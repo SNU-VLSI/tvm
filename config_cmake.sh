@@ -5,6 +5,11 @@ echo "set(CMAKE_BUILD_TYPE RelWithDebInfo)" >> config.cmake
 
 # LLVM is a must dependency for compiler end
 echo "set(USE_LLVM \"llvm-config --ignore-libllvm --link-static\")" >> config.cmake
+# echo "set(LLVM_INCLUDE_DIRS $HOME/project/llvm-project/llvm/include $HOME/project/llvm-project/builddir/include)" >> config.cmake
+# echo "set(LLVM_LIBS $(llvm-config --libfiles --system-libs))" >> config.cmake
+# echo "set(LLVM_VERSION_MAJOR 19)" >> config.cmake
+# echo "set(LLVM_VERSION_MINOR 1)" >> config.cmake
+# echo "set(LLVM_VERSION_PATCH 1)" >> config.cmake
 echo "set(HIDE_PRIVATE_SYMBOLS ON)" >> config.cmake
 
 # GPU SDKs, turn on if needed
