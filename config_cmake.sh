@@ -13,7 +13,8 @@ cp ../cmake/config.cmake .
 echo "set(CMAKE_BUILD_TYPE Debug)" >> config.cmake
 
 # LLVM is a must dependency for compiler end
-echo "set(USE_LLVM \"llvm-config --ignore-libllvm --link-static\")" >> config.cmake
+# echo "set(USE_LLVM \"llvm-config --ignore-libllvm --link-static\")" >> config.cmake
+echo "set(USE_LLVM ON)" >> config.cmake
 # echo "set(LLVM_INCLUDE_DIRS $HOME/project/llvm-project/llvm/include $HOME/project/llvm-project/builddir/include)" >> config.cmake
 # echo "set(LLVM_LIBS $(llvm-config --libfiles --system-libs))" >> config.cmake
 # echo "set(LLVM_VERSION_MAJOR 19)" >> config.cmake
