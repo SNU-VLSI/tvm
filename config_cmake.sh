@@ -1,7 +1,16 @@
+#!/bin/bash
+if [ "$(basename "$PWD")" != "build" ]; then
+	echo "Error: this script should be run in build dir"
+	exit 1
+fi
+
+export PATH="/root/tools/llvm_backend_test/bin:${PATH}"
+
+rm -rf *
 cp ../cmake/config.cmake .
 
 # controls default compilation flags (Candidates: Release, Debug, RelWithDebInfo)
-echo "set(CMAKE_BUILD_TYPE RelWithDebInfo)" >> config.cmake
+echo "set(CMAKE_BUILD_TYPE Debug)" >> config.cmake
 
 # LLVM is a must dependency for compiler end
 echo "set(USE_LLVM \"llvm-config --ignore-libllvm --link-static\")" >> config.cmake
