@@ -35,3 +35,9 @@ echo "set(USE_CUTLASS OFF)" >> config.cmake
 
 # set GTEST off
 echo "set(USE_GTEST OFF)" >> config.cmake
+
+# DEBUG ON
+echo "set(USE_RELAY_DEBUG ON)" >> config.cmake
+
+# VTA ON
+echo 'set(USE_VTA_FSIM ON)' >> config.cmake
