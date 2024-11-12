@@ -9,6 +9,9 @@ export PATH="/root/tools/llvm_backend_test/bin:${PATH}"
 rm -rf *
 cp ../cmake/config.cmake .
 
+# conda include path addition
+echo "include_directories("${CONDA_PREFIX}/include")" >> config.cmake
+
 # controls default compilation flags (Candidates: Release, Debug, RelWithDebInfo)
 echo "set(CMAKE_BUILD_TYPE Debug)" >> config.cmake
 
@@ -41,3 +44,7 @@ echo "set(USE_RELAY_DEBUG ON)" >> config.cmake
 
 # VTA ON
 echo 'set(USE_VTA_FSIM ON)' >> config.cmake
+
+# DNNL ON
+# echo "set(USE_DNNL $(echo $CONDA_PREFIX))" >> config.cmake
+echo "set(USE_DNNL $CONDA_PREFIX)" >> config.cmake
