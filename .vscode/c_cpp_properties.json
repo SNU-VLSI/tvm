@@ -3,7 +3,9 @@
         {
             "name": "Linux",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/src/runtime/contrib/**",
+                "/root/anaconda3/envs/py3.10/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
