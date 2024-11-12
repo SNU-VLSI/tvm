@@ -166,16 +166,21 @@ def check_dnnl_used(mod, subgraph_num=None):
         assert num_dnnl_subgraphs >= 1
 
 def update_lib(lib):
+    print("Updating lib... Before:")
+    # print(lib.get_source())
     test_dir = os.path.dirname(os.path.realpath(os.path.expanduser(__file__)))
     source_dir = os.path.join(test_dir, "..")
     contrib_path = os.path.join(source_dir, "src", "runtime", "contrib")
 
     kwargs = {}
     kwargs["options"] = ["-O2", "-std=c++17", "-I" + contrib_path, "-I/root/anaconda3/envs/py3.10/include"]
-    tmp_path = utils.tempdir()
+    os.system("rm -rf temp*")
+    tmp_path = utils.tempdir("./temp")
     lib_name = "lib.so"
     lib_path = tmp_path.relpath(lib_name)
-    lib.export_library(lib_path, fcompile=False, **kwargs)
+    os.system("mkdir -p temp_code")
+    lib.export_library(lib_path, fcompile=False, **kwargs, workspace_dir="./temp_code")
+    os.system("cp -r " + lib_path + " temp_object")
     lib = tvm_runtime.load_module(lib_path)
 
     return lib
