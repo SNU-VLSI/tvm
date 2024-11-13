@@ -81,7 +81,7 @@ inline std::string GetShapeString(std::vector<int> shape) {
   return v;
 }
 
-std::vector<std::string> Conv2d(const CallNode* call) {
+static std::vector<std::string> Conv2d(const CallNode* call) {
   std::vector<std::string> args;
   const auto* conv2d_attr = call->attrs.as<Conv2DAttrs>();
   ICHECK(conv2d_attr);
@@ -109,7 +109,7 @@ std::vector<std::string> Conv2d(const CallNode* call) {
   return args;
 }
 
-std::vector<std::string> Dense(const CallNode* call) {
+static std::vector<std::string> Dense(const CallNode* call) {
   std::vector<std::string> args;
   auto ishape = GetShape(call->args[0]->checked_type());
   auto wshape = GetShape(call->args[1]->checked_type());
@@ -122,7 +122,7 @@ std::vector<std::string> Dense(const CallNode* call) {
   return args;
 }
 
-std::vector<std::string> Relu(const CallNode* call) {
+static std::vector<std::string> Relu(const CallNode* call) {
   std::vector<std::string> args;
   auto ishape = GetShape(call->args[0]->checked_type());
   // Args: N, C, H, W
@@ -130,7 +130,7 @@ std::vector<std::string> Relu(const CallNode* call) {
   return args;
 }
 
-std::vector<std::string> BatchNorm(const CallNode* call) {
+static std::vector<std::string> BatchNorm(const CallNode* call) {
   std::vector<std::string> args;
   const auto* bn_attr = call->attrs.as<BatchNormAttrs>();
   auto ishape = GetShape(call->args[0]->checked_type());
@@ -150,7 +150,7 @@ std::vector<std::string> BatchNorm(const CallNode* call) {
 #define IMCFLOW_BINARY_ADD 0
 #define IMCFLOW_BINARY_MUL 1
 
-std::vector<std::string> Add(const CallNode* call) {
+static std::vector<std::string> Add(const CallNode* call) {
   std::vector<std::string> args;
   auto ishape = GetShape(call->args[0]->checked_type());
   args.push_back(std::to_string(IMCFLOW_BINARY_ADD));
@@ -159,7 +159,7 @@ std::vector<std::string> Add(const CallNode* call) {
   return args;
 }
 
-std::vector<std::string> Multiply(const CallNode* call) {
+static std::vector<std::string> Multiply(const CallNode* call) {
   std::vector<std::string> args;
   auto ishape = GetShape(call->args[0]->checked_type());
   args.push_back(std::to_string(IMCFLOW_BINARY_MUL));

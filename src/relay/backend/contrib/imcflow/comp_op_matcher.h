@@ -63,7 +63,7 @@ dmlc::any dmlc_attr(const T& val) {
 }
 
 /*! \brief Constructor of const scalar expression with defined type */
-tvm::relay::Expr constant(float val) {
+static tvm::relay::Expr constant(float val) {
   auto value = tvm::runtime::NDArray::Empty({}, tvm::DataType::Float(32), {kDLCPU, 0});
   value.CopyFromBytes(&val, sizeof(val));
   auto res = tvm::relay::Constant(value);
@@ -95,7 +95,7 @@ class ArgPacker {
   std::vector<tvm::relay::Expr>* args_;
 };
 
-const tvm::relay::CallNode* ParseQnnConvComp(const tvm::relay::FunctionNode& comp_fn,
+static const tvm::relay::CallNode* ParseQnnConvComp(const tvm::relay::FunctionNode& comp_fn,
                                              std::unordered_map<std::string, dmlc::any>* ext_attrs,
                                              std::vector<tvm::relay::Expr>* args) {
   using namespace tvm::relay;
@@ -158,7 +158,7 @@ const tvm::relay::CallNode* ParseQnnConvComp(const tvm::relay::FunctionNode& com
   return map.at(cnv)[0].as<CallNode>();
 }
 
-const tvm::relay::CallNode* ParseQnnDenseComp(const tvm::relay::FunctionNode& comp_fn,
+static const tvm::relay::CallNode* ParseQnnDenseComp(const tvm::relay::FunctionNode& comp_fn,
                                               std::unordered_map<std::string, dmlc::any>* ext_attrs,
                                               std::vector<tvm::relay::Expr>* args) {
   using namespace tvm::relay;
@@ -227,7 +227,7 @@ const tvm::relay::CallNode* ParseQnnDenseComp(const tvm::relay::FunctionNode& co
  * @param args real arguments of node
  * @return root call node
  */
-const tvm::relay::CallNode* ParseComposite(const tvm::relay::FunctionNode& comp_fn,
+static const tvm::relay::CallNode* ParseComposite(const tvm::relay::FunctionNode& comp_fn,
                                            std::unordered_map<std::string, dmlc::any>* ext_attrs,
                                            std::vector<tvm::relay::Expr>* args) {
   auto comp = comp_fn.GetAttr<tvm::String>(tvm::relay::attr::kComposite);

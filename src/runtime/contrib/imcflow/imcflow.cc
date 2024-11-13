@@ -31,7 +31,7 @@
 #include <numeric>
 #include <string>
 #include <vector>
-#include <tvm/runtime/registry.h>
+#include "imcflow_kernel.h"
 
 namespace tvm {
 namespace runtime {
