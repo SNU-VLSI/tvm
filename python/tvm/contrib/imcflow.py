@@ -20,40 +20,7 @@ from tvm import te
 from ..topi.nn.utils import get_pad_tuple
 
 
-def matmul(lhs, rhs, transa=False, transb=False, **kwargs):
-    """Create an extern op that compute matrix mult of A and rhs with CrhsLAS
-    This function serves as an example on how to call external libraries.
-
-    Parameters
-    ----------
-    lhs: Tensor
-        The left matrix operand
-    rhs: Tensor
-        The right matrix operand
-    transa: bool
-        Whether transpose lhs
-    transb: bool
-        Whether transpose rhs
-
-    Returns
-    -------
-    C: Tensor
-        The result tensor.
-    """
-    n = lhs.shape[1] if transa else lhs.shape[0]
-    m = rhs.shape[0] if transb else rhs.shape[1]
-    return te.extern(
-        (n, m),
-        [lhs, rhs],
-        lambda ins, outs: tvm.tir.call_packed(
-            "tvm.contrib.dnnl.matmul", ins[0], ins[1], outs[0], transa, transb
-        ),
-        name="C",
-        **kwargs,
-    )
-
-
-def dnnl_conv2d(
+def imcflow_conv2d(
     src,
     weights,
     stride,
@@ -141,7 +108,7 @@ def dnnl_conv2d(
         out_shape,
         [src, weights],
         lambda ins, outs: tvm.tir.call_packed(
-            "tvm.contrib.dnnl.conv2d",
+            "tvm.contrib.imcflow.conv2d",
             ins[0],
             ins[1],
             outs[0],

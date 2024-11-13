@@ -15,9 +15,9 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=invalid-name, unused-argument, use-list-literal
-"""DNNL library supported operators.
+"""IMCFLOW library supported operators.
 There are two ways to registering a function for an op to indicate if it is
-supported by DNNL.
+supported by IMCFLOW.
 
 - The first and simplest way is to use the helper so that
 users only need to provide the operator name and a boolean value to indicate if
@@ -30,7 +30,7 @@ it is supported. For example:
       add = _register_external_op_helper("add", False)
 
 - The other way is to implement the function by themselves to
-check the attributes of the op and decide if it should be offloaded to DNNL.
+check the attributes of the op and decide if it should be offloaded to IMCFLOW.
 """
 import logging
 from functools import reduce
@@ -48,13 +48,13 @@ from ... import _ffi_api
 from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard
 from .register import register_pattern_table
 
-logger = logging.getLogger("DNNL")
+logger = logging.getLogger("IMCFLOW")
 supported_post_elts = ["nn.relu", "tanh", "sigmoid", "clip", "gelu", "swish", "mish", None]
 
 
 def _register_external_op_helper(op_name, supported=True):
     """The helper function to indicate that a given operator can be supported
-    by DNNL.
+    by IMCFLOW.
 
     Parameters
     ----------
@@ -64,16 +64,16 @@ def _register_external_op_helper(op_name, supported=True):
     Returns
     -------
     f : callable
-        A function that returns if the operator is supported by DNNL.
+        A function that returns if the operator is supported by IMCFLOW.
     """
 
-    @tvm.ir.register_op_attr(op_name, "target.dnnl")
+    @tvm.ir.register_op_attr(op_name, "target.imcflow")
     def _func_wrapper(expr):
         args = expr.args
         if any([x.checked_type.dtype == "int64" for x in args]):
-            logger.info("DNNL does not support int64.")
+            logger.info("IMCFLOW does not support int64.")
             return False
-        # DNNL does not support pooling with ceil_mode = True.
+        # IMCFLOW does not support pooling with ceil_mode = True.
         if "pool" in op_name:
             attrs = dict(get_attrs(expr))
             if "ceil_mode" in attrs.keys() and attrs["ceil_mode"]:
@@ -222,7 +222,7 @@ def make_dense_bias_sum_pattern():
     out = is_op("nn.dense")(data1, weight)
     out = is_op("add")(out, bias)
     out = is_op("add")(out, data2)
-    return "dnnl.dense_bias_sum", out
+    return "imcflow.dense_bias_sum", out
 
 
 def get_op_name(expr):
@@ -341,8 +341,8 @@ def make_dense_pattern(with_bias=True, with_eltwise=None):
     return append_eltwise_ops(dense_out, with_eltwise)
 
 
-def make_dnnl_pattern(op_name, with_bias, with_eltwise):
-    """Create dnnl patterns.
+def make_imcflow_pattern(op_name, with_bias, with_eltwise):
+    """Create imcflow patterns.
 
     Parameters
     ----------
@@ -357,31 +357,31 @@ def make_dnnl_pattern(op_name, with_bias, with_eltwise):
     pattern : Tuple(pattern_name, CallPattern)
         Created pattern name, along with its CallPattern.
     """
-    pat_name = op_name.replace("nn", "dnnl")
+    pat_name = op_name.replace("nn", "imcflow")
     if "_transpose" in op_name:
-        pat_name = "dnnl.deconv" + op_name.split("_")[0][-2::]
+        pat_name = "imcflow.deconv" + op_name.split("_")[0][-2::]
     pat_name += "_bias" if with_bias else ""
     pat_name += ("_" + with_eltwise.split(".")[-1]) if with_eltwise else ""
     if "conv" in op_name:
-        dnnl_pattern = (
+        imcflow_pattern = (
             pat_name,
             make_conv_pattern(op_name, with_bias, with_eltwise),
             make_bias_add_pattren_predicate(add_checker),
         )
     elif op_name == "nn.dense":
-        dnnl_pattern = (pat_name, make_dense_pattern(with_bias, with_eltwise))
+        imcflow_pattern = (pat_name, make_dense_pattern(with_bias, with_eltwise))
     else:
         logger.warning(
             "Currently, only conv1d, conv2d, conv2d_transpose, conv3d_transpose, "
             "dense op are supported, but got %s.",
             op_name,
         )
-        dnnl_pattern = ()
-    return dnnl_pattern
+        imcflow_pattern = ()
+    return imcflow_pattern
 
 
 def make_qnn_conv2d_pattern():
-    """Make qnn.conv2d based pattern supported by DNNL
+    """Make qnn.conv2d based pattern supported by IMCFLOW
 
     Returns
     -------
@@ -409,11 +409,11 @@ def make_qnn_conv2d_pattern():
     pat = is_op("add")(pat, dst_zp) | pat  # optional dst_zp, can be dst_zp == 0
     pat = is_op("cast")(pat)
 
-    return "dnnl.qnn.conv2d", pat
+    return "imcflow.qnn.conv2d", pat
 
 
 def make_qnn_dense_pattern():
-    """Make qnn.dense based pattern supported by DNNL
+    """Make qnn.dense based pattern supported by IMCFLOW
 
     Returns
     -------
@@ -441,32 +441,32 @@ def make_qnn_dense_pattern():
     pat = is_op("add")(pat, dst_zp) | pat  # optional dst_zp, can be dst_zp == 0
     pat = is_op("cast")(pat)
 
-    return "dnnl.qnn.dense", pat
+    return "imcflow.qnn.dense", pat
 
 
-@register_pattern_table("dnnl")
+@register_pattern_table("imcflow")
 def pattern_table():
-    """Create dnnl patterns.
+    """Create imcflow patterns.
 
     Returns
     -------
-    dnnl_patterns : List[dnnl_pattern]
+    imcflow_patterns : List[imcflow_pattern]
         Created patterns.
     """
-    dnnl_patterns = list()
-    dnnl_patterns.append(make_qnn_conv2d_pattern())
-    dnnl_patterns.append(make_qnn_dense_pattern())
-    dnnl_patterns.append(make_dense_bias_sum_pattern())
-    dnnl_patterns.append(
+    imcflow_patterns = list()
+    imcflow_patterns.append(make_qnn_conv2d_pattern())
+    imcflow_patterns.append(make_qnn_dense_pattern())
+    imcflow_patterns.append(make_dense_bias_sum_pattern())
+    imcflow_patterns.append(
         (
-            "dnnl.conv2d_bias_sum_relu",
+            "imcflow.conv2d_bias_sum_relu",
             make_conv_bias_sum_relu_pattern("nn.conv2d"),
             make_sum_pattren_predicate(add_checker),
         )
     )
-    dnnl_patterns.append(
+    imcflow_patterns.append(
         (
-            "dnnl.conv2d_bias_sum",
+            "imcflow.conv2d_bias_sum",
             make_conv_bias_sum_relu_pattern("nn.conv2d", False),
             make_sum_pattren_predicate(add_checker),
         )
@@ -484,15 +484,15 @@ def pattern_table():
                 "nn.conv2d_transpose",
                 "nn.conv3d_transpose",
             ]:
-                dnnl_patterns.append(make_dnnl_pattern(conv_name, with_bias, elt))
-            dnnl_patterns.append(make_dnnl_pattern("nn.dense", with_bias, elt))
-    return dnnl_patterns
+                imcflow_patterns.append(make_imcflow_pattern(conv_name, with_bias, elt))
+            imcflow_patterns.append(make_imcflow_pattern("nn.dense", with_bias, elt))
+    return imcflow_patterns
 
 
 def get_optimal_layout_for_conv(
     data_layout, kernel_layout, weight_shape, out_shape, paddings, strides, dilates, groups, dtype
 ):
-    """Get the optimal layout of dnnl, given shape of conv2d.
+    """Get the optimal layout of imcflow, given shape of conv2d.
 
     Parameters
     ----------
@@ -530,7 +530,7 @@ def get_optimal_layout_for_conv_transpose(
     groups,
     dtype,
 ):
-    """Get the optimal layout of dnnl, given shape of tranposed conv2d.
+    """Get the optimal layout of imcflow, given shape of tranposed conv2d.
 
     Parameters
     ----------
@@ -657,82 +657,6 @@ def legalize_group_conv(attrs, inputs, types):
     return relay.nn.conv2d_transpose(data, weight, **new_attrs)
 
 
-def alter_conv(attrs, inputs, tinfos, out_type):
-    """The convolution's layout auto-query func for dnnl."""
-
-    data, weight = inputs
-    groups = str(attrs.groups)
-    weight_shape = ",".join([str(x) for x in get_shape(weight)])
-    out_shape = ",".join([str(x) for x in get_shape(out_type)])
-    paddings = ",".join([str(x) for x in attrs.get_int_tuple("padding")])
-    strides = ",".join([str(x) for x in attrs.get_int_tuple("strides")])
-    dilates = ",".join([str(x) for x in attrs.get_int_tuple("dilation")])
-    dtype = get_dtype(weight)
-    new_attrs = dict(attrs)
-    conv_type = type(attrs).__name__.split("Attrs")[0]
-
-    res = get_optimal_layout_for_conv(
-        attrs["data_layout"],
-        attrs["kernel_layout"],
-        weight_shape,
-        out_shape,
-        paddings,
-        strides,
-        dilates,
-        groups,
-        dtype,
-    )
-    src_df, weight_df, dst_df = res.split(",")
-    new_attrs["data_layout"] = tag2layout(src_df, is_weight=False, conv_type=conv_type)
-    new_attrs["kernel_layout"] = tag2layout(weight_df, is_weight=True, conv_type=conv_type)
-    new_attrs["out_layout"] = tag2layout(dst_df, is_weight=False, conv_type=conv_type)
-
-    if conv_type == "Conv1D":
-        return relay.nn.conv1d(data, weight, **new_attrs)
-    if conv_type == "Conv2D":
-        return relay.nn.conv2d(data, weight, **new_attrs)
-    return relay.nn.conv3d(data, weight, **new_attrs)
-
-
-def alter_conv_transpose(attrs, inputs, tinfos, out_type):
-    """The transposed convolution's layout auto-query func for dnnl."""
-
-    data, weight = inputs
-    weight_shape = ",".join([str(x) for x in get_shape(weight)])
-    out_shape = ",".join([str(x) for x in get_shape(out_type)])
-    paddings = ",".join([str(x) for x in attrs.get_int_tuple("padding")])
-    output_paddings = ",".join([str(x) for x in attrs.get_int_tuple("output_padding")])
-    strides = ",".join([str(x) for x in attrs.get_int_tuple("strides")])
-    dilates = ",".join([str(x) for x in attrs.get_int_tuple("dilation")])
-    groups = str(attrs.groups)
-    dtype = get_dtype(weight)
-    new_attrs = dict(attrs)
-    conv_type = type(attrs).__name__.split("Attrs")[0]
-
-    res = get_optimal_layout_for_conv_transpose(
-        attrs["data_layout"],
-        attrs["kernel_layout"],
-        weight_shape,
-        out_shape,
-        paddings,
-        output_paddings,
-        strides,
-        dilates,
-        groups,
-        dtype,
-    )
-    src_df, weight_df, dst_df = res.split(",")
-    new_attrs["data_layout"] = tag2layout(src_df, is_weight=False, conv_type=conv_type)
-    new_attrs["kernel_layout"] = tag2layout(weight_df, is_weight=True, conv_type=conv_type)
-    new_attrs["out_layout"] = tag2layout(dst_df, is_weight=False, conv_type=conv_type)
-
-    if conv_type == "Conv1DTranspose":
-        return relay.nn.conv1d_transpose(data, weight, **new_attrs)
-    if conv_type == "Conv2DTranspose":
-        return relay.nn.conv2d_transpose(data, weight, **new_attrs)
-    return relay.nn.conv3d_transpose(data, weight, **new_attrs)
-
-
 class IsComputeIntensiveGraph(ExprVisitor):
     """
     Visits the Graph recursively and checks if it contains compute heavy ops like convolutions and
@@ -772,13 +696,13 @@ class IsComputeIntensiveGraph(ExprVisitor):
 
 
 def is_valid_subgraph(body):
-    """Final check on whether the subgraph is valid and should be offloaded to DNNL."""
+    """Final check on whether the subgraph is valid and should be offloaded to IMCFLOW."""
     return IsComputeIntensiveGraph().is_graph_compute_intensive(body)
 
 
-def prune_dnnl_subgraphs(mod):
+def prune_imcflow_subgraphs(mod):
     """
-    Removes invalid subgraphs, which does not contain compute intensive dnnl ops.
+    Removes invalid subgraphs, which does not contain compute intensive imcflow ops.
     """
 
     class SubgraphRemover(ExprMutator):
@@ -817,7 +741,7 @@ def prune_dnnl_subgraphs(mod):
     # Remove invalid subgraphs
     for subgraph in mod.get_global_vars():
         name = subgraph.name_hint
-        if not mod[name].attrs or mod[name].attrs["Compiler"] != "dnnl":
+        if not mod[name].attrs or mod[name].attrs["Compiler"] != "imcflow":
             continue
         if not is_valid_subgraph(mod[name].body):
             subgraphs_to_remove.append(name)
@@ -889,7 +813,7 @@ class LayerNormRewrite(DFPatternCallback):
 
 def rewrite_layer_norm(mod):
     """Rewrite the input graph to replace multiple operators with a TVM native layer normalization
-    operator so that we can offload them to dnnl layer normalization byoc part.
+    operator so that we can offload them to imcflow layer normalization byoc part.
     """
     mod["main"] = rewrite(LayerNormRewrite(), mod["main"])
     return mod
@@ -1170,8 +1094,8 @@ def rewrite_resnetv1(mod):
     return mod
 
 
-class LegalizeQnnOpForDnnl(DFPatternCallback):
-    """Legalize QNN based patterns to match DNNL
+class LegalizeQnnOpForImcflow(DFPatternCallback):
+    """Legalize QNN based patterns to match IMCFLOW
 
     original pattern:
       OP = qnn.dense | qnn.conv2d
@@ -1182,7 +1106,7 @@ class LegalizeQnnOpForDnnl(DFPatternCallback):
       %4 = ((%3 - sum_lh_zp) * sum_lh_scl + (SRC2 - sum_rh_zp) * sum_rh_scl)  // qnn.add
            / sum_out_scl + sum_out_zp
 
-    transform to DNNL compatible:
+    transform to IMCFLOW compatible:
       %1 = OP<int>(SRC, WGH)
       %2 = cast(%1, dtype="float")
       %2 = (%1 + bias) * o_scl
@@ -1201,7 +1125,7 @@ class LegalizeQnnOpForDnnl(DFPatternCallback):
     """
 
     def __init__(self):
-        super(LegalizeQnnOpForDnnl, self).__init__()
+        super(LegalizeQnnOpForImcflow, self).__init__()
         self.src = wildcard()
         self.wgh = wildcard()
         self.bias = wildcard()
@@ -1350,10 +1274,10 @@ class LegalizeQnnOpForDnnl(DFPatternCallback):
         raise ValueError("Unexpected bias rank to broadcast. Only 0 and 1 are supported.")
 
 
-def legalize_qnn_for_dnnl(mod):
-    """Transform qnn primitives to DNNL compatible form. Eliminate source zero point and apply
+def legalize_qnn_for_imcflow(mod):
+    """Transform qnn primitives to IMCFLOW compatible form. Eliminate source zero point and apply
     strict sequence of post ops."""
-    mod["main"] = rewrite(LegalizeQnnOpForDnnl(), mod["main"])
+    mod["main"] = rewrite(LegalizeQnnOpForImcflow(), mod["main"])
 
     seq = tvm.transform.Sequential(
         [

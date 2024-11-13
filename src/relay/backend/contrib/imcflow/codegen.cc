@@ -18,8 +18,8 @@
  */
 
 /*!
- * \file src/relay/backend/contrib/dnnl/codegen.cc
- * \brief Implementation of DNNL codegen APIs.
+ * \file src/relay/backend/contrib/imcflow/codegen.cc
+ * \brief Implementation of IMCFLOW codegen APIs.
  */
 
 #include <tvm/relay/attrs/nn.h>
@@ -36,12 +36,7 @@
 #include "../../utils.h"
 #include "comp_op_matcher.h"
 
-#ifdef USE_JSON_RUNTIME
-#include "../../../../runtime/contrib/json/json_node.h"
-#include "../codegen_json/codegen_json.h"
-#else
 #include "../codegen_c/codegen_c.h"
-#endif
 
 namespace tvm {
 namespace relay {
@@ -72,7 +67,6 @@ static tvm::Array<Expr> BindToCallNodeArgs(const std::vector<Expr>& args, const 
   return res;
 }
 
-#ifndef USE_JSON_RUNTIME  // C source runtime
 inline size_t GetShape1DSize(const Type& type) {
   const auto shape = GetShape(type);
   return std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int>());
@@ -152,14 +146,14 @@ std::vector<std::string> BatchNorm(const CallNode* call) {
   return args;
 }
 
-// should comply with src/runtime/contrib/dnnl/dnnl.cc
-#define DNNL_BINARY_ADD 0
-#define DNNL_BINARY_MUL 1
+// should comply with src/runtime/contrib/imcflow/imcflow.cc
+#define IMCFLOW_BINARY_ADD 0
+#define IMCFLOW_BINARY_MUL 1
 
 std::vector<std::string> Add(const CallNode* call) {
   std::vector<std::string> args;
   auto ishape = GetShape(call->args[0]->checked_type());
-  args.push_back(std::to_string(DNNL_BINARY_ADD));
+  args.push_back(std::to_string(IMCFLOW_BINARY_ADD));
   // Args: H, W
   args.push_back(GetShapeString(ishape));
   return args;
@@ -168,7 +162,7 @@ std::vector<std::string> Add(const CallNode* call) {
 std::vector<std::string> Multiply(const CallNode* call) {
   std::vector<std::string> args;
   auto ishape = GetShape(call->args[0]->checked_type());
-  args.push_back(std::to_string(DNNL_BINARY_MUL));
+  args.push_back(std::to_string(IMCFLOW_BINARY_MUL));
   // Args: H, W
   args.push_back(GetShapeString(ishape));
   return args;
@@ -176,12 +170,12 @@ std::vector<std::string> Multiply(const CallNode* call) {
 
 // TODO(@zhiics, @comaniac): This is a basic implementation. We should implement
 // all utilities and make a base class for users to implement.
-class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public CodegenCBase {
+class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, public CodegenCBase {
  public:
-  explicit CodegenDNNL(const std::string& id) { this->ext_func_id_ = id; }
+  explicit CodegenIMCFLOW(const std::string& id) { this->ext_func_id_ = id; }
 
   std::vector<Output> VisitExprDefault_(const Object* op) final {
-    LOG(FATAL) << "DNNL codegen doesn't support: " << op->GetTypeKey();
+    LOG(FATAL) << "IMCFLOW codegen doesn't support: " << op->GetTypeKey();
   }
 
   std::vector<Output> VisitExpr_(const VarNode* node) final {
@@ -212,7 +206,7 @@ class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public C
 
   std::vector<Output> VisitExpr_(const ConstantNode* cn) final {
     Output output;
-    // Get const: static_cast<float*>(dnnl_0_consts[0]->data)
+    // Get const: static_cast<float*>(imcflow_0_consts[0]->data)
     output.name = CreateDataReference(ext_func_id_, const_idx_);
     output.dtype = "float";
 
@@ -225,7 +219,7 @@ class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public C
 
     // Give the ndarray a unique name to ease the initialization of it at
     // runtime.
-    std::string const_symbol = "dnnl_" + ext_func_id_;
+    std::string const_symbol = "imcflow_" + ext_func_id_;
     std::string const_var_name = CreateConstVar(const_symbol, const_idx_);
     const_vars_.push_back(const_var_name);
     const_idx_++;
@@ -272,9 +266,9 @@ class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public C
 
     using ArgFunType = std::function<std::vector<std::string>(const CallNode*)>;
     static const std::map<std::string, std::pair<std::string, ArgFunType>> op_map = {
-        {"nn.conv2d", {"dnnl_conv2d", Conv2d}}, {"nn.dense", {"dnnl_dense", Dense}},
-        {"nn.relu", {"dnnl_relu", Relu}},       {"nn.batch_norm", {"dnnl_bn", BatchNorm}},
-        {"add", {"dnnl_binary_op", Add}},       {"multiply", {"dnnl_binary_op", Multiply}},
+        {"nn.conv2d", {"imcflow_conv2d", Conv2d}}, {"nn.dense", {"imcflow_dense", Dense}},
+        {"nn.relu", {"imcflow_relu", Relu}},       {"nn.batch_norm", {"imcflow_bn", BatchNorm}},
+        {"add", {"imcflow_binary_op", Add}},       {"multiply", {"imcflow_binary_op", Multiply}},
     };
 
     const auto op_name = GetRef<Op>(op_node)->name;
@@ -291,15 +285,15 @@ class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public C
     const auto pattern_name = callee->GetAttr<runtime::String>(attr::kComposite);
     ICHECK(pattern_name.defined()) << "Only functions with composite attribute supported";
 
-    if (pattern_name == "dnnl.conv2d_bias_relu") {
+    if (pattern_name == "imcflow.conv2d_bias_relu") {
       const auto* conv_call =
           GetRootCall(callee->body.as<CallNode>(), 2, {"nn.conv2d", "add", "nn.relu"});
-      return GenerateBody(conv_call, "dnnl_fused_conv2d_bias_relu", GetArgumentNames(caller),
+      return GenerateBody(conv_call, "imcflow_fused_conv2d_bias_relu", GetArgumentNames(caller),
                           Conv2d(conv_call));
-    } else if (pattern_name == "dnnl.conv2d_relu") {
+    } else if (pattern_name == "imcflow.conv2d_relu") {
       const auto* conv_call = GetRootCall(callee->body.as<CallNode>(), 1,
                                           (const std::vector<std::string>){"nn.conv2d", "nn.relu"});
-      return GenerateBody(conv_call, "dnnl_fused_conv2d_relu", GetArgumentNames(caller),
+      return GenerateBody(conv_call, "imcflow_fused_conv2d_relu", GetArgumentNames(caller),
                           Conv2d(conv_call));
     }
 
@@ -363,7 +357,7 @@ class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public C
     return ret;
   }
 
-  /*! \brief The id of the external dnnl ext_func. */
+  /*! \brief The id of the external imcflow ext_func. */
   std::string ext_func_id_{""};
   /*!
    * \brief The index to track the output buffer. Each kernel will redirect the
@@ -372,9 +366,9 @@ class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public C
   int buf_idx_{0};
   /*! \brief The index of global constants. */
   int const_idx_{0};
-  /*! \brief The arguments used by a wrapped function that calls DNNL kernels. */
+  /*! \brief The arguments used by a wrapped function that calls IMCFLOW kernels. */
   Array<Var> ext_func_args_;
-  /*! \brief Statement of the function that will be compiled using DNNL kernels. */
+  /*! \brief Statement of the function that will be compiled using IMCFLOW kernels. */
   std::vector<std::string> ext_func_body_;
   /*! \brief The array declared to store the constant values. */
   std::string const_array_name_;
@@ -383,24 +377,24 @@ class CodegenDNNL : public MemoizedExprTranslator<std::vector<Output>>, public C
   /*! \brief The variable name to constant mapping. */
   Array<String> const_vars_;
 
-  friend class DNNLModuleCodegen;
+  friend class IMCFLOWModuleCodegen;
 };
 
 /*!
- * \brief The DNNL codegen helper to generate wrapepr function calls of DNNL
+ * \brief The IMCFLOW codegen helper to generate wrapepr function calls of IMCFLOW
  * libraries. The code is a CSourceModule that can be compiled separately and
  * linked together with a DSOModule.
  */
-class DNNLModuleCodegen : public CSourceModuleCodegenBase {
+class IMCFLOWModuleCodegen : public CSourceModuleCodegenBase {
  public:
-  // Create a corresponding DNNL function for the given relay Function.
-  std::pair<std::string, Array<String>> GenDNNLFunc(const Function& func) {
+  // Create a corresponding IMCFLOW function for the given relay Function.
+  std::pair<std::string, Array<String>> GenIMCFLOWFunc(const Function& func) {
     ICHECK(func.defined()) << "Input error: expect a Relay function.";
 
     // Record the external symbol for runtime lookup.
     auto sid = GetExtSymbol(func);
 
-    CodegenDNNL builder(sid);
+    CodegenIMCFLOW builder(sid);
     auto out = builder.VisitExpr(func->body);
     code_stream_ << builder.JIT(out);
 
@@ -410,9 +404,9 @@ class DNNLModuleCodegen : public CSourceModuleCodegenBase {
   /*!
    * \brief The overridden function that will create a CSourceModule. In order
    * to compile the generated C source code, users need to specify the paths to
-   * some libraries, including some TVM required and dnnl specific ones. To make
-   * linking simpiler, the DNNL kernels are wrapped in a TVM compatible manner
-   * and live under tvm/src/runtime/contrib/dnnl folder.
+   * some libraries, including some TVM required and imcflow specific ones. To make
+   * linking simpiler, the IMCFLOW kernels are wrapped in a TVM compatible manner
+   * and live under tvm/src/runtime/contrib/imcflow folder.
    *
    * \param ref An object ref that could be either a Relay function or module.
    *
@@ -427,16 +421,16 @@ class DNNLModuleCodegen : public CSourceModuleCodegenBase {
     code_stream_ << "#include <tvm/runtime/c_runtime_api.h>\n";
     code_stream_ << "#include <tvm/runtime/packed_func.h>\n";
     code_stream_ << "#include <dlpack/dlpack.h>\n";
-    // dnnl_kernel file is saved under src/runtime/contrib/dnnl so that we don't
+    // imcflow_kernel file is saved under src/runtime/contrib/imcflow so that we don't
     // expose it to ordinary users. To make export_library use it, users need to
     // pass -I${PATH_TO_TVM}/src/runtime/contrib
-    code_stream_ << "#include <dnnl/dnnl_kernel.h>\n";
+    code_stream_ << "#include <imcflow/imcflow_kernel.h>\n";
     code_stream_ << "using namespace tvm::runtime;\n";
     code_stream_ << "using namespace tvm::runtime::contrib;\n";
     code_stream_ << "\n";
 
     ICHECK(ref->IsInstance<FunctionNode>());
-    auto res = GenDNNLFunc(Downcast<Function>(ref));
+    auto res = GenIMCFLOWFunc(Downcast<Function>(ref));
     std::string code = code_stream_.str();
     String sym = std::get<0>(res);
     Array<String> variables = std::get<1>(res);
@@ -456,131 +450,29 @@ class DNNLModuleCodegen : public CSourceModuleCodegenBase {
   std::ostringstream code_stream_;
 };
 
-#else  // DNNL JSON runtime
-
-/*! \brief Serializer to DNNL JSON runtime module */
-class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
-  using JSONGraphNode = tvm::runtime::json::JSONGraphNode;
-  using JSONGraphNodeEntry = tvm::runtime::json::JSONGraphNodeEntry;
-
- public:
-  DNNLJSONSerializer(const std::string& symbol, const Expr& expr)
-      : JSONSerializer("dnnl_" + symbol, expr) {}
-
-  std::vector<JSONGraphNodeEntry> VisitExpr_(const CallNode* cn) override {
-    Expr expr = GetRef<Expr>(cn);
-    std::string name;
-    tvm::Array<Expr> args;
-    std::unordered_map<std::string, dmlc::any> extra_attrs;
-
-    const CallNode* call = cn;
-    if (const auto* op_node = cn->op.as<OpNode>()) {
-      name = op_node->name;
-      args = cn->args;
-    } else if (const auto* fn = cn->op.as<FunctionNode>()) {
-      auto comp = fn->GetAttr<String>(attr::kComposite);
-      ICHECK(comp.defined()) << "DNNL JSON runtime only supports composite functions.";
-      name = comp.value();
-
-      if (name.find("dnnl.deconv2d") != std::string::npos) {
-        call = GetRootCall(fn->body.as<CallNode>(), 10, "nn.conv2d_transpose");
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
-      } else if (name.find("dnnl.deconv3d") != std::string::npos) {
-        call = GetRootCall(fn->body.as<CallNode>(), 10, "nn.conv3d_transpose");
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
-      } else if (name.find("dnnl.conv1d") != std::string::npos) {
-        call = GetRootCall(fn->body.as<CallNode>(), 10, "nn.conv1d");
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
-      } else if (name.find("dnnl.conv2d") != std::string::npos) {
-        call = GetRootCall(fn->body.as<CallNode>(), 10, "nn.conv2d");
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
-      } else if (name.find("dnnl.conv3d") != std::string::npos) {
-        call = GetRootCall(fn->body.as<CallNode>(), 10, "nn.conv3d");
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
-      } else if (name.find("dnnl.dense") != std::string::npos) {
-        call = GetRootCall(fn->body.as<CallNode>(), 10, "nn.dense");
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
-      } else if (name.find("dnnl.qnn.conv2d") != std::string::npos ||
-                 name.find("dnnl.qnn.dense") != std::string::npos) {
-        std::vector<Expr> args_loc;
-        call = ParseComposite(*fn, &extra_attrs, &args_loc);
-        args = BindToCallNodeArgs(args_loc, cn);
-      } else {
-        LOG(FATAL) << "Unrecognized DNNL pattern: " << name;
-      }
-
-      if (args.empty()) {
-        args = cn->args;
-      }
-    } else {
-      LOG(FATAL) << "DNNL JSON runtime does not support calls to " << cn->op->GetTypeKey();
-    }
-
-    std::vector<JSONGraphNodeEntry> inputs;
-    for (const auto& arg : args) {
-      auto res = VisitExpr(arg);
-      inputs.insert(inputs.end(), res.begin(), res.end());
-    }
-    auto node = std::make_shared<JSONGraphNode>(name,     /* name_ */
-                                                "kernel", /* op_type_ */
-                                                inputs, 1 /* num_outputs_ */);
-    SetCallNodeAttribute(node, call);
-    // If has post-op `clip`. Assume the last op is clip, add clip's attrs to the pattern attrs.
-    if (name.find("_clip") != std::string::npos) {
-      auto clip_call = cn->op.as<FunctionNode>()->body.as<CallNode>();
-      ICHECK(IsOp(clip_call, "clip"));
-      SetCallNodeAttribute(node, clip_call);
-    }
-    // For QNN.
-    for (const auto& kvp : extra_attrs) node->SetAttr(kvp.first, kvp.second);
-
-    return AddNode(node, GetRef<Expr>(cn));
-  }
-};
-#endif
-
 /*!
  * \brief The external compiler/codegen tool. It takes a Relay expression/module and
  * compile it into a runtime module.
  */
-runtime::Module DNNLCompiler(const ObjectRef& ref) {
-#ifdef USE_JSON_RUNTIME
-  ICHECK(ref->IsInstance<FunctionNode>());
-  auto func = Downcast<Function>(ref);
-  auto func_name = GetExtSymbol(func);
-  DNNLJSONSerializer serializer(func_name, func);
-  serializer.serialize();
-  std::string graph_json = serializer.GetJSON();
-
-  // Note that serializer.const_name_to_constant() is ignored. Instead the TECompiler invokes
-  // a callback which calls backend::UpdateConstants to capture the map before the function
-  // 'disappears' into lowered form, on the assumption the visit order and thus constant
-  // names match those generated by the JSONSerializer.
-
-  const auto* pf = runtime::Registry::Get("runtime.DNNLJSONRuntimeCreate");
-  ICHECK(pf != nullptr) << "Cannot find JSON runtime module to create";
-  auto mod = (*pf)(func_name, graph_json, serializer.const_names());
-  return mod;
-#else
-  DNNLModuleCodegen dnnl;
-  return dnnl.CreateCSourceModule(ref);
-#endif
+runtime::Module IMCFLOWCompiler(const ObjectRef& ref) {
+  IMCFLOWModuleCodegen imcflow;
+  return imcflow.CreateCSourceModule(ref);
 }
 
-TVM_REGISTER_GLOBAL("relay.ext.dnnl").set_body_typed(DNNLCompiler);
+TVM_REGISTER_GLOBAL("relay.ext.imcflow").set_body_typed(IMCFLOWCompiler);
 
 /*!
- * \brief Constant Updater for DNNL JSON runtime
+ * \brief Constant Updater for IMCFLOW JSON runtime
  *
  * Not all originally existing ConstantNode should be passed to JSON runtime.
  * Some of them may be skipped or change ordering. So we have to apply the same traversing through
- * the graph as DNNLJSONSerializer.
+ * the graph as IMCFLOWJSONSerializer.
  */
-struct DNNLConstantUpdater : public ConstantUpdater {
+struct IMCFLOWConstantUpdater : public ConstantUpdater {
  public:
-  DNNLConstantUpdater(const std::string& symbol,
+  IMCFLOWConstantUpdater(const std::string& symbol,
                       std::unordered_map<std::string, runtime::NDArray>* params)
-      : ConstantUpdater("dnnl_" + symbol, params) {}
+      : ConstantUpdater("imcflow_" + symbol, params) {}
   using ConstantUpdater::VisitExpr_;
 
   void VisitExpr_(const CallNode* cn) final {
@@ -610,10 +502,10 @@ struct DNNLConstantUpdater : public ConstantUpdater {
  * \brief The external compiler/codegen tool. It takes a Relay expression/module and
  * produce collection of required constant NDArrays.
  */
-Map<String, runtime::NDArray> DNNLConstantUpdaterFunc(Expr expr, std::string symbol) {
+Map<String, runtime::NDArray> IMCFLOWConstantUpdaterFunc(Expr expr, std::string symbol) {
   // Visit all suitable constant nodes
   std::unordered_map<std::string, runtime::NDArray> res;
-  DNNLConstantUpdater const_updater(symbol, &res);
+  IMCFLOWConstantUpdater const_updater(symbol, &res);
   const_updater(expr);
 
   // Convert to tvm::Map
@@ -622,7 +514,7 @@ Map<String, runtime::NDArray> DNNLConstantUpdaterFunc(Expr expr, std::string sym
   return ret;
 }
 
-TVM_REGISTER_GLOBAL("relay.ext.dnnl.constant_updater").set_body_typed(DNNLConstantUpdaterFunc);
+TVM_REGISTER_GLOBAL("relay.ext.imcflow.constant_updater").set_body_typed(IMCFLOWConstantUpdaterFunc);
 
 }  // namespace contrib
 }  // namespace relay

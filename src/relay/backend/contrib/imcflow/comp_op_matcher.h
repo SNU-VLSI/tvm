@@ -18,12 +18,12 @@
  */
 
 /*!
- * \file src/relay/backend/contrib/dnnl/comp_op_matcher.h
+ * \file src/relay/backend/contrib/imcflow/comp_op_matcher.h
  * \brief Implement matcher based function to parse complex composite nodes.
  */
 
-#ifndef TVM_RELAY_BACKEND_CONTRIB_DNNL_COMP_OP_MATCHER_H_
-#define TVM_RELAY_BACKEND_CONTRIB_DNNL_COMP_OP_MATCHER_H_
+#ifndef TVM_RELAY_BACKEND_CONTRIB_IMCFLOW_COMP_OP_MATCHER_H_
+#define TVM_RELAY_BACKEND_CONTRIB_IMCFLOW_COMP_OP_MATCHER_H_
 
 #include <tvm/relay/function.h>
 
@@ -128,7 +128,7 @@ const tvm::relay::CallNode* ParseQnnConvComp(const tvm::relay::FunctionNode& com
   auto indexed_body = CreateIndexedGraph(comp_fn.body);
   DFPatternMatcher matcher(indexed_body.get());
   auto res = matcher.Match(pat, comp_fn.body);
-  ICHECK(res) << "Mismatch of DNNL partitioner and codegen logic";
+  ICHECK(res) << "Mismatch of IMCFLOW partitioner and codegen logic";
 
   // Handle arguments in deterministic order
   auto map = matcher.GetMemo();
@@ -190,7 +190,7 @@ const tvm::relay::CallNode* ParseQnnDenseComp(const tvm::relay::FunctionNode& co
   auto indexed_body = CreateIndexedGraph(comp_fn.body);
   DFPatternMatcher matcher(indexed_body.get());
   auto res = matcher.Match(pat, comp_fn.body);
-  ICHECK(res) << "Mismatch of DNNL partitioner and codegen logic";
+  ICHECK(res) << "Mismatch of IMCFLOW partitioner and codegen logic";
 
   // Handle arguments in deterministic order
   auto memo = matcher.GetMemo();
@@ -231,15 +231,15 @@ const tvm::relay::CallNode* ParseComposite(const tvm::relay::FunctionNode& comp_
                                            std::unordered_map<std::string, dmlc::any>* ext_attrs,
                                            std::vector<tvm::relay::Expr>* args) {
   auto comp = comp_fn.GetAttr<tvm::String>(tvm::relay::attr::kComposite);
-  ICHECK(comp.defined()) << "DNNL JSON runtime only supports composite functions.";
+  ICHECK(comp.defined()) << "IMCFLOW JSON runtime only supports composite functions.";
   auto name = comp.value();
 
   const tvm::relay::CallNode* res = nullptr;
-  if (name == "dnnl.qnn.conv2d")
+  if (name == "imcflow.qnn.conv2d")
     res = ParseQnnConvComp(comp_fn, ext_attrs, args);
-  else if (name == "dnnl.qnn.dense")
+  else if (name == "imcflow.qnn.dense")
     res = ParseQnnDenseComp(comp_fn, ext_attrs, args);
   return res;
 }
 
-#endif  // TVM_RELAY_BACKEND_CONTRIB_DNNL_COMP_OP_MATCHER_H_
+#endif  // TVM_RELAY_BACKEND_CONTRIB_IMCFLOW_COMP_OP_MATCHER_H_
