@@ -24,7 +24,8 @@
       "request": "launch",
       "program": "${file}",
       "console": "integratedTerminal",
-      "python": "/root/anaconda3/envs/py3.10/bin/python"
+      "python": "/root/anaconda3/envs/py3.10/bin/python",
+      "cwd" : "${fileDirname}"
     }
   ]
 }

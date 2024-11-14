@@ -52,3 +52,6 @@ echo "set(USE_DNNL C_SRC)" >> config.cmake
 
 # IMCFLOW ON
 echo "set(USE_IMCFLOW ON)" >> config.cmake
+
+# MICRO TVM
+echo "set(USE_MICRO ON)" >> config.cmake

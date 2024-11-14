@@ -1,7 +1,10 @@
 {
   "files.associations": {
+    "*.sv": "systemverilog",
     "string": "cpp",
     "cwchar": "cpp",
-    "functional": "cpp"
+    "functional": "cpp",
+    "*.inc": "cpp",
+    "c_runtime_api.h": "c"
   }
 }
