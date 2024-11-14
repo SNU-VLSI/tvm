@@ -49,3 +49,6 @@ echo 'set(USE_VTA_FSIM ON)' >> config.cmake
 # echo "set(USE_DNNL $(echo $CONDA_PREFIX))" >> config.cmake
 echo "set(CMAKE_LIBRARY_PATH ${CMAKE_LIBRARY_PATH} ${CONDA_PREFIX}/lib)" >> config.cmake
 echo "set(USE_DNNL C_SRC)" >> config.cmake
+
+# IMCFLOW ON
+echo "set(USE_IMCFLOW ON)" >> config.cmake
