@@ -398,3 +398,15 @@ def get_model(args):
   )
 
   return model
+
+def getTestModel():
+  import tvm.relay as relay
+  Flags, unparsed = parse_command()
+  model = get_model(Flags)
+  label_count=12
+  model_settings = prepare_model_settings(label_count, Flags)
+  # data = np.ones((1, 49, 10, 1)).astype(np.float32)
+  data = np.ones((1, 1, model_settings['spectrogram_length'], model_settings['dct_coefficient_count'])).astype(np.float32)
+  shape_dict = {"input_1": data.shape}
+  mod, params = relay.frontend.from_keras(model, shape_dict)
+  return mod, params, shape_dict

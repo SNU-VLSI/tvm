@@ -25,7 +25,8 @@
       "program": "${file}",
       "console": "integratedTerminal",
       "python": "/root/anaconda3/envs/py3.10/bin/python",
-      "cwd" : "${fileDirname}"
+      "cwd" : "${fileDirname}",
+      "args" : ["-k", "ds_cnn"]
     }
   ]
 }

@@ -289,3 +289,11 @@ def mobilenet_v1():
     # Instantiate model.
     model = Model(inputs=inputs, outputs=outputs)
     return model
+
+def getTestModel():
+  import tvm.relay as relay
+  model = mobilenet_v1()
+  data = np.ones((1, 3, 96, 96)).astype(np.float32)
+  shape_dict = {"input_1": data.shape}
+  mod, params = relay.frontend.from_keras(model, shape_dict)
+  return mod, params, shape_dict

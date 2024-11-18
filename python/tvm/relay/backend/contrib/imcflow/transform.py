@@ -52,9 +52,17 @@ class ConvSplitToAtom:
           _, IC, IH, IW = _get_type(expr.args[0])  # Input shape
           OC, _, KH, KW = _get_type(expr.args[1])  # Kernel shape
 
+          if not ((KH == 1 and KW == 1) or (KH == 3 and KW == 3) or (KH == 5 and KW == 5) or (KH == 7 and KW == 7)):
+            return expr
+
+          groups = expr.attrs.groups
+          assert (groups == 1 or groups == IC), "Grouped convolutions are not supported"
+
+          IsDepthWise = (groups == IC)
+
           # Set limits for in and out channels
-          in_ch_limit = math.floor(256 / (KH * KW))
-          out_ch_limit = 64
+          in_ch_limit = math.floor(256 / (KH * KW)) if not IsDepthWise else 32
+          out_ch_limit = 64 if not IsDepthWise else 32
 
           if (IC <= in_ch_limit) and (OC <= out_ch_limit):
               return expr  # Return original if no splitting is needed
@@ -62,27 +70,31 @@ class ConvSplitToAtom:
           # Determine split counts
           ic_split_num = math.ceil(IC / in_ch_limit)
           oc_split_num = math.ceil(OC / out_ch_limit)
+          IsICSplited = ic_split_num > 1
+          IsOCSplited = oc_split_num > 1
 
           # Split the input and weights
           ic_sections = [i*in_ch_limit for i in range(1, ic_split_num)]
           oc_sections = [i*out_ch_limit for i in range(1, oc_split_num)]
-          split_inputs = relay.op.transform.split(expr.args[0], indices_or_sections=ic_sections, axis=1)
-          split_weights = relay.op.transform.split(expr.args[1], indices_or_sections=oc_sections, axis=0)
+          
+          # input splitting
+          split_inputs = relay.op.transform.split(expr.args[0], indices_or_sections=ic_sections, axis=1) if IsICSplited else [expr.args[0]]
 
           # Nested weight splits for each out channel slice
           split_conv_weights = []
+          split_weights = relay.op.transform.split(expr.args[1], indices_or_sections=oc_sections, axis=0) if IsOCSplited else [expr.args[1]]
           for oc_id in range(oc_split_num):
-              weight_slice = relay.op.transform.split(split_weights[oc_id], indices_or_sections=ic_sections, axis=1)
+              weight_slice = relay.op.transform.split(split_weights[oc_id], indices_or_sections=ic_sections, axis=1) if (IsICSplited and (not IsDepthWise)) else [split_weights[oc_id]]
               split_conv_weights.append(weight_slice)
 
           # Create conv2d calls for each input-output channel slice
           conv_nodes = {}
           for oc_id in range(oc_split_num):
               oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
-              for ic_id in range(ic_split_num):
+              for ic_id in range(ic_split_num if not IsDepthWise else 1):
                   ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
                   conv_nodes[(oc_id, ic_id)] = relay.nn.conv2d(
-                      split_inputs[ic_id],
+                      split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
                       split_conv_weights[oc_id][ic_id],
                       channels=oc_size,
                       kernel_size=(KH, KW),
@@ -90,10 +102,11 @@ class ConvSplitToAtom:
                       padding=expr.attrs.padding,
                       data_layout=expr.attrs.data_layout,
                       kernel_layout=expr.attrs.kernel_layout,
+                      groups=1 if not IsDepthWise else oc_size
                   )
 
           # If input channels were split, sum the resulting conv2d outputs for each out channel slice
-          if IC > in_ch_limit:
+          if IsICSplited and (not IsDepthWise):
               add_nodes = {}
               for oc_id in range(oc_split_num):
                   add_nodes[oc_id] = conv_nodes[(oc_id, 0)]
@@ -103,7 +116,7 @@ class ConvSplitToAtom:
               add_nodes = {oc_id: conv_nodes[(oc_id, 0)] for oc_id in range(oc_split_num)}
 
           # If output channels were split, concatenate along the output axis
-          if OC > out_ch_limit:
+          if IsOCSplited:
               concat_node = relay.op.concatenate([add_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
           else:
               concat_node = add_nodes[0]

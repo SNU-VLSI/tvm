@@ -23,6 +23,8 @@ from tvm.relay.backend import Executor, Runtime
 from tvm.relay import pretty_print
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 
+from models import *
+
 np.random.seed(0)
 
 def get_graph(IC, IH, IW, OC, KH, KW):
@@ -93,6 +95,52 @@ def RunTest(Shapes):
   os.system("rm " + f"{TestName}_ref.so " + f"{TestName}_evl.so")
   print("Good")
 
+def RunTestModel(name):
+  from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
+
+  TestName=name
+  print(f"Running Test {name}")
+  if name == "resnet":
+    irmod, param_dict, shape_dict = resnet.getTestModel()
+  elif name == "mobilenet":
+    irmod, param_dict, shape_dict = mobilenet.getTestModel()
+  elif name == "deep_autoencoder":
+    irmod, param_dict, shape_dict = deep_autoencoder.getTestModel()
+  elif name == "ds_cnn":
+    irmod, param_dict, shape_dict = ds_cnn.getTestModel()
+  else:
+    raise ValueError("Model not found")
+
+  os.makedirs(TestName, exist_ok=True)
+  with open(f"{TestName}/before_model.txt", "w") as f:
+    f.write(pretty_print(irmod))
+  
+  CustomPass = imcflow_transform.ConvSplitToAtom()
+  split_mod = CustomPass(irmod)
+
+  with open(f"{TestName}/model.txt", "w") as f:
+    f.write(pretty_print(split_mod))
+
+  RelayVisualizer(
+    relay_mod = split_mod,
+    relay_param = param_dict,
+    plotter = DotPlotter(),
+    parser = DotVizParser(),
+  ).render(f"{TestName}/model")
+
+  dtype="float32"
+  input_dict = {
+      k: np.random.uniform(-1, 1, v).astype(dtype)
+      for k, v in shape_dict.items()
+  }
+
+  Data1 = buildAndRun(TestName+"_ref", irmod, input_dict, param_dict)
+  Data2 = buildAndRun(TestName+"_evl", split_mod, input_dict, param_dict)
+  tvm.testing.assert_allclose(Data1.numpy(), Data2.numpy(), rtol=1e-3, atol=1e-3)
+
+  os.system("rm " + f"{TestName}_ref.so " + f"{TestName}_evl.so")
+  print("Good")
+
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}
   RunTest(Shapes)
@@ -116,6 +164,18 @@ def test_5x5_small():
 def test_5x5_big():
   Shapes = { "IC": 21, "IH": 16, "IW": 16, "OC": 129, "KH": 5, "KW": 5}
   RunTest(Shapes)
+
+def test_resnet():
+  RunTestModel("resnet")
+
+def test_mobilenet():
+  RunTestModel("mobilenet")
+
+def test_deep_autoencoder():
+  RunTestModel("deep_autoencoder")
+
+def test_ds_cnn():
+  RunTestModel("ds_cnn")
 
 if __name__ == "__main__":
   tvm.testing.main()

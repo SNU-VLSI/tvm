@@ -16,7 +16,7 @@ from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation
 import yaml
 
 def yaml_load():
-    with open("baseline.yaml") as stream:
+    with open("/root/project/tvm/tvm_practice/models/baseline.yaml") as stream:
         param = yaml.safe_load(stream)
     return param
 
@@ -75,3 +75,13 @@ def get_model(inputDim):
 
 def load_model(file_path):
     return keras.models.load_model(file_path)
+
+def getTestModel():
+  import tvm.relay as relay
+  import numpy as np
+  param = yaml_load()
+  model = get_model(param["feature"]["n_mels"] * param["feature"]["frames"])
+  data = np.ones((1, 640)).astype(np.float32)
+  shape_dict = {"input_1": data.shape}
+  mod, params = relay.frontend.from_keras(model, shape_dict)
+  return mod, params, shape_dict

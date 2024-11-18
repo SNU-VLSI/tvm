@@ -185,3 +185,19 @@ def resnet_v1_eembc():
     # Instantiate model.
     model = Model(inputs=inputs, outputs=outputs)
     return model
+  
+def getTestModel():
+  from tvm.contrib.download import download_testdata
+  from PIL import Image
+  from tensorflow.keras.applications.resnet50 import preprocess_input
+  import tvm.relay as relay
+  resnet_model = resnet_v1_eembc()
+  img_url = "https://github.com/dmlc/mxnet.js/blob/main/data/cat.png?raw=true"
+  img_path = download_testdata(img_url, "cat.png", module="data")
+  img = Image.open(img_path).resize((32, 32))
+  # input preprocess
+  data = np.array(img)[np.newaxis, :].astype("float32")
+  data = preprocess_input(data).transpose([0, 3, 1, 2])
+  shape_dict = {"input_1": data.shape}
+  mod, params = relay.frontend.from_keras(resnet_model, shape_dict)
+  return mod, params, shape_dict
