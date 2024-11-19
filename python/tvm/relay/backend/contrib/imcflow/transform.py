@@ -4,6 +4,7 @@ from tvm.relay import transform, op
 from tvm.relay.ty import TupleType, TensorType
 
 import math
+from copy import deepcopy
 
 @relay.transform.function_pass(opt_level=0)
 class CustomPipeline:
@@ -19,12 +20,20 @@ class CustomPipeline:
 
 @relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
-    def __init__(self):
-      pass
+    def __init__(self, OldParamDict):
+      self.OldParamDict = OldParamDict
+      self.NewParamDict = {}
 
     def transform_function(self, func, mod, ctx):
       class Spliter(tvm.relay.ExprMutator):
         """Split large conv2d into smaller conv2d, split, concat, add, etc"""
+
+        def __init__(self, OldParamDict):
+          super().__init__()
+          self.OldParamDict = OldParamDict
+          self.NewParamDict = {k:v for k,v in OldParamDict.items()}
+          self.DeleteArgs = []
+          self.AddArgs = []
 
         def split_and_optimize_conv2d(self, expr, mod):
 
@@ -81,11 +90,26 @@ class ConvSplitToAtom:
           split_inputs = relay.op.transform.split(expr.args[0], indices_or_sections=ic_sections, axis=1) if IsICSplited else [expr.args[0]]
 
           # Nested weight splits for each out channel slice
-          split_conv_weights = []
-          split_weights = relay.op.transform.split(expr.args[1], indices_or_sections=oc_sections, axis=0) if IsOCSplited else [expr.args[1]]
+          # split_conv_weights = []
+          # split_weights = relay.op.transform.split(expr.args[1], indices_or_sections=oc_sections, axis=0) if IsOCSplited else [expr.args[1]]
+          # for oc_id in range(oc_split_num):
+          #     weight_slice = relay.op.transform.split(split_weights[oc_id], indices_or_sections=ic_sections, axis=1) if (IsICSplited and (not IsDepthWise)) else [split_weights[oc_id]]
+          #     split_conv_weights.append(weight_slice)
+
+          # split weight and make New params
+          split_conv_weights = [[None for _ in range(ic_split_num if (not IsDepthWise) else 1)] for _ in range(oc_split_num)]
+          OldParam = self.OldParamDict[expr.args[1].name_hint]
+          self.DeleteArgs.append(expr.args[1])
+          self.NewParamDict.pop(expr.args[1].name_hint)
           for oc_id in range(oc_split_num):
-              weight_slice = relay.op.transform.split(split_weights[oc_id], indices_or_sections=ic_sections, axis=1) if (IsICSplited and (not IsDepthWise)) else [split_weights[oc_id]]
-              split_conv_weights.append(weight_slice)
+            oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
+            for ic_id in range(ic_split_num if not IsDepthWise else 1):
+              ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
+              SplitParam = relay.Var(f"{expr.args[1].name_hint}_oc{oc_id}_ic{ic_id}", relay.TensorType([oc_size, ic_size, KH, KW], dtype=expr.args[1].type_annotation.dtype))
+              NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size, ic_id*in_ch_limit:(ic_id*in_ch_limit)+ic_size, :, :]
+              self.NewParamDict[SplitParam.name_hint] = tvm.nd.array(NewData, device=OldParam.device)
+              split_conv_weights[oc_id][ic_id] = SplitParam
+              self.AddArgs.append(SplitParam)
 
           # Create conv2d calls for each input-output channel slice
           conv_nodes = {}
@@ -132,7 +156,16 @@ class ConvSplitToAtom:
           else:
             return super().visit_call(call)
 
-      return Spliter().visit(func)
+      Spliter_ = Spliter(self.OldParamDict)
+      NewFunc = Spliter_.visit(func)
+      OldArgs = func.params
+      NewArgs = OldArgs[:]
+      for arg in Spliter_.DeleteArgs:
+        NewArgs.remove(arg)
+      for arg in Spliter_.AddArgs:
+        NewArgs.append(arg)
+      self.NewParamDict = Spliter_.NewParamDict
+      return relay.Function(NewArgs, NewFunc.body)
 
 @relay.transform.function_pass(opt_level=0)
 class DenseToConv:

@@ -117,7 +117,8 @@ def RunTestModel(name):
   with open(f"{TestName}/before_model.txt", "w") as f:
     f.write(pretty_print(irmod))
   
-  transforms = tvm.transform.Sequential([imcflow_transform.ConvSplitToAtom()])
+  ConvSplitToAtom = imcflow_transform.ConvSplitToAtom(param_dict)
+  transforms = tvm.transform.Sequential([ConvSplitToAtom])
   split_mod = transforms(irmod)
 
   with open(f"{TestName}/model.txt", "w") as f:
@@ -125,7 +126,7 @@ def RunTestModel(name):
 
   RelayVisualizer(
     relay_mod = split_mod,
-    relay_param = param_dict,
+    relay_param = ConvSplitToAtom.NewParamDict,
     plotter = DotPlotter(),
     parser = DotVizParser(),
   ).render(f"{TestName}/model")
@@ -137,7 +138,7 @@ def RunTestModel(name):
   }
 
   Data1 = buildAndRun(TestName+"_ref", irmod, input_dict, param_dict)
-  Data2 = buildAndRun(TestName+"_evl", split_mod, input_dict, param_dict)
+  Data2 = buildAndRun(TestName+"_evl", split_mod, input_dict, ConvSplitToAtom.NewParamDict)
   tvm.testing.assert_allclose(Data1.numpy(), Data2.numpy(), rtol=1e-3, atol=1e-3)
 
   os.system("rm " + f"{TestName}_ref.so " + f"{TestName}_evl.so")
