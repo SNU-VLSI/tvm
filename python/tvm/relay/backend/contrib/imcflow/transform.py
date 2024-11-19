@@ -126,8 +126,11 @@ class ConvSplitToAtom:
 
         def visit_call(self, call):
           if call.op == op.get("nn.conv2d"):
-            return Spliter().split_and_optimize_conv2d(call, mod)
+            NewCall = super().visit_call(call)
+            NewCall = Spliter().split_and_optimize_conv2d(NewCall, mod)
+            return NewCall
           else:
+            print(f"Skipping {call.op.name}")
             return super().visit_call(call)
 
       return Spliter().visit(func)

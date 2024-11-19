@@ -108,6 +108,8 @@ def RunTestModel(name):
     irmod, param_dict, shape_dict = deep_autoencoder.getTestModel()
   elif name == "ds_cnn":
     irmod, param_dict, shape_dict = ds_cnn.getTestModel()
+  elif name == "wide_model":
+    irmod, param_dict, shape_dict = wide_model.getTestModel()
   else:
     raise ValueError("Model not found")
 
@@ -176,6 +178,9 @@ def test_deep_autoencoder():
 
 def test_ds_cnn():
   RunTestModel("ds_cnn")
+
+def test_wide_model():
+  RunTestModel("wide_model")
 
 if __name__ == "__main__":
   tvm.testing.main()
