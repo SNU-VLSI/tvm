@@ -117,8 +117,8 @@ def RunTestModel(name):
   with open(f"{TestName}/before_model.txt", "w") as f:
     f.write(pretty_print(irmod))
   
-  CustomPass = imcflow_transform.ConvSplitToAtom()
-  split_mod = CustomPass(irmod)
+  transforms = tvm.transform.Sequential([imcflow_transform.ConvSplitToAtom()])
+  split_mod = transforms(irmod)
 
   with open(f"{TestName}/model.txt", "w") as f:
     f.write(pretty_print(split_mod))

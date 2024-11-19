@@ -1,0 +1,18 @@
+def @main(%input_1: Tensor[(1, 32, 8, 8), float32], %v_param_1: Tensor[(128, 32, 3, 3), float32], %v_param_2: Tensor[(128), float32], %v_param_3: Tensor[(128), float32], %v_param_4: Tensor[(128), float32], %v_param_5: Tensor[(128), float32], %v_param_6: Tensor[(128), float32], %v_param_7: Tensor[(128, 128, 3, 3), float32], %v_param_8: Tensor[(128), float32], %v_param_9: Tensor[(128), float32], %v_param_10: Tensor[(128), float32], %v_param_11: Tensor[(128), float32], %v_param_12: Tensor[(128), float32], %v_param_13: Tensor[(10, 128), float32], %v_param_14: Tensor[(10), float32]) {
+  %0 = nn.conv2d(%input_1, %v_param_1, padding=[1, 1, 1, 1], channels=128, kernel_size=[3, 3]);
+  %1 = nn.bias_add(%0, %v_param_2);
+  %2 = nn.batch_norm(%1, %v_param_3, %v_param_4, %v_param_5, %v_param_6, epsilon=0.001f);
+  %3 = %2.0;
+  %4 = nn.relu(%3);
+  %5 = nn.conv2d(%4, %v_param_7, padding=[1, 1, 1, 1], channels=128, kernel_size=[3, 3]);
+  %6 = nn.bias_add(%5, %v_param_8);
+  %7 = nn.batch_norm(%6, %v_param_9, %v_param_10, %v_param_11, %v_param_12, epsilon=0.001f);
+  %8 = %7.0;
+  %9 = nn.relu(%8);
+  %10 = nn.avg_pool2d(%9, pool_size=[8, 8], strides=[8, 8], padding=[0, 0, 0, 0]);
+  %11 = transpose(%10, axes=[0, 2, 3, 1]);
+  %12 = nn.batch_flatten(%11);
+  %13 = nn.dense(%12, %v_param_13, units=10);
+  %14 = nn.bias_add(%13, %v_param_14);
+  nn.softmax(%14, axis=1)
+}

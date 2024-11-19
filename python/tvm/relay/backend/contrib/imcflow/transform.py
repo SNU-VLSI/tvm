@@ -127,10 +127,80 @@ class ConvSplitToAtom:
         def visit_call(self, call):
           if call.op == op.get("nn.conv2d"):
             NewCall = super().visit_call(call)
-            NewCall = Spliter().split_and_optimize_conv2d(NewCall, mod)
+            NewCall = self.split_and_optimize_conv2d(NewCall, mod)
             return NewCall
           else:
-            print(f"Skipping {call.op.name}")
             return super().visit_call(call)
 
       return Spliter().visit(func)
+
+@relay.transform.function_pass(opt_level=0)
+class DenseToConv:
+    def __init__(self):
+      pass
+
+    def transform_function(self, func, mod, ctx):
+      class _Mutator(tvm.relay.ExprMutator):
+        """convert dense to conv2d with kernel size 1x1"""
+
+        def transform(self, expr, mod):
+
+          def _get_type(node):
+              """A method to infer the type of a relay expression."""
+              mod = tvm.IRModule.from_expr(node)
+              mod = relay.transform.InferType()(mod)
+              entry = mod["main"]
+
+              infer_out = entry if isinstance(node, relay.Function) else entry.body
+              out_type = infer_out._checked_type_
+
+              if isinstance(out_type, TensorType):
+                  # Single tensor, get the shape directly
+                  shapes = [int(dim) for dim in out_type.shape]
+              elif isinstance(out_type, TupleType):
+                  # Tuple of tensors, get the shape of each tensor in the tuple
+                  shapes = [int(field) for field in out_type.fields]
+              else:
+                  raise RuntimeError(f"Unsupported output type {type(out_type)} in operator {node.op.name}")
+
+              return shapes
+
+          # Extract input and kernel shapes
+          _, K = _get_type(expr.args[0])  # Input shape
+          N, _ = _get_type(expr.args[1])  # Kernel shape
+
+          KH, KW = 1, 1
+          IC = K
+          OC = N
+          stride = 1
+          padding = 0
+
+          # reshape input
+          x = relay.op.transform.reshape(expr.args[0], newshape=(1, IC, 1, 1))
+
+          # reshape weight
+          w = relay.op.transform.reshape(expr.args[1], newshape=(OC, IC, KH, KW))
+
+          # convert dense to conv2d
+          y = relay.nn.conv2d(
+              x,
+              w,
+              channels=OC,
+              kernel_size=(KH, KW),
+              strides=(stride, stride),
+              padding=(padding, padding),
+          )
+
+          y = relay.op.transform.reshape(y, newshape=(1, N))
+
+          return y
+
+        def visit_call(self, call):
+          if call.op == op.get("nn.dense"):
+            NewCall = super().visit_call(call)
+            NewCall = self.transform(NewCall, mod)
+            return NewCall
+          else:
+            return super().visit_call(call)
+
+      return _Mutator().visit(func)
