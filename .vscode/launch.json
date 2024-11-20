@@ -27,6 +27,21 @@
       "python": "/root/anaconda3/envs/py3.10/bin/python",
       "cwd" : "${fileDirname}",
       "args" : ["-k", "wide_model", "-s"]
-    }
+    },
+    {
+      "name": "gdb python",
+      "type": "cppdbg",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/tvm_practice",
+      "program": "/root/anaconda3/envs/py3.10/bin/python",
+      "args": [
+        "test_imcflow.py",
+        "-k test_my_relu",
+        "-s"
+      ],
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "gdb",
+    },
   ]
 }

@@ -179,6 +179,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   }
 
   std::vector<Output> VisitExpr_(const VarNode* node) final {
+    LOG(INFO) << "IMCFLOW VarNode Visited";
     ext_func_args_.push_back(GetRef<Var>(node));
     Output output;
     output.name = node->name_hint();
@@ -186,6 +187,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   }
 
   std::vector<Output> VisitExpr_(const TupleNode* node) final {
+    LOG(INFO) << "IMCFLOW TupleNode Visited";
     std::vector<Output> outs;
     for (auto field : node->fields) {
       auto res = VisitExpr(field);
@@ -196,6 +198,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   }
 
   std::vector<Output> VisitExpr_(const TupleGetItemNode* op) final {
+    LOG(INFO) << "IMCFLOW TupleGetItemNode Visited";
     auto res = VisitExpr(op->tuple);
     ICHECK_GT(res.size(), static_cast<size_t>(op->index));
 
@@ -205,6 +208,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   }
 
   std::vector<Output> VisitExpr_(const ConstantNode* cn) final {
+    LOG(INFO) << "IMCFLOW ConstantNode Visited";
     Output output;
     // Get const: static_cast<float*>(imcflow_0_consts[0]->data)
     output.name = CreateDataReference(ext_func_id_, const_idx_);
@@ -232,6 +236,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   }
 
   std::vector<Output> VisitExpr_(const CallNode* call) final {
+    LOG(INFO) << "IMCFLOW CallNode Visited";
     GenerateBodyOutput ret;
     if (const auto* func = call->op.as<FunctionNode>()) {
       ret = GenerateCompositeFunctionCall(func, call);
@@ -285,19 +290,19 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
     const auto pattern_name = callee->GetAttr<runtime::String>(attr::kComposite);
     ICHECK(pattern_name.defined()) << "Only functions with composite attribute supported";
 
-    if (pattern_name == "imcflow.conv2d_bias_relu") {
-      const auto* conv_call =
-          GetRootCall(callee->body.as<CallNode>(), 2, {"nn.conv2d", "add", "nn.relu"});
-      return GenerateBody(conv_call, "imcflow_fused_conv2d_bias_relu", GetArgumentNames(caller),
-                          Conv2d(conv_call));
-    } else if (pattern_name == "imcflow.conv2d_relu") {
-      const auto* conv_call = GetRootCall(callee->body.as<CallNode>(), 1,
-                                          (const std::vector<std::string>){"nn.conv2d", "nn.relu"});
-      return GenerateBody(conv_call, "imcflow_fused_conv2d_relu", GetArgumentNames(caller),
-                          Conv2d(conv_call));
-    }
+    using ExpectedOpType = std::vector<std::string>;
+    using ArgFunType = std::function<std::vector<std::string>(const CallNode*)>;
+    static const std::map<std::string, std::tuple<int, ExpectedOpType, std::string, ArgFunType>> pat_map = {
+        {"imcflow.conv2d_bias_relu", {2, {"nn.conv2d", "add", "nn.relu"}, "imcflow_fused_conv2d_bias_relu", Conv2d}},
+        {"imcflow.conv2d_relu", {1, {"nn.conv2d", "nn.relu"}, "imcflow_fused_conv2d_relu", Conv2d}},
+    };
 
-    LOG(FATAL) << "Unknown composite function:" << pattern_name;
+    auto info_ = pat_map.at(pattern_name.value());
+    const auto* call =
+        GetRootCall(callee->body.as<CallNode>(), std::get<0>(info_), std::get<1>(info_));
+    return GenerateBody(call, std::get<2>(info_), GetArgumentNames(caller), std::get<3>(info_)(call));
+
+    LOG(FATAL) << "Unsupported composite function: " << AsText(call->op, false);
   }
 
   GenerateBodyOutput GenerateBody(const CallNode* root_call, const std::string& func_name,
@@ -432,6 +437,7 @@ class IMCFLOWModuleCodegen : public CSourceModuleCodegenBase {
     ICHECK(ref->IsInstance<FunctionNode>());
     auto res = GenIMCFLOWFunc(Downcast<Function>(ref));
     std::string code = code_stream_.str();
+    DLOG(INFO) << "CreateCSourceModule - code:\n" << code << std::endl;
     String sym = std::get<0>(res);
     Array<String> variables = std::get<1>(res);
 
@@ -476,6 +482,7 @@ struct IMCFLOWConstantUpdater : public ConstantUpdater {
   using ConstantUpdater::VisitExpr_;
 
   void VisitExpr_(const CallNode* cn) final {
+    LOG(INFO) << "IMCFLOW CallNode Visited";
     this->VisitSpan(cn->span);
 
     if (const auto* fn = cn->op.as<FunctionNode>()) {
