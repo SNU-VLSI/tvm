@@ -148,18 +148,23 @@ def check_imcflow_used(mod, subgraph_num=None):
         assert num_imcflow_subgraphs >= 1
 
 
-def update_lib(lib):
+def update_lib(lib, output_dir='./output', lib_name='lib.so'):
     test_dir = os.path.dirname(os.path.realpath(os.path.expanduser(__file__)))
     source_dir = os.path.join(test_dir, "..")
     contrib_path = os.path.join(source_dir, "src", "runtime", "contrib")
 
-    kwargs = {}
-    kwargs["options"] = ["-O2", "-std=c++17", "-I" + contrib_path]
-    # tmp_path = utils.tempdir()
-    lib_name = "lib.so"
-    lib_path = "./" + lib_name
-    print(f"exporting lib to {lib_path}")
-    lib.export_library(lib_path, fcompile=False, **kwargs)
+    # Use a wrapper around the standard C compiler to save the C source
+    kwargs = {"options": ["-O2", "-std=c++17", "-save-temps", "-I" + contrib_path]}
+
+    # setup output directory
+    if output_dir is None:
+        output_dir = utils.tempdir()
+    os.makedirs(output_dir, exist_ok=True)
+    lib_path = os.path.join(output_dir, lib_name)
+
+    # Export library and intermediate C source code
+    print(f"Exporting library to {lib_path} with intermediate source code")
+    lib.export_library(lib_path, workspace_dir=output_dir, **kwargs)
     lib = tvm_runtime.load_module(lib_path)
 
     return lib
@@ -250,6 +255,13 @@ def add_activation(activation, out, dic, param_lst):
         raise NotImplementedError(f"Activation {activation} is not supported.")
 
 
+def get_activation(x_shape=(1, 32, 8, 8), activation=None, dtype="float32"):
+    x = relay.var("x", shape=(x_shape), dtype=dtype)
+    dic = {"x": x_shape}
+    param_lst = []
+    return add_activation(activation, x, dic, param_lst)
+
+
 def get_conv2d(
     x_shape=(1, 32, 8, 8),
     k_shape=(16, 32, 3, 3),
@@ -276,6 +288,15 @@ def get_conv2d(
     param_lst = ["kernel"]
     return add_activation(activation, out, dic, param_lst)
 
+def test_my_relu(run_module, dtype="float32"):
+    relu, dic, param_lst = get_activation(
+        x_shape=(1, 32, 8, 8),
+        activation="relu",
+        dtype=dtype,
+    )
+    relu = tvm.IRModule.from_expr(relu)
+    config = relu, dic, param_lst
+    run_and_verify_func(config, run_module=run_module, dtype=dtype)
 
 def test_my_conv2d(run_module, dtype="float32"):
     conv2d, dic, param_lst = get_conv2d(
@@ -285,6 +306,21 @@ def test_my_conv2d(run_module, dtype="float32"):
         padding=(2, 2),
         strides=(1, 1),
         dilation=(2, 2),
+        dtype=dtype,
+    )
+    conv2d = tvm.IRModule.from_expr(conv2d)
+    config = conv2d, dic, param_lst
+    run_and_verify_func(config, run_module=run_module, dtype=dtype)
+
+def test_my_conv2d_relu(run_module, dtype="float32"):
+    conv2d, dic, param_lst = get_conv2d(
+        x_shape=(1, 32, 8, 8),
+        k_shape=(32, 32, 3, 3),
+        groups=1,
+        padding=(2, 2),
+        strides=(1, 1),
+        dilation=(2, 2),
+        activation="relu",
         dtype=dtype,
     )
     conv2d = tvm.IRModule.from_expr(conv2d)
