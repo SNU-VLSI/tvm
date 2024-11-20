@@ -114,6 +114,13 @@ def RunTestModel(name):
     raise ValueError("Model not found")
 
   os.makedirs(TestName, exist_ok=True)
+
+  RelayVisualizer(
+    relay_mod = irmod,
+    relay_param = param_dict,
+    plotter = DotPlotter(),
+    parser = DotVizParser(),
+  ).render(f"{TestName}/before_model")
   with open(f"{TestName}/before_model.txt", "w") as f:
     f.write(pretty_print(irmod))
   
