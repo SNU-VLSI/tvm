@@ -45,7 +45,7 @@ from tvm.relay.expr import Call, GlobalVar, TupleGetItem, const
 from tvm.relay.expr_functor import ExprMutator, ExprVisitor
 
 from ... import _ffi_api
-from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard
+from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard, is_tuple_get_item
 from .register import register_pattern_table
 
 logger = logging.getLogger("IMCFLOW")
@@ -448,20 +448,20 @@ def makeBNPattern(data):
   var = is_constant()
   gamma = is_constant()
   beta = is_constant()
-  epsilon = is_constant()
-  return is_op("nn.batch_norm")(data, gamma, beta, mean, var, epsilon)
+
+  return is_tuple_get_item(is_op("nn.batch_norm")(data, gamma, beta, mean, var), 0)
 
 def makeAddPattern(data):
   return is_op("add")(data, wildcard())
 
 def makeBiasAddPattern(data):
-  return is_op("nn.bias_add")(data, wildcard())
+  return is_op("nn.bias_add")(data, is_constant())
 
 def makeReluPattern(data):
   return is_op("nn.relu")(data)
 
 def make_conv_with_postop_pattern(conv_type, postops):
-    data1, weight = wildcard(), wildcard()
+    data1, weight = wildcard(), is_constant()
     out = is_op(conv_type)(data1, weight)
     for postop in postops:
       out = postop(out)
@@ -479,14 +479,22 @@ def pattern_table():
     imcflow_patterns = list()
 
     post_patterns = [
-      ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
-      ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
-      ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
-      ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
+      # 4
       ("imcflow.conv2d_add_bias_add_bn_relu",[makeAddPattern, makeBiasAddPattern, makeBNPattern, makeReluPattern]),
-      ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
+
+      # 3
+      ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
       ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
       ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
+      
+      # 2
+      ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
+      ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
+      ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
+
+      # 1
+      ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
+      ("imcflow.conv2d_bn", [makeBNPattern]),
     ]
 
     for name, patterns in post_patterns:
