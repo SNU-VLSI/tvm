@@ -149,7 +149,8 @@ def RunTestModel(name):
   tvm.testing.assert_allclose(Data1.numpy(), Data2.numpy(), rtol=1e-3, atol=1e-3)
 
   os.system("rm " + f"{TestName}_ref.so " + f"{TestName}_evl.so")
-  print("Good")
+  with open(f"{TestName}/good.txt", "w") as f:
+    f.write("good")
 
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}

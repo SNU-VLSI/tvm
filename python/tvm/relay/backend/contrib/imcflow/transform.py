@@ -50,7 +50,7 @@ class ConvSplitToAtom:
           self.DeleteArgs = []
           self.AddArgs = []
           self.PostProcess = []
-          self.IsSplitedPostNode = []
+          # self.IsSplitedPostNode = []
 
         def removeParamVar(self, Var):
           self.DeleteArgs.append(Var)
@@ -132,7 +132,10 @@ class ConvSplitToAtom:
           for oc_id in range(oc_split_num):
             oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
             for ic_id in range(ic_split_num if not IsDepthWise else 1):
-              ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
+              if IsDepthWise:
+                ic_size = 1
+              else:
+                ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
               SplitParam = relay.Var(f"{expr.args[1].name_hint}_oc{oc_id}_ic{ic_id}", relay.TensorType([oc_size, ic_size, KH, KW], dtype=expr.args[1].type_annotation.dtype))
               split_conv_weights[oc_id][ic_id] = SplitParam
 
@@ -181,8 +184,9 @@ class ConvSplitToAtom:
                 post_nodes[oc_id] = add_nodes[oc_id]
 
               # RemoveTargets.extend(PostProcess)
-              self.IsSplitedPostNode.extend([True for _ in range(len(PostProcess))])
+              # self.IsSplitedPostNode.extend([True for _ in range(len(PostProcess))])
               for PostNode in PostProcess[::-1]:
+                setattr(PostNode, "ShouldDelete", True)
                 if PostNode.op == op.get("nn.bias_add"):
                   self.removeParamVar(PostNode.args[1])
                 elif PostNode.op == op.get("nn.batch_norm"):
@@ -219,7 +223,7 @@ class ConvSplitToAtom:
               concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
           else:
               concat_node = add_nodes[0]
-              self.IsSplitedPostNode.extend([True for _ in range(len(PostProcess))])
+              # self.IsSplitedPostNode.extend([True for _ in range(len(PostProcess))])
 
           return concat_node
 
@@ -234,12 +238,12 @@ class ConvSplitToAtom:
           elif call.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm")]:
             self.PostProcess.append(call)
             NewCall = super().visit_call(call)
-            if self.IsSplitedPostNode.pop():
+            if hasattr(call, "ShouldDelete"):
               return relay.Tuple([NewCall.args[0]]) if call.op == op.get("nn.batch_norm") else NewCall.args[0]
             else:
               return NewCall
           else:
-            self.IsSplitedPostNode.extend([False for _ in range(len(self.PostProcess))])
+            # self.IsSplitedPostNode.extend([False for _ in range(len(self.PostProcess))])
             self.PostProcess = []
             return super().visit_call(call)
 

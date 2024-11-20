@@ -443,6 +443,29 @@ def make_qnn_dense_pattern():
 
     return "imcflow.qnn.dense", pat
 
+def makeBNPattern(data):
+  mean = is_constant()
+  var = is_constant()
+  gamma = is_constant()
+  beta = is_constant()
+  epsilon = is_constant()
+  return is_op("nn.batch_norm")(data, gamma, beta, mean, var, epsilon)
+
+def makeAddPattern(data):
+  return is_op("add")(data, wildcard())
+
+def makeBiasAddPattern(data):
+  return is_op("nn.bias_add")(data, wildcard())
+
+def makeReluPattern(data):
+  return is_op("nn.relu")(data)
+
+def make_conv_with_postop_pattern(conv_type, postops):
+    data1, weight = wildcard(), wildcard()
+    out = is_op(conv_type)(data1, weight)
+    for postop in postops:
+      out = postop(out)
+    return out
 
 @register_pattern_table("imcflow")
 def pattern_table():
@@ -454,38 +477,26 @@ def pattern_table():
         Created patterns.
     """
     imcflow_patterns = list()
-    imcflow_patterns.append(make_qnn_conv2d_pattern())
-    imcflow_patterns.append(make_qnn_dense_pattern())
-    imcflow_patterns.append(make_dense_bias_sum_pattern())
-    imcflow_patterns.append(
-        (
-            "imcflow.conv2d_bias_sum_relu",
-            make_conv_bias_sum_relu_pattern("nn.conv2d"),
-            make_sum_pattren_predicate(add_checker),
-        )
-    )
-    imcflow_patterns.append(
-        (
-            "imcflow.conv2d_bias_sum",
-            make_conv_bias_sum_relu_pattern("nn.conv2d", False),
-            make_sum_pattren_predicate(add_checker),
-        )
-    )
 
-    elt_list = ["nn.relu", "tanh", "sigmoid", "clip", "gelu", "swish", "mish", None]
-    for with_bias in [True, False]:
-        for elt in elt_list:
-            if not with_bias and not elt:
-                continue
-            for conv_name in [
-                "nn.conv1d",
-                "nn.conv2d",
-                "nn.conv3d",
-                "nn.conv2d_transpose",
-                "nn.conv3d_transpose",
-            ]:
-                imcflow_patterns.append(make_imcflow_pattern(conv_name, with_bias, elt))
-            imcflow_patterns.append(make_imcflow_pattern("nn.dense", with_bias, elt))
+    post_patterns = [
+      ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
+      ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
+      ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
+      ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
+      ("imcflow.conv2d_add_bias_add_bn_relu",[makeAddPattern, makeBiasAddPattern, makeBNPattern, makeReluPattern]),
+      ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
+      ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
+      ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
+    ]
+
+    for name, patterns in post_patterns:
+      imcflow_patterns.append(
+          (
+              name,
+              make_conv_with_postop_pattern("nn.conv2d", patterns)
+          )
+      )
+
     return imcflow_patterns
 
 
