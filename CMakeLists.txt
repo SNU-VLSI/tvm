@@ -93,6 +93,7 @@ tvm_option(DMLC_PATH "Path to DMLC" "3rdparty/dmlc-core/include")
 tvm_option(RANG_PATH "Path to RANG" "3rdparty/rang/include")
 tvm_option(COMPILER_RT_PATH "Path to COMPILER-RT" "3rdparty/compiler-rt")
 tvm_option(PICOJSON_PATH "Path to PicoJSON" "3rdparty/picojson")
+tvm_option(NLOHMANN_JSON_PATH "Path to nlohmann-json" "3rdparty/nlohmann-json")
 
 # Contrib library options
 tvm_option(USE_BYODT_POSIT "Build with BYODT software emulated posit custom datatype" OFF)
@@ -146,6 +147,7 @@ include_directories(SYSTEM ${DMLC_PATH})
 include_directories(SYSTEM ${RANG_PATH})
 include_directories(SYSTEM ${COMPILER_RT_PATH})
 include_directories(SYSTEM ${PICOJSON_PATH})
+include_directories(SYSTEM ${NLOHMANN_JSON_PATH})
 
 # initial variables
 set(TVM_LINKER_LIBS "")

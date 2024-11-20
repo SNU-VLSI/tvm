@@ -6,6 +6,9 @@
     "functional": "cpp",
     "*.inc": "cpp",
     "c_runtime_api.h": "c",
-    "regex": "cpp"
+    "regex": "cpp",
+    "sstream": "cpp",
+    "optional": "cpp",
+    "system_error": "cpp"
   }
 }
