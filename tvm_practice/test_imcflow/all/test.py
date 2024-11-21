@@ -13,7 +13,6 @@ from tvm import relay
 from tvm.relay import transform
 from tvm.relay.build_module import bind_params_by_name
 from tvm.relay.testing.temp_op_attr import TempOpAttr
-from tvm.relay.op.contrib import imcflow
 import tvm.testing
 from tvm.contrib import utils
 from tvm import runtime as tvm_runtime
@@ -21,7 +20,9 @@ from tvm.contrib import graph_executor
 
 from tvm.relay.backend import Executor, Runtime
 from tvm.relay import pretty_print
+
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
+from tvm.relay.op.contrib import imcflow
 
 from models import *
 
@@ -106,8 +107,9 @@ def RunTestModel(name):
       plotter = DotPlotter(),
       parser = DotVizParser(),
     ).render(f"{TestName}/{mod_name}")
+
     with open(f"{TestName}/{mod_name}.txt", "w") as f:
-      f.write(pretty_print(irmod))
+      f.write(pretty_print(mod))
 
   print(f"Running Test {name}")
   if name == "resnet":
@@ -141,17 +143,20 @@ def RunTestModel(name):
   printModel(eval_mod, eval_param_dict, "before_byoc_model")
 
   # byoc pass
-  byoc_seq = tvm.transform.Sequential(
-      [
-          transform.MergeComposite(imcflow.pattern_table()),
-          # transform.AnnotateTarget("imcflow"),
-          # transform.MergeCompilerRegions(),
-          # transform.PartitionGraph(),
-      ]
-  )
+  eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_merge_model")
 
-  eval_mod = byoc_seq(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_byoc_model")
+  # eval_mod = transform.AnnotateTarget("imcflow")(eval_mod)
+  AnnotGenerator = imcflow_transform.AnnotGenerator()
+  AnnotGenerator(eval_mod)
+  eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.Config)(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_annot_model")
+
+  # eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_merge_region_model")
+
+  eval_mod = transform.PartitionGraph()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_partition_graph_model")
 
   # # Run
   # dtype="float32"

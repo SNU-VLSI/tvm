@@ -7,18 +7,6 @@ import math
 from copy import deepcopy
 
 @relay.transform.function_pass(opt_level=0)
-class CustomPipeline:
-    """Simple test function to replace one argument to another."""
-
-    def __init__(self, prefix):
-        self.prefix = prefix
-
-    # This function can define a pass.
-    def transform_function(self, func, mod, ctx):
-      print(func)
-      return func
-
-@relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
     def __init__(self, OldParamDict):
       self.OldParamDict = OldParamDict
@@ -331,4 +319,22 @@ class DenseToConv:
           else:
             return super().visit_call(call)
 
+      return _Mutator().visit(func)
+      
+@relay.transform.function_pass(opt_level=0)
+class AnnotGenerator:
+    def __init__(self):
+      self.Config = {}
+
+    def transform_function(self, func, mod, ctx):
+      Config = {}
+      class _Mutator(tvm.relay.ExprVisitor):
+        def visit_call(self, call):
+          if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and call.op.attrs["Composite"] == "imcflow.conv2d_bias_add_bn_relu":
+            Config.update({int(hash(call)): "begin_end"})
+            super().visit_call(call)
+          else:
+            super().visit_call(call)
+
+      self.Config = Config
       return _Mutator().visit(func)
