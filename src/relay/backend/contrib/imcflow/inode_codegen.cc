@@ -1,4 +1,5 @@
 #include "inode_codegen.h"
+
 #include <fstream>
 #include <sstream>
 
@@ -8,111 +9,240 @@ namespace contrib {
 
 using json = nlohmann::json;
 
-// Load the configuration from a JSON file
-void InodeCodegen::LoadConfig(const std::string& json_path) {
-  std::ifstream ifs(json_path);
-  json jf = json::parse(ifs);
-
-  ParseInodes(jf);
-
-  LOG(INFO) << "Configuration loaded successfully.";
+// Constructor to initialize DeviceCodegen with an output directory.
+InodeCodegen::InodeCodegen(const std::string& json_path) {
+  std::ifstream file(json_path);
+  if (!file.is_open()) {
+    throw std::runtime_error("Could not open file: " + json_path);
+  }
+  file >> jf_;
+  dbl_ = {};
 }
 
-// Parse the inodes and their components
-void InodeCodegen::ParseInodes(const json& jf) {
-  if (!jf.contains("inodes")) {
-    LOG(FATAL) << "No 'inodes' key found in the JSON configuration.";
-    return;
+std::string IndentMultilineString(const std::string& input, int indent_level = 2,
+                                  char indent_char = ' ') {
+  std::istringstream input_stream(input);
+  std::ostringstream output_stream;
+  std::string line;
+  std::string indent(indent_level, indent_char);
+
+  while (std::getline(input_stream, line)) {
+    output_stream << indent << line << '\n';
   }
 
-  for (const auto& inode : jf["inodes"]) {
-    std::map<std::string, int> inode_metadata;
-
-    // Parse metadata
-    if (inode.contains("metadata")) {
-      for (const auto& [key, value] : inode["metadata"].items()) {
-        inode_metadata[key] = value.get<int>();
-      }
-      LOG(INFO) << "Metadata parsed successfully.";
-    }
-
-    // Parse memory layout
-    if (inode.contains("memory_layout")) {
-      ParseMemoryLayout(inode["memory_layout"]);
-      LOG(INFO) << "Memory layout parsed successfully.";
-    }
-
-    // Parse code blocks
-    if (inode.contains("code_blocks")) {
-      ParseCodeBlocks(inode["code_blocks"]);
-      LOG(INFO) << "Code blocks parsed successfully.";
-    }
-
-    inodes_.push_back(inode_metadata);
-  }
-}
-
-// Parse the memory layout of an inode
-void InodeCodegen::ParseMemoryLayout(const nlohmann::json& layout) {
-  for (const auto& region : layout) {
-    std::string region_name = region["region"];
-    memory_blocks_["region"] = region_name;
-
-    if (region.contains("blocks")) {
-      for (const auto& block : region["blocks"]) {
-        std::string block_name = block["name"];
-        memory_blocks_["block_name"] = block_name;
-      }
-    } else {
-      LOG(WARNING) << "No 'blocks' found in memory layout region.";
-    }
-  }
-}
-
-// Parse the code blocks of an inode
-void InodeCodegen::ParseCodeBlocks(const nlohmann::json& blocks) {
-  for (const auto& block : blocks) {
-    std::string block_type = block["type"];
-    LOG(INFO) << "Processing block type: " << block_type;
-
-    if (block.contains("entries")) {
-      for (const auto& entry : block["entries"]) {
-        ParseEntry(entry);
-      }
-    } else {
-      LOG(WARNING) << "No 'entries' found for block type: " << block_type;
-    }
-  }
-}
-
-// Parse an entry of a code block
-void InodeCodegen::ParseEntry(const nlohmann::json& entry) {
-  int entry_id = entry.value("id", -1);
-  LOG(INFO) << "Processing entry id: " << entry_id;
-  std::string data_block_name = entry.value("data_block", "");
-  int policy_addr = entry.value("policy_addr", -1);
-  int fifo_id = entry.value("fifo_id", -1);
+  return output_stream.str();
 }
 
 // Generate the full code for an inode
-std::string InodeCodegen::GenerateCode(const std::map<std::string, int>& inode_metadata) {
+std::string InodeCodegen::GenerateCode(const std::string& func_name) {
   std::ostringstream code;
-  code << "#include <builtin.h>\n\n";
-  code << "int main() {\n";
+  code << "int " << func_name << "() {\n";
+  code << "  int hid = __builtin_INODE_GET_CORE_HID();\n\n";
 
-  // Generate code based on metadata and parsed blocks
-  for (const auto& [key, value] : inode_metadata) {
-    code << "  // Metadata: " << key << " = " << value << "\n";
+  // Generate code for each inode
+  for (const auto& inode : jf_["inodes"]) {
+    LOG(INFO) << "Generating code for hid: " << inode["metadata"]["hid"];
+    code << IndentMultilineString(GenerateNodeCode(inode));
   }
-
-  for (const auto& [block_name, block_value] : memory_blocks_) {
-    code << "  // Memory Block: " << block_name << " = " << block_value << "\n";
-  }
-
-  code << "  __builtin_INODE_SET_FLAG(1);\n";
-  code << "  __builtin_INODE_HALT();\n";
-  code << "  return 0;\n";
   code << "}\n";
+
+  return code.str();
+}
+
+// Generate the code for a given inode and parse data block layout
+std::string InodeCodegen::GenerateNodeCode(const json& inode) {
+  std::ostringstream code;
+  int hid = inode["metadata"]["hid"];
+  code << "if (hid == " << hid << ") {\n";
+
+  // Parse memory layout and populate dbl_
+  LOG(INFO) << "Parsing memory layout for hid: " << hid;
+  ParseMemoryLayout(inode["memory_layout"]);
+
+  // Generate code for each code block
+  LOG(INFO) << "Generating code for hid: " << inode["metadata"]["hid"];
+  for (const auto& code_block : inode["code_blocks"]) {
+    code << IndentMultilineString(GenerateBlockCode(code_block));
+  }
+
+  code << "}\n";
+
+  return code.str();
+}
+
+// Parse memory layout and populate dbl_
+void InodeCodegen::ParseMemoryLayout(const json& memory_layout) {
+  for (const auto& region : memory_layout) {
+    if (region["region"] == "Data") {
+      ParseDataBlockLayout(region["blocks"]);
+    }
+  }
+}
+
+// Parse data blocks and populate dbl_
+void InodeCodegen::ParseDataBlockLayout(const json& blocks) {
+  for (const auto& block : blocks) {
+    std::string name = block["name"];
+    int offset = block["block_offset"];
+    int size = block["block_size"];
+    ValidateBlock(offset, size);
+    dbl_[name] = std::make_pair(offset, size);
+  }
+}
+
+// Validate block offset and size
+void InodeCodegen::ValidateBlock(int offset, int size) {
+  if (offset % 32 != 0 || size % 32 != 0) {
+    LOG(FATAL) << "Block offset and size must be a multiple of 32 (bytes)";
+  }
+}
+
+// Generate code for a given block
+std::string InodeCodegen::GenerateBlockCode(const json& code_block) {
+  std::ostringstream code;
+  std::string type = code_block["type"];
+
+  LOG(INFO) << "Generating code for block type: " << type;
+  code << "/*generate: " << type << "*/\n";
+
+  if (type == "AddPolicyUpdate") {
+    code << GeneratePolicyUpdateCode(code_block);
+  } else if (type == "AddWriteIMCU") {
+    code << GenerateWriteIMCUCode(code_block);
+  } else if (type == "AddWriteIMEM") {
+    code << GenerateWriteIMEMCode(code_block);
+  } else if (type == "AddRecv") {
+    code << GenerateRecvCode(code_block);
+  } else if (type == "AddSend") {
+    code << GenerateSendCode(code_block);
+  } else if (type == "AddCtrl") {
+    code << GenerateCtrlCode(code_block);
+  } else {
+    LOG(FATAL) << "Unknown block type: " << type;
+  }
+  code << "/*endgenerate: " << type << "*/\n";
+  code << "\n";
+
+  return code.str();
+}
+
+// Generate code for policy update
+std::string InodeCodegen::GeneratePolicyUpdateCode(const json& code_block) {
+  std::ostringstream code;
+
+  code << "int policy_table_start_address;\n";
+
+  for (const auto& entry : code_block["entries"]) {
+    std::string db_name = entry["data_block"];
+    int address = dbl_[db_name].first;
+    int size = dbl_[db_name].second;
+
+    code << "\npolicy_table_start_address = " << address << ";\n";
+    for (int i = 0; i < size; i += 32) {
+      code << "__builtin_INODE_PU(policy_table_start_address, " << i << ", "
+           << int(i / 32) << ", " << entry["col_id"] << ");\n";
+    }
+  }
+
+  return code.str();
+}
+
+// Generate code for writing to IMCU
+std::string InodeCodegen::GenerateWriteIMCUCode(const json& code_block) {
+  std::ostringstream code;
+
+  return code.str();
+}
+
+// Generate code for writing to IMEM
+std::string InodeCodegen::GenerateWriteIMEMCode(const json& code_block) {
+  std::ostringstream code;
+
+  code << "int imem_size;\n";
+  code << "int imem_start_address;\n";
+
+  for (const auto& entry : code_block["entries"]) {
+    std::string db_name = entry["data_block"];
+    int address = dbl_[db_name].first;
+    int size = dbl_[db_name].second;
+
+    // TODO: we can unroll some of the loop
+    code << "\nimem_start_address = " << address << ";\n";
+    code << "for (int i = 0; i < imem_size; i += 32) {\n";
+    code << "  __builtin_INODE_WR_IMEM(i, 0, " << entry["policy_addr"] << ");\n";
+    code << "}\n";
+  }
+
+  return code.str();
+}
+
+// Generate code for receiving data
+std::string InodeCodegen::GenerateRecvCode(const json& code_block) {
+  std::ostringstream code;
+
+  code << "int recv_start_address;\n";
+  code << "int recv_size;\n";
+
+  for (const auto& entry : code_block["entries"]) {
+    std::string db_name = entry["data_block"];
+    int address = dbl_[db_name].first;
+    int size = dbl_[db_name].second;
+
+    // TODO: we can unroll some of the loop
+    // TODO: remove policy from RECV
+    code << "\nrecv_start_address = " << address << ";\n";
+    code << "for (int i = 0; i < recv_size; i += 32) {\n";
+    code << "  __builtin_INODE_RECV(i, 0, 0," << entry["fifo_id"] <<");\n";
+    code << "}\n";
+  }
+
+  return code.str();
+}
+
+// Generate code for sending data
+std::string InodeCodegen::GenerateSendCode(const json& code_block) {
+  std::ostringstream code;
+
+  code << "int send_start_address;\n";
+  code << "int send_size;\n";
+
+  for (const auto& entry : code_block["entries"]) {
+    std::string db_name = entry["data_block"];
+    int address = dbl_[db_name].first;
+    int size = dbl_[db_name].second;
+
+    // TODO: we can unroll some of the loop
+    code << "\nsend_start_address = " << address << ";\n";
+    code << "for (int i = 0; i < send_size; i += 32) {\n";
+    code << "  __builtin_INODE_SEND(i, 0, " << entry["policy_addr"] << "," << entry["fifo_id"] <<");\n";
+    code << "}\n";
+  }
+
+  return code.str();
+}
+
+// Generate code for control block
+std::string InodeCodegen::GenerateCtrlCode(const json& code_block) {
+  std::ostringstream code;
+
+  // TODO: what if there are multiple sync ids?
+  for (const auto& entry: code_block["entries"]) {
+    std::string op = entry["operation"];
+    if (op == "setflag") {
+      code << "__builtin_INODE_SET_FLAG(" << entry["flag_value"] << ");\n";
+    } else if (op == "standby") {
+      code << "__builtin_INODE_STANDBY(" << entry["target_id"] << ", " << entry["flag_value"] << ");\n";
+    } else if (op == "halt") {
+      code << "__builtin_INODE_HALT();\n";
+    } else if (op == "interrupt") {
+      code << "__builtin_INODE_INTERRUPT();\n";
+    } else if (op == "done") {
+      code << "__builtin_INODE_DONE();\n";
+    } else {
+      LOG(FATAL) << "Unknown control operation: " << op;
+    }
+
+  }
 
   return code.str();
 }

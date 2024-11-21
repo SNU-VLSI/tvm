@@ -9,12 +9,9 @@ int main(int argc, char** argv) {
   }
 
   std::string json_path = argv[1];
-  tvm::relay::contrib::InodeCodegen codegen;
+  tvm::relay::contrib::InodeCodegen codegen(json_path);
 
-  codegen.LoadConfig(json_path);
-
-  std::map<std::string, int> metadata = {{"hid", 0}, {"wid", 0}};
-  std::string test_code = codegen.GenerateCode(metadata);
+  std::string test_code = codegen.GenerateCode("test");
   std::cout << test_code;
 
   return 0;
