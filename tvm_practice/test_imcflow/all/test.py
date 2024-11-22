@@ -149,14 +149,21 @@ def RunTestModel(name):
   # eval_mod = transform.AnnotateTarget("imcflow")(eval_mod)
   AnnotGenerator = imcflow_transform.AnnotGenerator()
   AnnotGenerator(eval_mod)
-  eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.Config)(eval_mod)
+  # print(AnnotGenerator.RegionList)
+  eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_annot_model")
 
-  # eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_merge_region_model")
+  eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_merge_region_model")
+
+  eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_clean_region_model")
 
   eval_mod = transform.PartitionGraph()(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_partition_graph_model")
+
+  eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_prune_model")
 
   # # Run
   # dtype="float32"

@@ -34,6 +34,7 @@ check the attributes of the op and decide if it should be offloaded to IMCFLOW.
 """
 import logging
 from functools import reduce
+import itertools
 
 import tvm.ir
 from tvm import relay
@@ -48,6 +49,8 @@ from ... import _ffi_api
 from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard, is_tuple_get_item
 from .register import register_pattern_table
 from tvm.relay.op.annotation import compiler_begin, compiler_end
+
+import re
 
 logger = logging.getLogger("IMCFLOW")
 supported_post_elts = ["nn.relu", None]
@@ -451,32 +454,46 @@ def pattern_table():
     """
     imcflow_patterns = list()
 
-    post_patterns = [
-      # 4
-      ("imcflow.conv2d_add_bias_add_bn_relu",[makeAddPattern, makeBiasAddPattern, makeBNPattern, makeReluPattern]),
+    PostProcess = [(makeBNPattern, "bn"), (makeAddPattern, "add"), (makeBiasAddPattern, "bias_add"), (makeReluPattern, "relu")]
+    MaxNumPostOps = 6
 
-      # 3
-      ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
-      ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
-      ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
+    for i in range(MaxNumPostOps, 0, -1):
+      for postops in itertools.permutations(PostProcess, i):
+        postop_names = [name for _, name in postops]
+        imcflow_patterns.append(
+            (
+                "imcflow.conv2d_" + "_".join(postop_names),
+                make_conv_with_postop_pattern("nn.conv2d", [postop for postop, _ in postops])
+            )
+        )
+
+    # post_patterns = [
+    #   # 4
+    #   ("imcflow.conv2d_add_bias_add_bn_relu",[makeAddPattern, makeBiasAddPattern, makeBNPattern, makeReluPattern]),
+
+    #   # 3
+    #   ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
+    #   ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
+    #   ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
       
-      # 2
-      ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
-      ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
-      ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
+    #   # 2
+    #   ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
+    #   ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
+    #   ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
 
-      # 1
-      ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
-      ("imcflow.conv2d_bn", [makeBNPattern]),
-    ]
+    #   # 1
+    #   ("imcflow.conv2d_add",[makeAddPattern]),
+    #   ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
+    #   ("imcflow.conv2d_bn", [makeBNPattern]),
+    # ]
 
-    for name, patterns in post_patterns:
-      imcflow_patterns.append(
-          (
-              name,
-              make_conv_with_postop_pattern("nn.conv2d", patterns)
-          )
-      )
+    # for name, patterns in post_patterns:
+    #   imcflow_patterns.append(
+    #       (
+    #           name,
+    #           make_conv_with_postop_pattern("nn.conv2d", patterns)
+    #       )
+    #   )
 
     return imcflow_patterns
 
@@ -1292,36 +1309,133 @@ class ImcflowAnnotationPass:
     Config : Dict[hash : Union[begin, end]]
     """
 
-    def __init__(self, Config):
-        self.Config = Config
+    def __init__(self, RegionList):
+        self.RegionList = RegionList
 
     def transform_function(self, func, mod, ctx):
-        Config = self.Config
+        RegionList = self.RegionList
+
+        def getRegion(expr):
+            target = int(hash(expr))
+            for i, region in enumerate(RegionList):
+              if target in region:
+                return i+1
+            return 0
         class Annotator(tvm.relay.ExprMutator):
             def visit_call(self, call):
                 """Add compiler_begin and compiler_end annotations to the Call expr"""
-                if int(hash(call)) in Config:
-                  NodeConfig = Config[int(hash(call))]
-
+                if RegionNum := getRegion(call):
                   # visit the arguments
-                  if NodeConfig == "begin" or NodeConfig == "begin_end":
-                    new_args = []
-                    for arg in call.args:
-                        ann = compiler_begin(super().visit(arg), "imcflow")
-                        new_args.append(ann)
-                  elif NodeConfig == "end":
-                    new_args = []
-                    for arg in call.args:
-                        ann = super().visit(arg)
-                        new_args.append(ann)
-
-                  new_call = relay.Call(call.op, new_args, call.attrs, call.type_args)
-
-                  if NodeConfig == "end" or NodeConfig == "begin_end":
-                    new_call  = compiler_end(new_call, "imcflow")
-                  
+                  new_args = []
+                  for arg in call.args:
+                    ann = compiler_begin(super().visit(arg), f"imcflow_region{RegionNum}")
+                    new_args.append(ann)
+                  new_call = compiler_end(relay.Call(call.op, new_args, call.attrs, call.type_args), f"imcflow_region{RegionNum}")
                   return new_call
                 else:
-                    return super().visit_call(call)
+                  return super().visit_call(call)
+
+            def visit_tuple_getitem(self, op):
+              if RegionNum := getRegion(op):
+                NewTupleValue = compiler_begin(super().visit(op.tuple_value), f"imcflow_region{RegionNum}")
+                NewNode = compiler_end(relay.TupleGetItem(NewTupleValue, op.index), f"imcflow_region{RegionNum}")
+                return NewNode
+              else:
+                return super().visit_tuple_getitem(op)
+            
+            def visit_tuple(self, op):
+              if RegionNum := getRegion(op):
+                NewFields = []
+                for field in op.fields:
+                  NewFields.append(compiler_begin(super().visit(field), f"imcflow_region{RegionNum}"))
+                return compiler_end(relay.Tuple(NewFields), f"imcflow_region{RegionNum}")
+              else:
+                return super().visit_tuple(op)
 
         return Annotator().visit(func)
+
+@transform.function_pass(opt_level=0)
+class ImcflowCleanRegionTag:
+    def transform_function(self, func, mod, ctx):
+        class _Mutator(tvm.relay.ExprMutator):
+            def visit_call(self, call):
+              if hasattr(call.op, "name") and (call.op.name == "annotation.compiler_begin" or call.op.name == "annotation.compiler_end"):
+                if re.match(r"imcflow_region\d+", call.attrs.compiler): 
+                  if call.op.name == "annotation.compiler_begin":
+                    return compiler_begin(super().visit(call.args[0]), "imcflow")
+                  elif call.op.name == "annotation.compiler_end":
+                    return compiler_end(super().visit(call.args[0]), "imcflow")
+                else:
+                  return super().visit_call(call)
+              else:
+                return super().visit_call(call)
+        return _Mutator().visit(func)
+
+def is_valid_subgraph(body):
+    """
+    Check if the subgraph contains compute intensive dnnl ops.
+    """
+    class SubgraphChecker(ExprVisitor):
+        def __init__(self):
+            ExprVisitor.__init__(self)
+            self.valid = False
+
+        def visit_call(self, call):
+            if hasattr(call.op, "name") and call.op.name == "nn.conv2d":
+              self.valid = True
+            super().visit_call(call)
+
+    checker = SubgraphChecker()
+    checker.visit(body)
+    return checker.valid
+
+def prune_subgraphs(mod):
+    """
+    Removes invalid subgraphs, which does not contain compute intensive dnnl ops.
+    """
+
+    class SubgraphRemover(ExprMutator):
+        """
+        Reverts subgraphs in subgraphs_to_remove back to TVM instead of using an external codegen.
+        """
+
+        def __init__(self, subgraphs_to_remove, mod, new_mod):
+            ExprMutator.__init__(self)
+            self.subgraphs_to_remove = subgraphs_to_remove
+            self.mod = mod
+            self.new_mod = new_mod
+
+        def visit_call(self, call):
+            if isinstance(call.op, GlobalVar):
+                name = call.op.name_hint
+                if name in self.subgraphs_to_remove:
+                    # "Inline" the subgraph back into new main function.
+                    func = self.mod[name]
+                    var_map = {}
+                    for arg, param in zip(call.args, func.params):
+                        var_map[param] = super().visit(arg)
+                    new_body = relay.bind(func.body, var_map)
+                    return new_body
+                if name != "main":
+                    args = []
+                    for arg in call.args:
+                        args.append(super().visit(arg))
+                    return call.op(*args)
+            return super().visit_call(call)
+
+    subgraphs_to_remove = []
+    # If only one subgraph, do nothing.
+    if len(mod.get_global_vars()) <= 2:
+        return mod
+    # Remove invalid subgraphs
+    for subgraph in mod.get_global_vars():
+        name = subgraph.name_hint
+        if not mod[name].attrs or mod[name].attrs["Compiler"] != "imcflow":
+            continue
+        if not is_valid_subgraph(mod[name].body):
+            subgraphs_to_remove.append(name)
+    # Create new pruned module
+    new_mod = tvm.IRModule(mod.functions, mod.type_definitions)
+    new_mod["main"] = SubgraphRemover(subgraphs_to_remove, mod, new_mod).visit(mod["main"])
+    new_mod = transform.RemoveUnusedFunctions()(new_mod)
+    return new_mod

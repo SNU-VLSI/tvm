@@ -5,6 +5,7 @@ from tvm.relay.ty import TupleType, TensorType
 
 import math
 from copy import deepcopy
+import re
 
 @relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
@@ -320,21 +321,225 @@ class DenseToConv:
             return super().visit_call(call)
 
       return _Mutator().visit(func)
+
+def getFirstInCalls(expr):
+  InCalls = []
+
+  class _Visitor(tvm.relay.ExprVisitor):
+    def visit_call(self, call):
+      if int(hash(expr)) != int(hash(call)):
+        InCalls.append(call)
+      super().visit_call(call)
+  
+  _Visitor().visit(expr)
+
+  pass
+
+def getFirstOutCall(func, expr):
+  pass
+
+def getSplitOutputCalls(func, expr):
+
+  OutCalls = []
+  class _Visitor(tvm.relay.ExprVisitor):
+    def visit_call(self, call):
+      for arg in call.args:
+        if isinstance(arg, relay.TupleGetItem):
+          if int(hash(arg.tuple_value)) == int(hash(expr)):
+            OutCalls.append(call)
+      super().visit_call(call)
+  
+  _Visitor().visit(func)
+  return OutCalls
+
+def getInputNodes(expr, recursive=False):
+  InNodes = []
+
+  class _Visitor(tvm.relay.ExprVisitor):
+    def visit_call(self, call):
+      for arg in call.args:
+        InNodes.append(arg)
+      if recursive:
+        super().visit_call(call)
+    
+    def visit_tuple_getitem(self, op):
+      InNodes.append(op.tuple_value)
+      if recursive:
+        super().visit_tuple_getitem(op)
+    
+    def visit_tuple(self, op):
+      for field in op.fields:
+        InNodes.append(field)
+      if recursive:
+        super().visit_tuple(op)
+  
+  if isinstance(expr, list):
+    for node in expr:
+      _Visitor().visit(node)
+  else:
+    _Visitor().visit(expr)
+
+  return list(set(InNodes))
+
+def getOutputNodes(expr, recursive=False):
+  OutNodes = []
+
+  class _Visitor(tvm.relay.ExprVisitor):
+    def visit_call(self, call):
+      for arg in call.args:
+        if int(hash(expr)) == int(hash(arg)):
+          OutNodes.append(call)
+      if recursive:
+        super().visit_call(call)
+    
+    def visit_tuple_getitem(self, op):
+      OutNodes.append(op)
+      if recursive:
+        super().visit_tuple_getitem(op)
+    
+    def visit_tuple(self, op):
+      for field in op.fields:
+        OutNodes.append(field)
+      if recursive:
+        super().visit_tuple(op)
+  
+  _Visitor().visit(expr)
+  return OutNodes
       
 @relay.transform.function_pass(opt_level=0)
 class AnnotGenerator:
     def __init__(self):
-      self.Config = {}
+      self.RegionList = []
 
     def transform_function(self, func, mod, ctx):
-      Config = {}
-      class _Mutator(tvm.relay.ExprVisitor):
-        def visit_call(self, call):
-          if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and call.op.attrs["Composite"] == "imcflow.conv2d_bias_add_bn_relu":
-            Config.update({int(hash(call)): "begin_end"})
-            super().visit_call(call)
-          else:
-            super().visit_call(call)
+      RegionList = []
+      IMCE_NUM = 4
 
-      self.Config = Config
-      return _Mutator().visit(func)
+      class _Annotator(tvm.relay.ExprVisitor):
+        """
+          Target Operators:
+            conv2d, bias_add, batch_norm, relu, add and fused versions
+            split, concat
+        """
+        def createRegion(self):
+          Region = []
+          RegionList.append(Region)
+          return Region
+        
+        def addToRegion(self, Region, Node):
+          if Node not in Region or Node == -1:
+            Region.append(Node)
+          return Region
+        
+        def getRegionSize(self, Region):
+          Num = 0
+          for Node in Region:
+            if Node == -1:
+              Num -= 1
+            else:
+              Num += 1
+          return Num
+        
+        def getRegion(self, Node):
+          Regions = []
+          if isinstance(Node, list):
+            for n in Node:
+              for Region in RegionList:
+                if int(hash(n)) in Region:
+                  if Region not in Regions:
+                    Regions.append(Region)
+            return Regions
+          else:
+            for Region in RegionList:
+              if int(hash(Node)) in Region:
+                return Region
+            return None
+        
+        def visit_call(self, call):
+          # post DFS search
+          for a in call.args:
+              self.visit(a)
+
+          # check this node is for imcflow
+          IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+
+          if IsComposite or IsSupportedOp:
+            # get possible region list
+            InputNodes = getInputNodes(call)
+            InputRegions = self.getRegion(InputNodes)
+            CandidateRegions = InputRegions[:]
+
+            ## cycle dependency check
+            for InputRegion in InputRegions:
+              for InputNode in [x for x in InputNodes if x not in InputRegions]:
+                RecurInputRegions = self.getRegion(getInputNodes(InputNode, True))
+                if InputRegion in RecurInputRegions:
+                  try:
+                    CandidateRegions.pop(InputRegion)
+                  except:
+                    pass
+            
+            ## capacity check
+            Deletes = []
+            for CandidateRegion in CandidateRegions:
+              if self.getRegionSize(CandidateRegion) + 1 > IMCE_NUM:
+                Deletes.append(CandidateRegion)
+            for Delete in Deletes:
+              if Delete in CandidateRegions:
+                CandidateRegions.remove(Delete)
+            
+            ## select region
+            #TODO: select optimal region. curently, select first region
+            if len(CandidateRegions) > 0:
+              Region = CandidateRegions[0]
+            else:
+              Region = self.createRegion()
+            
+            # add node to region
+            Region = self.addToRegion(Region, int(hash(call)))
+            if IsSupportedOp and call.op.name in ["split", "concatenate"]:
+              Region = self.addToRegion(Region, -1)
+
+        def visit_tuple_getitem(self, op):
+          super().visit_tuple_getitem(op)
+          TupleValueRegion = self.getRegion(op.tuple_value)
+          TupleValueRegion = self.addToRegion(TupleValueRegion, int(hash(op)))
+          TupleValueRegion = self.addToRegion(TupleValueRegion, -1)
+        
+        def visit_tuple(self, op):
+          super().visit_tuple(op)
+
+          # get possible region list
+          InputNodes = getInputNodes(op)
+          InputRegions = self.getRegion(InputNodes)
+          CandidateRegions = InputRegions[:]
+
+          ## cycle dependency check
+          for InputRegion in InputRegions:
+            for InputNode in [x for x in InputNodes if x not in InputRegions]:
+              RecurInputRegions = self.getRegion(getInputNodes(InputNode, True))
+              if InputRegion in RecurInputRegions:
+                try:
+                  CandidateRegions.pop(InputRegion)
+                except:
+                  pass
+          
+          ## select region
+          #TODO: select optimal region. curently, select first region
+          if len(CandidateRegions) > 0:
+            Region = CandidateRegions[0]
+          else:
+            Region = self.createRegion()
+          
+          # add node to region
+          Region = self.addToRegion(Region, int(hash(op)))
+          Region = self.addToRegion(Region, -1)
+
+      # find all regions
+      if mod["main"] == func:
+        _Annotator().visit(func)
+
+      self.RegionList = RegionList
+
+      return func
