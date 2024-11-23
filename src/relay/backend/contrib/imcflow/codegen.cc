@@ -38,6 +38,9 @@
 
 #include "../codegen_c/codegen_c.h"
 
+#include <tvm/relay/executor.h>
+#include <tvm/relay/runtime.h>
+
 namespace tvm {
 namespace relay {
 namespace contrib {
@@ -456,6 +459,28 @@ class IMCFLOWModuleCodegen : public CSourceModuleCodegenBase {
   std::ostringstream code_stream_;
 };
 
+class IMCFLOWVirtualModuleCodegen {
+ public:
+  runtime::Module CreateLLVMModule(const ObjectRef& ref) {
+    // make module from ref
+    Function func = Downcast<Function>(ref);
+    IRModule mod = IRModule::FromExpr(func);
+
+    std::cout << PrettyPrint(mod) << std::endl;
+
+    // use TVM built-in codegen to generate LLVM module
+    std::string ext_name = "relay.build_module._BuildModule";
+    auto pf = tvm::runtime::Registry::Get(ext_name);
+
+    runtime::Module RelayBuildModule = (*pf)();
+    PackedFunc f=RelayBuildModule.GetFunction("build");
+    f(mod, Array<tvm::Target>({tvm::Target("llvm")}), tvm::Target("llvm"), relay::Executor::Create("graph"), relay::Runtime::Create("cpp"), WorkspaceMemoryPools(), ConstantMemoryPools(), std::string("imcflow_cpu"));
+
+    return RelayBuildModule.GetFunction("get_module")();
+  }
+};
+
+#ifdef USE_IMCFLOW_CSRC
 /*!
  * \brief The external compiler/codegen tool. It takes a Relay expression/module and
  * compile it into a runtime module.
@@ -464,6 +489,18 @@ runtime::Module IMCFLOWCompiler(const ObjectRef& ref) {
   IMCFLOWModuleCodegen imcflow;
   return imcflow.CreateCSourceModule(ref);
 }
+#elif USE_IMCFLOW_VIRTUAL
+/*!
+ * \brief The external compiler/codegen tool. It takes a Relay expression/module and
+ * compile it into a runtime module.
+ */
+runtime::Module IMCFLOWCompiler(const ObjectRef& ref) {
+  IMCFLOWVirtualModuleCodegen imcflow;
+  return imcflow.CreateLLVMModule(ref);
+}
+#else
+  static_assert(false, "Either USE_IMCFLOW_CSRC or USE_IMCFLOW_VIRTUAL should be defined");
+#endif
 
 TVM_REGISTER_GLOBAL("relay.ext.imcflow").set_body_typed(IMCFLOWCompiler);
 

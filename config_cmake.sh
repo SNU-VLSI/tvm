@@ -51,7 +51,7 @@ echo "set(CMAKE_LIBRARY_PATH ${CMAKE_LIBRARY_PATH} ${CONDA_PREFIX}/lib)" >> conf
 echo "set(USE_DNNL C_SRC)" >> config.cmake
 
 # IMCFLOW ON
-echo "set(USE_IMCFLOW ON)" >> config.cmake
+echo "set(USE_IMCFLOW VIRTUAL)" >> config.cmake
 
 # MICRO TVM
 echo "set(USE_MICRO ON)" >> config.cmake
