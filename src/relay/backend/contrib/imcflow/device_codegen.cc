@@ -7,18 +7,19 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
 #include "inode_codegen.h"
 
 namespace tvm {
 namespace relay {
 namespace contrib {
 
-std::string DeviceCodegen::HandleDeviceCodeGeneration(const std::string& op_name,
-                                                      const std::vector<std::string>& args) {
+void DeviceCodegen::HandleDeviceCodeGeneration(const std::string& op_name,
+                                               const std::vector<std::string>& args) {
   LOG(INFO) << "Generating inode code for operator: " << op_name;
   std::string inode_code = GenerateTargetCode(op_name, args, "inode");
   std::string cpp_name = SaveCodeToFile(inode_code, op_name, "inode");
-  return CompileDeviceCode(cpp_name);
+  CompileDeviceCode(cpp_name, "inode");
 }
 
 std::string DeviceCodegen::GenerateTargetCode(const std::string& op_name,
@@ -47,35 +48,72 @@ std::string DeviceCodegen::SaveCodeToFile(const std::string& code, const std::st
   return cpp_name;
 }
 
-std::string DeviceCodegen::CompileDeviceCode(const std::string& cpp_name) {
-  // truncate .cpp from cpp_name
-  std::string file_name_no_ext = cpp_name.substr(0, cpp_name.size() - 4);
-  std::string lib_name = file_name_no_ext + ".o";
-  std::string out_name = file_name_no_ext + ".out";
-  std::string bin_name = file_name_no_ext + ".bin";
-  std::string host_lib_name = file_name_no_ext + ".host.o";
+void DeviceCodegen::CompileDeviceCode(const std::string& cpp_name, const std::string& target) {
+  if (cpp_name.size() < 4 || cpp_name.substr(cpp_name.size() - 4) != ".cpp") {
+    LOG(FATAL) << "Invalid cpp_name: " << cpp_name;
+  }
 
-  // clang: compile into *.o
-  std::string command = "clang " + compile_options_ + " -o " + lib_name + " " + cpp_name;
+  std::string base_name = cpp_name.substr(0, cpp_name.size() - 4);
+  std::vector<int> hids = {0, 1, 2, 3};
+  std::vector<int> wids;
+
+  if (target == "inode") {
+      wids = {0};
+  } else if (target == "imce") {
+      wids = {1, 2, 3, 4};
+  } else {
+      LOG(FATAL) << "Unknown target: " << target;
+  }
+
+  for (auto hid : hids) {
+    for (auto wid: wids) {
+      std::string hid_str = std::to_string(hid);
+      std::string wid_str = std::to_string(wid);
+      std::string obj_file = base_name + "_" + hid_str + ".o";
+      std::string out_file = base_name + "_" + hid_str + ".out";
+      std::string bin_file = base_name + "_" + hid_str + ".bin";
+      std::string host_obj_file = base_name + "_" + hid_str + ".host.o";
+
+      // Compile into object file
+      CompileCppToObject(cpp_name, obj_file, hid_str, wid_str);
+
+      // Link object file into an output binary
+      LinkObjectToBinary(obj_file, out_file);
+
+      // Extract the .text section into a binary file
+      ExtractTextSection(out_file, bin_file);
+
+      // Create a host-compatible object file including the binary
+      CreateHostObject(bin_file, host_obj_file);
+    }
+  }
+}
+
+void DeviceCodegen::CompileCppToObject(const std::string& cpp_name, const std::string& obj_file,
+                                       const std::string& hid, const std::string& wid) {
+  std::string command = "clang " + compile_options_ + " -mllvm=\"-INODE_hid=" + hid + "\" " +
+                        "-mllvm=\"-INODE_wid=" + wid + "\" -o " + obj_file + " " + cpp_name;
   int ret = system(command.c_str());
-  ICHECK_EQ(ret, 0) << "clang failed for " << cpp_name;
+  ICHECK_EQ(ret, 0) << "clang failed for " << cpp_name << " (hid=" << hid << ")";
+}
 
-  // ld.lld: link and resolve relocation into *.out
-  command = "ld.lld " + lld_options_ + " -o " + out_name + " " + lib_name;
-  ret = system(command.c_str());
-  ICHECK_EQ(ret, 0) << "ld.lld failed for " << lib_name;
+void DeviceCodegen::LinkObjectToBinary(const std::string& obj_file, const std::string& out_file) {
+  std::string command = "ld.lld " + lld_options_ + " -o " + out_file + " " + obj_file;
+  int ret = system(command.c_str());
+  ICHECK_EQ(ret, 0) << "ld.lld failed for " << obj_file;
+}
 
-  // llvm-objcopy: copy .text section into *.bin
-  command = "llvm-objcopy " + objcopy_options_ + out_name + " " + bin_name;
-  ret = system(command.c_str());
-  ICHECK_EQ(ret, 0) << "objcopy failed for " << out_name;
+void DeviceCodegen::ExtractTextSection(const std::string& out_file, const std::string& bin_file) {
+  std::string command = "llvm-objcopy " + objcopy_options_ + " " + out_file + " " + bin_file;
+  int ret = system(command.c_str());
+  ICHECK_EQ(ret, 0) << "llvm-objcopy failed for " << out_file;
+}
 
-  // ld: re-link the library for the host to include the binary *.host.o
-  command = "ld " + ld_options_ + " -o " + host_lib_name + " " + bin_name;
-  ret = system(command.c_str());
-  ICHECK_EQ(ret, 0) << "ld failed for " << bin_name;
-
-  return host_lib_name;
+void DeviceCodegen::CreateHostObject(const std::string& bin_file,
+                                     const std::string& host_obj_file) {
+  std::string command = "ld " + ld_options_ + " -o " + host_obj_file + " " + bin_file;
+  int ret = system(command.c_str());
+  ICHECK_EQ(ret, 0) << "ld failed for " << bin_file;
 }
 
 }  // namespace contrib
