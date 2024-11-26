@@ -167,6 +167,7 @@ std::string InodeCodegen::GenerateWriteIMEMCode(const json& code_block) {
 
     // TODO: we can unroll some of the loop
     code << "\nimem_start_address = " << address << ";\n";
+    code << "\nimem_size = " << size << ";\n";
     code << "for (int i = 0; i < imem_size; i += 32) {\n";
     code << "  __builtin_INODE_WR_IMEM(i, 0, " << entry["policy_addr"] << ");\n";
     code << "}\n";
@@ -190,6 +191,7 @@ std::string InodeCodegen::GenerateRecvCode(const json& code_block) {
     // TODO: we can unroll some of the loop
     // TODO: remove policy from RECV
     code << "\nrecv_start_address = " << address << ";\n";
+    code << "\nrecv_size = " << size << ";\n";
     code << "for (int i = 0; i < recv_size; i += 32) {\n";
     code << "  __builtin_INODE_RECV(i, 0, 0," << entry["fifo_id"] <<");\n";
     code << "}\n";
@@ -212,6 +214,7 @@ std::string InodeCodegen::GenerateSendCode(const json& code_block) {
 
     // TODO: we can unroll some of the loop
     code << "\nsend_start_address = " << address << ";\n";
+    code << "\nsend_size = " << size << ";\n";
     code << "for (int i = 0; i < send_size; i += 32) {\n";
     code << "  __builtin_INODE_SEND(i, 0, " << entry["policy_addr"] << "," << entry["fifo_id"] <<");\n";
     code << "}\n";

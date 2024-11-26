@@ -154,7 +154,8 @@ def update_lib(lib, output_dir='./output', lib_name='lib.so'):
     contrib_path = os.path.join(source_dir, "src", "runtime", "contrib")
 
     # Use a wrapper around the standard C compiler to save the C source
-    kwargs = {"options": ["-O2", "-std=c++17", "-save-temps", "-I" + contrib_path]}
+    kwargs = {}
+    kwargs["options"] = ["-O2", "-std=c++17", "-I" + contrib_path, "-I/root/anaconda3/envs/py3.10/include"]
 
     # setup output directory
     if output_dir is None:
