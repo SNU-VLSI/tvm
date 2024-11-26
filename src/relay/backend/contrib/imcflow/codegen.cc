@@ -37,6 +37,7 @@
 #include "comp_op_matcher.h"
 
 #include "../codegen_c/codegen_c.h"
+#include "device_codegen.h"
 
 namespace tvm {
 namespace relay {
@@ -313,6 +314,10 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   GenerateBodyOutput GenerateBody(const CallNode* root_call, const std::string& func_name,
                                   const std::vector<std::string>& func_args,
                                   const std::vector<std::string>& attribute_args) {
+    // Generate the Device Body
+    DeviceCodegen device_codegen("./"); // TODO: change this directory
+    device_codegen.HandleDeviceCodeGeneration(func_name, func_args);
+
     // Make function call with input buffers when visiting arguments
     ICHECK_GT(func_args.size(), 0);
     std::ostringstream decl_stream;

@@ -1,7 +1,6 @@
-#include "inode_codegen.h"
-
 #include <fstream>
 #include <sstream>
+#include "inode_codegen.h"
 
 namespace tvm {
 namespace relay {
@@ -36,7 +35,7 @@ std::string IndentMultilineString(const std::string& input, int indent_level = 2
 // Generate the full code for an inode
 std::string InodeCodegen::GenerateCode(const std::string& func_name) {
   std::ostringstream code;
-  code << "int " << func_name << "() {\n";
+  code << "void " << func_name << "() {\n";
   code << "  int hid = __builtin_INODE_GET_CORE_HID();\n\n";
 
   // Generate code for each inode
@@ -235,7 +234,7 @@ std::string InodeCodegen::GenerateCtrlCode(const json& code_block) {
     } else if (op == "halt") {
       code << "__builtin_INODE_HALT();\n";
     } else if (op == "interrupt") {
-      code << "__builtin_INODE_INTERRUPT();\n";
+      code << "__builtin_INODE_INTRT(0);\n";
     } else if (op == "done") {
       code << "__builtin_INODE_DONE();\n";
     } else {
