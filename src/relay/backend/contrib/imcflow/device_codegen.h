@@ -7,14 +7,11 @@
 #include <vector>
 #include <cstdlib>
 #include <tvm/runtime/logging.h>
-#include "../../utils.h"
 #include "inode_codegen.h"
 
 namespace tvm {
 namespace relay {
 namespace contrib {
-
-using namespace backend;
 
 /*!
  * \brief A class to handle device code generation, file management, and compilation.
@@ -53,16 +50,25 @@ class DeviceCodegen {
   std::string SaveCodeToFile(const std::string& code, const std::string& op_name, const std::string& target);
   /*!
    * \brief Compile the target code using clang.
-   * \param file_name The file path of the code to compile.
+   * \param cpp_name The file path of the code to compile.
    * \return The file path of the compiled shared library.
    */
-  std::string CompileDeviceCode(const std::string& file_name);
+  std::string CompileDeviceCode(const std::string& cpp_name);
 
   std::string output_dir_;  /*!< The directory for generated code and binaries. */
   const std::string compile_options_ = "\
-    -O1 --target=INODE -c -mllvm=\"-force-hardware-loops\" -mllvm=\"-force-nested-hardware-loop\"\
-    ";  /*!< The compile options for clang. */
+    -O1 --target=INODE -c -fPIC -mllvm=\"-force-hardware-loops\" -mllvm=\"-force-nested-hardware-loop\"\
+    ";  /*!< The options for clang. */
     // -O1 --target=IMCE -mllvm=\"-force-hardware-loops\" -mllvm=\"-force-nested-hardware-loop\" -shared -fPIC
+  const std::string objcopy_options_ = "\
+    -O binary --only-section=.text\
+    ";  /*!< The options for llvm-objcopy. */
+  const std::string lld_options_ = "\
+    -e 0 -Ttext 0x0\
+    ";  /*!< The options for ld. */
+  const std::string ld_options_ = "\
+    -r -b binary\
+    ";  /*!< The options for ld. */
 };
 
 }  // namespace contrib
