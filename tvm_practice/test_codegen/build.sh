@@ -1,1 +1,0 @@
-g++ -std=c++17 -o main main.cc inode_codegen.cc -ltvm_runtime -L/root/project/tvm/build -I/root/project/tvm/include/ -I/root/project/tvm/3rdparty/dmlc-core/include/ -I/root/project/tvm/3rdparty/dlpack/include -I/root/project/tvm/3rdparty/nlohmann-json
