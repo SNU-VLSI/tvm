@@ -8,7 +8,6 @@
 #include <sstream>
 #include <string>
 #include <vector>
-
 #include "inode_codegen.h"
 
 namespace tvm {
