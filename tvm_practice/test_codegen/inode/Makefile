@@ -1,5 +1,6 @@
 .PHONY: help clean build
 
+JSON = imcflow.json
 FILE = relu.cpp
 HID = 0
 
@@ -9,7 +10,7 @@ help:
 	@echo "make build - build the project"
 
 clean:
-	rm -rf main *.o *.ll
+	rm -rf main *.cpp *.o *.ll
 
 build: clean
 	g++ -std=c++17 -o main main.cc inode_codegen.cc \
@@ -19,7 +20,10 @@ build: clean
 		-I/root/project/tvm/3rdparty/dlpack/include \
 		-I/root/project/tvm/3rdparty/nlohmann-json
 
-clang: main
+test: main ${JSON}
+	./main ${JSON} > ${FILE}
+
+clang: main ${FILE}
 	clang -O1 --target=INODE -c \
 		-mllvm="-INODE_hid=${HID}" -mllvm="-INODE_wid=0" -mllvm="-force-hardware-loops" \
 		-mllvm="-force-nested-hardware-loop" ${FILE}
