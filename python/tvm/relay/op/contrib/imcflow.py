@@ -34,7 +34,6 @@ check the attributes of the op and decide if it should be offloaded to IMCFLOW.
 """
 import logging
 from functools import reduce
-import itertools
 
 import tvm.ir
 from tvm import relay
@@ -46,17 +45,14 @@ from tvm.relay.expr import Call, GlobalVar, TupleGetItem, const
 from tvm.relay.expr_functor import ExprMutator, ExprVisitor
 
 from ... import _ffi_api
-from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard, is_tuple_get_item
+from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard
 from .register import register_pattern_table
-from tvm.relay.op.annotation import compiler_begin, compiler_end
-
-import re
 
 logger = logging.getLogger("IMCFLOW")
-supported_post_elts = ["nn.relu", None]
+supported_post_elts = ["nn.relu", "tanh", "sigmoid", "clip", "gelu", "swish", "mish", None]
 
 
-def _register_external_op_helper(op_name):
+def _register_external_op_helper(op_name, supported=True):
     """The helper function to indicate that a given operator can be supported
     by IMCFLOW.
 
@@ -73,19 +69,47 @@ def _register_external_op_helper(op_name):
 
     @tvm.ir.register_op_attr(op_name, "target.imcflow")
     def _func_wrapper(expr):
-      if expr.op.name in ["nn.conv2d", "nn.batch_norm", "nn.relu", "nn.bias_add", "add"]:
-        return True
-      else:
-        return False
+        args = expr.args
+        if any([x.checked_type.dtype == "int64" for x in args]):
+            logger.info("IMCFLOW does not support int64.")
+            return False
+        # IMCFLOW does not support pooling with ceil_mode = True.
+        if "pool" in op_name:
+            attrs = dict(get_attrs(expr))
+            if "ceil_mode" in attrs.keys() and attrs["ceil_mode"]:
+                return False
+        return supported
 
     return _func_wrapper
 
 
-_register_external_op_helper("nn.conv2d")
 _register_external_op_helper("nn.batch_norm")
+_register_external_op_helper("nn.conv1d")
+_register_external_op_helper("nn.conv2d")
+_register_external_op_helper("nn.conv3d")
+_register_external_op_helper("nn.conv2d_transpose")
+_register_external_op_helper("nn.conv3d_transpose")
+_register_external_op_helper("nn.dense")
+_register_external_op_helper("nn.max_pool2d")
+_register_external_op_helper("nn.avg_pool2d")
+_register_external_op_helper("nn.global_avg_pool2d")
+_register_external_op_helper("nn.max_pool3d")
+_register_external_op_helper("nn.avg_pool3d")
+_register_external_op_helper("abs")
+_register_external_op_helper("clip")
+_register_external_op_helper("exp")
+_register_external_op_helper("log")
+_register_external_op_helper("sqrt")
+_register_external_op_helper("round")
 _register_external_op_helper("nn.relu")
-_register_external_op_helper("nn.bias_add")
-_register_external_op_helper("nn.add")
+_register_external_op_helper("nn.leaky_relu")
+_register_external_op_helper("tanh")
+_register_external_op_helper("sigmoid")
+_register_external_op_helper("nn.softmax")
+_register_external_op_helper("add")
+_register_external_op_helper("multiply")
+_register_external_op_helper("nn.layer_norm")
+_register_external_op_helper("nn.batch_matmul")
 
 
 def append_eltwise_ops(op, eltwise):
@@ -419,29 +443,6 @@ def make_qnn_dense_pattern():
 
     return "imcflow.qnn.dense", pat
 
-def makeBNPattern(data):
-  mean = is_constant()
-  var = is_constant()
-  gamma = is_constant()
-  beta = is_constant()
-
-  return is_tuple_get_item(is_op("nn.batch_norm")(data, gamma, beta, mean, var), 0)
-
-def makeAddPattern(data):
-  return is_op("add")(data, wildcard())
-
-def makeBiasAddPattern(data):
-  return is_op("nn.bias_add")(data, is_constant())
-
-def makeReluPattern(data):
-  return is_op("nn.relu")(data)
-
-def make_conv_with_postop_pattern(conv_type, postops):
-    data1, weight = wildcard(), is_constant()
-    out = is_op(conv_type)(data1, weight)
-    for postop in postops:
-      out = postop(out)
-    return out
 
 @register_pattern_table("imcflow")
 def pattern_table():
@@ -453,48 +454,38 @@ def pattern_table():
         Created patterns.
     """
     imcflow_patterns = list()
-
-    PostProcess = [(makeBNPattern, "bn"), (makeAddPattern, "add"), (makeBiasAddPattern, "bias_add"), (makeReluPattern, "relu")]
-    MaxNumPostOps = 6
-
-    for i in range(MaxNumPostOps, 0, -1):
-      for postops in itertools.permutations(PostProcess, i):
-        postop_names = [name for _, name in postops]
-        imcflow_patterns.append(
-            (
-                "imcflow.conv2d_" + "_".join(postop_names),
-                make_conv_with_postop_pattern("nn.conv2d", [postop for postop, _ in postops])
-            )
+    imcflow_patterns.append(make_qnn_conv2d_pattern())
+    imcflow_patterns.append(make_qnn_dense_pattern())
+    imcflow_patterns.append(make_dense_bias_sum_pattern())
+    imcflow_patterns.append(
+        (
+            "imcflow.conv2d_bias_sum_relu",
+            make_conv_bias_sum_relu_pattern("nn.conv2d"),
+            make_sum_pattren_predicate(add_checker),
         )
+    )
+    imcflow_patterns.append(
+        (
+            "imcflow.conv2d_bias_sum",
+            make_conv_bias_sum_relu_pattern("nn.conv2d", False),
+            make_sum_pattren_predicate(add_checker),
+        )
+    )
 
-    # post_patterns = [
-    #   # 4
-    #   ("imcflow.conv2d_add_bias_add_bn_relu",[makeAddPattern, makeBiasAddPattern, makeBNPattern, makeReluPattern]),
-
-    #   # 3
-    #   ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
-    #   ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
-    #   ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
-      
-    #   # 2
-    #   ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
-    #   ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
-    #   ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
-
-    #   # 1
-    #   ("imcflow.conv2d_add",[makeAddPattern]),
-    #   ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
-    #   ("imcflow.conv2d_bn", [makeBNPattern]),
-    # ]
-
-    # for name, patterns in post_patterns:
-    #   imcflow_patterns.append(
-    #       (
-    #           name,
-    #           make_conv_with_postop_pattern("nn.conv2d", patterns)
-    #       )
-    #   )
-
+    elt_list = ["nn.relu", "tanh", "sigmoid", "clip", "gelu", "swish", "mish", None]
+    for with_bias in [True, False]:
+        for elt in elt_list:
+            if not with_bias and not elt:
+                continue
+            for conv_name in [
+                "nn.conv1d",
+                "nn.conv2d",
+                "nn.conv3d",
+                "nn.conv2d_transpose",
+                "nn.conv3d_transpose",
+            ]:
+                imcflow_patterns.append(make_imcflow_pattern(conv_name, with_bias, elt))
+            imcflow_patterns.append(make_imcflow_pattern("nn.dense", with_bias, elt))
     return imcflow_patterns
 
 
@@ -664,6 +655,82 @@ def legalize_group_conv(attrs, inputs, types):
         return relay.nn.conv2d(data, weight, **new_attrs)
     new_attrs["kernel_layout"] = "GIOHW"
     return relay.nn.conv2d_transpose(data, weight, **new_attrs)
+
+
+def alter_conv(attrs, inputs, tinfos, out_type):
+    """The convolution's layout auto-query func for imcflow."""
+
+    data, weight = inputs
+    groups = str(attrs.groups)
+    weight_shape = ",".join([str(x) for x in get_shape(weight)])
+    out_shape = ",".join([str(x) for x in get_shape(out_type)])
+    paddings = ",".join([str(x) for x in attrs.get_int_tuple("padding")])
+    strides = ",".join([str(x) for x in attrs.get_int_tuple("strides")])
+    dilates = ",".join([str(x) for x in attrs.get_int_tuple("dilation")])
+    dtype = get_dtype(weight)
+    new_attrs = dict(attrs)
+    conv_type = type(attrs).__name__.split("Attrs")[0]
+
+    res = get_optimal_layout_for_conv(
+        attrs["data_layout"],
+        attrs["kernel_layout"],
+        weight_shape,
+        out_shape,
+        paddings,
+        strides,
+        dilates,
+        groups,
+        dtype,
+    )
+    src_df, weight_df, dst_df = res.split(",")
+    new_attrs["data_layout"] = tag2layout(src_df, is_weight=False, conv_type=conv_type)
+    new_attrs["kernel_layout"] = tag2layout(weight_df, is_weight=True, conv_type=conv_type)
+    new_attrs["out_layout"] = tag2layout(dst_df, is_weight=False, conv_type=conv_type)
+
+    if conv_type == "Conv1D":
+        return relay.nn.conv1d(data, weight, **new_attrs)
+    if conv_type == "Conv2D":
+        return relay.nn.conv2d(data, weight, **new_attrs)
+    return relay.nn.conv3d(data, weight, **new_attrs)
+
+
+def alter_conv_transpose(attrs, inputs, tinfos, out_type):
+    """The transposed convolution's layout auto-query func for imcflow."""
+
+    data, weight = inputs
+    weight_shape = ",".join([str(x) for x in get_shape(weight)])
+    out_shape = ",".join([str(x) for x in get_shape(out_type)])
+    paddings = ",".join([str(x) for x in attrs.get_int_tuple("padding")])
+    output_paddings = ",".join([str(x) for x in attrs.get_int_tuple("output_padding")])
+    strides = ",".join([str(x) for x in attrs.get_int_tuple("strides")])
+    dilates = ",".join([str(x) for x in attrs.get_int_tuple("dilation")])
+    groups = str(attrs.groups)
+    dtype = get_dtype(weight)
+    new_attrs = dict(attrs)
+    conv_type = type(attrs).__name__.split("Attrs")[0]
+
+    res = get_optimal_layout_for_conv_transpose(
+        attrs["data_layout"],
+        attrs["kernel_layout"],
+        weight_shape,
+        out_shape,
+        paddings,
+        output_paddings,
+        strides,
+        dilates,
+        groups,
+        dtype,
+    )
+    src_df, weight_df, dst_df = res.split(",")
+    new_attrs["data_layout"] = tag2layout(src_df, is_weight=False, conv_type=conv_type)
+    new_attrs["kernel_layout"] = tag2layout(weight_df, is_weight=True, conv_type=conv_type)
+    new_attrs["out_layout"] = tag2layout(dst_df, is_weight=False, conv_type=conv_type)
+
+    if conv_type == "Conv1DTranspose":
+        return relay.nn.conv1d_transpose(data, weight, **new_attrs)
+    if conv_type == "Conv2DTranspose":
+        return relay.nn.conv2d_transpose(data, weight, **new_attrs)
+    return relay.nn.conv3d_transpose(data, weight, **new_attrs)
 
 
 class IsComputeIntensiveGraph(ExprVisitor):
@@ -1299,143 +1366,3 @@ def legalize_qnn_for_imcflow(mod):
     with tvm.transform.PassContext(opt_level=3):
         mod = seq(mod)
     return mod
-
-@transform.function_pass(opt_level=0)
-class ImcflowAnnotationPass:
-    """Responsible for annotating Relay expressions for Vitis-AI DPU accelerators
-
-    Parameters
-    ----------
-    Config : Dict[hash : Union[begin, end]]
-    """
-
-    def __init__(self, RegionList):
-        self.RegionList = RegionList
-
-    def transform_function(self, func, mod, ctx):
-        RegionList = self.RegionList
-
-        def getRegion(expr):
-            target = int(hash(expr))
-            for i, region in enumerate(RegionList):
-              if target in region:
-                return i+1
-            return 0
-        class Annotator(tvm.relay.ExprMutator):
-            def visit_call(self, call):
-                """Add compiler_begin and compiler_end annotations to the Call expr"""
-                if RegionNum := getRegion(call):
-                  # visit the arguments
-                  new_args = []
-                  for arg in call.args:
-                    ann = compiler_begin(super().visit(arg), f"imcflow_region{RegionNum}")
-                    new_args.append(ann)
-                  new_call = compiler_end(relay.Call(call.op, new_args, call.attrs, call.type_args), f"imcflow_region{RegionNum}")
-                  return new_call
-                else:
-                  return super().visit_call(call)
-
-            def visit_tuple_getitem(self, op):
-              if RegionNum := getRegion(op):
-                NewTupleValue = compiler_begin(super().visit(op.tuple_value), f"imcflow_region{RegionNum}")
-                NewNode = compiler_end(relay.TupleGetItem(NewTupleValue, op.index), f"imcflow_region{RegionNum}")
-                return NewNode
-              else:
-                return super().visit_tuple_getitem(op)
-            
-            def visit_tuple(self, op):
-              if RegionNum := getRegion(op):
-                NewFields = []
-                for field in op.fields:
-                  NewFields.append(compiler_begin(super().visit(field), f"imcflow_region{RegionNum}"))
-                return compiler_end(relay.Tuple(NewFields), f"imcflow_region{RegionNum}")
-              else:
-                return super().visit_tuple(op)
-
-        return Annotator().visit(func)
-
-@transform.function_pass(opt_level=0)
-class ImcflowCleanRegionTag:
-    def transform_function(self, func, mod, ctx):
-        class _Mutator(tvm.relay.ExprMutator):
-            def visit_call(self, call):
-              if hasattr(call.op, "name") and (call.op.name == "annotation.compiler_begin" or call.op.name == "annotation.compiler_end"):
-                if re.match(r"imcflow_region\d+", call.attrs.compiler): 
-                  if call.op.name == "annotation.compiler_begin":
-                    return compiler_begin(super().visit(call.args[0]), "imcflow")
-                  elif call.op.name == "annotation.compiler_end":
-                    return compiler_end(super().visit(call.args[0]), "imcflow")
-                else:
-                  return super().visit_call(call)
-              else:
-                return super().visit_call(call)
-        return _Mutator().visit(func)
-
-def is_valid_subgraph(body):
-    """
-    Check if the subgraph contains compute intensive dnnl ops.
-    """
-    class SubgraphChecker(ExprVisitor):
-        def __init__(self):
-            ExprVisitor.__init__(self)
-            self.valid = False
-
-        def visit_call(self, call):
-            if hasattr(call.op, "name") and call.op.name == "nn.conv2d":
-              self.valid = True
-            super().visit_call(call)
-
-    checker = SubgraphChecker()
-    checker.visit(body)
-    return checker.valid
-
-def prune_subgraphs(mod):
-    """
-    Removes invalid subgraphs, which does not contain compute intensive dnnl ops.
-    """
-
-    class SubgraphRemover(ExprMutator):
-        """
-        Reverts subgraphs in subgraphs_to_remove back to TVM instead of using an external codegen.
-        """
-
-        def __init__(self, subgraphs_to_remove, mod, new_mod):
-            ExprMutator.__init__(self)
-            self.subgraphs_to_remove = subgraphs_to_remove
-            self.mod = mod
-            self.new_mod = new_mod
-
-        def visit_call(self, call):
-            if isinstance(call.op, GlobalVar):
-                name = call.op.name_hint
-                if name in self.subgraphs_to_remove:
-                    # "Inline" the subgraph back into new main function.
-                    func = self.mod[name]
-                    var_map = {}
-                    for arg, param in zip(call.args, func.params):
-                        var_map[param] = super().visit(arg)
-                    new_body = relay.bind(func.body, var_map)
-                    return new_body
-                if name != "main":
-                    args = []
-                    for arg in call.args:
-                        args.append(super().visit(arg))
-                    return call.op(*args)
-            return super().visit_call(call)
-
-    subgraphs_to_remove = []
-    # If only one subgraph, do nothing.
-    if len(mod.get_global_vars()) <= 2:
-        return mod
-    # Remove invalid subgraphs
-    for subgraph in mod.get_global_vars():
-        name = subgraph.name_hint
-        if not mod[name].attrs or mod[name].attrs["Compiler"] != "imcflow":
-            continue
-        if not is_valid_subgraph(mod[name].body):
-            subgraphs_to_remove.append(name)
-    # Create new pruned module
-    new_mod = tvm.IRModule(mod.functions, mod.type_definitions)
-    new_mod["main"] = SubgraphRemover(subgraphs_to_remove, mod, new_mod).visit(mod["main"])
-    new_mod = transform.RemoveUnusedFunctions()(new_mod)
-    return new_mod

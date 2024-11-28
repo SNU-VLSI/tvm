@@ -621,6 +621,34 @@ def get_dense_bias(
         out = gelu_helper(out)
     return out, dic, param_lst
 
+def test_my_conv2d(run_module, dtype="float32"):
+    conv2d, dic, param_lst = get_conv2d(
+        x_shape=(1, 32, 8, 8),
+        k_shape=(32, 32, 3, 3),
+        groups=1,
+        padding=(1, 1),
+        strides=(1, 1),
+        dilation=(1, 1),
+        dtype=dtype,
+    )
+    conv2d = tvm.IRModule.from_expr(conv2d)
+    config = conv2d, dic, param_lst
+    run_and_verify_func(config, run_module=run_module, test_bf16=False, dtype=dtype)
+
+def test_my_conv2d_relu(run_module, dtype="float32"):
+    conv2d, dic, param_lst = get_conv2d(
+        x_shape=(1, 32, 8, 8),
+        k_shape=(32, 32, 3, 3),
+        groups=1,
+        padding=(1, 1),
+        strides=(1, 1),
+        dilation=(1, 1),
+        activation="relu",
+        dtype=dtype,
+    )
+    conv2d = tvm.IRModule.from_expr(conv2d)
+    config = conv2d, dic, param_lst
+    run_and_verify_func(config, run_module=run_module, test_bf16=False, dtype=dtype)
 
 def test_prune_dnnl_subgraph(run_module):
     """In this test, OP "add" should be offloaded from dnnl codegen."""
