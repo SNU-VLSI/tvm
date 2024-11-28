@@ -47,10 +47,13 @@ from tvm.relay.expr_functor import ExprMutator, ExprVisitor
 from ... import _ffi_api
 from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard
 from .register import register_pattern_table
+<<<<<<< HEAD
 from tvm.relay.op.annotation import compiler_begin, compiler_end
 from tvm.relay.function import Function, FunctionWithFields
 
 import re
+=======
+>>>>>>> a5d2a259c (feat(imcflow.py): add support for additional post operations like 'tanh', 'sigmoid', 'clip', 'gelu', 'swish', 'mish' in IMCFLOW)
 
 logger = logging.getLogger("IMCFLOW")
 supported_post_elts = ["nn.relu", "tanh", "sigmoid", "clip", "gelu", "swish", "mish", None]
@@ -1370,6 +1373,7 @@ def legalize_qnn_for_imcflow(mod):
     with tvm.transform.PassContext(opt_level=3):
         mod = seq(mod)
     return mod
+<<<<<<< HEAD
 
 @transform.function_pass(opt_level=0)
 class ImcflowAnnotationPass:
@@ -1545,3 +1549,8 @@ def clear_compiler_tag(mod):
     for func in mod.functions:
         mod[func] = SubgraphRemover().visit(mod[func])
     return mod
+<<<<<<< HEAD
+=======
+=======
+>>>>>>> a5d2a259c (feat(imcflow.py): add support for additional post operations like 'tanh', 'sigmoid', 'clip', 'gelu', 'swish', 'mish' in IMCFLOW)
+>>>>>>> 4681dff81 (feat(imcflow.py): add support for additional post operations like 'tanh', 'sigmoid', 'clip', 'gelu', 'swish', 'mish' in IMCFLOW)
