@@ -49,6 +49,7 @@ from ... import _ffi_api
 from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard, is_tuple_get_item
 from .register import register_pattern_table
 from tvm.relay.op.annotation import compiler_begin, compiler_end
+from tvm.relay.function import Function, FunctionWithFields
 
 import re
 
@@ -1439,3 +1440,38 @@ def prune_subgraphs(mod):
     new_mod["main"] = SubgraphRemover(subgraphs_to_remove, mod, new_mod).visit(mod["main"])
     new_mod = transform.RemoveUnusedFunctions()(new_mod)
     return new_mod
+
+def clear_compiler_tag(mod):
+    class SubgraphRemover(ExprMutator):
+        def visit_function(self, func):
+          from copy import deepcopy
+
+          old_attrs = func.attrs
+          mutable_dict = {}
+          if "Compiler" in old_attrs.keys():
+            for key, value in old_attrs.items():
+              if str(key) == "Compiler":
+                  continue
+              if str(key) == "Primitive":
+                  continue
+
+              if isinstance(value, tvm.runtime.container.String):
+                v = str(value)
+              elif isinstance(value, tvm.tir.expr.IntImm):
+                v = value.value
+              else:
+                raise ValueError(f"Unsupported type {type(value)}")
+
+              mutable_dict[str(key)] = v
+            new_attrs = tvm.ir.make_node("DictAttrs", **mutable_dict)
+
+            new_params = [self.visit(x) for x in func.params]
+            new_body = self.visit(func.body)
+            return FunctionWithFields(func, list(new_params), new_body, attrs=new_attrs)
+          else:
+            return super().visit_function(func)
+
+
+    for func in mod.functions:
+        mod[func] = SubgraphRemover().visit(mod[func])
+    return mod

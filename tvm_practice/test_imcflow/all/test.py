@@ -165,6 +165,9 @@ def RunTestModel(name):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_prune_model")
 
+  eval_mod = imcflow.clear_compiler_tag(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_clear_tag_model")
+
   # # Run
   dtype="float32"
   input_dict = {
