@@ -15,6 +15,9 @@ echo "include_directories("${CONDA_PREFIX}/include")" >> config.cmake
 # controls default compilation flags (Candidates: Release, Debug, RelWithDebInfo)
 echo "set(CMAKE_BUILD_TYPE Debug)" >> config.cmake
 
+# export the compile commands as json
+echo "set(CMAKE_EXPORT_COMPILE_COMMANDS ON)" >> config.cmake
+
 # LLVM is a must dependency for compiler end
 # echo "set(USE_LLVM \"llvm-config --ignore-libllvm --link-static\")" >> config.cmake
 echo "set(USE_LLVM ON)" >> config.cmake
