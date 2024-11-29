@@ -10,5 +10,6 @@
     "sstream": "cpp",
     "optional": "cpp",
     "system_error": "cpp"
-  }
+  },
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"
 }
