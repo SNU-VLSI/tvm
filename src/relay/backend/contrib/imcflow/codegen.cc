@@ -318,6 +318,9 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
     DeviceCodegen device_codegen("./"); // TODO: change this directory
     device_codegen.HandleDeviceCodeGeneration(func_name, func_args);
 
+    // Generate Kernel Body
+
+
     // Make function call with input buffers when visiting arguments
     ICHECK_GT(func_args.size(), 0);
     std::ostringstream decl_stream;
