@@ -55,7 +55,7 @@ def buildAndRun(name, mod, data_dict, param_dict):
 
   dev = tvm.cpu()
   Executor_ = Executor("graph")
-  Runtime_  = Runtime("cpp") 
+  Runtime_  = Runtime("cpp")
 
   # build
   with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
@@ -65,7 +65,7 @@ def buildAndRun(name, mod, data_dict, param_dict):
 
   mod.export_library(f"{name}.so")
   lib = tvm.runtime.load_module(f"{name}.so")
-  
+
   gmod = tvm.contrib.graph_executor.GraphModule(lib["default"](dev))
   gmod.set_input(**data_dict)
   gmod.run()
@@ -165,8 +165,8 @@ def RunTestModel(name):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_prune_model")
 
-  eval_mod = imcflow.clear_compiler_tag(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_clear_tag_model")
+  # eval_mod = imcflow.clear_compiler_tag(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_clear_tag_model")
 
   # # Run
   dtype="float32"
