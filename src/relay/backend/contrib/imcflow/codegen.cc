@@ -467,24 +467,50 @@ class IMCFLOWModuleCodegen : public CSourceModuleCodegenBase {
   std::ostringstream code_stream_;
 };
 
+struct BuildOutput {
+  std::string graph_json;
+  runtime::Module mod;
+  std::unordered_map<std::string, tvm::runtime::NDArray> params;
+};
+
 class IMCFLOWVirtualModuleCodegen {
  public:
   runtime::Module CreateLLVMModule(const ObjectRef& ref) {
     // make module from ref
+    relay::Executor executor = relay::Executor::Create("graph");
+    relay::Runtime runtime = relay::Runtime::Create("cpp");
+    WorkspaceMemoryPools wsmp = WorkspaceMemoryPools();
+    ConstantMemoryPools cmp = ConstantMemoryPools();
+    tvm::Target target("llvm");
+    std::string mod_name("imcflow_cpu");
+    // BuildOutput build_output;
+
     Function func = Downcast<Function>(ref);
-    IRModule mod = IRModule::FromExpr(func);
+    IRModule func_module = WithAttrs(IRModule::FromExpr(func),
+                                     {{tvm::attr::kExecutor, executor},
+                                      {tvm::attr::kRuntime, runtime},
+                                      {tvm::attr::kWorkspaceMemoryPools, wsmp},
+                                      {tvm::attr::kConstantMemoryPools, cmp}});
 
-    std::cout << PrettyPrint(mod) << std::endl;
+    tvm::runtime::Optional<String> func_name = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    // func_module->Update(tvm::GlobalVar("main"), func);
+    std::cout << "DEBUG_IMCFLOW " << PrettyPrint(func_module) << std::endl;
 
-    // use TVM built-in codegen to generate LLVM module
+    // executor_codegen_ = MakeExecutorCodegen("graph");
+    // executor_codegen_->Init(nullptr, config_->primitive_targets);
+    // executor_codegen_->Codegen(func_module, func, mod_name);
+    // executor_codegen_->UpdateOutput(&ret_);
+    // ret_.params = executor_codegen_->GetParams();
+
+    // // use TVM built-in codegen to generate LLVM module
     std::string ext_name = "relay.build_module._BuildModule";
     auto pf = tvm::runtime::Registry::Get(ext_name);
 
     runtime::Module RelayBuildModule = (*pf)();
-    PackedFunc f=RelayBuildModule.GetFunction("build");
-    f(mod, Array<tvm::Target>({tvm::Target("llvm")}), tvm::Target("llvm"), relay::Executor::Create("graph"), relay::Runtime::Create("cpp"), WorkspaceMemoryPools(), ConstantMemoryPools(), std::string("imcflow_cpu"));
+    PackedFunc f=RelayBuildModule.GetFunction("build_with_func_name");
+    f(func_module, Array<tvm::Target>({target}), target, executor, runtime, wsmp, cmp, mod_name, func_name.value());
 
-    return RelayBuildModule.GetFunction("get_module")();
+    return runtime::Module();
   }
 };
 
