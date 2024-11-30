@@ -109,7 +109,8 @@ def RunTestModel(name):
     ).render(f"{TestName}/{mod_name}")
 
     with open(f"{TestName}/{mod_name}.txt", "w") as f:
-      f.write(pretty_print(mod))
+      # f.write(pretty_print(mod))
+      f.write(mod.astext(show_meta_data=True))
 
   print(f"Running Test {name}")
   if name == "resnet":

@@ -52,6 +52,7 @@ from tvm.relay.op.annotation import compiler_begin, compiler_end
 from tvm.relay.function import Function, FunctionWithFields
 
 import re
+import numpy as np
 
 logger = logging.getLogger("IMCFLOW")
 supported_post_elts = ["nn.relu", None]
@@ -1449,7 +1450,7 @@ def insertConstant(mod):
         def visit_function(self, fn):
           if fn.attrs and "Compiler" in fn.attrs and fn.attrs["Compiler"] == "imcflow":
             new_params = [self.visit(x) for x in fn.params]
-            new_params = new_params + [relay.Var("const1", relay.TensorType([1], "float32"))]
+            new_params = new_params + [relay.Var("const1", relay.TensorType([2, 16], "float32"))]
             new_body = self.visit(fn.body)
             return FunctionWithFields(fn, list(new_params), new_body)
           else:
@@ -1462,7 +1463,7 @@ def insertConstant(mod):
             if IsComposite:
               new_fn = self.visit(call.op)
               new_args = [self.visit(arg) for arg in call.args]
-              new_args = new_args + [relay.const(1.0, "float32")]
+              new_args = new_args + [relay.Constant(tvm.nd.array(np.zeros((2, 16), dtype="float32")))]
               return Call(new_fn, new_args, call.attrs, call.type_args, call.span)
             else:
               return super().visit_call(call)
