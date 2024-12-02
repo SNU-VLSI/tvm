@@ -259,11 +259,13 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
 
  private:
   std::vector<std::string> GetArgumentNames(const CallNode* call) {
+    LOG(INFO) << "IMCFLOW GetArgumentNames";
     std::vector<std::string> arg_names;
     for (size_t i = 0; i < call->args.size(); ++i) {
       auto res = VisitExpr(call->args[i]);
       for (const auto& out : res) {
         arg_names.push_back(out.name);
+        LOG(INFO) << out.name;
       }
     }
     return arg_names;
@@ -277,6 +279,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
     static const std::map<std::string, std::pair<std::string, ArgFunType>> op_map = {
         {"nn.conv2d", {"imcflow_conv2d", Conv2d}}, {"nn.dense", {"imcflow_dense", Dense}},
         {"nn.relu", {"imcflow_relu", Relu}},       {"nn.batch_norm", {"imcflow_bn", BatchNorm}},
+        {"nn.bias_add", {"imcflow_bias_add", Add}},
         {"add", {"imcflow_binary_op", Add}},       {"multiply", {"imcflow_binary_op", Multiply}},
     };
 
@@ -294,17 +297,29 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
     const auto pattern_name = callee->GetAttr<runtime::String>(attr::kComposite);
     ICHECK(pattern_name.defined()) << "Only functions with composite attribute supported";
 
-    using ExpectedOpType = std::vector<std::string>;
-    using ArgFunType = std::function<std::vector<std::string>(const CallNode*)>;
-    static const std::map<std::string, std::tuple<int, ExpectedOpType, std::string, ArgFunType>> pat_map = {
-        {"imcflow.conv2d_bias_relu", {2, {"nn.conv2d", "add", "nn.relu"}, "imcflow_fused_conv2d_bias_relu", Conv2d}},
-        {"imcflow.conv2d_relu", {1, {"nn.conv2d", "nn.relu"}, "imcflow_fused_conv2d_relu", Conv2d}},
-    };
+    // using ExpectedOpType = std::vector<std::string>;
+    // using ArgFunType = std::function<std::vector<std::string>(const CallNode*)>;
+    // static const std::map<std::string, std::tuple<int, ExpectedOpType, std::string, ArgFunType>> pat_map = {
+    //     {"imcflow.conv2d_bias_relu", {2, {"nn.conv2d", "add", "nn.relu"}, "imcflow_fused_conv2d_bias_relu", Conv2d}},
+    //     {"imcflow.conv2d_relu", {1, {"nn.conv2d", "nn.relu"}, "imcflow_fused_conv2d_relu", Conv2d}},
+    //     // {"imcflow.conv2d_bias_add_bn_relu", {3, {"nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu"}, "imcflow_fused_conv2d_bias_add_bn_relu", Conv2d}},
+    // };
 
-    auto info_ = pat_map.at(pattern_name.value());
-    const auto* call =
-        GetRootCall(callee->body.as<CallNode>(), std::get<0>(info_), std::get<1>(info_));
-    return GenerateBody(call, std::get<2>(info_), GetArgumentNames(caller), std::get<3>(info_)(call));
+    // auto info_ = pat_map.at(pattern_name.value());
+    // const auto* call =
+    //     GetRootCall(callee->body.as<CallNode>(), std::get<0>(info_), std::get<1>(info_));
+    // return GenerateBody(call, std::get<2>(info_), GetArgumentNames(caller), std::get<3>(info_)(call));
+
+    LOG(INFO) << "DEBUG_IMCFLOW Call body";
+    auto callee_body = callee->body.as<CallNode>();
+
+    LOG(INFO) << "DEBUG_IMCFLOW VisitExpr";
+    auto out = this->VisitExpr(callee->body);
+
+    const auto* call = GetRootCall(callee_body, "nn.conv2d");
+
+    LOG(INFO) << "DEBUG_IMCFLOW GenerateBody";
+    return GenerateBody(call, "imcflow_fused_func", GetArgumentNames(caller), Conv2d(call));
 
     LOG(FATAL) << "Unsupported composite function: " << AsText(call->op, false);
   }
@@ -317,12 +332,12 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   GenerateBodyOutput GenerateBody(const CallNode* root_call, const std::string& func_name,
                                   const std::vector<std::string>& func_args,
                                   const std::vector<std::string>& attribute_args) {
+    LOG(INFO) << "IMCFLOW GenerateBody Enter";
     // Generate the Device Body
     DeviceCodegen device_codegen("./"); // TODO: change this directory
     device_codegen.HandleDeviceCodeGeneration(func_name, func_args);
 
     // Generate Kernel Body
-
 
     // Make function call with input buffers when visiting arguments
     ICHECK_GT(func_args.size(), 0);
@@ -409,6 +424,8 @@ class IMCFLOWModuleCodegen : public CSourceModuleCodegenBase {
 
     // Record the external symbol for runtime lookup.
     auto sid = GetExtSymbol(func);
+
+    LOG(INFO) << "DEBUG_IMCFLOW " << PrettyPrint(func) << std::endl;
 
     CodegenIMCFLOW builder(sid);
     auto out = builder.VisitExpr(func->body);
@@ -553,7 +570,7 @@ struct IMCFLOWConstantUpdater : public ConstantUpdater {
   using ConstantUpdater::VisitExpr_;
 
   void VisitExpr_(const CallNode* cn) final {
-    LOG(INFO) << "IMCFLOW CallNode Visited";
+    LOG(INFO) << "IMCFLOW Constant Updater CallNode Visited";
     this->VisitSpan(cn->span);
 
     if (const auto* fn = cn->op.as<FunctionNode>()) {

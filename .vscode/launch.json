@@ -35,8 +35,8 @@
       "cwd": "${workspaceFolder}/tvm_practice",
       "program": "/root/anaconda3/envs/py3.10/bin/python",
       "args": [
-        "test_imcflow.py",
-        "-k test_my_relu",
+        "test.py",
+        "-k small_model",
         "-s"
       ],
       "stopAtEntry": false,
