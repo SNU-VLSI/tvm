@@ -20,15 +20,9 @@
 #ifndef TVM_RELAY_CONTRIB_IMCFLOW_CODEGEN_H_
 #define TVM_RELAY_CONTRIB_IMCFLOW_CODEGEN_H_
 
-#include <tvm/relay/attrs/nn.h>
-#include <tvm/relay/type.h>
-#include <tvm/runtime/module.h>
-#include <tvm/runtime/registry.h>
 
-#include <string>
-#include <vector>
-#include <unordered_map>
-
+#include "../../utils.h"
+#include "../codegen_c/codegen_c.h"
 
 namespace tvm {
 namespace relay {
@@ -60,31 +54,29 @@ static std::vector<std::string> Multiply(const CallNode* call);
 
 // TODO(@zhiics, @comaniac): This is a basic implementation. We should implement
 // all utilities and make a base class for users to implement.
-class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, public CodegenCBase {
+class CodegenIMCFLOW : public MemoizedExprTranslator<int>, public CodegenCBase {
  public:
   explicit CodegenIMCFLOW(const std::string& id) { this->ext_func_id_ = id; }
 
-  std::vector<Output> VisitExprDefault_(const Object* op) final;
-  std::vector<Output> VisitExpr_(const VarNode* node) final;
-  std::vector<Output> VisitExpr_(const TupleNode* node) final;
-  std::vector<Output> VisitExpr_(const TupleGetItemNode* op) final;
-  std::vector<Output> VisitExpr_(const ConstantNode* cn) final;
-  std::vector<Output> VisitExpr_(const CallNode* call) final;
+  int VisitExprDefault_(const Object* op) final;
+  int VisitExpr_(const LetNode* op) final;
+  int VisitExpr_(const VarNode* node) final;
+  int VisitExpr_(const TupleNode* node) final;
+  int VisitExpr_(const TupleGetItemNode* op) final;
+  int VisitExpr_(const ConstantNode* cn) final;
+  int VisitExpr_(const CallNode* call) final;
 
   std::string JIT(const std::vector<Output>& out);
 
  private:
-  std::vector<std::string> GetArgumentNames(const CallNode* call);
+  // std::vector<std::string> GetArgumentNames(const CallNode* call);
 
-  GenerateBodyOutput GenerateOpCall(const CallNode* call);
+  void GenerateOpCall(const CallNode* call);
 
-  GenerateBodyOutput GenerateCompositeFunctionCall(const FunctionNode* callee,
-                                                   const CallNode* caller);
+  void GenerateCompositeFunctionCall(const FunctionNode* callee,
+                                                    const CallNode* caller);
 
-  GenerateBodyOutput GenerateBody(const CallNode* root_call, const std::string& func_name,
-                                  const std::vector<std::string>& attribute_args);
-
-  GenerateBodyOutput GenerateBody(const CallNode* root_call, const std::string& func_name,
+  std::vector<Output> GenerateBody(const CallNode* root_call, const std::string& func_name,
                                   const std::vector<std::string>& func_args,
                                   const std::vector<std::string>& attribute_args);
 
@@ -104,7 +96,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<std::vector<Output>>, publi
   /*! \brief The array declared to store the constant values. */
   std::string const_array_name_;
   /*! \brief The declaration of intermeidate buffers. */
-  std::vector<std::string> buf_decl_;
+  std::vector<std::string> buf_decl_ = {};
   /*! \brief The variable name to constant mapping. */
   Array<String> const_vars_;
 
@@ -180,4 +172,4 @@ Map<String, runtime::NDArray> IMCFLOWConstantUpdaterFunc(Expr expr, std::string 
 }  // namespace relay
 }  // namespace tvm
 
-#endif // TVM_RELAY_CONTRIB_IMCFLOW_CODEGEN_H_
+#endif  // TVM_RELAY_CONTRIB_IMCFLOW_CODEGEN_H_

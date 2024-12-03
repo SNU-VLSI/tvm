@@ -21,22 +21,19 @@
  * \file src/relay/backend/contrib/imcflow/codegen.cc
  * \brief Implementation of IMCFLOW codegen APIs.
  */
-
-#include <tvm/relay/expr_functor.h>
-#include <tvm/relay/transform.h>
-#include <fstream>
-#include <numeric>
-#include <sstream>
-
-#include "../../utils.h"
-#include "comp_op_matcher.h"
-
-#include "../codegen_c/codegen_c.h"
-#include "device_codegen.h"
-
-#include <tvm/relay/executor.h>
-#include <tvm/relay/runtime.h>
 #include "codegen.h"
+
+#include <tvm/relay/attrs/nn.h>
+#include <tvm/relay/type.h>
+#include <tvm/runtime/module.h>
+#include <tvm/runtime/registry.h>
+#include <tvm/relay/executor.h>
+#include <tvm/relay/expr_functor.h>
+#include <tvm/relay/runtime.h>
+#include <tvm/relay/transform.h>
+
+#include "comp_op_matcher.h"
+#include "device_codegen.h"
 
 namespace tvm {
 namespace relay {
@@ -168,47 +165,36 @@ static std::vector<std::string> Multiply(const CallNode* call) {
   return args;
 }
 
-// TODO(@zhiics, @comaniac): This is a basic implementation. We should implement
-// all utilities and make a base class for users to implement.
-std::vector<Output> CodegenIMCFLOW::VisitExprDefault_(const Object* op) {
+int CodegenIMCFLOW::VisitExprDefault_(const Object* op) {
   LOG(FATAL) << "IMCFLOW codegen doesn't support: " << op->GetTypeKey();
 }
 
-std::vector<Output> CodegenIMCFLOW::VisitExpr_(const VarNode* node) {
-  LOG(INFO) << "IMCFLOW VarNode Visited";
-  ext_func_args_.push_back(GetRef<Var>(node));
-  Output output;
-  output.name = node->name_hint();
-  return {output};
+int CodegenIMCFLOW::VisitExpr_(const LetNode* op) {
+  DLOG(INFO) << "IMCFLOW LetNode Visited";
+  VisitExpr(op->var);
+  VisitExpr(op->value);
+  VisitExpr(op->body);
 }
 
-std::vector<Output> CodegenIMCFLOW::VisitExpr_(const TupleNode* node) {
-  LOG(INFO) << "IMCFLOW TupleNode Visited";
-  std::vector<Output> outs;
+int CodegenIMCFLOW::VisitExpr_(const VarNode* node) {
+  DLOG(INFO) << "IMCFLOW VarNode Visited";
+  // ext_func_args_.push_back(GetRef<Var>(node));
+}
+
+int CodegenIMCFLOW::VisitExpr_(const TupleNode* node) {
+  DLOG(INFO) << "IMCFLOW TupleNode Visited";
   for (auto field : node->fields) {
-    auto res = VisitExpr(field);
-    ICHECK_EQ(res.size(), 1U) << "Do not support tuple nest";
-    outs.push_back(res[0]);
+    VisitExpr(field);
   }
-  return outs;
 }
 
-std::vector<Output> CodegenIMCFLOW::VisitExpr_(const TupleGetItemNode* op) {
-  LOG(INFO) << "IMCFLOW TupleGetItemNode Visited";
-  auto res = VisitExpr(op->tuple);
-  ICHECK_GT(res.size(), static_cast<size_t>(op->index));
-
-  // Only keep the item we want for the child node.
-  // FIXME(@comaniac): The other items should still be requried for the primary outputs.
-  return {res[op->index]};
+int CodegenIMCFLOW::VisitExpr_(const TupleGetItemNode* op) {
+  DLOG(INFO) << "IMCFLOW TupleGetItemNode Visited";
+  VisitExpr(op->tuple);
 }
 
-std::vector<Output> CodegenIMCFLOW::VisitExpr_(const ConstantNode* cn) {
-  LOG(INFO) << "IMCFLOW ConstantNode Visited";
-  Output output;
-  // Get const: static_cast<float*>(imcflow_0_consts[0]->data)
-  output.name = CreateDataReference(ext_func_id_, const_idx_);
-  output.dtype = "float";
+int CodegenIMCFLOW::VisitExpr_(const ConstantNode* cn) {
+  DLOG(INFO) << "IMCFLOW ConstantNode Visited";
 
   // Generate the global variable for needed ndarrays
   if (const_array_name_.empty()) {
@@ -227,120 +213,103 @@ std::vector<Output> CodegenIMCFLOW::VisitExpr_(const ConstantNode* cn) {
   const auto* type_node = cn->checked_type().as<TensorTypeNode>();
   ICHECK(type_node);
   ICHECK_EQ(GetDtypeString(type_node), "float") << "Only float is supported for now.";
-
-  return {output};
 }
 
-std::vector<Output> CodegenIMCFLOW::VisitExpr_(const CallNode* call) {
-  LOG(INFO) << "IMCFLOW CallNode Visited";
-  GenerateBodyOutput ret;
+int CodegenIMCFLOW::VisitExpr_(const CallNode* call) {
+  DLOG(INFO) << "IMCFLOW CallNode Visited";
   if (const auto* func = call->op.as<FunctionNode>()) {
-    ret = GenerateCompositeFunctionCall(func, call);
+    GenerateCompositeFunctionCall(func, call);
   } else {
-    ret = GenerateOpCall(call);
+    GenerateOpCall(call);
   }
-
-  buf_decl_.insert(buf_decl_.end(), ret.buffers.begin(), ret.buffers.end());
-  ext_func_body_.push_back(ret.decl);
-  return ret.outputs;
 }
 
 std::string CodegenIMCFLOW::JIT(const std::vector<Output>& out) {
-  return JitImpl(ext_func_id_, ext_func_args_, buf_decl_, ext_func_body_, const_array_name_, out);
+  std::string ret =
+      JitImpl(ext_func_id_, ext_func_args_, buf_decl_, ext_func_body_, const_array_name_, out);
+  DLOG(INFO) << "DEBUG_IMCFLOW (JIT)" << ret << std::endl;
+  return ret;
 }
 
-std::vector<std::string> CodegenIMCFLOW::GetArgumentNames(const CallNode* call) {
-  LOG(INFO) << "IMCFLOW GetArgumentNames";
-  std::vector<std::string> arg_names;
-  for (size_t i = 0; i < call->args.size(); ++i) {
-    auto res = VisitExpr(call->args[i]);
-    for (const auto& out : res) {
-      arg_names.push_back(out.name);
-      LOG(INFO) << out.name;
-    }
-  }
-  return arg_names;
-}
+// std::vector<std::string> CodegenIMCFLOW::GetArgumentNames(const CallNode* call) {
+//   DLOG(INFO) << "IMCFLOW GetArgumentNames";
+//   std::vector<std::string> arg_names;
+//   for (size_t i = 0; i < call->args.size(); ++i) {
+//     auto res = VisitExpr(call->args[i]);
+//     for (const auto& out : res) {
+//       arg_names.push_back(out.name);
+//       DLOG(INFO) << out.name;
+//     }
+//   }
+//   return arg_names;
+// }
 
-GenerateBodyOutput CodegenIMCFLOW::GenerateOpCall(const CallNode* call) {
+void CodegenIMCFLOW::GenerateOpCall(const CallNode* call) {
+  DLOG(INFO) << "IMCFLOW GenerateOpCall Visited " << AsText(call->op, false);
   const auto* op_node = call->op.as<OpNode>();
   ICHECK(op_node) << "Expect OpNode, but got " << call->op->GetTypeKey();
 
   using ArgFunType = std::function<std::vector<std::string>(const CallNode*)>;
   static const std::map<std::string, std::pair<std::string, ArgFunType>> op_map = {
-      {"nn.conv2d", {"imcflow_conv2d", Conv2d}}, {"nn.dense", {"imcflow_dense", Dense}},
-      {"nn.relu", {"imcflow_relu", Relu}},       {"nn.batch_norm", {"imcflow_bn", BatchNorm}},
-      {"nn.bias_add", {"imcflow_bias_add", Add}},
-      {"add", {"imcflow_binary_op", Add}},       {"multiply", {"imcflow_binary_op", Multiply}},
+      {"nn.conv2d", {"imcflow_conv2d", Conv2d}},     {"nn.dense", {"imcflow_dense", Dense}},
+      {"nn.relu", {"imcflow_relu", Relu}},           {"nn.batch_norm", {"imcflow_bn", BatchNorm}},
+      {"nn.bias_add", {"imcflow_bias_add", Add}},    {"add", {"imcflow_binary_op", Add}},
+      {"multiply", {"imcflow_binary_op", Multiply}},
   };
 
   const auto op_name = GetRef<Op>(op_node)->name;
   const auto iter = op_map.find(op_name);
-  if (iter != op_map.end()) {
-    return GenerateBody(call, iter->second.first, iter->second.second(call));
-  }
 
+  if (iter != op_map.end()) {
+    // Visit operator and arguments
+    std::vector<Output> res;
+    for (const auto& arg : call->args) {
+      VisitExpr(arg);
+    }
+    return;
+  }
   LOG(FATAL) << "Unsupported op: " << AsText(call->op, false);
 }
 
-GenerateBodyOutput CodegenIMCFLOW::GenerateCompositeFunctionCall(const FunctionNode* callee,
-                                                  const CallNode* caller) {
+void CodegenIMCFLOW::GenerateCompositeFunctionCall(const FunctionNode* callee,
+                                                                  const CallNode* caller) {
   const auto pattern_name = callee->GetAttr<runtime::String>(attr::kComposite);
+  const auto hash_name = callee->GetAttr<runtime::String>(attr::kHash);
+  DLOG(INFO) << "IMCFLOW GenerateCompositeFunctionCall Visited " << pattern_name.value()
+            << " hash: " << hash_name.value();
   ICHECK(pattern_name.defined()) << "Only functions with composite attribute supported";
 
-  // using ExpectedOpType = std::vector<std::string>;
-  // using ArgFunType = std::function<std::vector<std::string>(const CallNode*)>;
-  // static const std::map<std::string, std::tuple<int, ExpectedOpType, std::string, ArgFunType>> pat_map = {
-  //     {"imcflow.conv2d_bias_relu", {2, {"nn.conv2d", "add", "nn.relu"}, "imcflow_fused_conv2d_bias_relu", Conv2d}},
-  //     {"imcflow.conv2d_relu", {1, {"nn.conv2d", "nn.relu"}, "imcflow_fused_conv2d_relu", Conv2d}},
-  //     // {"imcflow.conv2d_bias_add_bn_relu", {3, {"nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu"}, "imcflow_fused_conv2d_bias_add_bn_relu", Conv2d}},
-  // };
-
-  // auto info_ = pat_map.at(pattern_name.value());
-  // const auto* call =
-  //     GetRootCall(callee->body.as<CallNode>(), std::get<0>(info_), std::get<1>(info_));
-  // return GenerateBody(call, std::get<2>(info_), GetArgumentNames(caller), std::get<3>(info_)(call));
-
-  LOG(INFO) << "DEBUG_IMCFLOW Call body";
-  auto callee_body = callee->body.as<CallNode>();
-
-  LOG(INFO) << "DEBUG_IMCFLOW VisitExpr";
-  auto out = this->VisitExpr(callee->body);
-
-  const auto* call = GetRootCall(callee_body, "nn.conv2d");
-
-  LOG(INFO) << "DEBUG_IMCFLOW GenerateBody";
-  return GenerateBody(call, "imcflow_fused_func", GetArgumentNames(caller), Conv2d(call));
-
-  LOG(FATAL) << "Unsupported composite function: " << AsText(call->op, false);
+  auto func = GetRef<Function>(callee);
+  VisitExpr(func->body);
+  for (const auto& arg : caller->args) {
+    VisitExpr(arg);
+  }
 }
 
-GenerateBodyOutput CodegenIMCFLOW::GenerateBody(const CallNode* root_call, const std::string& func_name,
-                                const std::vector<std::string>& attribute_args) {
-  return GenerateBody(root_call, func_name, GetArgumentNames(root_call), attribute_args);
-}
-
-GenerateBodyOutput CodegenIMCFLOW::GenerateBody(const CallNode* root_call, const std::string& func_name,
-                                const std::vector<std::string>& func_args,
-                                const std::vector<std::string>& attribute_args) {
-  LOG(INFO) << "IMCFLOW GenerateBody Enter";
+std::vector<Output> CodegenIMCFLOW::GenerateBody(const CallNode* root_call,
+                                                const std::string& func_name,
+                                                const std::vector<std::string>& func_args,
+                                                const std::vector<std::string>& attribute_args) {
+  DLOG(INFO) << "IMCFLOW GenerateBody Enter";
   // Generate the Device Body
   std::string command = "mkdir -p ./imcflowlib";
   int err = system(command.c_str());
   ICHECK_EQ(err, 0) << "mkdir -p ./imcflowlib failed";
 
-  DeviceCodegen device_codegen("./imcflowlib"); // TODO: change this directory
+  DeviceCodegen device_codegen("./imcflowlib");  // TODO: change this directory
   device_codegen.HandleDeviceCodeGeneration(func_name, func_args);
 
   // Generate Kernel Body
 
-  // Make function call with input buffers when visiting arguments
-  ICHECK_GT(func_args.size(), 0);
   std::ostringstream decl_stream;
-  decl_stream << "(" << func_args[0];
-  for (size_t i = 1; i < func_args.size(); ++i) {
-    decl_stream << ", " << func_args[i];
-  }
+  decl_stream << "(";
+  // Make function call with input buffers when visiting arguments
+  // ICHECK_GT(func_args.size(), 0);
+  // std::ostringstream decl_stream;
+  // decl_stream << "(" << func_args[0];
+  // for (size_t i = 1; i < func_args.size(); ++i) {
+  //   decl_stream << ", " << func_args[i];
+  // }
 
   // Analyze the output buffers
   std::vector<Type> out_types;
@@ -357,7 +326,7 @@ GenerateBodyOutput CodegenIMCFLOW::GenerateBody(const CallNode* root_call, const
     LOG(FATAL) << "Unrecognized type node: " << AsText(root_call->checked_type(), false);
   }
 
-  GenerateBodyOutput ret;
+  std::vector<Output> outputs;
   for (const auto& out_type : out_types) {
     this->PrintIndents();
     const std::string out = "buf_" + std::to_string(buf_idx_++);
@@ -369,9 +338,9 @@ GenerateBodyOutput CodegenIMCFLOW::GenerateBody(const CallNode* root_call, const
     output.size = out_size;
     output.dtype = GetDtypeString(out_type.as<TensorTypeNode>());
     output.need_copy = true;
-    ret.buffers.push_back("float* " + out + " = (float*)std::malloc(4 * " +
+    buf_decl_.push_back("float* " + out + " = (float*)std::malloc(4 * " +
                           std::to_string(out_size) + ");");
-    ret.outputs.push_back(output);
+    outputs.push_back(output);
   }
 
   // Attach attribute arguments
@@ -379,8 +348,9 @@ GenerateBodyOutput CodegenIMCFLOW::GenerateBody(const CallNode* root_call, const
     decl_stream << ", " << attribute_args[i];
   }
   decl_stream << ");";
-  ret.decl = func_name + decl_stream.str();
-  return ret;
+  ext_func_body_.push_back(func_name + decl_stream.str());
+
+  return outputs;
 }
 
 // Create a corresponding IMCFLOW function for the given relay Function.
@@ -390,10 +360,12 @@ std::pair<std::string, Array<String>> IMCFLOWModuleCodegen::GenIMCFLOWFunc(const
   // Record the external symbol for runtime lookup.
   auto sid = GetExtSymbol(func);
 
-  LOG(INFO) << "DEBUG_IMCFLOW " << PrettyPrint(func) << std::endl;
-
   CodegenIMCFLOW builder(sid);
-  auto out = builder.VisitExpr(func->body);
+  builder.VisitExpr(func->body); // visit the body and update the constant related variables
+
+  auto out = builder.GenerateBody(func->body.as<CallNode>(), sid, {}, {});
+  // std::vector<Output> out = {};
+
   code_stream_ << builder.JIT(out);
 
   return {sid, builder.const_vars_};
@@ -442,11 +414,11 @@ runtime::Module IMCFLOWVirtualModuleCodegen::CreateLLVMModule(const ObjectRef& r
   // BuildOutput build_output;
 
   Function func = Downcast<Function>(ref);
-  IRModule func_module = WithAttrs(IRModule::FromExpr(func),
-                                    {{tvm::attr::kExecutor, executor},
-                                    {tvm::attr::kRuntime, runtime},
-                                    {tvm::attr::kWorkspaceMemoryPools, wsmp},
-                                    {tvm::attr::kConstantMemoryPools, cmp}});
+  IRModule func_module =
+      WithAttrs(IRModule::FromExpr(func), {{tvm::attr::kExecutor, executor},
+                                           {tvm::attr::kRuntime, runtime},
+                                           {tvm::attr::kWorkspaceMemoryPools, wsmp},
+                                           {tvm::attr::kConstantMemoryPools, cmp}});
 
   tvm::runtime::Optional<String> func_name = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
   // func_module->Update(tvm::GlobalVar("main"), func);
@@ -463,8 +435,9 @@ runtime::Module IMCFLOWVirtualModuleCodegen::CreateLLVMModule(const ObjectRef& r
   auto pf = tvm::runtime::Registry::Get(ext_name);
 
   runtime::Module RelayBuildModule = (*pf)();
-  PackedFunc f=RelayBuildModule.GetFunction("build_with_func_name");
-  f(func_module, Array<tvm::Target>({target}), target, executor, runtime, wsmp, cmp, mod_name, func_name.value());
+  PackedFunc f = RelayBuildModule.GetFunction("build_with_func_name");
+  f(func_module, Array<tvm::Target>({target}), target, executor, runtime, wsmp, cmp, mod_name,
+    func_name.value());
 
   return runtime::Module();
 }
@@ -488,13 +461,13 @@ runtime::Module IMCFLOWCompiler(const ObjectRef& ref) {
   return imcflow.CreateLLVMModule(ref);
 }
 #else
-  static_assert(false, "Either USE_IMCFLOW_CSRC or USE_IMCFLOW_VIRTUAL should be defined");
+static_assert(false, "Either USE_IMCFLOW_CSRC or USE_IMCFLOW_VIRTUAL should be defined");
 #endif
 
 TVM_REGISTER_GLOBAL("relay.ext.imcflow").set_body_typed(IMCFLOWCompiler);
 
 void IMCFLOWConstantUpdater::VisitExpr_(const CallNode* cn) {
-  LOG(INFO) << "IMCFLOW Constant Updater CallNode Visited";
+  DLOG(INFO) << "IMCFLOW Constant Updater CallNode Visited";
   this->VisitSpan(cn->span);
 
   if (const auto* fn = cn->op.as<FunctionNode>()) {
