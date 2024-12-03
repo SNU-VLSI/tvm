@@ -1318,7 +1318,8 @@ class ImcflowAnnotationPass:
         RegionList = self.RegionList
 
         def getRegion(expr):
-            target = int(hash(expr))
+            # target = int(hash(expr))
+            target = expr
             for i, region in enumerate(RegionList):
               if target in region:
                 return i+1

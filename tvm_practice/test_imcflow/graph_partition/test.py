@@ -152,35 +152,38 @@ def RunTestModel(name):
   transforms = tvm.transform.Sequential([ConvSplitToAtom])
   eval_mod = transforms(eval_mod)
   eval_param_dict = ConvSplitToAtom.NewParamDict
+  printModel(eval_mod, eval_param_dict, "after_split")
 
   # bind params
   eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
-  printModel(eval_mod, eval_param_dict, "before_byoc_model")
+  printModel(eval_mod, eval_param_dict, "after_bind")
 
   # byoc pass
   eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_merge_model")
+  printModel(eval_mod, eval_param_dict, "after_merge")
 
   SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(eval_mod["main"])
-  print("SplitConcatRegions Regions: ", SplitConcatRegions)
   eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_annot_model")
+  eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  eval_mod = transform.PartitionGraph()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_split_concat_partition")
 
-  # eval_mod = transform.AnnotateTarget("imcflow")(eval_mod)
-  # AnnotGenerator = imcflow_transform.AnnotGenerator()
-  # AnnotGenerator(eval_mod)
-  # # print(AnnotGenerator.RegionList)
-  # eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_annot_model")
+  AnnotGenerator = imcflow_transform.AnnotGenerator()
+  AnnotGenerator(eval_mod)
+  # print(AnnotGenerator.RegionList)
+  eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_annot")
 
-  # eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_merge_region_model")
+  eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_merge_region")
 
-  # eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_clean_region_model")
+  eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_clean_region")
 
-  # eval_mod = transform.PartitionGraph()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_partition_graph_model")
+  eval_mod = transform.PartitionGraph()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_partition_graph")
+
+  # flattern external subgraphs
 
   # eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   # printModel(eval_mod, eval_param_dict, "after_prune_model")

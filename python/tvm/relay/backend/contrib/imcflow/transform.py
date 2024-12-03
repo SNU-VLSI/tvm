@@ -494,11 +494,11 @@ def getSplitConcatDepsRegions(func):
   _ConcatVisitor().visit(func)
   Regions = []
   for key, value in Results.items():
-    Region = [int(hash(key))]
+    Region = [key]
     for path in value:
       for v in path:
-        if int(hash(v)) not in Region:
-          Region.append(int(hash(v)))
+        if v not in Region:
+          Region.append(v)
     Regions.append(Region)
   
   # merge region if intersection is not empty
@@ -578,7 +578,7 @@ class AnnotGenerator:
 
     def transform_function(self, func, mod, ctx):
       RegionList = []
-      IMCE_NUM = 4
+      IMCE_NUM = 16
 
       class _Annotator(tvm.relay.ExprVisitor):
         """
@@ -592,33 +592,66 @@ class AnnotGenerator:
           return Region
         
         def addToRegion(self, Region, Node):
-          if Node not in Region or Node == -1:
+          if Node not in Region:
             Region.append(Node)
           return Region
         
         def getRegionSize(self, Region):
-          Num = 0
+          Cost = 0
           for Node in Region:
-            if Node == -1:
-              Num -= 1
-            else:
-              Num += 1
-          return Num
+            Cost = Cost + self.getCost(Node)
+          return Cost
         
         def getRegion(self, Node):
           Regions = []
           if isinstance(Node, list):
             for n in Node:
               for Region in RegionList:
-                if int(hash(n)) in Region:
+                if n in Region:
                   if Region not in Regions:
                     Regions.append(Region)
             return Regions
           else:
             for Region in RegionList:
-              if int(hash(Node)) in Region:
+              if Node in Region:
                 return Region
             return None
+        
+        def getCost(self, call):
+          if not isinstance(call, Call):
+             return 0
+
+          IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+          IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
+          IsNoCostCall = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split", "concatenate"]
+
+          class _CostVisitor(tvm.relay.ExprVisitor):
+            def __init__(self, getCostFunc):
+              super().__init__()
+              self.Cost = 0
+              self.getCost = getCostFunc
+            
+            def visit(self, expr):
+              self.Cost = self.Cost + self.getCost(expr)
+              super().visit(expr)
+            
+            def visit_call(self, call):
+              if isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"]):
+                self.visit(call.op)
+              for a in call.args:
+                self.visit(a)
+
+          if IsNoCostCall:
+            return 0
+          
+          if IsComposite or IsSupportedOp:
+            return 1
+          
+          if IsSuperNode:
+            obj = _CostVisitor(self.getCost)
+            obj.visit(mod[call.op].body)
+            return obj.Cost
         
         def visit_call(self, call):
           # post DFS search
@@ -628,8 +661,13 @@ class AnnotGenerator:
           # check this node is for imcflow
           IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+          IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
 
-          if IsComposite or IsSupportedOp:
+          if IsComposite or IsSupportedOp or IsSuperNode:
+            # check possibility
+            if self.getCost(call) > IMCE_NUM:
+              raise ValueError("Cost of node is too high")
+
             # get possible region list
             InputNodes = getInputNodes(call)
             InputRegions = self.getRegion(InputNodes)
@@ -637,7 +675,7 @@ class AnnotGenerator:
 
             ## cycle dependency check
             for InputRegion in InputRegions:
-              for InputNode in [x for x in InputNodes if x not in InputRegions]:
+              for InputNode in [x for x in InputNodes if x not in InputRegion]:
                 RecurInputRegions = self.getRegion(getInputNodes(InputNode, True))
                 if InputRegion in RecurInputRegions:
                   try:
@@ -648,7 +686,7 @@ class AnnotGenerator:
             ## capacity check
             Deletes = []
             for CandidateRegion in CandidateRegions:
-              if self.getRegionSize(CandidateRegion) + 1 > IMCE_NUM:
+              if self.getRegionSize(CandidateRegion) + self.getCost(call) > IMCE_NUM:
                 Deletes.append(CandidateRegion)
             for Delete in Deletes:
               if Delete in CandidateRegions:
@@ -660,17 +698,13 @@ class AnnotGenerator:
               Region = CandidateRegions[0]
             else:
               Region = self.createRegion()
+            Region = self.addToRegion(Region, call)
             
-            # add node to region
-            Region = self.addToRegion(Region, int(hash(call)))
-            if IsSupportedOp and call.op.name in ["split", "concatenate"]:
-              Region = self.addToRegion(Region, -1)
-
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
           TupleValueRegion = self.getRegion(op.tuple_value)
-          TupleValueRegion = self.addToRegion(TupleValueRegion, int(hash(op)))
-          TupleValueRegion = self.addToRegion(TupleValueRegion, -1)
+          TupleValueRegion = self.addToRegion(TupleValueRegion, op)
+          # TupleValueRegion = self.addToRegion(TupleValueRegion, -1)
         
         def visit_tuple(self, op):
           super().visit_tuple(op)
@@ -698,8 +732,8 @@ class AnnotGenerator:
             Region = self.createRegion()
           
           # add node to region
-          Region = self.addToRegion(Region, int(hash(op)))
-          Region = self.addToRegion(Region, -1)
+          Region = self.addToRegion(Region, op)
+          # Region = self.addToRegion(Region, -1)
 
       # find all regions
       if mod["main"] == func:
