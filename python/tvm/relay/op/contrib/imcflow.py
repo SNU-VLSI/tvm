@@ -49,8 +49,10 @@ from ... import _ffi_api
 from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard, is_tuple_get_item
 from .register import register_pattern_table
 from tvm.relay.op.annotation import compiler_begin, compiler_end
+from tvm.relay.function import Function, FunctionWithFields
 
 import re
+import numpy as np
 
 logger = logging.getLogger("IMCFLOW")
 supported_post_elts = ["nn.relu", None]
@@ -1439,3 +1441,37 @@ def prune_subgraphs(mod):
     new_mod["main"] = SubgraphRemover(subgraphs_to_remove, mod, new_mod).visit(mod["main"])
     new_mod = transform.RemoveUnusedFunctions()(new_mod)
     return new_mod
+
+def insertConstant(mod):
+    """
+    test function
+    """
+    class _Mutator(ExprMutator):
+        def visit_function(self, fn):
+          if fn.attrs and "Compiler" in fn.attrs and fn.attrs["Compiler"] == "imcflow":
+            new_params = [self.visit(x) for x in fn.params]
+            new_params = new_params + [relay.Var("const1", relay.TensorType([2, 16], "float32"))]
+            new_body = self.visit(fn.body)
+            return FunctionWithFields(fn, list(new_params), new_body)
+          else:
+            return super().visit_function(fn)
+        def visit_call(self, call):
+            IsComposite=False
+            if isinstance(call.op, relay.GlobalVar):
+              fn = mod[call.op.name_hint]
+              IsComposite = "Compiler" in fn.attrs and fn.attrs["Compiler"] == "imcflow"
+            if IsComposite:
+              new_fn = self.visit(call.op)
+              new_args = [self.visit(arg) for arg in call.args]
+              new_args = new_args + [relay.Constant(tvm.nd.array(np.zeros((2, 16), dtype="float32")))]
+              return Call(new_fn, new_args, call.attrs, call.type_args, call.span)
+            else:
+              return super().visit_call(call)
+
+    for subgraph in mod.get_global_vars():
+        name = subgraph.name_hint
+        fn = mod[name]
+        print("subgraph name: ", name)
+        mod[name] = _Mutator().visit(fn)
+    # mod["main"] = _Mutator().visit(mod["main"])
+    return mod
