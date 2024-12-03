@@ -1,8 +1,6 @@
 #ifndef TVM_RELAY_CONTRIB_DEVICE_CODEGEN_H_
 #define TVM_RELAY_CONTRIB_DEVICE_CODEGEN_H_
 
-#include <tvm/runtime/logging.h>
-
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
