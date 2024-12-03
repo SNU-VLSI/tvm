@@ -189,6 +189,8 @@ constexpr const char* kParams = "__params__";
 constexpr const char* kSkipOptimization = "SkipOptimization";
 /*! \brief Treat the function as a composite operator. */
 constexpr const char* kComposite = "Composite";
+/*! \brief Store the hash of the function. */
+constexpr const char* kHash = "hash";
 /*! \brief Mark the function to be inlined. */
 constexpr const char* kInline = "Inline";
 /*! \brief Indicate the function was created by the Pattern Partitioning Pass. */
