@@ -2,6 +2,12 @@ import tvm
 from tvm import relay
 from tvm.relay import transform, op
 from tvm.relay.ty import TupleType, TensorType
+from tvm.relay.expr_functor import ExprMutator, ExprVisitor
+from tvm.relay.function import Function, FunctionWithFields
+from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
+from tvm.relay.expr import RefCreate, RefRead, RefWrite
+from tvm.relay.adt import Constructor, Match, Clause
+from tvm.ir import Op
 
 import math
 from copy import deepcopy
@@ -338,19 +344,178 @@ def getFirstInCalls(expr):
 def getFirstOutCall(func, expr):
   pass
 
-def getSplitOutputCalls(func, expr):
+def getSplitConcatDepsRegions(func):
+  """
+  Traverse the graph and find post dominate nodes ended with call for all split nodes
+  """
 
-  OutCalls = []
-  class _Visitor(tvm.relay.ExprVisitor):
+  Results = {}
+  OutNodes = []
+  InputNodes = []
+  class _SplitVisitor(tvm.relay.ExprVisitor):
+
+    def visit(self, expr):
+        """Apply the visitor to an expression."""
+        if isinstance(expr, Function):
+            res = self.visit_function(expr)
+        elif isinstance(expr, Call):
+            res = self.visit_call(expr)
+        elif isinstance(expr, Let):
+            res = self.visit_let(expr)
+        elif isinstance(expr, Var):
+            res = self.visit_var(expr)
+        elif isinstance(expr, GlobalVar):
+            res = self.visit_global_var(expr)
+        elif isinstance(expr, If):
+            res = self.visit_if(expr)
+        elif isinstance(expr, Tuple):
+            res = self.visit_tuple(expr)
+        elif isinstance(expr, TupleGetItem):
+            res = self.visit_tuple_getitem(expr)
+        elif isinstance(expr, Constant):
+            res = self.visit_constant(expr)
+        elif isinstance(expr, Op):
+            res = self.visit_op(expr)
+        elif isinstance(expr, RefCreate):
+            res = self.visit_ref_create(expr)
+        elif isinstance(expr, RefRead):
+            res = self.visit_ref_read(expr)
+        elif isinstance(expr, RefWrite):
+            res = self.visit_ref_write(expr)
+        elif isinstance(expr, Constructor):
+            res = self.visit_constructor(expr)
+        elif isinstance(expr, Match):
+            res = self.visit_match(expr)
+        else:
+            raise Exception(f"warning unhandled case: {type(expr)}")
+
+        return res
+
     def visit_call(self, call):
-      for arg in call.args:
-        if isinstance(arg, relay.TupleGetItem):
-          if int(hash(arg.tuple_value)) == int(hash(expr)):
-            OutCalls.append(call)
-      super().visit_call(call)
+      if call.op == op.get("split"):
+        # make dict entry if not exists
+        if call not in Results:
+          Results[call] = []
+
+        # append OutNodes and flush
+        if len(OutNodes) > 0:
+          Results[call].append(OutNodes[:])
+          OutNodes.clear()
+
+        for a in call.args:
+            self.visit(a)
+      else:
+        # only track most recent call node
+        for a in call.args:
+          OutNodes.clear()
+          OutNodes.append(call)
+          self.visit(a)
+    
+    def visit_tuple(self, tup):
+      OutNodes.append(tup)
+      super().visit_tuple(tup)
+    
+    def visit_tuple_getitem(self, t):
+      OutNodes.append(t)
+      super().visit_tuple_getitem(t)
+
+  class _ConcatVisitor(tvm.relay.ExprVisitor):
+
+    def visit(self, expr):
+        """Apply the visitor to an expression."""
+        if isinstance(expr, Function):
+            res = self.visit_function(expr)
+        elif isinstance(expr, Call):
+            res = self.visit_call(expr)
+        elif isinstance(expr, Let):
+            res = self.visit_let(expr)
+        elif isinstance(expr, Var):
+            res = self.visit_var(expr)
+        elif isinstance(expr, GlobalVar):
+            res = self.visit_global_var(expr)
+        elif isinstance(expr, If):
+            res = self.visit_if(expr)
+        elif isinstance(expr, Tuple):
+            res = self.visit_tuple(expr)
+        elif isinstance(expr, TupleGetItem):
+            res = self.visit_tuple_getitem(expr)
+        elif isinstance(expr, Constant):
+            res = self.visit_constant(expr)
+        elif isinstance(expr, Op):
+            res = self.visit_op(expr)
+        elif isinstance(expr, RefCreate):
+            res = self.visit_ref_create(expr)
+        elif isinstance(expr, RefRead):
+            res = self.visit_ref_read(expr)
+        elif isinstance(expr, RefWrite):
+            res = self.visit_ref_write(expr)
+        elif isinstance(expr, Constructor):
+            res = self.visit_constructor(expr)
+        elif isinstance(expr, Match):
+            res = self.visit_match(expr)
+        else:
+            raise Exception(f"warning unhandled case: {type(expr)}")
+
+        return res
+
+    def visit_call(self, call):
+      if call.op == op.get("concatenate"):
+        # make dict entry if not exists
+        if call not in Results:
+          Results[call] = []
+
+        for a in call.args:
+          self.visit(a)
+          # append InputNodes and flush
+          if len(InputNodes) > 0:
+            Results[call].append(InputNodes[:])
+            InputNodes.clear()
+      else:
+        # only track most recent call node
+        for a in call.args:
+          self.visit(a)
+        InputNodes.clear()
+        InputNodes.append(call)
+    
+    def visit_tuple(self, tup):
+      Nodes = []
+      for x in tup.fields:
+        self.visit(x)
+        Nodes.extend(InputNodes)
+      InputNodes.clear()
+      InputNodes.extend(Nodes)
+      InputNodes.append(tup)
+    
+    def visit_tuple_getitem(self, t):
+      super().visit_tuple_getitem(t)
+      InputNodes.append(t)
+    
+  _SplitVisitor().visit(func)
+  _ConcatVisitor().visit(func)
+  Regions = []
+  for key, value in Results.items():
+    Region = [int(hash(key))]
+    for path in value:
+      for v in path:
+        if int(hash(v)) not in Region:
+          Region.append(int(hash(v)))
+    Regions.append(Region)
   
-  _Visitor().visit(func)
-  return OutCalls
+  # merge region if intersection is not empty
+  Changed=True
+  while Changed:
+    Changed = False
+    for i in range(len(Regions)):
+      for j in range(i+1, len(Regions)):
+        if len(set(Regions[i]) & set(Regions[j])) > 0:
+          Regions[i] = list(set(Regions[i]) | set(Regions[j]))
+          Regions.pop(j)
+          Changed = True
+          break
+      if Changed:
+        break
+
+  return Regions
 
 def getInputNodes(expr, recursive=False):
   InNodes = []
@@ -517,7 +682,7 @@ class AnnotGenerator:
 
           ## cycle dependency check
           for InputRegion in InputRegions:
-            for InputNode in [x for x in InputNodes if x not in InputRegions]:
+            for InputNode in [x for x in InputNodes if x not in InputRegion]:
               RecurInputRegions = self.getRegion(getInputNodes(InputNode, True))
               if InputRegion in RecurInputRegions:
                 try:
