@@ -543,3 +543,79 @@ class AnnotGenerator:
       self.RegionList = RegionList
 
       return func
+    
+@relay.transform.function_pass(opt_level=0)
+class NodeMapper:
+    def __init__(self, IMCE_NUM=4, INODE_NUM=4):
+      self.MappingDict_2D = {}
+      self.IMCE_NUM = IMCE_NUM
+      self.INODE_NUM = INODE_NUM
+
+    def transform_function(self, func, mod, ctx):
+      IMCE_NUM = self.IMCE_NUM
+      INODE_NUM = self.INODE_NUM
+      
+      class _Nodemapper(tvm.relay.ExprVisitor):
+        """
+          Target Operators:
+            conv2d, bias_add, batch_norm, relu, add and fused versions
+            split, concat
+        """
+        def __init__(self):
+            super().__init__()
+            self.MappingDict ={}
+            self.imce_index = IMCE_NUM
+            self.inode_index = INODE_NUM
+        
+        def traverse_func(self, func):
+            self.visit(func)            
+            return self.MappingDict
+        
+        def visit_call(self, call):
+          # post DFS search
+          # traverse child node
+          for a in call.args:
+              self.visit(a)
+
+          # check constraint and map imcflow node
+          if self.MappingDict:
+              _, last_child_mapping = list(self.MappingDict.items())[-1]
+          else:
+              last_child_mapping = None
+                 
+          # check this node is for imcflow
+          IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
+          IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
+          if IsConcat:
+              if last_child_mapping is None:
+                  raise ValueError("split or concatenate should have at least 1 child node")
+              self.MappingDict[int(hash(call))] = last_child_mapping
+          elif IsSplit:
+              if last_child_mapping is None:
+                  self.MappingDict[int(hash(call))] = f"inode_{self.inode_index}"
+                  self.inode_index -= 1
+              else:
+                  self.MappingDict[int(hash(call))] = last_child_mapping
+          else:
+              self.MappingDict[int(hash(call))] = f"imce_{self.imce_index}"
+              self.imce_index -= 1
+
+        def visit_tuple_getitem(self, op):
+          super().visit_tuple_getitem(op)
+        
+        def visit_tuple(self, op):
+          super().visit_tuple(op)
+
+      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
+      items = mod.functions_items()
+      function_names = [item[0].name_hint for item in items]
+      
+      num_func = len(function_names)
+      for i in range(num_func):
+        if function_names[i]=="main": continue
+          # _Nodemapper().visit(mod["main"])
+        elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
+          self.MappingDict_2D[function_names[i]] = _Nodemapper().traverse_func(mod[function_names[i]])
+
+      # # find all regions
+      return func
