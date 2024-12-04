@@ -40,13 +40,8 @@ namespace tvm {
 namespace runtime {
 namespace contrib {
 
-void imcflow_relu(float* data, float* out, std::vector<int64_t> shape) {
-  /*
-  int64_t size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int64_t>());
-  for (int64_t i = 0; i < size; i++) {
-    out[i] = std::max(data[i], 0.0f);
-  }
-  */
+extern "C" void imcflow_fused_kernel(float* data, float* out) {
+  out = data;
   // 1. reorder input
   // 2. device code transfer
   // 3. data transfer (host -> device)
@@ -54,9 +49,16 @@ void imcflow_relu(float* data, float* out, std::vector<int64_t> shape) {
   // 5. wait for interrupt
   // 6. data transfer (device -> host)
   // 7. reorder output
-
-
 }
+
+/*
+void imcflow_relu(float* data, float* out, std::vector<int64_t> shape) {
+  int64_t size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int64_t>());
+  for (int64_t i = 0; i < size; i++) {
+    out[i] = std::max(data[i], 0.0f);
+  }
+}
+*/
 
 }  // namespace contrib
 }  // namespace runtime

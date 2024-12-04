@@ -30,30 +30,15 @@ namespace contrib {
 
 using namespace backend;
 
-/*!
- * \brief Replace var expr which bind with args of call node
- *
- * \param args vector of expression (contains vars or constant nodes)
- * \param cn call node which describe mapping of internal body vars with args
- * \return updated vector of expressions
- */
-static tvm::Array<Expr> BindToCallNodeArgs(const std::vector<Expr>& args, const CallNode* cn);
-
+// Get the size of a 1D shape.
 inline size_t GetShape1DSize(const Type& type);
 
+// Get the string representation of a shape.
 inline std::string GetShapeString(std::vector<int> shape);
 
-static std::vector<std::string> Conv2d(const CallNode* call);
-static std::vector<std::string> Dense(const CallNode* call);
-static std::vector<std::string> Relu(const CallNode* call);
-static std::vector<std::string> BatchNorm(const CallNode* call);
-
-// should comply with src/runtime/contrib/imcflow/imcflow.cc
-static std::vector<std::string> Add(const CallNode* call);
-static std::vector<std::string> Multiply(const CallNode* call);
-
-// TODO(@zhiics, @comaniac): This is a basic implementation. We should implement
-// all utilities and make a base class for users to implement.
+/*!
+ * \brief The IMCFLOW codegen class that generates C code for IMCFLOW kernels.
+ */
 class CodegenIMCFLOW : public MemoizedExprTranslator<int>, public CodegenCBase {
  public:
   explicit CodegenIMCFLOW(const std::string& id) { this->ext_func_id_ = id; }
@@ -69,7 +54,6 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<int>, public CodegenCBase {
   std::string JIT(const std::vector<Output>& out);
 
  private:
-  // std::vector<std::string> GetArgumentNames(const CallNode* call);
 
   void GenerateOpCall(const CallNode* call);
 
@@ -144,29 +128,6 @@ class IMCFLOWVirtualModuleCodegen {
  public:
   runtime::Module CreateLLVMModule(const ObjectRef& ref);
 };
-
-/*!
- * \brief Constant Updater for IMCFLOW JSON runtime
- *
- * Not all originally existing ConstantNode should be passed to JSON runtime.
- * Some of them may be skipped or change ordering. So we have to apply the same traversing through
- * the graph as IMCFLOWJSONSerializer.
- */
-struct IMCFLOWConstantUpdater : public ConstantUpdater {
- public:
-  IMCFLOWConstantUpdater(const std::string& symbol,
-                         std::unordered_map<std::string, runtime::NDArray>* params)
-      : ConstantUpdater("imcflow_" + symbol, params) {}
-  using ConstantUpdater::VisitExpr_;
-
-  void VisitExpr_(const CallNode* cn) final;
-};
-
-/*!
- * \brief The external compiler/codegen tool. It takes a Relay expression/module and
- * produce collection of required constant NDArrays.
- */
-Map<String, runtime::NDArray> IMCFLOWConstantUpdaterFunc(Expr expr, std::string symbol);
 
 }  // namespace contrib
 }  // namespace relay

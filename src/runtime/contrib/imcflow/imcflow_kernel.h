@@ -35,33 +35,7 @@ namespace tvm {
 namespace runtime {
 namespace contrib {
 
-extern "C" TVM_DLL void imcflow_conv2d(float* data, float* weights, float* out, int p_N_, int p_C_,
-                                    int p_H_, int p_W_, int p_O_, int p_G_, int p_Ph0_, int p_Pw0_,
-                                    int p_Ph1_, int p_Pw1_, int p_Kh_, int p_Kw_, int p_Sh_,
-                                    int p_Sw_);
-
-extern "C" TVM_DLL void imcflow_fused_conv2d_relu(float* data, float* weights, float* out, int p_N_,
-                                               int p_C_, int p_H_, int p_W_, int p_O_, int p_G_,
-                                               int p_Ph0_, int p_Pw0_, int p_Ph1_, int p_Pw1_,
-                                               int p_Kh_, int p_Kw_, int p_Sh_, int p_Sw_);
-
-extern "C" TVM_DLL void imcflow_fused_conv2d_bias_relu(float* data, float* weights, float* bias,
-                                                    float* out, int p_N_, int p_C_, int p_H_,
-                                                    int p_W_, int p_O_, int p_G_, int p_Ph0_,
-                                                    int p_Pw0_, int p_Ph1_, int p_Pw1_, int p_Kh_,
-                                                    int p_Kw_, int p_Sh_, int p_Sw_);
-
-extern "C" TVM_DLL void imcflow_dense(float* data, float* weight, float* out, int p_B_, int p_I_,
-                                   int p_O_);
-
-extern "C" TVM_DLL void imcflow_relu(float* data, float* out, std::vector<int64_t> shape);
-
-extern "C" TVM_DLL void imcflow_bn(float* data, float* gamma, float* beta, float* mean,
-                                float* variance, float* out, float* new_mean, float* new_variance,
-                                int p_n_, int p_c_, int p_h_, int p_w_, int p_e_);
-
-extern "C" TVM_DLL void imcflow_binary_op(float* data, float* weight, float* out, int binary_algo,
-                                       std::vector<int64_t> shape);
+extern "C" TVM_DLL void imcflow_fused_kernel(float* data, float* out);
 
 }  // namespace contrib
 }  // namespace runtime
