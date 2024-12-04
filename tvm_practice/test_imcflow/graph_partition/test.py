@@ -183,10 +183,12 @@ def RunTestModel(name):
   eval_mod = transform.PartitionGraph()(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_partition_graph")
 
-  # flattern external subgraphs
+  eval_mod = imcflow.flattenSubgraphs(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_flatten")
 
-  # eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_prune_model")
+  eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_prune_model")
+
 
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}

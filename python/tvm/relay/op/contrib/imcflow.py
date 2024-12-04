@@ -1476,3 +1476,54 @@ def insertConstant(mod):
         mod[name] = _Mutator().visit(fn)
     # mod["main"] = _Mutator().visit(mod["main"])
     return mod
+
+def flattenSubgraphs(mod):
+    """
+    There can be call of imcflow subgraphs in a imcflow subgraph. we want to flattern them.
+    only main function can have call of imcflow subgraphs
+    """
+
+    # collect call of imcflow subgraphs in main function
+    class SubgraphCollector(ExprVisitor):
+        def __init__(self):
+            ExprVisitor.__init__(self)
+            self.subgraph_calls = []
+
+        def visit_call(self, call):
+            if isinstance(call.op, GlobalVar):
+                name = call.op.name_hint
+                if "imcflow" in name: 
+                    self.subgraph_calls.append(name)
+            for arg in call.args:
+              self.visit(arg)
+    SubObj = SubgraphCollector()
+    SubObj.visit(mod["main"])
+    TopImcflowFuncs = SubObj.subgraph_calls[:]
+    OtherImcflowFuncs = [x.name_hint for x in mod.get_global_vars() if (x.name_hint not in SubObj.subgraph_calls) and ("imcflow" in x.name_hint)]
+
+    # flatten the subgraphs for top level imcflow functions
+    class SubgraphFlatter(ExprMutator):
+      def visit_call(self, call):
+          if isinstance(call.op, GlobalVar):
+              name = call.op.name_hint
+              if name in OtherImcflowFuncs:
+                  # "Inline" the subgraph back into new main function.
+                  func = mod[name]
+                  var_map = {}
+                  for arg, param in zip(call.args, func.params):
+                      var_map[param] = super().visit(arg)
+                  new_body = relay.bind(super().visit(func.body), var_map)
+                  return new_body
+              if name != "main":
+                  args = []
+                  for arg in call.args:
+                      args.append(super().visit(arg))
+                  return call.op(*args)
+          return super().visit_call(call)
+    for func_name in TopImcflowFuncs:
+      mod[func_name] = SubgraphFlatter().visit(mod[func_name])
+    
+    # remove unused functions
+    mod = transform.RemoveUnusedFunctions()(mod)
+
+    return mod
