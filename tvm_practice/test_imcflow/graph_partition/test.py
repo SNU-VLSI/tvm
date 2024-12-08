@@ -189,6 +189,11 @@ def RunTestModel(name):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_prune_model")
 
+  NodeMapper = imcflow_transform.NodeMapper()
+  NodeMapper(eval_mod)
+
+  PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(NodeMapper.MappingDict_2D)(eval_mod)
+
 
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}
