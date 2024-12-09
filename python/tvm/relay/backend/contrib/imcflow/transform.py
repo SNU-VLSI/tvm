@@ -745,7 +745,7 @@ class AnnotGenerator:
     
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
-    def __init__(self, IMCE_NUM=4, INODE_NUM=4):
+    def __init__(self, IMCE_NUM=16, INODE_NUM=4):
       self.MappingDict_2D = {}
       self.IMCE_NUM = IMCE_NUM
       self.INODE_NUM = INODE_NUM
@@ -763,8 +763,8 @@ class NodeMapper:
         def __init__(self):
             super().__init__()
             self.MappingDict ={}
-            self.imce_index = IMCE_NUM
-            self.inode_index = INODE_NUM
+            self.imce_index = IMCE_NUM - 1
+            self.inode_index = INODE_NUM - 1
         
         def traverse_func(self, func):
             self.visit(func)            
@@ -778,25 +778,31 @@ class NodeMapper:
 
           # check constraint and map imcflow node
           if self.MappingDict:
-              _, last_child_mapping = list(self.MappingDict.items())[-1]
+              last_child_mapping, _ = list(self.MappingDict.items())[-1][1]
           else:
               last_child_mapping = None
                  
-          # check this node is for imcflow
+          #for debugging
+          if hasattr(call.op, "attrs"):
+            indicator = call.op.attrs["Composite"]
+          else:
+            indicator = call.op
+          
+          # check if this node is 
           IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
           IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
           if IsConcat:
               if last_child_mapping is None:
                   raise ValueError("split or concatenate should have at least 1 child node")
-              self.MappingDict[int(hash(call))] = last_child_mapping
+              self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
           elif IsSplit:
               if last_child_mapping is None:
-                  self.MappingDict[int(hash(call))] = f"inode_{self.inode_index}"
+                  self.MappingDict[int(hash(call))] = (f"inode_{self.inode_index}", indicator)
                   self.inode_index -= 1
               else:
-                  self.MappingDict[int(hash(call))] = last_child_mapping
+                  self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
           else:
-              self.MappingDict[int(hash(call))] = f"imce_{self.imce_index}"
+              self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
               self.imce_index -= 1
 
         def visit_tuple_getitem(self, op):
@@ -818,3 +824,310 @@ class NodeMapper:
 
       # # find all regions
       return func
+    
+
+@relay.transform.function_pass(opt_level=0)
+class PolicyTableGenerator:
+    def __init__(self, MappingDict_2D, IMCE_NUM=16, INODE_NUM=4):
+      self.MappingDict_2D = MappingDict_2D
+      self.Policytable_2D = {}
+      self.IMCE_NUM = IMCE_NUM
+      self.INODE_NUM = INODE_NUM
+
+    def transform_function(self, func, mod, ctx):
+      IMCE_NUM = self.IMCE_NUM
+      INODE_NUM = self.INODE_NUM
+      
+      class _PolicyTableGenerator(tvm.relay.ExprVisitor):
+        """
+          Target Operators:
+            conv2d, bias_add, batch_norm, relu, add and fused versions
+            split, concat
+        """
+        def __init__(self, MappingDict):
+            super().__init__()
+            self.MappingDict = MappingDict
+            self.Policytable = []
+            self.PathDict = {} # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
+            self.Initial_addr_table = {}
+            self.IMCE_NUM = IMCE_NUM
+            self.INODE_NUM = INODE_NUM
+            import math
+            self.IMCE_NUM_SQRT = math.sqrt(self.IMCE_NUM)
+            self.table_capacity = 16
+
+        def gen_policytable(self):
+            # Initialize policy tables for all nodes
+            policy_tables = {
+                f"imce_{i}": [] for i in range(self.IMCE_NUM)
+            }
+            policy_tables.update({
+                f"inode_{i}": [] for i in range(self.INODE_NUM)
+            })
+            
+            # Dictionary to store initial addresses for each source-index pair
+            self.Initial_addr_table = {}  # {(source, index): initial_address}
+
+            def get_mapped_node(coord):
+                if coord[1] != 0: # imce
+                    return f"imce_{coord[0]*4 + coord[1] - 1}"
+                else:  # inode
+                    return f"inode_{coord[0]}"
+
+                return
+            
+            def get_coordinates(node_name):
+                if "imce" in node_name:
+                    idx = int(node_name.split('_')[1])
+                    return (idx // 4, idx % 4 + 1)
+                else:  # inode
+                    idx = int(node_name.split('_')[1])
+                    return (idx, 0)
+            
+            def get_direction(source_coord, dest_coord):
+                if source_coord[1] < dest_coord[1]:
+                    return "East"
+                elif source_coord[1] > dest_coord[1]:
+                    return "West"
+                elif source_coord[0] < dest_coord[0]:
+                    return "South"
+                elif source_coord[0] > dest_coord[0]:
+                    return "North"
+                return None
+
+            def check_path_capacity(path_coords, current_tables, router_list):
+                """Check if all nodes in the path have available capacity"""
+                for coord in path_coords:
+                    node = get_mapped_node(coord)
+                    if len(current_tables[node]) >= self.table_capacity:
+                        if coord in router_list: 
+                            continue
+                        else: 
+                            return False
+                return True
+
+            def get_path_coords(source_coord, dest_coord, is_xy_routing=True, router_list=None):
+                """Get list of coordinates for the path"""
+                path_coords = []
+                current_coord = source_coord
+                routing = None
+
+                if is_xy_routing:
+                    # Move horizontally first (X)
+                    while current_coord[1] != dest_coord[1]:
+                        next_coord = (current_coord[0], 
+                                    current_coord[1] + (1 if current_coord[1] < dest_coord[1] else -1))
+                        path_coords.append(next_coord)
+                        current_coord = next_coord
+
+                    # Then vertically (Y)
+                    while current_coord[0] != dest_coord[0]:
+                        next_coord = (current_coord[0] + (1 if current_coord[0] < dest_coord[0] else -1),
+                                    current_coord[1])
+                        path_coords.append(next_coord)
+                        current_coord = next_coord
+                    routing = "X-Y"
+                else:
+                    # Move vertically first (Y)
+                    while current_coord[0] != dest_coord[0]:
+                        next_coord = (current_coord[0] + (1 if current_coord[0] < dest_coord[0] else -1),
+                                    current_coord[1])
+                        path_coords.append(next_coord)
+                        current_coord = next_coord
+
+                    # Then horizontally (X)
+                    while current_coord[1] != dest_coord[1]:
+                        next_coord = (current_coord[0],
+                                    current_coord[1] + (1 if current_coord[1] < dest_coord[1] else -1))
+                        path_coords.append(next_coord)
+                        current_coord = next_coord
+                    routing = "Y-X"
+                
+                # check policy table's capacity along the designated routing path
+                if not check_path_capacity(path_coords, policy_tables, router_list):
+                    # If X-Y fails, try Y-X routing
+                    path_coords, routing = get_path_coords(source_coord, dest_coord, False)
+                    if not check_path_capacity(path_coords, policy_tables, router_list):
+                        raise ValueError("Routing failed for both X-Y and Y-X!")
+                
+                #TODO: there may be cases that X-Y and Y-X both fails!!!!!
+                      
+                return path_coords, routing
+
+            def append_single_dest(source_node, dest_node, dest_index=None, router_list=None, init_addr_save=True):
+                """Append new entries to policy tables for a single destination"""
+                source_coord = get_coordinates(source_node)
+                dest_coord = get_coordinates(dest_node)
+                entry_addr = len(policy_tables[source_node])
+                if init_addr_save is True:
+                    self.Initial_addr_table[(source_node, dest_index)] = entry_addr
+                if source_coord == dest_coord: # if same node, return
+                    return
+                
+                # Try X-Y routing first
+                path_coords, _ = get_path_coords(source_coord, dest_coord)
+                if router_list is not None:
+                    #if dest_index is provided, save all nodes along the path
+                    router_list.extend(path_coords)
+                    
+                current_coord = source_coord
+                current_node = source_node
+                # Apply the successful path to tables
+                for next_coord in path_coords:
+                    direction = get_direction(current_coord, next_coord)
+                    next_node = get_mapped_node(next_coord)
+                    
+                    entry = {
+                        "Local": None,
+                        "North": None,
+                        "South": None,
+                        "East": None,
+                        "West": None
+                    }
+                    target_addr = len(policy_tables[next_node])
+                    entry[direction] = target_addr
+                    policy_tables[current_node].append(entry)
+                    
+                    #switch to next node
+                    current_coord = next_coord
+                    current_node = get_mapped_node(current_coord)
+                    
+                # insert entry for destination node
+                entry = {
+                    "Local": True,
+                    "North": None,
+                    "South": None,
+                    "East": None,
+                    "West": None
+                }
+                policy_tables[dest_node].append(entry)
+
+                return router_list
+                
+            def append_multi_dest(source_node, destinations):
+                """Handle multiple destinations with potential path sharing"""
+                router_list = {}
+                for dest in destinations:
+                    dest_node = dest[1][0]
+                    dest_index = dest[2] if len(dest) > 2 else None  # Get index if it exists
+                    if source_node == dest_node: # if same node, return
+                        break
+                    
+                    # check if there's existing path with same index
+                    if (source_node, dest_index) in self.Initial_addr_table:
+                        # Follow existing path and modify at divergence point
+                        entry_addr = self.Initial_addr_table[(source_node, dest_index)]
+                        current_node = source_node
+                        current_coord = get_coordinates(current_node)
+                        dest_coord = get_coordinates(dest_node)
+                        next_coord = None
+
+                        while current_coord != dest_coord:
+                            entry = policy_tables[current_node][entry_addr]
+                            # direction = get_direction(current_coord, dest_coord)
+                            direction_list = []
+                            for direction, target_addr in entry.items():
+                                if target_addr is not None:
+                                  direction_list.append(direction)
+
+                            # determine which direction to go following X-Y routing
+                            # check if there's available X-Y path, and if yes, just go for it
+                            path_coords, routing = path_coords, _ = get_path_coords(current_coord, dest_coord, router_list[dest_index])
+                            
+                            next_coord = path_coords[0]
+                            next_node = get_mapped_node(next_coord)
+
+                            direction = get_direction(current_coord, next_coord)
+                            
+                            # Check if it is divergence point from existing path
+                            if entry[direction] is None:
+                                # Divergence point: modify entry and continue with new path                                
+                                target_addr = len(policy_tables[next_node])
+                                entry[direction] = target_addr
+                                router_list[dest_index] = append_single_dest(current_node, dest_node, dest_index, router_list=router_list[dest_index], init_addr_save=False)
+                                break
+                            else:
+                                # Follow existing path
+                                current_coord = next_coord
+                                current_node = next_node
+                                entry_addr = entry[direction]
+                                if current_node == dest_node: # if same node, return
+                                    policy_tables[dest_node][entry_addr]["Local"] = True
+                                    break
+
+                    else:
+                        # if not, create new path
+                        router_list[dest_index] = append_single_dest(source_node, dest_node, dest_index, router_list=[])
+
+            # Main logic
+            for source, destinations in self.PathDict.items():
+                source_node = source[1][0]
+                if len(destinations) > 1:
+                    append_multi_dest(source_node, destinations)
+                else:
+                    append_single_dest(source_node, destinations[0][1][0])
+
+            self.Policytable = policy_tables
+            
+        def traverse_func(self, func):
+            # traverse input function by visit() to make PathDict and generate policy table for it
+            self.visit(func)
+            self.gen_policytable()            
+            return self.Policytable
+
+        def visit_call(self, call):
+            current_node_id = int(hash(call))  # Unique identifier for the current node
+            current_mapping = self.MappingDict[current_node_id]
+
+            if current_mapping is None:
+                return  # Skip nodes not included in the mapping
+            
+            # register paths into PathDict
+            for a in call.args:
+                if isinstance(a, Call):
+                  source_id = int(hash(a))
+                  source_mapping = self.MappingDict[source_id]
+                  if (source_id, source_mapping) in self.PathDict:
+                      self.PathDict[(source_id, source_mapping)].append((current_node_id, current_mapping))
+                  else:
+                      self.PathDict[(source_id, source_mapping)] = [(current_node_id, current_mapping)]
+                elif isinstance(a, Tuple):
+                  for b in a.fields:
+                    source_id = int(hash(b))
+                    source_mapping = self.MappingDict[source_id]
+                    if (source_id, source_mapping) in self.PathDict:
+                        self.PathDict[(source_id, source_mapping)].append((current_node_id, current_mapping))
+                    else:
+                        self.PathDict[(source_id, source_mapping)] = [(current_node_id, current_mapping)]
+                elif isinstance(a, TupleGetItem):
+                    source_id = int(hash(a.tuple_value))
+                    source_mapping = self.MappingDict[source_id]
+                    #For TupleGetItem, save pair with index for further path generation
+                    if (source_id, source_mapping) in self.PathDict:
+                        self.PathDict[(source_id, source_mapping)].append((current_node_id, current_mapping, a.index))
+                    else:
+                        self.PathDict[(source_id, source_mapping)] = [(current_node_id, current_mapping, a.index)]
+                else: continue
+
+            #Pre DFS search: Traverse child nodes
+            for a in call.args:
+                self.visit(a)
+
+        def visit_tuple_getitem(self, op):
+          super().visit_tuple_getitem(op)
+        
+        def visit_tuple(self, op):
+          super().visit_tuple(op)
+
+      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
+      items = mod.functions_items()
+      function_names = [item[0].name_hint for item in items]
+      
+      num_func = len(function_names)
+      for i in range(num_func):
+        if function_names[i]=="main": continue
+        elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
+          self.Policytable_2D[function_names[i]] = _PolicyTableGenerator(self.MappingDict_2D[function_names[i]]).traverse_func(mod[function_names[i]])
+
+      # # find all regions
+      return func 
