@@ -849,24 +849,20 @@ class PolicyTableGenerator:
             self.MappingDict = MappingDict
             self.Policytable = []
             self.PathDict = {} # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
-            self.Initial_addr_table = {}
+            self.start_addr_dict = {}
             self.IMCE_NUM = IMCE_NUM
             self.INODE_NUM = INODE_NUM
             import math
             self.IMCE_NUM_SQRT = math.sqrt(self.IMCE_NUM)
             self.table_capacity = 16
 
-        def gen_policytable(self):
+        def generate_policy_table(self):
             # Initialize policy tables for all nodes
-            policy_tables = {
-                f"imce_{i}": [] for i in range(self.IMCE_NUM)
-            }
-            policy_tables.update({
-                f"inode_{i}": [] for i in range(self.INODE_NUM)
-            })
+            policy_tables = { f"imce_{i}": [] for i in range(self.IMCE_NUM) }
+            policy_tables.update({f"inode_{i}": [] for i in range(self.INODE_NUM)})
             
             # Dictionary to store initial addresses for each source-index pair
-            self.Initial_addr_table = {}  # {(source, index): initial_address}
+            self.start_addr_dict = {}  # {(source, index): start_address}
 
             def get_mapped_node(coord):
                 if coord[1] != 0: # imce
@@ -910,7 +906,6 @@ class PolicyTableGenerator:
                 """Get list of coordinates for the path"""
                 path_coords = []
                 current_coord = source_coord
-                routing = None
 
                 if is_xy_routing:
                     # Move horizontally first (X)
@@ -926,7 +921,6 @@ class PolicyTableGenerator:
                                     current_coord[1])
                         path_coords.append(next_coord)
                         current_coord = next_coord
-                    routing = "X-Y"
                 else:
                     # Move vertically first (Y)
                     while current_coord[0] != dest_coord[0]:
@@ -941,31 +935,30 @@ class PolicyTableGenerator:
                                     current_coord[1] + (1 if current_coord[1] < dest_coord[1] else -1))
                         path_coords.append(next_coord)
                         current_coord = next_coord
-                    routing = "Y-X"
                 
                 # check policy table's capacity along the designated routing path
                 if not check_path_capacity(path_coords, policy_tables, router_list):
                     # If X-Y fails, try Y-X routing
-                    path_coords, routing = get_path_coords(source_coord, dest_coord, False)
+                    path_coords = get_path_coords(source_coord, dest_coord, False)
                     if not check_path_capacity(path_coords, policy_tables, router_list):
                         raise ValueError("Routing failed for both X-Y and Y-X!")
                 
                 #TODO: there may be cases that X-Y and Y-X both fails!!!!!
                       
-                return path_coords, routing
+                return path_coords
 
-            def append_single_dest(source_node, dest_node, dest_index=None, router_list=None, init_addr_save=True):
+            def handle_single_dest(source_node, dest_node, dest_index=None, router_list=None, init_addr_save=True):
                 """Append new entries to policy tables for a single destination"""
                 source_coord = get_coordinates(source_node)
                 dest_coord = get_coordinates(dest_node)
                 entry_addr = len(policy_tables[source_node])
                 if init_addr_save is True:
-                    self.Initial_addr_table[(source_node, dest_index)] = entry_addr
+                    self.start_addr_dict[(source_node, dest_index)] = entry_addr
                 if source_coord == dest_coord: # if same node, return
                     return
                 
                 # Try X-Y routing first
-                path_coords, _ = get_path_coords(source_coord, dest_coord)
+                path_coords = get_path_coords(source_coord, dest_coord)
                 if router_list is not None:
                     #if dest_index is provided, save all nodes along the path
                     router_list.extend(path_coords)
@@ -977,13 +970,7 @@ class PolicyTableGenerator:
                     direction = get_direction(current_coord, next_coord)
                     next_node = get_mapped_node(next_coord)
                     
-                    entry = {
-                        "Local": None,
-                        "North": None,
-                        "South": None,
-                        "East": None,
-                        "West": None
-                    }
+                    entry = {"Local": None, "North": None, "South": None, "East": None, "West": None}
                     target_addr = len(policy_tables[next_node])
                     entry[direction] = target_addr
                     policy_tables[current_node].append(entry)
@@ -993,18 +980,12 @@ class PolicyTableGenerator:
                     current_node = get_mapped_node(current_coord)
                     
                 # insert entry for destination node
-                entry = {
-                    "Local": True,
-                    "North": None,
-                    "South": None,
-                    "East": None,
-                    "West": None
-                }
+                entry = {"Local": True, "North": None, "South": None, "East": None, "West": None}
                 policy_tables[dest_node].append(entry)
 
                 return router_list
                 
-            def append_multi_dest(source_node, destinations):
+            def handle_multi_dest(source_node, destinations):
                 """Handle multiple destinations with potential path sharing"""
                 router_list = {}
                 for dest in destinations:
@@ -1013,41 +994,34 @@ class PolicyTableGenerator:
                     if source_node == dest_node: # if same node, return
                         break
                     
-                    # check if there's existing path with same index
-                    if (source_node, dest_index) in self.Initial_addr_table:
+                    # check if there's previous path with same index
+                    if (source_node, dest_index) in self.start_addr_dict:
                         # Follow existing path and modify at divergence point
-                        entry_addr = self.Initial_addr_table[(source_node, dest_index)]
+                        entry_addr = self.start_addr_dict[(source_node, dest_index)]
                         current_node = source_node
                         current_coord = get_coordinates(current_node)
                         dest_coord = get_coordinates(dest_node)
                         next_coord = None
 
                         while current_coord != dest_coord:
-                            entry = policy_tables[current_node][entry_addr]
-                            # direction = get_direction(current_coord, dest_coord)
-                            direction_list = []
-                            for direction, target_addr in entry.items():
-                                if target_addr is not None:
-                                  direction_list.append(direction)
+                            entry = policy_tables[current_node][entry_addr] # current policy table entry
 
-                            # determine which direction to go following X-Y routing
-                            # check if there's available X-Y path, and if yes, just go for it
-                            path_coords, routing = path_coords, _ = get_path_coords(current_coord, dest_coord, router_list[dest_index])
-                            
+                            # Find which direction to go next.
+                            path_coords = get_path_coords(current_coord, dest_coord, router_list[dest_index])                            
                             next_coord = path_coords[0]
                             next_node = get_mapped_node(next_coord)
-
                             direction = get_direction(current_coord, next_coord)
                             
-                            # Check if it is divergence point from existing path
-                            if entry[direction] is None:
-                                # Divergence point: modify entry and continue with new path                                
+                            # If direction is different from previous path, diverge!
+                            if entry[direction] is None: 
+                                # modify entry
                                 target_addr = len(policy_tables[next_node])
                                 entry[direction] = target_addr
-                                router_list[dest_index] = append_single_dest(current_node, dest_node, dest_index, router_list=router_list[dest_index], init_addr_save=False)
+                                # diverge into new path                                
+                                router_list[dest_index] = handle_single_dest(current_node, dest_node, dest_index, router_list=router_list[dest_index], init_addr_save=False)
                                 break
                             else:
-                                # Follow existing path
+                                # otherwise, keep following the previous path
                                 current_coord = next_coord
                                 current_node = next_node
                                 entry_addr = entry[direction]
@@ -1057,22 +1031,22 @@ class PolicyTableGenerator:
 
                     else:
                         # if not, create new path
-                        router_list[dest_index] = append_single_dest(source_node, dest_node, dest_index, router_list=[])
+                        router_list[dest_index] = handle_single_dest(source_node, dest_node, dest_index, router_list=[])
 
             # Main logic
             for source, destinations in self.PathDict.items():
                 source_node = source[1][0]
                 if len(destinations) > 1:
-                    append_multi_dest(source_node, destinations)
+                    handle_multi_dest(source_node, destinations)
                 else:
-                    append_single_dest(source_node, destinations[0][1][0])
+                    handle_single_dest(source_node, destinations[0][1][0])
 
             self.Policytable = policy_tables
             
         def traverse_func(self, func):
             # traverse input function by visit() to make PathDict and generate policy table for it
             self.visit(func)
-            self.gen_policytable()            
+            self.generate_policy_table()            
             return self.Policytable
 
         def visit_call(self, call):
