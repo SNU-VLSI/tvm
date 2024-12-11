@@ -52,6 +52,7 @@ from tvm.relay.op.annotation import compiler_begin, compiler_end
 from tvm.relay.function import Function, FunctionWithFields
 
 import re
+import numpy as np
 
 logger = logging.getLogger("IMCFLOW")
 supported_post_elts = ["nn.relu", None]
@@ -1317,7 +1318,8 @@ class ImcflowAnnotationPass:
         RegionList = self.RegionList
 
         def getRegion(expr):
-            target = int(hash(expr))
+            # target = int(hash(expr))
+            target = expr
             for i, region in enumerate(RegionList):
               if target in region:
                 return i+1
@@ -1441,37 +1443,87 @@ def prune_subgraphs(mod):
     new_mod = transform.RemoveUnusedFunctions()(new_mod)
     return new_mod
 
-def clear_compiler_tag(mod):
-    class SubgraphRemover(ExprMutator):
-        def visit_function(self, func):
-          from copy import deepcopy
-
-          old_attrs = func.attrs
-          mutable_dict = {}
-          if "Compiler" in old_attrs.keys():
-            for key, value in old_attrs.items():
-              if str(key) == "Compiler":
-                  continue
-              if str(key) == "Primitive":
-                  continue
-
-              if isinstance(value, tvm.runtime.container.String):
-                v = str(value)
-              elif isinstance(value, tvm.tir.expr.IntImm):
-                v = value.value
-              else:
-                raise ValueError(f"Unsupported type {type(value)}")
-
-              mutable_dict[str(key)] = v
-            new_attrs = tvm.ir.make_node("DictAttrs", **mutable_dict)
-
-            new_params = [self.visit(x) for x in func.params]
-            new_body = self.visit(func.body)
-            return FunctionWithFields(func, list(new_params), new_body, attrs=new_attrs)
+def insertConstant(mod):
+    """
+    test function
+    """
+    class _Mutator(ExprMutator):
+        def visit_function(self, fn):
+          if fn.attrs and "Compiler" in fn.attrs and fn.attrs["Compiler"] == "imcflow":
+            new_params = [self.visit(x) for x in fn.params]
+            new_params = new_params + [relay.Var("const1", relay.TensorType([2, 16], "float32"))]
+            new_body = self.visit(fn.body)
+            return FunctionWithFields(fn, list(new_params), new_body)
           else:
-            return super().visit_function(func)
+            return super().visit_function(fn)
+        def visit_call(self, call):
+            IsComposite=False
+            if isinstance(call.op, relay.GlobalVar):
+              fn = mod[call.op.name_hint]
+              IsComposite = "Compiler" in fn.attrs and fn.attrs["Compiler"] == "imcflow"
+            if IsComposite:
+              new_fn = self.visit(call.op)
+              new_args = [self.visit(arg) for arg in call.args]
+              new_args = new_args + [relay.Constant(tvm.nd.array(np.zeros((2, 16), dtype="float32")))]
+              return Call(new_fn, new_args, call.attrs, call.type_args, call.span)
+            else:
+              return super().visit_call(call)
 
+    for subgraph in mod.get_global_vars():
+        name = subgraph.name_hint
+        fn = mod[name]
+        print("subgraph name: ", name)
+        mod[name] = _Mutator().visit(fn)
+    # mod["main"] = _Mutator().visit(mod["main"])
+    return mod
 
-    for func in mod.functions:
-        mod[func] = SubgraphRemover().visit(mod[func])
+def flattenSubgraphs(mod):
+    """
+    There can be call of imcflow subgraphs in a imcflow subgraph. we want to flattern them.
+    only main function can have call of imcflow subgraphs
+    """
+
+    # collect call of imcflow subgraphs in main function
+    class SubgraphCollector(ExprVisitor):
+        def __init__(self):
+            ExprVisitor.__init__(self)
+            self.subgraph_calls = []
+
+        def visit_call(self, call):
+            if isinstance(call.op, GlobalVar):
+                name = call.op.name_hint
+                if "imcflow" in name:
+                    self.subgraph_calls.append(name)
+            for arg in call.args:
+              self.visit(arg)
+    SubObj = SubgraphCollector()
+    SubObj.visit(mod["main"])
+    TopImcflowFuncs = SubObj.subgraph_calls[:]
+    OtherImcflowFuncs = [x.name_hint for x in mod.get_global_vars() if (x.name_hint not in SubObj.subgraph_calls) and ("imcflow" in x.name_hint)]
+
+    # flatten the subgraphs for top level imcflow functions
+    class SubgraphFlatter(ExprMutator):
+      def visit_call(self, call):
+          if isinstance(call.op, GlobalVar):
+              name = call.op.name_hint
+              if name in OtherImcflowFuncs:
+                  # "Inline" the subgraph back into new main function.
+                  func = mod[name]
+                  var_map = {}
+                  for arg, param in zip(call.args, func.params):
+                      var_map[param] = super().visit(arg)
+                  new_body = relay.bind(super().visit(func.body), var_map)
+                  return new_body
+              if name != "main":
+                  args = []
+                  for arg in call.args:
+                      args.append(super().visit(arg))
+                  return call.op(*args)
+          return super().visit_call(call)
+    for func_name in TopImcflowFuncs:
+      mod[func_name] = SubgraphFlatter().visit(mod[func_name])
+
+    # remove unused functions
+    mod = transform.RemoveUnusedFunctions()(mod)
+
     return mod
