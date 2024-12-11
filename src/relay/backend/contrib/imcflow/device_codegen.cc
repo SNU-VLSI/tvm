@@ -14,12 +14,12 @@ namespace tvm {
 namespace relay {
 namespace contrib {
 
-void DeviceCodegen::HandleDeviceCodeGeneration(const std::string& op_name,
-                                               const std::vector<std::string>& args) {
+void DeviceCodegen::HandleCodeGeneration(const std::string& op_name,
+                                         const std::vector<std::string>& args) {
   LOG(INFO) << "Generating inode code for operator: " << op_name;
   std::string inode_code = GenerateTargetCode(op_name, args, "inode");
-  std::string cpp_name = SaveCodeToFile(inode_code, op_name, "inode");
-  CompileDeviceCode(cpp_name, "inode");
+  std::string cpp_name = SaveTargetCodeToFile(inode_code, op_name, "inode");
+  CompileTargetCode(cpp_name, "inode");
 }
 
 std::string DeviceCodegen::GenerateTargetCode(const std::string& op_name,
@@ -38,8 +38,8 @@ std::string DeviceCodegen::GenerateTargetCode(const std::string& op_name,
   return code_stream.str();
 }
 
-std::string DeviceCodegen::SaveCodeToFile(const std::string& code, const std::string& op_name,
-                                          const std::string& target) {
+std::string DeviceCodegen::SaveTargetCodeToFile(const std::string& code, const std::string& op_name,
+                                                const std::string& target) {
   std::string cpp_name = output_dir_ + "/" + op_name + "_" + target + ".cpp";
   std::ofstream file(cpp_name);
   ICHECK(file.is_open()) << "Failed to open file for writing: " << cpp_name;
@@ -48,7 +48,7 @@ std::string DeviceCodegen::SaveCodeToFile(const std::string& code, const std::st
   return cpp_name;
 }
 
-void DeviceCodegen::CompileDeviceCode(const std::string& cpp_name, const std::string& target) {
+void DeviceCodegen::CompileTargetCode(const std::string& cpp_name, const std::string& target) {
   if (cpp_name.size() < 4 || cpp_name.substr(cpp_name.size() - 4) != ".cpp") {
     LOG(FATAL) << "Invalid cpp_name: " << cpp_name;
   }
@@ -58,15 +58,15 @@ void DeviceCodegen::CompileDeviceCode(const std::string& cpp_name, const std::st
   std::vector<int> wids;
 
   if (target == "inode") {
-      wids = {0};
+    wids = {0};
   } else if (target == "imce") {
-      wids = {1, 2, 3, 4};
+    wids = {1, 2, 3, 4};
   } else {
-      LOG(FATAL) << "Unknown target: " << target;
+    LOG(FATAL) << "Unknown target: " << target;
   }
 
   for (auto hid : hids) {
-    for (auto wid: wids) {
+    for (auto wid : wids) {
       std::string hid_str = std::to_string(hid);
       std::string wid_str = std::to_string(wid);
       std::string obj_file = base_name + "_" + hid_str + ".o";

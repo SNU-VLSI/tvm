@@ -60,7 +60,7 @@ class CodegenIMCFLOW : public MemoizedExprTranslator<int>, public CodegenCBase {
   void GenerateCompositeFunctionCall(const FunctionNode* callee,
                                                     const CallNode* caller);
 
-  std::vector<Output> GenerateBody(const CallNode* root_call, const std::string& func_name,
+  std::vector<Output> GenerateBody(const CallNode* root_call,
                                   const std::vector<std::string>& func_args,
                                   const std::vector<std::string>& attribute_args);
 

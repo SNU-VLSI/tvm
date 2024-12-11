@@ -33,6 +33,7 @@
 #include <tvm/relay/transform.h>
 
 #include "device_codegen.h"
+#include "kernel_codegen.h"
 
 namespace tvm {
 namespace relay {
@@ -56,6 +57,7 @@ inline std::string GetShapeString(std::vector<int> shape) {
 
 int CodegenIMCFLOW::VisitExprDefault_(const Object* op) {
   LOG(FATAL) << "IMCFLOW codegen doesn't support: " << op->GetTypeKey();
+  return 1;
 }
 
 int CodegenIMCFLOW::VisitExpr_(const LetNode* op) {
@@ -63,11 +65,13 @@ int CodegenIMCFLOW::VisitExpr_(const LetNode* op) {
   VisitExpr(op->var);
   VisitExpr(op->value);
   VisitExpr(op->body);
+  return 1;
 }
 
 int CodegenIMCFLOW::VisitExpr_(const VarNode* node) {
   // ext_func_args_.push_back(GetRef<Var>(node));
   DLOG(INFO) << "IMCFLOW VarNode Visited";
+  return 1;
 }
 
 int CodegenIMCFLOW::VisitExpr_(const TupleNode* node) {
@@ -75,11 +79,13 @@ int CodegenIMCFLOW::VisitExpr_(const TupleNode* node) {
   for (auto field : node->fields) {
     VisitExpr(field);
   }
+  return 1;
 }
 
 int CodegenIMCFLOW::VisitExpr_(const TupleGetItemNode* op) {
   DLOG(INFO) << "IMCFLOW TupleGetItemNode Visited";
   VisitExpr(op->tuple);
+  return 1;
 }
 
 int CodegenIMCFLOW::VisitExpr_(const ConstantNode* cn) {
@@ -102,6 +108,7 @@ int CodegenIMCFLOW::VisitExpr_(const ConstantNode* cn) {
   const auto* type_node = cn->checked_type().as<TensorTypeNode>();
   ICHECK(type_node);
   ICHECK_EQ(GetDtypeString(type_node), "float") << "Only float is supported for now.";
+  return 1;
 }
 
 int CodegenIMCFLOW::VisitExpr_(const CallNode* call) {
@@ -111,6 +118,7 @@ int CodegenIMCFLOW::VisitExpr_(const CallNode* call) {
   } else {
     GenerateOpCall(call);
   }
+  return 1;
 }
 
 std::string CodegenIMCFLOW::JIT(const std::vector<Output>& out) {
@@ -148,24 +156,29 @@ void CodegenIMCFLOW::GenerateCompositeFunctionCall(const FunctionNode* callee,
 }
 
 std::vector<Output> CodegenIMCFLOW::GenerateBody(const CallNode* root_call,
-                                                const std::string& func_name,
                                                 const std::vector<std::string>& func_args,
                                                 const std::vector<std::string>& attribute_args) {
   DLOG(INFO) << "IMCFLOW GenerateBody Enter";
-  // Generate the Device Body
-  std::string command = "mkdir -p ./imcflowlib";
+  // std::string kernel_func_name = ext_func_id_ + "_kernel";
+
+  // Make a directory to store the generated files
+  std::string lib_dir = "./imcflowlib";
+  std::string command = "mkdir -p " + lib_dir;
   int err = system(command.c_str());
   ICHECK_EQ(err, 0) << "mkdir -p ./imcflowlib failed";
 
-  DeviceCodegen device_codegen("./imcflowlib");  // TODO: change this directory
-  device_codegen.HandleDeviceCodeGeneration(func_name, func_args);
-
   // Generate Kernel Body
+  KernelCodegen kernel_codegen(lib_dir);
+  kernel_codegen.HandleCodeGeneration(ext_func_id_, func_args);
+
+  // Generate the Device Body
+  DeviceCodegen device_codegen(lib_dir);  // TODO: change this directory
+  device_codegen.HandleCodeGeneration(ext_func_id_, func_args);
 
   // Make function call with input buffers when visiting arguments
   ICHECK_GT(func_args.size(), 0);
   std::ostringstream decl_stream;
-  decl_stream << "(" << func_args[0];
+  decl_stream << "_kernel(" << func_args[0];
   for (size_t i = 1; i < func_args.size(); ++i) {
     decl_stream << ", " << func_args[i];
   }
@@ -207,7 +220,7 @@ std::vector<Output> CodegenIMCFLOW::GenerateBody(const CallNode* root_call,
     decl_stream << ", " << attribute_args[i];
   }
   decl_stream << ");";
-  ext_func_body_.push_back(func_name + decl_stream.str());
+  ext_func_body_.push_back(ext_func_id_ + decl_stream.str());
 
   return outputs;
 }
@@ -224,13 +237,12 @@ std::pair<std::string, Array<String>> IMCFLOWModuleCodegen::GenIMCFLOWFunc(const
   builder.VisitExpr(func->body); // visit the body and update the constant related variables
   builder.ext_func_args_ = func_node->params;
 
-  std::string func_name = "imcflow_fused_kernel";
   std::vector<std::string> func_args;
   for (const auto& arg : func_node->params) {
     func_args.push_back(arg->name_hint());
   }
 
-  auto out = builder.GenerateBody(func->body.as<CallNode>(), func_name, func_args, {});
+  auto out = builder.GenerateBody(func->body.as<CallNode>(), func_args, {});
 
   code_stream_ << builder.JIT(out);
 
@@ -250,7 +262,7 @@ runtime::Module IMCFLOWModuleCodegen::CreateCSourceModule(const ObjectRef& ref) 
   // imcflow_kernel file is saved under src/runtime/contrib/imcflow so that we don't
   // expose it to ordinary users. To make export_library use it, users need to
   // pass -I${PATH_TO_TVM}/src/runtime/contrib
-  code_stream_ << "#include <imcflow/imcflow_kernel.h>\n";
+  code_stream_ << "#include <imcflow_kernel.h>\n";
   code_stream_ << "using namespace tvm::runtime;\n";
   code_stream_ << "using namespace tvm::runtime::contrib;\n";
   code_stream_ << "\n";
