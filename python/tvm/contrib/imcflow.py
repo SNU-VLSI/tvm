@@ -14,116 +14,99 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""External function interface to BLAS libraries."""
-import tvm
-from tvm import te
-from ..topi.nn.utils import get_pad_tuple
+
+from typing import Tuple
 
 
-def imcflow_conv2d(
-    src,
-    weights,
-    stride,
-    padding,
-    dilation,
-    groups,
-    channel_last=False,
-    out_dtype="float32",
-    **kwargs,
-):
-    """Convolution operator in NCHW layout.
+class ImcflowDeviceConfig:
+  """Imcflow config class"""
+  INODE_NUM = 4
+  IMCE_H_NUM = 4
+  IMCE_W_NUM = 4
+  IMCE_NUM = 16
+  INODE_MMREG_SIZE = 128
+  INODE_DATA_MEM_SIZE = 65536
+  INODE_INST_MEM_SIZE = 1024
+  IMCE_INST_MEM_SIZE = 1024
 
-    Parameters
-    ----------
-    src : tvm.te.Tensor
-        4-D with shape [batch, in_channel, in_height, in_width]
-
-    weights : tvm.te.Tensor
-        4-D with shape [num_filter, in_channel, filter_height, filter_width]
-
-    stride : int or a list/tuple of two ints
-        Stride size, or [stride_height, stride_width]
-
-    padding : int or a list/tuple of 2 or 4 ints
-        padding size, or
-        [pad_height, pad_width] for 2 ints, or
-        [pad_top, pad_left, pad_bottom, pad_right] for 4 ints
-
-    dilation: int or a list/tuple of two ints
-        dilation size, or [dilation_height, dilation_width]
-
-    groups: str
-        input data layout: NCHW or NHWC
-
-    channel_last: bool
-        chose if input/output data format is in channel_last format(NHWC) or
-        in plain format(NCHW)
-
-    out_dtype: str
-        output datatype: now only support float32
-
-    Returns
-    -------
-    Output : tvm.te.Tensor
-        4-D with shape [batch, out_channel, out_height, out_width]
-    """
-
-    assert isinstance(stride, int) or len(stride) == 2
-    assert isinstance(dilation, int) or len(dilation) == 2
-    if isinstance(stride, int):
-        stride_h = stride_w = stride
-    else:
-        stride_h, stride_w = stride
-
-    if isinstance(dilation, int):
-        dilation_h = dilation_w = dilation
-    else:
-        dilation_h, dilation_w = dilation
-
-    pre_cast = src.dtype == "float32"
-    post_cast = out_dtype == "float32"
-
-    if channel_last:
-        batch, in_height, in_width, _ = src.shape
-        kernel_h, kernel_w, _, num_filter = weights.shape
-    else:
-        batch, _, in_height, in_width = src.shape
-        num_filter, _, kernel_h, kernel_w = weights.shape
-
-    dilated_kernel_h = (kernel_h - 1) * dilation_h + 1
-    dilated_kernel_w = (kernel_w - 1) * dilation_w + 1
-    pad_top, pad_left, pad_down, pad_right = get_pad_tuple(
-        padding, (dilated_kernel_h, dilated_kernel_w)
+  def __init__(self):
+    self.mem_layout = MemoryLayout(
+        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+        MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
-    out_channel = num_filter
-    out_height = (in_height - dilated_kernel_h + pad_top + pad_down) // stride_h + 1
-    out_width = (in_width - dilated_kernel_w + pad_left + pad_right) // stride_w + 1
 
-    if channel_last:
-        out_shape = (batch, out_height, out_width, out_channel)
-    else:
-        out_shape = (batch, out_channel, out_height, out_width)
+  @staticmethod
+  def is_supported_kernel(KH, KW):
+    return (KH, KW) in {(1, 1), (3, 3), (5, 5), (7, 7)}
 
-    return te.extern(
-        out_shape,
-        [src, weights],
-        lambda ins, outs: tvm.tir.call_packed(
-            "tvm.contrib.imcflow.conv2d",
-            ins[0],
-            ins[1],
-            outs[0],
-            pad_top,
-            pad_down,
-            pad_left,
-            pad_right,
-            stride[0],
-            stride[1],
-            groups,
-            channel_last,
-            pre_cast,
-            post_cast,
-        ),
-        name="C",
-        dtype=out_dtype,
-        **kwargs,
-    )
+
+class DataBlock:
+  def __init__(self, name: str, size: int):
+    self.name = name
+    self.size = size
+    self.offset = -1  # offset in the region
+    self.base_address = -1  # base address in the device memory
+
+  def set_offset(self, offset: int):
+    self.offset = offset
+
+  def set_base_address(self, address: int):
+    self.base_address = address
+
+  def __str__(self):
+    return (f"DataBlock({self.name}, {self.size}, {self.base_address})")
+
+
+class MemoryRegion:
+  def __init__(self, name: str, size: int):
+    self.name = name
+    self.size = size
+    self.blocks = {}
+    self.base_address = -1  # offset in the device memory
+    self._last_offset = 0
+
+  def __getitem__(self, block_name: str):
+    return self.blocks.get(block_name, None)
+
+  def allocate(self, block: DataBlock):
+    """Allocate a data block in the region sequentially, assuming they are not delocated"""
+    assert block.size + self._last_offset <= self.size, "Data block size exceeds region size"
+    block.set_offset(self._last_offset)
+    block.set_base_address(self._last_offset + self.base_address)
+    self._last_offset += block.size
+    self.blocks[block.name] = block
+
+  def set_base_address(self, address: int):
+    self.base_address = address
+
+  def __str__(self):
+    if not self.blocks:
+      return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
+    blocks_str = ",\n      ".join(str(block) for block in self.blocks.values())
+    return (f"MemoryRegion({self.name}, {self.size}, {self.base_address}, "
+            f"blocks=[\n      {blocks_str}\n    ])")
+
+
+class MemoryLayout:
+  def __init__(self, *regions: MemoryRegion):
+    self.regions = {}
+    _last_end_address = 0
+
+    for region in regions:
+      self.regions[region.name] = region
+      region.set_base_address(_last_end_address)
+      _last_end_address += region.size
+
+  def __getitem__(self, region_name: str):
+    return self.regions.get(region_name, None)
+
+  def __str__(self):
+    regions_str = ",\n  ".join(str(region) for region in self.regions.values())
+    return f"MemoryLayout(regions=[\n  {regions_str}\n])"
