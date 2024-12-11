@@ -192,8 +192,9 @@ def RunTestModel(name):
   NodeMapper = imcflow_transform.NodeMapper()
   NodeMapper(eval_mod)
 
-  PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(NodeMapper.MappingDict_2D)(eval_mod)
-
+  PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(NodeMapper.MappingDict_2D)
+  PolicyTableGenerator(eval_mod)
+  print("PolicyTable mapping done!!")
 
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}
