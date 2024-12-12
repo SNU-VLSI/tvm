@@ -30,6 +30,8 @@ class ImcflowDeviceConfig:
   IMCE_INST_MEM_SIZE = 1024
 
   HWNodeMap = {}
+  TensorEdgeList = []
+  TensorEdgeListDict = {}
   TensorIDtoEdge = {}
   TensorEdgetoInfo = {}
   _instance = None
@@ -151,7 +153,7 @@ class MemoryLayout:
 class TensorID:
   def __init__(self, graph_node_id: int, tensor_type: str):
     assert tensor_type in {"idata", "odata", "weight",
-                           "bias", "scale"}, "Invalid tensor type"
+                           "bias", "scale", "idata0", "idata1"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 

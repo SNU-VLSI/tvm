@@ -7,16 +7,18 @@ from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
-from tvm.contrib.imcflow import ImcflowDeviceConfig
+from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID
 from tvm.ir import Op
-from tvm.relay.op.contrib.imcflow import IDDict
+from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc
 
 import math
 from copy import deepcopy
 import re
+from dataclasses import dataclass
+from enum import Enum
 
 def getNodeID(node):
-  id_dict = IDDict()
+  id_dict = HashToCustomID()
   if int(hash(node)) in id_dict:
     return id_dict[int(hash(node))]
   else:
@@ -760,89 +762,90 @@ class AnnotGenerator:
 
       return func
 
-class SrcNode:
-  def __init__(self, hwnode_id, node_id, node_name):
-    self.hwnode_id = hwnode_id
-    self.node_id = node_id
-    self.node_name = node_name 
+# class SrcNode:
+#   def __init__(self, hwnode_id, node_id, node_name):
+#     self.hwnode_id = hwnode_id
+#     self.node_id = node_id
+#     self.node_name = node_name 
   
-  def __str__(self):
-    return f"({self.hwnode_id}, {self.node_id}, {self.node_name})"
+#   def __str__(self):
+#     return f"({self.hwnode_id}, {self.node_id}, {self.node_name})"
 
-  def __repr__(self):
-    return self.__str__()
+#   def __repr__(self):
+#     return self.__str__()
   
-  # def __repr__(self):
-  #   return f"SrcNode : {self.__str__()}"
+#   # def __repr__(self):
+#   #   return f"SrcNode : {self.__str__()}"
 
-class DstNode:
-  def __init__(self, hwnode_id, node_id, node_name, split_idx=None):
-    self.hwnode_id = hwnode_id
-    self.node_id = node_id
-    self.node_name = node_name
-    self.split_idx = split_idx
+# class DstNode:
+#   def __init__(self, hwnode_id, node_id, node_name, split_idx=None):
+#     self.hwnode_id = hwnode_id
+#     self.node_id = node_id
+#     self.node_name = node_name
+#     self.split_idx = split_idx
   
-  def __str__(self):
-    return f"({self.hwnode_id}, {self.node_id}, {self.node_name}" + (f", {self.split_idx}" if self.split_idx is not None else "") + ")"
+#   def __str__(self):
+#     return f"({self.hwnode_id}, {self.node_id}, {self.node_name}" + (f", {self.split_idx}" if self.split_idx is not None else "") + ")"
   
-  def __repr__(self):
-    return self.__str__()
-    # return f"DstNode : {self.__str__()}"
+#   def __repr__(self):
+#     return self.__str__()
+#     # return f"DstNode : {self.__str__()}"
 
-class PathEntry:
-  def __init__(self, src_node, dst_node, tag):
-    self.src_node = src_node
-    self.dst_node = dst_node
-    self.tag = tag
+# class PathEntry:
+#   def __init__(self, src_node, dst_node, tag):
+#     self.src_node = src_node
+#     self.dst_node = dst_node
+#     self.tag = tag
   
-  def __str__(self):
-    return f"({self.src_node}, {self.dst_node}, {self.tag})"
+#   def __str__(self):
+#     return f"({self.src_node}, {self.dst_node}, {self.tag})"
   
-  def __repr__(self):
-    return self.__str__()
-    # return f"PathEntry : {self.__str__()}"
+#   def __repr__(self):
+#     return self.__str__()
+#     # return f"PathEntry : {self.__str__()}"
 
-class ImcflowPathList(list):
-  def __init__(self, *args):
-    super().__init__(*args)
-    self.Merged = []
+# class ImcflowPathList(list):
+#   def __init__(self, *args):
+#     super().__init__(*args)
+#     self.Merged = []
   
-  def assignNodeIDToPlaceHolder(self):
-    Cnt = 0
-    for entry in self:
-      if entry.src_node.hwnode_id == "inode_placeholder":
-        entry.src_node.hwnode_id = f"inode_{Cnt}"
-        Cnt = (Cnt+1)%4
-    return self
+#   def assignNodeIDToPlaceHolder(self):
+#     Cnt = 0
+#     for entry in self:
+#       if entry.src_node.hwnode_id == "inode_placeholder":
+#         entry.src_node.hwnode_id = f"inode_{Cnt}"
+#         Cnt = (Cnt+1)%4
+#     return self
   
-  def mergeSplitEntries(self):
-    data = {}
-    SplitEntries = []
-    for entry in self:
-      if entry.dst_node.split_idx is not None:
-        SplitEntries.append(entry)
-        if entry.src_node not in data: data[entry.src_node] = {"tag":entry.tag, "dst_nodes":[]}
-        data[entry.src_node]["dst_nodes"].append(entry.dst_node)
+#   def mergeSplitEntries(self):
+#     data = {}
+#     SplitEntries = []
+#     for entry in self:
+#       if entry.dst_node.split_idx is not None:
+#         SplitEntries.append(entry)
+#         if entry.src_node not in data: data[entry.src_node] = {"tag":entry.tag, "dst_nodes":[]}
+#         data[entry.src_node]["dst_nodes"].append(entry.dst_node)
 
-    self.Merged = []
-    # for entry in SplitEntries:
-    #   if entry in self.Merged: self.Merged.remove(entry)
+#     self.Merged = []
+#     # for entry in SplitEntries:
+#     #   if entry in self.Merged: self.Merged.remove(entry)
     
-    for src_node, value in data.items():
-      self.Merged.append(PathEntry(src_node, value["dst_nodes"], value["tag"]))
+#     for src_node, value in data.items():
+#       self.Merged.append(PathEntry(src_node, value["dst_nodes"], value["tag"]))
 
-    return self
+#     return self
   
-  def __str__(self):
-    return f"PathList : {super().__str__()}"
+#   def __str__(self):
+#     return f"PathList : {super().__str__()}"
   
-  def __repr__(self):
-    return f"PathList : {super().__str__()}"
+#   def __repr__(self):
+#     return f"PathList : {super().__str__()}"
 
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
     def __init__(self):
-      self.MappingDict_2D = {}
+      # self.MappingDict_2D = {}
+      self.MappingDict = {}
 
     def transform_function(self, func, mod, ctx):
       class _Nodemapper(tvm.relay.ExprVisitor):
@@ -869,7 +872,8 @@ class NodeMapper:
 
           # check constraint and map imcflow node
           if self.MappingDict:
-              last_child_mapping, _ = list(self.MappingDict.items())[-1][1]
+              # last_child_mapping, _ = list(self.MappingDict.items())[-1][1]
+              last_child_mapping = list(self.MappingDict.items())[-1][1]
           else:
               last_child_mapping = None
 
@@ -886,20 +890,20 @@ class NodeMapper:
           if IsConcat:
               if last_child_mapping is None:
                   raise ValueError("split or concatenate should have at least 1 child node")
-              # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
-              self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
+              self.MappingDict[getNodeID(call)] = last_child_mapping
+              # self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
           elif IsSplit:
               if last_child_mapping is None:
+                  self.MappingDict[getNodeID(call)] = f"inode_{self.inode_index}"
                   # self.MappingDict[int(hash(call))] = (f"inode_{self.inode_index}", indicator)
-                  self.MappingDict[getNodeID(call)] = (f"inode_{self.inode_index}", indicator)
                   self.inode_index -= 1
               else:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
-                  self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
+                  self.MappingDict[getNodeID(call)] = last_child_mapping
           else:
-              # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
-              self.MappingDict[getNodeID(call)] = (f"imce_{self.imce_index}", indicator)
+              self.MappingDict[getNodeID(call)] = f"imce_{self.imce_index}"
               self.imce_index -= 1
+              # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
@@ -916,85 +920,72 @@ class NodeMapper:
         if function_names[i]=="main": continue
           # _Nodemapper().visit(mod["main"])
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          self.MappingDict_2D[function_names[i]] = _Nodemapper().traverse_func(mod[function_names[i]])
+          self.MappingDict.update(_Nodemapper().traverse_func(mod[function_names[i]]))
+      
+      ImcflowDeviceConfig().HWNodeMap = self.MappingDict
 
       # # find all regions
       return func
 
-def getPathListDict(mod, MappingDict):
-  class _PathFinder(tvm.relay.ExprVisitor):
-    def __init__(self, MappingDict):
+def constructTensorEdgeList(mod):
+  @dataclass
+  class TensorIDPair:
+    graph_node_id : int
+    split_idx : None | int
+  class _Visitor(tvm.relay.ExprVisitor):
+
+    def __init__(self):
         super().__init__()
-        self.MappingDict = MappingDict
-        self.PathList = [] # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
+        # self.MappingDict = ImcflowDeviceConfig().HWNodeMap
+        self.TensorEdgeList = []
         self.InSubFunction = False
-        self.SubFunctionMapping = None
+        # self.SubFunctionMapping = None
         self.SubFunctionNodeID = None
         self.VarProperties = {}
 
-    def getInputNodeProperties(self, node):
+    def getInputGraphNodeID(self, node):
       if isinstance(node, Call):
-        # source_id = int(hash(node))
-        source_id = getNodeID(node)
-        source_mapping = self.MappingDict[source_id]
-        return [SrcNode(source_mapping[0], source_id, source_mapping[1])]
+        if isinstance(node.op, relay.Function) and "Composite" in node.op.attrs and re.match(r"imcflow\..*", node.op.attrs["Composite"]):
+          return (getNodeID(node), getNodeID(node.op.body))
+        else:
+          return getNodeID(node)
       elif isinstance(node, Tuple):
         result = []
         for b in node.fields:
-          # source_id = int(hash(b))
-          source_id = getNodeID(b)
-          source_mapping = self.MappingDict[source_id]
-          result.append(SrcNode(source_mapping[0], source_id, source_mapping[1]))
-          # result.append((source_mapping, source_id))
+          result.append(self.getInputGraphNodeID(b))
         return result
       elif isinstance(node, TupleGetItem):
-          # source_id = int(hash(node.tuple_value))
-          source_id = getNodeID(node.tuple_value)
-          source_mapping = self.MappingDict[source_id]
-          return [SrcNode(source_mapping[0], source_id, source_mapping[1])], node.index
-          # return [(source_mapping, source_id, node.index)]
+          return self.getInputGraphNodeID(node.tuple_value)
       elif isinstance(node, Var):
-          return [SrcNode('inode_placeholder', -1, "Var")]
-          # return [(source_mapping, -1)]
+          return getNodeID(node)
       elif isinstance(node, Constant):
-          return [SrcNode('inode_placeholder', -1, "Constant")]
-          # return [(source_mapping, -1)]
+          return getNodeID(node)
     
-    def getInodePlaceHolderInputVar(self):
-      return SrcNode('inode_placeholder', -1, "Var")
-      # return [('inode_placeholder', -1, "Var")]
-
-    def getInodePlaceHolderInputConstant(self):
-      return SrcNode('inode_placeholder', -1, "Constant")
-      # return [('inode_placeholder', -1, "Constant")]
-    
-    def appendToPathList(self, SrcNodeProperties, DstNodeProperty, tag, split_idx=None):
-      if isinstance(SrcNodeProperties, list):
-        if len(SrcNodeProperties) > 1:
-          for SrcNodeProperty in SrcNodeProperties:
-            self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag, split_idx)
-        else:
-          SrcNodeProperty = SrcNodeProperties[0]
-          self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag, split_idx)
-      elif isinstance(SrcNodeProperties, tuple):
-        SrcNodeProperty_list = SrcNodeProperties[0]
-        split_idx = SrcNodeProperties[1]
-        self.appendToPathList(SrcNodeProperty_list, DstNodeProperty, tag, split_idx)
-      elif isinstance(SrcNodeProperties, SrcNode):
-        SrcNodeProperty = SrcNodeProperties
-        if split_idx is not None:
-          # NewSrcNodeProperty = (SrcNodeProperty[0], SrcNodeProperty[1])
-          # NewDstNodeProperty = (DstNodeProperty[0], DstNodeProperty[1], SrcNodeProperty[2])
-          # self.PathList.append((NewSrcNodeProperty, NewDstNodeProperty, tag))
-          # src_node = SrcNodeProperty[0]
-          # split_idx = SrcNodeProperty[1] 
-          dst_node = DstNode(DstNodeProperty.hwnode_id, DstNodeProperty.node_id, DstNodeProperty.node_name, split_idx)
-          self.PathList.append(PathEntry(SrcNodeProperties, dst_node, tag))
-        else:
-          # self.PathList.append((SrcNodeProperty, DstNodeProperty, tag))
-          self.PathList.append(PathEntry(SrcNodeProperty, DstNodeProperty, tag))
+    def getInputGraphNodeSplitIndex(self, node):
+      if isinstance(node, TupleGetItem):
+        return node.index
       else:
-        raise ValueError("Invalid input node")
+        return None
+    
+    # def getInodePlaceHolderInputVar(self):
+    #   return TensorIDPair(VAR_NODE_ID, 'inode_placeholder')
+
+    # def getInodePlaceHolderInputConstant(self):
+    #   return TensorIDPair(CONST_NODE_ID, 'inode_placeholder')
+    
+    def appendToTensorEdgeList(self, SrcGraphNodeIDs, DstGraphNodeID, SrcTag, DstTag, SplitIdx=None):
+      if isinstance(SrcGraphNodeIDs, list):
+        for SrcGraphNodeID in SrcGraphNodeIDs:
+          self.appendToTensorEdgeList(SrcGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
+      elif isinstance(SrcGraphNodeIDs, (int, tuple)):
+        SrcGraphNodeID = SrcGraphNodeIDs
+        self.TensorEdgeList.append(
+          TensorEdge(TensorID(SrcGraphNodeID, SrcTag),
+                     TensorID(DstGraphNodeID, DstTag),
+                     SplitIdx)
+        )
+      else:
+        raise ValueError("Invalid input tensor id pair")
     
     def visit_function(self, fn):
       if self.InSubFunction:
@@ -1008,13 +999,14 @@ def getPathListDict(mod, MappingDict):
 
     def visit_call(self, call):
         # current_node_id = int(hash(call))  # Unique identifier for the current node
-        current_node_id = getNodeID(call)  # Unique identifier for the current node
-        current_mapping = self.MappingDict[current_node_id] if not self.InSubFunction else self.SubFunctionMapping
+        # DstGraphNodeID = getNodeID(call)
+        DstGraphNodeID = getNodeID(call) if not self.InSubFunction else (self.SubFunctionNodeID, getNodeID(call))
+        # current_mapping = self.MappingDict[current_node_id] if not self.InSubFunction else self.SubFunctionMapping
         # DstNodeProperty = (current_mapping, current_node_id) if not self.InSubFunction else (current_mapping, (self.SubFunctionNodeID, current_node_id))
-        if not self.InSubFunction:
-          DstNodeProperty = DstNode(current_mapping[0], current_node_id, current_mapping[1])
-        else:
-          DstNodeProperty = DstNode(current_mapping[0], (self.SubFunctionNodeID, current_node_id), getNodeDebugID(call) + "_in_"  + current_mapping[1])
+        # if not self.InSubFunction:
+        #   DstNodeProperty = DstNode(current_mapping[0], current_node_id, current_mapping[1])
+        # else:
+        #   DstNodeProperty = DstNode(current_mapping[0], (self.SubFunctionNodeID, current_node_id), getNodeDebugID(call) + "_in_"  + current_mapping[1])
 
         # if current_mapping is None:
         #     return  # Skip nodes not included in the mapping
@@ -1027,57 +1019,64 @@ def getPathListDict(mod, MappingDict):
 
         # visit composite function
         # we will collect Var Nodes usage and its properties
-        def _processInputNode(InputNode, CheckFunc, tag, DstNodeProperty_=None):
-          DstNodeProperty_ = DstNodeProperty if DstNodeProperty_ is None else DstNodeProperty_
+        def _processInputNode(SrcGraphNode, SrcTag, DstGraphNodeID, DstTag, SplitIdx):
           if not self.InSubFunction:
-            InputNodeProperty = self.getInputNodeProperties(InputNode)
-            if isinstance(InputNodeProperty, tuple):
-              if not CheckFunc(InputNodeProperty[0]):
-                raise ValueError("Invalid input node")
-            else:
-              if not CheckFunc(InputNodeProperty):
-                raise ValueError("Invalid input node")
-            self.appendToPathList(InputNodeProperty, DstNodeProperty_, tag)
+            InputGraphNodeID = self.getInputGraphNodeID(SrcGraphNode)
+            self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
             return True
           else:
-              if isinstance(InputNode, Var):
-                self.VarProperties[InputNode]["tag"] = tag
-                self.VarProperties[InputNode]["dst_property"] = DstNodeProperty_
+              if isinstance(SrcGraphNode, Var):
+                self.VarProperties[SrcGraphNode]["src_tag"] = SrcTag
+                self.VarProperties[SrcGraphNode]["dst_tag"] = DstTag
+                self.VarProperties[SrcGraphNode]["dst_graph_node_id"] = DstGraphNodeID
 
         if IsComposite:
           self.InSubFunction = True
-          self.SubFunctionMapping = current_mapping
-          self.SubFunctionNodeID = current_node_id
+          # self.SubFunctionMapping = current_mapping
+          self.SubFunctionNodeID = DstGraphNodeID
           self.visit(call.op)
           self.InSubFunction = False
           ParamToArg = {x: y for x, y in zip(call.op.params, call.args)}
           for var, arg in ParamToArg.items():
             # print(f"var: {var}, arg: {arg}, var_properties: {self.VarProperties[var]}")
-            _processInputNode(arg, lambda x: len(x) == 1, self.VarProperties[var]["tag"], self.VarProperties[var]["dst_property"])
+            _processInputNode(arg, self.VarProperties[var]["src_tag"], 
+                              self.VarProperties[var]["dst_graph_node_id"], self.VarProperties[var]["dst_tag"],
+                              self.getInputGraphNodeSplitIndex(arg))
         elif IsSupportedOp:
           if call.op == op.get("split"):
-            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("concatenate"):
-            _processInputNode(call.args[0], lambda x: len(x) > 1, "data")
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            # _processInputNode(call.args[0], lambda x: len(x) > 1, "data")
           if call.op == op.get("nn.conv2d"):
-            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-            InputNodeProperties = self.getInputNodeProperties(call.args[1])
-            assert len(InputNodeProperties) == 1, "Conv2d should have only one weight node"
-            self.appendToPathList(InputNodeProperties, DstNodeProperty, "weight")
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
+            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            # InputNodeProperties = self.getInputTensorIDPair(call.args[1])
+            # assert len(InputNodeProperties) == 1, "Conv2d should have only one weight node"
+            # self.appendToPathList(InputNodeProperties, DstNodeProperty, "weight")
           if call.op == op.get("nn.bias_add"):
-            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-            InputNodeProperties = self.getInputNodeProperties(call.args[1])
-            assert len(InputNodeProperties) == 1, "Bias_add should have only one bias node"
-            self.appendToPathList(InputNodeProperties, DstNodeProperty, "bias")
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
+            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            # InputNodeProperties = self.getInputTensorIDPair(call.args[1])
+            # assert len(InputNodeProperties) == 1, "Bias_add should have only one bias node"
+            # self.appendToPathList(InputNodeProperties, DstNodeProperty, "bias")
           if call.op == op.get("nn.batch_norm"):
-            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-            self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "scale")
-            self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "bias")
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "scale", DstGraphNodeID, "scale", None)
+            _processInputNode(call.args[2], "bias", DstGraphNodeID, "bias", None)
+            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            # self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "scale")
+            # self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "bias")
           if call.op == op.get("nn.relu"):
-            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
           if call.op == op.get("add"):
-            _processInputNode(call.args[0], lambda x: len(x) == 1, "data0")
-            _processInputNode(call.args[1], lambda x: len(x) == 1, "data1")
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata0", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "odata", DstGraphNodeID, "idata1", self.getInputGraphNodeSplitIndex(call.args[1]))
+            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data0")
+            # _processInputNode(call.args[1], lambda x: len(x) == 1, "data1")
         
         #Pre DFS search: Traverse child nodes
         for a in call.args:
@@ -1089,18 +1088,15 @@ def getPathListDict(mod, MappingDict):
     def visit_tuple(self, op):
       super().visit_tuple(op)
     
-    def getPathList(self, func):
-       self.visit(func)
-       return self.PathList
+    def getTensorEdgeList(self, func_name, func):
+      self.visit(func)
+      return self.TensorEdgeList
     
-  PathListDict = {}
-  for func_name_var, func in mod.functions_items():
+  for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif func.attrs["Compiler"]=="imcflow":
-      # PathListDict[func_name_var.name_hint] = _PathFinder(MappingDict[func_name_var.name_hint]).getPathList(func)
-      PathListDict[func_name_var.name_hint] = ImcflowPathList(_PathFinder(MappingDict[func_name_var.name_hint]).getPathList(func)).assignNodeIDToPlaceHolder().mergeSplitEntries()
-  
-  return PathListDict
+      ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint] = _Visitor().getTensorEdgeList(func_name_var, func)
+      ImcflowDeviceConfig().TensorEdgeList.extend(ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint])
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
@@ -1402,9 +1398,9 @@ class PolicyTableGenerator:
 #   for func_name in mod.functions:
 #     vis.visit(mod[func_name])
 
-def constructIDDict(mod):
-  from tvm.relay.op.contrib.imcflow import IDDict
-  id_dict = IDDict()
+def constructHashToCustomID(mod):
+  id_dict = HashToCustomID()
+  name_dict = CustomIDToName()
   class _Visitor(tvm.relay.ExprVisitor):
     def __init__(self):
       super().__init__()
@@ -1412,11 +1408,37 @@ def constructIDDict(mod):
 
     def visit_call(self, call):
       id_dict[int(hash(call))] = self.Cnt
+      name_dict[self.Cnt] = getNodeDebugID(call)
       self.Cnt = self.Cnt + 1
       super().visit_call(call)
+    
+    def visit_var(self, var):
+      id_dict[int(hash(var))] = self.Cnt
+      name_dict[self.Cnt] = var.name_hint
+      self.Cnt = self.Cnt + 1
+      super().visit_var(var)
+    
+    def visit_constant(self, const):
+      id_dict[int(hash(const))] = self.Cnt
+      name_dict[self.Cnt] = "Const"
+      self.Cnt = self.Cnt + 1
+      super().visit_constant(const)
   
   vis = _Visitor()
   for func_name in mod.functions:
     vis.visit(mod[func_name])
-  
-  return id_dict
+
+def constructCustomIDInFunc(mod):
+  data = CustomIDInFunc()
+  class _Visitor(tvm.relay.ExprVisitor):
+    def __init__(self, func_name):
+      super().__init__()
+      self.func_name = func_name
+      data[func_name] = []
+
+    def visit_call(self, call):
+      data[self.func_name].append(getNodeID(call))
+      super().visit_call(call)
+    
+  for func_name in mod.functions:
+    if "imcflow" in func_name: _Visitor(func_name).visit(mod[func_name])
