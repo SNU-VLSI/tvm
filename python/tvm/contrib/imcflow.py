@@ -29,8 +29,11 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 
-  def __init__(self):
-    self.mem_layout = MemoryLayout(
+  def __new__(cls, *args, **kwargs):
+    if cls._instance is None:
+      cls._instance = super(ImcflowDeviceConfig, cls).__new__(
+          cls, *args, **kwargs)
+      cls._instance.mem_layout = MemoryLayout(
         MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
         MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
         MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
@@ -41,6 +44,10 @@ class ImcflowDeviceConfig:
         MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
         MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
+    return cls._instance
+
+  def __init__(self):
+    pass
 
   @staticmethod
   def is_supported_kernel(KH, KW):
