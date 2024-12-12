@@ -15,8 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from typing import Tuple
-
+from typing import Tuple, List, Dict, Union
 
 class ImcflowDeviceConfig:
   """Imcflow config class"""
@@ -28,6 +27,11 @@ class ImcflowDeviceConfig:
   INODE_DATA_MEM_SIZE = 65536
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
+
+  HWNodeMap = {}
+  TensorIDtoEdge = {}
+  TensorEdgetoInfo = {}
+  _instance = None
 
   def __new__(cls, *args, **kwargs):
     if cls._instance is None:
@@ -52,7 +56,6 @@ class ImcflowDeviceConfig:
   @staticmethod
   def is_supported_kernel(KH, KW):
     return (KH, KW) in {(1, 1), (3, 3), (5, 5), (7, 7)}
-
 
 class DataBlock:
   def __init__(self, name: str, size: int):
@@ -117,3 +120,59 @@ class MemoryLayout:
   def __str__(self):
     regions_str = ",\n  ".join(str(region) for region in self.regions.values())
     return f"MemoryLayout(regions=[\n  {regions_str}\n])"
+
+class TensorID:
+  def __init__(self, graph_node_id: int, tensor_type: str):
+    assert tensor_type in {"idata", "odata", "weight", "bias", "scale"}, "Invalid tensor type"
+    self.graph_node_id = graph_node_id
+    self.tensor_type = tensor_type
+
+  def __str__(self):
+    return f"TensorID(graph_node_id={self.graph_node_id}, tensor_type={self.tensor_type})"
+
+
+class TensorEdge:
+  def __init__(self, src_id: TensorID, dst_id: TensorID, split_idx: Union[None, int] = None):
+    self.src_id = src_id
+    self.dst_id = dst_id
+    self.split_idx = split_idx
+
+  def __str__(self):
+    return f"TensorEdge(src_id={self.src_id}, dst_id={self.dst_id}, split_idx={self.split_idx})"
+
+
+class MultiCastTensorEdge:
+  def __init__(self, src_id: TensorID, dst_id: List[TensorID], split_idx: List[Union[None, int]]):
+    self.src_id = src_id
+    self.dst_id = dst_id
+    self.split_idx = split_idx
+
+  def __str__(self):
+    return (f"MultiCastTensorEdge(src_id={self.src_id}, "
+            f"dst_id={self.dst_id}, split_idx={self.split_idx})")
+
+
+class RouterEntry:
+  def __init__(self, router_id: int, address: int, data: Dict):
+    self.router_id = router_id
+    self.address = address
+    self.data = data
+
+  def __str__(self):
+    return (f"RouterEntry(router_id={self.router_id}, address={self.address}, "
+            f"data={self.data})")
+
+
+class TensorEdgeInfo:
+  def __init__(self, policy_info: List[RouterEntry], mem_info: DataBlock, fifo_id: int):
+    self.PolicyInfo = policy_info
+    self.MemInfo = mem_info
+    self.fifo_id = fifo_id
+
+  def append_policy_info(self, entry: RouterEntry):
+    self.PolicyInfo.append(entry)
+
+  def __str__(self):
+    policy_info_str = ", ".join(str(entry) for entry in self.PolicyInfo)
+    return (f"TensorEdgeInfo(PolicyInfo=[{policy_info_str}], "
+            f"MemInfo={self.MemInfo}, fifo_id={self.fifo_id})")
