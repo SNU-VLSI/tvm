@@ -17,6 +17,7 @@
 
 from typing import Tuple, List, Dict, Union
 
+
 class ImcflowDeviceConfig:
   """Imcflow config class"""
   INODE_NUM = 4
@@ -38,16 +39,16 @@ class ImcflowDeviceConfig:
       cls._instance = super(ImcflowDeviceConfig, cls).__new__(
           cls, *args, **kwargs)
       cls._instance.mem_layout = MemoryLayout(
-        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-        MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-    )
+          MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+          MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+          MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+          MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+          MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+      )
     return cls._instance
 
   def __init__(self):
@@ -56,6 +57,31 @@ class ImcflowDeviceConfig:
   @staticmethod
   def is_supported_kernel(KH, KW):
     return (KH, KW) in {(1, 1), (3, 3), (5, 5), (7, 7)}
+
+  @classmethod
+  def add_hw_node(cls, graph_node_id, hwnode_id):
+    cls.HWNodeMap[graph_node_id] = hwnode_id
+
+  @classmethod
+  def get_hw_node(cls, graph_node_id):
+    return cls.HWNodeMap.get(graph_node_id, None)
+
+  @classmethod
+  def add_tensor_edge(cls, tensor_id, tensor_edge):
+    cls.TensorIDtoEdge[tensor_id] = tensor_edge
+
+  @classmethod
+  def get_tensor_edge(cls, tensor_id):
+    return cls.TensorIDtoEdge.get(tensor_id, None)
+
+  @classmethod
+  def add_tensor_edge_info(cls, tensor_edge, tensor_edge_info):
+    cls.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
+
+  @classmethod
+  def get_tensor_edge_info(cls, tensor_edge):
+    return cls.TensorEdgetoInfo.get(tensor_edge, None)
+
 
 class DataBlock:
   def __init__(self, name: str, size: int):
@@ -121,14 +147,16 @@ class MemoryLayout:
     regions_str = ",\n  ".join(str(region) for region in self.regions.values())
     return f"MemoryLayout(regions=[\n  {regions_str}\n])"
 
+
 class TensorID:
   def __init__(self, graph_node_id: int, tensor_type: str):
-    assert tensor_type in {"idata", "odata", "weight", "bias", "scale"}, "Invalid tensor type"
+    assert tensor_type in {"idata", "odata", "weight",
+                           "bias", "scale"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
   def __str__(self):
-    return f"TensorID(graph_node_id={self.graph_node_id}, tensor_type={self.tensor_type})"
+    return f"TensorID({self.graph_node_id}, {self.tensor_type})"
 
 
 class TensorEdge:
@@ -138,18 +166,18 @@ class TensorEdge:
     self.split_idx = split_idx
 
   def __str__(self):
-    return f"TensorEdge(src_id={self.src_id}, dst_id={self.dst_id}, split_idx={self.split_idx})"
+    return f"TensorEdge({self.src_id}, {self.dst_id}, {self.split_idx})"
 
 
 class MultiCastTensorEdge:
-  def __init__(self, src_id: TensorID, dst_id: List[TensorID], split_idx: List[Union[None, int]]):
+  def __init__(self, src_id: TensorID, dst_ids: List[TensorID], split_idx: List[Union[None, int]]):
     self.src_id = src_id
-    self.dst_id = dst_id
+    self.dst_ids = dst_ids
     self.split_idx = split_idx
 
   def __str__(self):
-    return (f"MultiCastTensorEdge(src_id={self.src_id}, "
-            f"dst_id={self.dst_id}, split_idx={self.split_idx})")
+    dst_id_strs = ", ".join(str(dst_id) for dst_id in self.dst_ids)
+    return f"MultiCastTensorEdge({self.src_id}, [{dst_id_strs}], {self.split_idx})"
 
 
 class RouterEntry:
@@ -159,8 +187,7 @@ class RouterEntry:
     self.data = data
 
   def __str__(self):
-    return (f"RouterEntry(router_id={self.router_id}, address={self.address}, "
-            f"data={self.data})")
+    return f"RouterEntry({self.router_id}, {self.address}, {self.data})"
 
 
 class TensorEdgeInfo:
@@ -174,5 +201,4 @@ class TensorEdgeInfo:
 
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.PolicyInfo)
-    return (f"TensorEdgeInfo(PolicyInfo=[{policy_info_str}], "
-            f"MemInfo={self.MemInfo}, fifo_id={self.fifo_id})")
+    return f"TensorEdgeInfo([{policy_info_str}], {self.MemInfo}, {self.fifo_id})"
