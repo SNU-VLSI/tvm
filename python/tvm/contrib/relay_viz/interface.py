@@ -28,6 +28,8 @@ from tvm import relay
 
 UNKNOWN_TYPE = "unknown"
 
+from tvm.relay.op.contrib.imcflow import IDDict
+
 
 class VizNode:
     """VizNode carry node information for `VizGraph` interface.
@@ -254,10 +256,9 @@ class DefaultVizParser(VizParser):
         else:
             op_name = str(type(node.op)).split(".")[-1].split("'")[0]
 
-        if hasattr(node, "CustomID"):
-          node_detail.append(f"CustomID : {node.CustomID}")
-        else:
-          node_detail.append(f"CustomID : NoID")
+        id_dict = IDDict()
+        if int(hash(node)) in id_dict:
+          node_detail.append(f"CustomID : {id_dict[int(hash(node))]}")
 
         # Arguments -> CallNode
         viz_node = VizNode(node_id, f"Call {op_name}", "\n".join(node_detail))

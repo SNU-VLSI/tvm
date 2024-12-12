@@ -8,10 +8,25 @@ from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, 
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
 from tvm.ir import Op
+from tvm.relay.op.contrib.imcflow import IDDict
 
 import math
 from copy import deepcopy
 import re
+
+def getNodeID(node):
+  id_dict = IDDict()
+  if int(hash(node)) in id_dict:
+    return id_dict[int(hash(node))]
+  else:
+    return -1
+
+def getNodeDebugID(node):
+  if hasattr(node.op, "attrs"):
+    indicator = str(node.op.attrs["Composite"])
+  else:
+    indicator = str(node.op)
+  return indicator
 
 @relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
@@ -333,7 +348,8 @@ def getFirstInCalls(expr):
 
   class _Visitor(tvm.relay.ExprVisitor):
     def visit_call(self, call):
-      if int(hash(expr)) != int(hash(call)):
+      # if int(hash(expr)) != int(hash(call)):
+      if getNodeID(expr) != getNodeID(call):
         InCalls.append(call)
       super().visit_call(call)
   
@@ -552,7 +568,8 @@ def getOutputNodes(expr, recursive=False):
   class _Visitor(tvm.relay.ExprVisitor):
     def visit_call(self, call):
       for arg in call.args:
-        if int(hash(expr)) == int(hash(arg)):
+        # if int(hash(expr)) == int(hash(arg)):
+        if getNodeID(expr) == getNodeID(arg):
           OutNodes.append(call)
       if recursive:
         super().visit_call(call)
@@ -742,7 +759,86 @@ class AnnotGenerator:
       self.RegionList = RegionList
 
       return func
+
+class SrcNode:
+  def __init__(self, hwnode_id, node_id, node_name):
+    self.hwnode_id = hwnode_id
+    self.node_id = node_id
+    self.node_name = node_name 
+  
+  def __str__(self):
+    return f"({self.hwnode_id}, {self.node_id}, {self.node_name})"
+
+  def __repr__(self):
+    return self.__str__()
+  
+  # def __repr__(self):
+  #   return f"SrcNode : {self.__str__()}"
+
+class DstNode:
+  def __init__(self, hwnode_id, node_id, node_name, split_idx=None):
+    self.hwnode_id = hwnode_id
+    self.node_id = node_id
+    self.node_name = node_name
+    self.split_idx = split_idx
+  
+  def __str__(self):
+    return f"({self.hwnode_id}, {self.node_id}, {self.node_name}" + (f", {self.split_idx}" if self.split_idx is not None else "") + ")"
+  
+  def __repr__(self):
+    return self.__str__()
+    # return f"DstNode : {self.__str__()}"
+
+class PathEntry:
+  def __init__(self, src_node, dst_node, tag):
+    self.src_node = src_node
+    self.dst_node = dst_node
+    self.tag = tag
+  
+  def __str__(self):
+    return f"({self.src_node}, {self.dst_node}, {self.tag})"
+  
+  def __repr__(self):
+    return self.__str__()
+    # return f"PathEntry : {self.__str__()}"
+
+class ImcflowPathList(list):
+  def __init__(self, *args):
+    super().__init__(*args)
+    self.Merged = []
+  
+  def assignNodeIDToPlaceHolder(self):
+    Cnt = 0
+    for entry in self:
+      if entry.src_node.hwnode_id == "inode_placeholder":
+        entry.src_node.hwnode_id = f"inode_{Cnt}"
+        Cnt = (Cnt+1)%4
+    return self
+  
+  def mergeSplitEntries(self):
+    data = {}
+    SplitEntries = []
+    for entry in self:
+      if entry.dst_node.split_idx is not None:
+        SplitEntries.append(entry)
+        if entry.src_node not in data: data[entry.src_node] = {"tag":entry.tag, "dst_nodes":[]}
+        data[entry.src_node]["dst_nodes"].append(entry.dst_node)
+
+    self.Merged = []
+    # for entry in SplitEntries:
+    #   if entry in self.Merged: self.Merged.remove(entry)
     
+    for src_node, value in data.items():
+      self.Merged.append(PathEntry(src_node, value["dst_nodes"], value["tag"]))
+
+    return self
+  
+  def __str__(self):
+    return f"PathList : {super().__str__()}"
+  
+  def __repr__(self):
+    return f"PathList : {super().__str__()}"
+
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
     def __init__(self, IMCE_NUM=16, INODE_NUM=4):
@@ -783,10 +879,11 @@ class NodeMapper:
               last_child_mapping = None
                  
           #for debugging
-          if hasattr(call.op, "attrs"):
-            indicator = call.op.attrs["Composite"]
-          else:
-            indicator = call.op
+          indicator = getNodeDebugID(call)
+          # if hasattr(call.op, "attrs"):
+          #   indicator = call.op.attrs["Composite"]
+          # else:
+          #   indicator = call.op
           
           # check if this node is 
           IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
@@ -794,15 +891,19 @@ class NodeMapper:
           if IsConcat:
               if last_child_mapping is None:
                   raise ValueError("split or concatenate should have at least 1 child node")
-              self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
+              # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
+              self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
           elif IsSplit:
               if last_child_mapping is None:
-                  self.MappingDict[int(hash(call))] = (f"inode_{self.inode_index}", indicator)
+                  # self.MappingDict[int(hash(call))] = (f"inode_{self.inode_index}", indicator)
+                  self.MappingDict[getNodeID(call)] = (f"inode_{self.inode_index}", indicator)
                   self.inode_index -= 1
               else:
-                  self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
+                  # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
+                  self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
           else:
-              self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
+              # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
+              self.MappingDict[getNodeID(call)] = (f"imce_{self.imce_index}", indicator)
               self.imce_index -= 1
 
         def visit_tuple_getitem(self, op):
@@ -824,7 +925,187 @@ class NodeMapper:
 
       # # find all regions
       return func
+
+def getPathListDict(mod, MappingDict):
+  class _PathFinder(tvm.relay.ExprVisitor):
+    def __init__(self, MappingDict):
+        super().__init__()
+        self.MappingDict = MappingDict
+        self.PathList = [] # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
+        self.InSubFunction = False
+        self.SubFunctionMapping = None
+        self.SubFunctionNodeID = None
+        self.VarProperties = {}
+
+    def getInputNodeProperties(self, node):
+      if isinstance(node, Call):
+        # source_id = int(hash(node))
+        source_id = getNodeID(node)
+        source_mapping = self.MappingDict[source_id]
+        return [SrcNode(source_mapping[0], source_id, source_mapping[1])]
+      elif isinstance(node, Tuple):
+        result = []
+        for b in node.fields:
+          # source_id = int(hash(b))
+          source_id = getNodeID(b)
+          source_mapping = self.MappingDict[source_id]
+          result.append(SrcNode(source_mapping[0], source_id, source_mapping[1]))
+          # result.append((source_mapping, source_id))
+        return result
+      elif isinstance(node, TupleGetItem):
+          # source_id = int(hash(node.tuple_value))
+          source_id = getNodeID(node.tuple_value)
+          source_mapping = self.MappingDict[source_id]
+          return [SrcNode(source_mapping[0], source_id, source_mapping[1])], node.index
+          # return [(source_mapping, source_id, node.index)]
+      elif isinstance(node, Var):
+          return [SrcNode('inode_placeholder', -1, "Var")]
+          # return [(source_mapping, -1)]
+      elif isinstance(node, Constant):
+          return [SrcNode('inode_placeholder', -1, "Constant")]
+          # return [(source_mapping, -1)]
     
+    def getInodePlaceHolderInputVar(self):
+      return SrcNode('inode_placeholder', -1, "Var")
+      # return [('inode_placeholder', -1, "Var")]
+
+    def getInodePlaceHolderInputConstant(self):
+      return SrcNode('inode_placeholder', -1, "Constant")
+      # return [('inode_placeholder', -1, "Constant")]
+    
+    def appendToPathList(self, SrcNodeProperties, DstNodeProperty, tag, split_idx=None):
+      if isinstance(SrcNodeProperties, list):
+        if len(SrcNodeProperties) > 1:
+          for SrcNodeProperty in SrcNodeProperties:
+            self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag, split_idx)
+        else:
+          SrcNodeProperty = SrcNodeProperties[0]
+          self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag, split_idx)
+      elif isinstance(SrcNodeProperties, tuple):
+        SrcNodeProperty_list = SrcNodeProperties[0]
+        split_idx = SrcNodeProperties[1]
+        self.appendToPathList(SrcNodeProperty_list, DstNodeProperty, tag, split_idx)
+      elif isinstance(SrcNodeProperties, SrcNode):
+        SrcNodeProperty = SrcNodeProperties
+        if split_idx is not None:
+          # NewSrcNodeProperty = (SrcNodeProperty[0], SrcNodeProperty[1])
+          # NewDstNodeProperty = (DstNodeProperty[0], DstNodeProperty[1], SrcNodeProperty[2])
+          # self.PathList.append((NewSrcNodeProperty, NewDstNodeProperty, tag))
+          # src_node = SrcNodeProperty[0]
+          # split_idx = SrcNodeProperty[1] 
+          dst_node = DstNode(DstNodeProperty.hwnode_id, DstNodeProperty.node_id, DstNodeProperty.node_name, split_idx)
+          self.PathList.append(PathEntry(SrcNodeProperties, dst_node, tag))
+        else:
+          # self.PathList.append((SrcNodeProperty, DstNodeProperty, tag))
+          self.PathList.append(PathEntry(SrcNodeProperty, DstNodeProperty, tag))
+      else:
+        raise ValueError("Invalid input node")
+    
+    def visit_function(self, fn):
+      if self.InSubFunction:
+        self.VarProperties = {}
+        for x in fn.params:
+          self.VarProperties[x] = {}
+          self.visit(x)
+        self.visit(fn.body)
+      else:
+        super().visit_function(fn)
+
+    def visit_call(self, call):
+        # current_node_id = int(hash(call))  # Unique identifier for the current node
+        current_node_id = getNodeID(call)  # Unique identifier for the current node
+        current_mapping = self.MappingDict[current_node_id] if not self.InSubFunction else self.SubFunctionMapping
+        # DstNodeProperty = (current_mapping, current_node_id) if not self.InSubFunction else (current_mapping, (self.SubFunctionNodeID, current_node_id))
+        if not self.InSubFunction:
+          DstNodeProperty = DstNode(current_mapping[0], current_node_id, current_mapping[1])
+        else:
+          DstNodeProperty = DstNode(current_mapping[0], (self.SubFunctionNodeID, current_node_id), getNodeDebugID(call) + "_in_"  + current_mapping[1])
+
+        # if current_mapping is None:
+        #     return  # Skip nodes not included in the mapping
+
+        IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
+        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+
+        if not IsComposite and not IsSupportedOp:
+          raise ValueError("Unsupported operator detected. please check.")
+
+        # visit composite function
+        # we will collect Var Nodes usage and its properties
+        def _processInputNode(InputNode, CheckFunc, tag, DstNodeProperty_=None):
+          DstNodeProperty_ = DstNodeProperty if DstNodeProperty_ is None else DstNodeProperty_
+          if not self.InSubFunction:
+            InputNodeProperty = self.getInputNodeProperties(InputNode)
+            if isinstance(InputNodeProperty, tuple):
+              if not CheckFunc(InputNodeProperty[0]):
+                raise ValueError("Invalid input node")
+            else:
+              if not CheckFunc(InputNodeProperty):
+                raise ValueError("Invalid input node")
+            self.appendToPathList(InputNodeProperty, DstNodeProperty_, tag)
+            return True
+          else:
+              if isinstance(InputNode, Var):
+                self.VarProperties[InputNode]["tag"] = tag
+                self.VarProperties[InputNode]["dst_property"] = DstNodeProperty_
+
+        if IsComposite:
+          self.InSubFunction = True
+          self.SubFunctionMapping = current_mapping
+          self.SubFunctionNodeID = current_node_id
+          self.visit(call.op)
+          self.InSubFunction = False
+          ParamToArg = {x: y for x, y in zip(call.op.params, call.args)}
+          for var, arg in ParamToArg.items():
+            # print(f"var: {var}, arg: {arg}, var_properties: {self.VarProperties[var]}")
+            _processInputNode(arg, lambda x: len(x) == 1, self.VarProperties[var]["tag"], self.VarProperties[var]["dst_property"])
+        elif IsSupportedOp:
+          if call.op == op.get("split"):
+            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+          if call.op == op.get("concatenate"):
+            _processInputNode(call.args[0], lambda x: len(x) > 1, "data")
+          if call.op == op.get("nn.conv2d"):
+            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            InputNodeProperties = self.getInputNodeProperties(call.args[1])
+            assert len(InputNodeProperties) == 1, "Conv2d should have only one weight node"
+            self.appendToPathList(InputNodeProperties, DstNodeProperty, "weight")
+          if call.op == op.get("nn.bias_add"):
+            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            InputNodeProperties = self.getInputNodeProperties(call.args[1])
+            assert len(InputNodeProperties) == 1, "Bias_add should have only one bias node"
+            self.appendToPathList(InputNodeProperties, DstNodeProperty, "bias")
+          if call.op == op.get("nn.batch_norm"):
+            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+            self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "scale")
+            self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "bias")
+          if call.op == op.get("nn.relu"):
+            _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+          if call.op == op.get("add"):
+            _processInputNode(call.args[0], lambda x: len(x) == 1, "data0")
+            _processInputNode(call.args[1], lambda x: len(x) == 1, "data1")
+        
+        #Pre DFS search: Traverse child nodes
+        for a in call.args:
+            self.visit(a)
+
+    def visit_tuple_getitem(self, op):
+      super().visit_tuple_getitem(op)
+    
+    def visit_tuple(self, op):
+      super().visit_tuple(op)
+    
+    def getPathList(self, func):
+       self.visit(func)
+       return self.PathList
+    
+  PathListDict = {}
+  for func_name_var, func in mod.functions_items():
+    if func_name_var.name_hint == "main": continue
+    elif func.attrs["Compiler"]=="imcflow":
+      # PathListDict[func_name_var.name_hint] = _PathFinder(MappingDict[func_name_var.name_hint]).getPathList(func)
+      PathListDict[func_name_var.name_hint] = ImcflowPathList(_PathFinder(MappingDict[func_name_var.name_hint]).getPathList(func)).assignNodeIDToPlaceHolder().mergeSplitEntries()
+  
+  return PathListDict
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
@@ -1052,161 +1333,9 @@ class PolicyTableGenerator:
         def traverse_func(self, func):
             # traverse input function by visit() to make PathDict and generate policy table for it
             self.visit(func)
-            return self.PathList
             self.generate_policy_table()            
             return self.Policytable
         
-        def getInputNodeProperties(self, node):
-          if isinstance(node, Call):
-            source_id = int(hash(node))
-            source_mapping = self.MappingDict[source_id]
-            return [(source_mapping, source_id)]
-          elif isinstance(node, Tuple):
-            result = []
-            for b in node.fields:
-              source_id = int(hash(b))
-              source_mapping = self.MappingDict[source_id]
-              result.append((source_mapping, source_id))
-            return result
-          elif isinstance(node, TupleGetItem):
-              source_id = int(hash(node.tuple_value))
-              source_mapping = self.MappingDict[source_id]
-              return [(source_mapping, source_id, node.index)]
-          elif isinstance(node, Var):
-              source_mapping = 'inode_placeholder'
-              return [(source_mapping, -1)]
-          elif isinstance(node, Constant):
-              source_mapping = 'inode_placeholder'
-              return [(source_mapping, -1)]
-        
-        def getInodePlaceHolderInputProperty(self):
-          return [('inode_placeholder', -1)]
-        
-        def appendToPathList(self, SrcNodeProperties, DstNodeProperty, tag):
-          if isinstance(SrcNodeProperties, list):
-            if len(SrcNodeProperties) > 1: # tuple case
-              for SrcNodeProperty in SrcNodeProperties:
-                self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag)
-            else:
-              SrcNodeProperty = SrcNodeProperties[0]
-              self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag)
-          else:
-            SrcNodeProperty = SrcNodeProperties
-            if len(SrcNodeProperty) == 3: # from split
-              NewSrcNodeProperty = (SrcNodeProperty[0], SrcNodeProperty[1])
-              NewDstNodeProperty = (DstNodeProperty[0], DstNodeProperty[1], SrcNodeProperty[2])
-              self.PathList.append((NewSrcNodeProperty, NewDstNodeProperty, tag))
-            else:
-              self.PathList.append((SrcNodeProperty, DstNodeProperty, tag))
-        
-        def visit_function(self, fn):
-          if self.InSubFunction:
-            self.VarProperties = {}
-            for x in fn.params:
-              self.VarProperties[x] = {}
-              self.visit(x)
-            self.visit(fn.body)
-          else:
-            super().visit_function(fn)
-
-        def visit_call(self, call):
-            current_node_id = int(hash(call))  # Unique identifier for the current node
-            current_mapping = self.MappingDict[current_node_id] if not self.InSubFunction else self.SubFunctionMapping
-            DstNodeProperty = (current_mapping, current_node_id) if not self.InSubFunction else (current_mapping, (self.SubFunctionNodeID, current_node_id))
-
-            if current_mapping is None:
-                return  # Skip nodes not included in the mapping
-
-            IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
-            IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-
-            if not IsComposite and not IsSupportedOp:
-              raise ValueError("Unsupported operator detected. please check.")
-
-            # visit composite function
-            # we will collect Var Nodes usage and its properties
-            def _processInputNode(InputNode, CheckFunc, tag, DstNodeProperty_=None):
-              DstNodeProperty_ = DstNodeProperty if DstNodeProperty_ is None else DstNodeProperty_
-              if not self.InSubFunction:
-                InputNodeProperty = self.getInputNodeProperties(InputNode)
-                if not CheckFunc(InputNodeProperty):
-                  return False
-                self.appendToPathList(InputNodeProperty, DstNodeProperty_, tag)
-                return True
-              else:
-                 if isinstance(InputNode, Var):
-                    self.VarProperties[InputNode]["tag"] = tag
-                    self.VarProperties[InputNode]["dst_property"] = DstNodeProperty_
-
-            if IsComposite:
-              self.InSubFunction = True
-              self.SubFunctionMapping = current_mapping
-              self.SubFunctionNodeID = current_node_id
-              self.visit(call.op)
-              self.InSubFunction = False
-              ParamToArg = {x: y for x, y in zip(call.op.params, call.args)}
-              for var, arg in ParamToArg.items():
-                # print(f"var: {var}, arg: {arg}, var_properties: {self.VarProperties[var]}")
-                _processInputNode(arg, lambda x: len(x) == 1, self.VarProperties[var]["tag"], self.VarProperties[var]["dst_property"])
-            elif IsSupportedOp:
-              if call.op == op.get("split"):
-                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-                # InputNodeProperty = self.getInputNodeProperties(call.args[0])
-                # assert len(InputNodeProperty) == 1, "Split should have only one input node"
-                # self.appendToPathList(InputNodeProperty, DstNodeProperty, "data")
-              if call.op == op.get("concatenate"):
-                _processInputNode(call.args[0], lambda x: len(x) > 1, "data")
-                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
-                # assert len(InputNodeProperties) > 1, "Concatenate should have more than one input node"
-                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
-              if call.op == op.get("nn.conv2d"):
-                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
-                # assert len(InputNodeProperties) == 1, "Conv2d should have only one input node"
-                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
-                InputNodeProperties = self.getInputNodeProperties(call.args[1])
-                assert len(InputNodeProperties) == 1, "Conv2d should have only one weight node"
-                self.appendToPathList(InputNodeProperties, DstNodeProperty, "weight")
-              if call.op == op.get("nn.bias_add"):
-                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
-                # assert len(InputNodeProperties) == 1, "Bias_add should have only one input node"
-                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
-                InputNodeProperties = self.getInputNodeProperties(call.args[1])
-                assert len(InputNodeProperties) == 1, "Bias_add should have only one bias node"
-                self.appendToPathList(InputNodeProperties, DstNodeProperty, "bias")
-              if call.op == op.get("nn.batch_norm"):
-                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
-                # assert len(InputNodeProperties) == 1, "Batch_norm should have only one input node"
-                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
-                self.appendToPathList(self.getInodePlaceHolderInputProperty(), DstNodeProperty, "scale")
-                self.appendToPathList(self.getInodePlaceHolderInputProperty(), DstNodeProperty, "bias")
-              if call.op == op.get("nn.relu"):
-                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
-                # assert len(InputNodeProperties) == 1, "Relu should have only one input node"
-                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
-              if call.op == op.get("add"):
-                _processInputNode(call.args[0], lambda x: len(x) == 1, "data0")
-                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
-                # assert len(InputNodeProperties) == 1, "Add should have only one input node"
-                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data0")
-                _processInputNode(call.args[1], lambda x: len(x) == 1, "data1")
-                # InputNodeProperties = self.getInputNodeProperties(call.args[1])
-                # assert len(InputNodeProperties) == 1, "Add should have only one input node"
-                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data1")
-            
-            #Pre DFS search: Traverse child nodes
-            for a in call.args:
-                self.visit(a)
-
-        def visit_tuple_getitem(self, op):
-          super().visit_tuple_getitem(op)
-        
-        def visit_tuple(self, op):
-          super().visit_tuple(op)
-
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
       items = mod.functions_items()
       function_names = [item[0].name_hint for item in items]
@@ -1222,22 +1351,86 @@ class PolicyTableGenerator:
       # # find all regions
       return func 
 
-@relay.transform.function_pass(opt_level=0)
-class IDAssigner:
-    def transform_function(self, func, mod, ctx):
-      class _Visitor(tvm.relay.ExprVisitor):
-        def __init__(self):
-          super().__init__()
-          self.Cnt = 0
+# @relay.transform.function_pass(opt_level=0)
+# class IDAssigner:
+#     def transform_function(self, func, mod, ctx):
+#       class _Visitor(tvm.relay.ExprMutator):
+#         def __init__(self):
+#           super().__init__()
+#           self.Cnt = 0
 
-        def visit_call(self, call):
-          setattr(call, "CustomID", self.Cnt)
-          print(call.CustomID)
-          self.Cnt = self.Cnt + 1
-          super().visit_call(call)
+#         def visit_call(self, call):
+#           NewAttr = {}
+#           if isinstance(call.op, Function):
+#             # new_fn.attrs["CustomID"] = self.Cnt
+#             for key in call.attrs.keys():
+#               NewAttr[key] = call.attrs.get_str(key)
+#             NewAttr["CustomID"] = self.Cnt
+#             dattr = tvm.ir.make_node("DictAttrs", **NewAttr)
+#             self.Cnt = self.Cnt + 1
+#             new_fn = FunctionWithFields(call.op, list(call.op.params), call.op.body, call.op.ret_type, call.op.ty_params, dattr)
+#             new_call_attrs = call.attrs
+#           elif isinstance(call.op, Op):
+#             # call.attrs["CustomID"] = self.Cnt
+#             if call.attrs is not None:
+#               for key in call.attrs.keys():
+#                 NewAttr[key] = call.attrs.get_str(key)
+#             NewAttr["CustomID"] = self.Cnt
+#             dattr = tvm.ir.make_node("DictAttrs", **NewAttr)
+#             new_fn = call.op
+#             new_call_attrs = dattr
+#             self.Cnt = self.Cnt + 1
 
-      print("-----------------------func--------------------")
-      print(func)      
-      _Visitor().visit(func)
+#           new_args = [self.visit(arg) for arg in call.args]
+
+#           return Call(new_fn, new_args, new_call_attrs, call.type_args, call.span)
+
+#       print("-----------------------func--------------------")
+#       print(func)      
+#       # _Visitor().visit(func)
       
-      return func
+#       return _Visitor().visit(func)
+
+# def assignID(mod):
+#   class _Visitor(tvm.relay.ExprMutator):
+#     def __init__(self):
+#       super().__init__()
+#       self.Cnt = 0
+
+#     def visit_call(self, call):
+#       setattr(call, "CustomID", self.Cnt)
+#       return call
+  
+#   vis = _Visitor()
+#   for func_name in mod.functions:
+#     mod[func_name] = vis.visit(mod[func_name])
+#   return mod
+
+# def printID(mod):
+#   class _Visitor(tvm.relay.ExprVisitor):
+#     def visit_call(self, call):
+#       print(call.CustomID)
+#       super().visit_call(call)
+  
+#   vis = _Visitor()
+#   for func_name in mod.functions:
+#     vis.visit(mod[func_name])
+
+def constructIDDict(mod):
+  from tvm.relay.op.contrib.imcflow import IDDict
+  id_dict = IDDict()
+  class _Visitor(tvm.relay.ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.Cnt = 0
+
+    def visit_call(self, call):
+      id_dict[int(hash(call))] = self.Cnt
+      self.Cnt = self.Cnt + 1
+      super().visit_call(call)
+  
+  vis = _Visitor()
+  for func_name in mod.functions:
+    vis.visit(mod[func_name])
+  
+  return id_dict

@@ -148,56 +148,63 @@ def RunTestModel(name):
   eval_param_dict = param_dict
 
   # imcflow specific first phase
-  # ConvSplitToAtom = imcflow_transform.ConvSplitToAtom(eval_param_dict)
-  # transforms = tvm.transform.Sequential([ConvSplitToAtom])
-  # eval_mod = transforms(eval_mod)
-  # eval_param_dict = ConvSplitToAtom.NewParamDict
-  # printModel(eval_mod, eval_param_dict, "after_split")
+  ConvSplitToAtom = imcflow_transform.ConvSplitToAtom(eval_param_dict)
+  transforms = tvm.transform.Sequential([ConvSplitToAtom])
+  eval_mod = transforms(eval_mod)
+  eval_param_dict = ConvSplitToAtom.NewParamDict
+  printModel(eval_mod, eval_param_dict, "after_split")
 
-  # # bind params
-  # eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
-  # printModel(eval_mod, eval_param_dict, "after_bind")
+  # bind params
+  eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
+  printModel(eval_mod, eval_param_dict, "after_bind")
 
-  # # byoc pass
-  # eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_merge")
+  # byoc pass
+  eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_merge")
 
-  # SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(eval_mod["main"])
-  # eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
-  # eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  # eval_mod = transform.PartitionGraph()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_split_concat_partition")
+  SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(eval_mod["main"])
+  eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
+  eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  eval_mod = transform.PartitionGraph()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_split_concat_partition")
 
-  # AnnotGenerator = imcflow_transform.AnnotGenerator()
-  # AnnotGenerator(eval_mod)
-  # # print(AnnotGenerator.RegionList)
-  # eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_annot")
+  AnnotGenerator = imcflow_transform.AnnotGenerator()
+  AnnotGenerator(eval_mod)
+  # print(AnnotGenerator.RegionList)
+  eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_annot")
 
-  # eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_merge_region")
+  eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_merge_region")
 
-  # eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_clean_region")
+  eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_clean_region")
 
-  # eval_mod = transform.PartitionGraph()(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_partition_graph")
+  eval_mod = transform.PartitionGraph()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_partition_graph")
 
-  # eval_mod = imcflow.flattenSubgraphs(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_flatten")
+  eval_mod = imcflow.flattenSubgraphs(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_flatten")
 
-  # eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  # printModel(eval_mod, eval_param_dict, "after_prune_model")
+  eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
+  imcflow_transform.constructIDDict(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_prune_model")
 
-  # NodeMapper = imcflow_transform.NodeMapper()
-  # NodeMapper(eval_mod)
+  NodeMapper = imcflow_transform.NodeMapper()
+  NodeMapper(eval_mod)
+
+  PathListDict = imcflow_transform.getPathListDict(eval_mod, NodeMapper.MappingDict_2D)
+  for key, paths in PathListDict.items():
+    print(key)
+    for path in paths:
+      print(path)
+    
+    print("Merged Paths")
+    for merged_path in paths.Merged:
+      print(merged_path)
 
   # PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(NodeMapper.MappingDict_2D)
   # PolicyTableGenerator(eval_mod)
-
-  eval_mod = imcflow_transform.IDAssigner()(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_id_assign")
-  # print(PolicyTableGenerator.PathList)
 
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}

@@ -1527,3 +1527,14 @@ def flattenSubgraphs(mod):
     mod = transform.RemoveUnusedFunctions()(mod)
 
     return mod
+
+class IDDict(dict):
+  _instance = None
+
+  def __new__(cls, *args, **kwargs):
+    if cls._instance is None:
+      cls._instance = super(IDDict, cls).__new__(cls, *args, **kwargs)
+    return cls._instance
+
+  def __init__(self):
+    super().__init__()
