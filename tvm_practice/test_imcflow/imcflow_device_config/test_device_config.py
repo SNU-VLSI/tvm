@@ -21,18 +21,18 @@ def test_multicast_tensor_edge():
     assert str(multi_cast_edge) == "MultiCastTensorEdge(TensorID(1, idata), [TensorID(2, odata), TensorID(3, weight)], [None, 1])"
 
 def test_router_entry():
-    router_entry = RouterEntry(0, 100, {"key": "value"})
-    assert str(router_entry) == "RouterEntry(0, 100, {'key': 'value'})"
+    router_entry = RouterEntry(0, 100, {"Local": True, "North": None, "South": None, "East": None, "West": None})
+    assert str(router_entry) == "RouterEntry(0, 100, {'Local': True, 'North': None, 'South': None, 'East': None, 'West': None})"
 
 def test_tensor_edge_info():
     mem_info = DataBlock("block1", 1024)
     mem_info.set_offset(100)
     mem_info.set_base_address(200)
-    router_entry = RouterEntry(0, 100, {"key": "value"})
+    router_entry = RouterEntry(0, 100, {"Local": True, "North": None, "South": None, "East": None, "West": None})
     edge_info = TensorEdgeInfo([router_entry], mem_info, fifo_id=1)
-    assert str(edge_info) == "TensorEdgeInfo([RouterEntry(0, 100, {'key': 'value'})], DataBlock(block1, 1024, 200), 1)"
+    assert str(edge_info) == "TensorEdgeInfo([RouterEntry(0, 100, {'Local': True, 'North': None, 'South': None, 'East': None, 'West': None})], DataBlock(block1, 1024, 200), 1)"
 
-    new_router_entry = RouterEntry(1, 101, {"another_key": "another_value"})
+    new_router_entry = RouterEntry(1, 101, {"Local": None, "North": None, "South": None, "East": None, "West": None})
     edge_info.append_policy_info(new_router_entry)
     assert len(edge_info.PolicyInfo) == 2
 
