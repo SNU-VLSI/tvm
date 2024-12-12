@@ -9,7 +9,19 @@
     "regex": "cpp",
     "sstream": "cpp",
     "optional": "cpp",
-    "system_error": "cpp"
+    "system_error": "cpp",
+    "array": "cpp",
+    "deque": "cpp",
+    "forward_list": "cpp",
+    "list": "cpp",
+    "unordered_map": "cpp",
+    "unordered_set": "cpp",
+    "vector": "cpp",
+    "string_view": "cpp",
+    "initializer_list": "cpp",
+    "ranges": "cpp",
+    "span": "cpp",
+    "valarray": "cpp"
   },
   "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"
 }

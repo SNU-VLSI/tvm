@@ -7,6 +7,7 @@ from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
+from tvm.contrib.imcflow import ImcflowDeviceConfig
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import IDDict
 
@@ -33,7 +34,7 @@ class ConvSplitToAtom:
     def __init__(self, OldParamDict):
       self.OldParamDict = OldParamDict
       self.NewParamDict = {}
-    
+
     def transform_function(self, func, mod, ctx):
       RemoveTargets = []
       class _RedundantTupleRemover(tvm.relay.ExprMutator):
@@ -65,7 +66,7 @@ class ConvSplitToAtom:
         def removeParamVar(self, Var):
           self.DeleteArgs.append(Var)
           self.NewParamDict.pop(Var.name_hint)
-        
+
         def addParamVar(self, Var, Data):
           self.NewParamDict[Var.name_hint] = Data
           self.AddArgs.append(Var)
@@ -96,9 +97,9 @@ class ConvSplitToAtom:
           _, IC, IH, IW = _get_type(expr.args[0])  # Input shape
           OC, _, KH, KW = _get_type(expr.args[1])  # Kernel shape
 
-          if not ((KH == 1 and KW == 1) or (KH == 3 and KW == 3) or (KH == 5 and KW == 5) or (KH == 7 and KW == 7)):
+          if not ImcflowDeviceConfig.is_supported_kernel(KH, KW):
             return expr
-          
+
           for PostNode in PostProcess:
             assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm")], "Unsupported post process node"
 
@@ -123,7 +124,7 @@ class ConvSplitToAtom:
           # Split the input and weights
           ic_sections = [i*in_ch_limit for i in range(1, ic_split_num)]
           oc_sections = [i*out_ch_limit for i in range(1, oc_split_num)]
-          
+
           # input splitting
           split_inputs = relay.op.transform.split(expr.args[0], indices_or_sections=ic_sections, axis=1) if IsICSplited else [expr.args[0]]
 
@@ -209,7 +210,7 @@ class ConvSplitToAtom:
                     ParamOldName = PostNode.args[1].name_hint
                     ParamNewName = f"{ParamOldName}_oc{oc_id}"
                     ParamNewType = relay.TensorType([oc_size], dtype=PostNode.args[1].type_annotation.dtype)
-                    SplitParam = relay.Var(ParamNewName, ParamNewType) 
+                    SplitParam = relay.Var(ParamNewName, ParamNewType)
                     OldParam = self.OldParamDict[ParamOldName]
                     NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
                     self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
@@ -222,14 +223,14 @@ class ConvSplitToAtom:
                       ParamOldName = PostNode.args[i].name_hint
                       ParamNewName = f"{ParamOldName}_oc{oc_id}"
                       ParamNewType = relay.TensorType([oc_size], dtype=PostNode.args[i].type_annotation.dtype)
-                      SplitParam = relay.Var(ParamNewName, ParamNewType) 
+                      SplitParam = relay.Var(ParamNewName, ParamNewType)
                       OldParam = self.OldParamDict[ParamOldName]
                       NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
                       self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
                       NewParams.append(SplitParam)
                     # post_nodes[oc_id] = relay.TupleGetItem(relay.nn.batch_norm(post_nodes[oc_id], *NewParams), 0)
                     post_nodes[oc_id] = relay.nn.batch_norm(post_nodes[oc_id], *NewParams)[0]
-                  
+
               concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
           else:
               concat_node = add_nodes[0]
@@ -352,7 +353,7 @@ def getFirstInCalls(expr):
       if getNodeID(expr) != getNodeID(call):
         InCalls.append(call)
       super().visit_call(call)
-  
+
   _Visitor().visit(expr)
 
   pass
@@ -426,11 +427,11 @@ def getSplitConcatDepsRegions(func):
           OutNodes.clear()
           OutNodes.append(call)
           self.visit(a)
-    
+
     def visit_tuple(self, tup):
       OutNodes.append(tup)
       super().visit_tuple(tup)
-    
+
     def visit_tuple_getitem(self, t):
       OutNodes.append(t)
       super().visit_tuple_getitem(t)
@@ -492,7 +493,7 @@ def getSplitConcatDepsRegions(func):
           self.visit(a)
         InputNodes.clear()
         InputNodes.append(call)
-    
+
     def visit_tuple(self, tup):
       Nodes = []
       for x in tup.fields:
@@ -501,11 +502,11 @@ def getSplitConcatDepsRegions(func):
       InputNodes.clear()
       InputNodes.extend(Nodes)
       InputNodes.append(tup)
-    
+
     def visit_tuple_getitem(self, t):
       super().visit_tuple_getitem(t)
       InputNodes.append(t)
-    
+
   _SplitVisitor().visit(func)
   _ConcatVisitor().visit(func)
   Regions = []
@@ -516,7 +517,7 @@ def getSplitConcatDepsRegions(func):
         if v not in Region:
           Region.append(v)
     Regions.append(Region)
-  
+
   # merge region if intersection is not empty
   Changed=True
   while Changed:
@@ -542,18 +543,18 @@ def getInputNodes(expr, recursive=False):
         InNodes.append(arg)
       if recursive:
         super().visit_call(call)
-    
+
     def visit_tuple_getitem(self, op):
       InNodes.append(op.tuple_value)
       if recursive:
         super().visit_tuple_getitem(op)
-    
+
     def visit_tuple(self, op):
       for field in op.fields:
         InNodes.append(field)
       if recursive:
         super().visit_tuple(op)
-  
+
   if isinstance(expr, list):
     for node in expr:
       _Visitor().visit(node)
@@ -573,21 +574,21 @@ def getOutputNodes(expr, recursive=False):
           OutNodes.append(call)
       if recursive:
         super().visit_call(call)
-    
+
     def visit_tuple_getitem(self, op):
       OutNodes.append(op)
       if recursive:
         super().visit_tuple_getitem(op)
-    
+
     def visit_tuple(self, op):
       for field in op.fields:
         OutNodes.append(field)
       if recursive:
         super().visit_tuple(op)
-  
+
   _Visitor().visit(expr)
   return OutNodes
-      
+
 @relay.transform.function_pass(opt_level=0)
 class AnnotGenerator:
     def __init__(self):
@@ -595,7 +596,6 @@ class AnnotGenerator:
 
     def transform_function(self, func, mod, ctx):
       RegionList = []
-      IMCE_NUM = 16
 
       class _Annotator(tvm.relay.ExprVisitor):
         """
@@ -607,18 +607,18 @@ class AnnotGenerator:
           Region = []
           RegionList.append(Region)
           return Region
-        
+
         def addToRegion(self, Region, Node):
           if Node not in Region:
             Region.append(Node)
           return Region
-        
+
         def getRegionSize(self, Region):
           Cost = 0
           for Node in Region:
             Cost = Cost + self.getCost(Node)
           return Cost
-        
+
         def getRegion(self, Node):
           Regions = []
           if isinstance(Node, list):
@@ -633,7 +633,7 @@ class AnnotGenerator:
               if Node in Region:
                 return Region
             return None
-        
+
         def getCost(self, call):
           if not isinstance(call, Call):
              return 0
@@ -648,11 +648,11 @@ class AnnotGenerator:
               super().__init__()
               self.Cost = 0
               self.getCost = getCostFunc
-            
+
             def visit(self, expr):
               self.Cost = self.Cost + self.getCost(expr)
               super().visit(expr)
-            
+
             def visit_call(self, call):
               if isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"]):
                 self.visit(call.op)
@@ -661,15 +661,15 @@ class AnnotGenerator:
 
           if IsNoCostCall:
             return 0
-          
+
           if IsComposite or IsSupportedOp:
             return 1
-          
+
           if IsSuperNode:
             obj = _CostVisitor(self.getCost)
             obj.visit(mod[call.op].body)
             return obj.Cost
-        
+
         def visit_call(self, call):
           # post DFS search
           for a in call.args:
@@ -682,7 +682,7 @@ class AnnotGenerator:
 
           if IsComposite or IsSupportedOp or IsSuperNode:
             # check possibility
-            if self.getCost(call) > IMCE_NUM:
+            if self.getCost(call) > ImcflowDeviceConfig.IMCE_NUM:
               raise ValueError("Cost of node is too high")
 
             # get possible region list
@@ -699,16 +699,16 @@ class AnnotGenerator:
                     CandidateRegions.pop(InputRegion)
                   except:
                     pass
-            
+
             ## capacity check
             Deletes = []
             for CandidateRegion in CandidateRegions:
-              if self.getRegionSize(CandidateRegion) + self.getCost(call) > IMCE_NUM:
+              if self.getRegionSize(CandidateRegion) + self.getCost(call) > ImcflowDeviceConfig.IMCE_NUM:
                 Deletes.append(CandidateRegion)
             for Delete in Deletes:
               if Delete in CandidateRegions:
                 CandidateRegions.remove(Delete)
-            
+
             ## select region
             #TODO: select optimal region. curently, select first region
             if len(CandidateRegions) > 0:
@@ -716,13 +716,13 @@ class AnnotGenerator:
             else:
               Region = self.createRegion()
             Region = self.addToRegion(Region, call)
-            
+
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
           TupleValueRegion = self.getRegion(op.tuple_value)
           TupleValueRegion = self.addToRegion(TupleValueRegion, op)
           # TupleValueRegion = self.addToRegion(TupleValueRegion, -1)
-        
+
         def visit_tuple(self, op):
           super().visit_tuple(op)
 
@@ -740,14 +740,14 @@ class AnnotGenerator:
                   CandidateRegions.pop(InputRegion)
                 except:
                   pass
-          
+
           ## select region
           #TODO: select optimal region. curently, select first region
           if len(CandidateRegions) > 0:
             Region = CandidateRegions[0]
           else:
             Region = self.createRegion()
-          
+
           # add node to region
           Region = self.addToRegion(Region, op)
           # Region = self.addToRegion(Region, -1)
@@ -841,15 +841,10 @@ class ImcflowPathList(list):
 
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
-    def __init__(self, IMCE_NUM=16, INODE_NUM=4):
+    def __init__(self):
       self.MappingDict_2D = {}
-      self.IMCE_NUM = IMCE_NUM
-      self.INODE_NUM = INODE_NUM
 
     def transform_function(self, func, mod, ctx):
-      IMCE_NUM = self.IMCE_NUM
-      INODE_NUM = self.INODE_NUM
-      
       class _Nodemapper(tvm.relay.ExprVisitor):
         """
           Target Operators:
@@ -859,13 +854,13 @@ class NodeMapper:
         def __init__(self):
             super().__init__()
             self.MappingDict ={}
-            self.imce_index = IMCE_NUM - 1
-            self.inode_index = INODE_NUM - 1
-        
+            self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
+            self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
+
         def traverse_func(self, func):
-            self.visit(func)            
+            self.visit(func)
             return self.MappingDict
-        
+
         def visit_call(self, call):
           # post DFS search
           # traverse child node
@@ -877,7 +872,7 @@ class NodeMapper:
               last_child_mapping, _ = list(self.MappingDict.items())[-1][1]
           else:
               last_child_mapping = None
-                 
+
           #for debugging
           indicator = getNodeDebugID(call)
           # if hasattr(call.op, "attrs"):
@@ -908,14 +903,14 @@ class NodeMapper:
 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
-        
+
         def visit_tuple(self, op):
           super().visit_tuple(op)
 
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
       items = mod.functions_items()
       function_names = [item[0].name_hint for item in items]
-      
+
       num_func = len(function_names)
       for i in range(num_func):
         if function_names[i]=="main": continue
@@ -1109,17 +1104,11 @@ def getPathListDict(mod, MappingDict):
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
-    def __init__(self, MappingDict_2D, IMCE_NUM=16, INODE_NUM=4):
+    def __init__(self, MappingDict_2D):
       self.MappingDict_2D = MappingDict_2D
-      self.Policytable_2D = {}
-      self.IMCE_NUM = IMCE_NUM
-      self.INODE_NUM = INODE_NUM
-      self.PathList = None
+      self.PolicyTable_2D = {}
 
     def transform_function(self, func, mod, ctx):
-      IMCE_NUM = self.IMCE_NUM
-      INODE_NUM = self.INODE_NUM
-      
       class _PolicyTableGenerator(tvm.relay.ExprVisitor):
         """
           Target Operators:
@@ -1133,10 +1122,7 @@ class PolicyTableGenerator:
             self.PathDict = {} # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
             self.PathList = [] # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
             self.start_addr_dict = {}
-            self.IMCE_NUM = IMCE_NUM
-            self.INODE_NUM = INODE_NUM
-            import math
-            self.IMCE_NUM_SQRT = math.sqrt(self.IMCE_NUM)
+            self.IMCE_NUM_SQRT = math.sqrt(ImcflowDeviceConfig.IMCE_NUM)
             self.table_capacity = 16
             self.InSubFunction = False
             self.SubFunctionMapping = None
@@ -1145,9 +1131,9 @@ class PolicyTableGenerator:
 
         def generate_policy_table(self):
             # Initialize policy tables for all nodes
-            policy_tables = { f"imce_{i}": [] for i in range(self.IMCE_NUM) }
-            policy_tables.update({f"inode_{i}": [] for i in range(self.INODE_NUM)})
-            
+            policy_tables = { f"imce_{i}": [] for i in range(ImcflowDeviceConfig.IMCE_NUM) }
+            policy_tables.update({f"inode_{i}": [] for i in range(ImcflowDeviceConfig.INODE_NUM)})
+
             # Dictionary to store initial addresses for each source-index pair
             self.start_addr_dict = {}  # {(source, index): start_address}
 
@@ -1158,7 +1144,7 @@ class PolicyTableGenerator:
                     return f"inode_{coord[0]}"
 
                 return
-            
+
             def get_coordinates(node_name):
                 if "imce" in node_name:
                     idx = int(node_name.split('_')[1])
@@ -1166,7 +1152,7 @@ class PolicyTableGenerator:
                 else:  # inode
                     idx = int(node_name.split('_')[1])
                     return (idx, 0)
-            
+
             def get_direction(source_coord, dest_coord):
                 if source_coord[1] < dest_coord[1]:
                     return "East"
@@ -1183,9 +1169,9 @@ class PolicyTableGenerator:
                 for coord in path_coords:
                     node = get_mapped_node(coord)
                     if len(current_tables[node]) >= self.table_capacity:
-                        if coord in router_list: 
+                        if coord in router_list:
                             continue
-                        else: 
+                        else:
                             return False
                 return True
 
@@ -1197,7 +1183,7 @@ class PolicyTableGenerator:
                 if is_xy_routing:
                     # Move horizontally first (X)
                     while current_coord[1] != dest_coord[1]:
-                        next_coord = (current_coord[0], 
+                        next_coord = (current_coord[0],
                                     current_coord[1] + (1 if current_coord[1] < dest_coord[1] else -1))
                         path_coords.append(next_coord)
                         current_coord = next_coord
@@ -1222,16 +1208,16 @@ class PolicyTableGenerator:
                                     current_coord[1] + (1 if current_coord[1] < dest_coord[1] else -1))
                         path_coords.append(next_coord)
                         current_coord = next_coord
-                
+
                 # check policy table's capacity along the designated routing path
                 if not check_path_capacity(path_coords, policy_tables, router_list):
                     # If X-Y fails, try Y-X routing
                     path_coords = get_path_coords(source_coord, dest_coord, False)
                     if not check_path_capacity(path_coords, policy_tables, router_list):
                         raise ValueError("Routing failed for both X-Y and Y-X!")
-                
+
                 #TODO: there may be cases that X-Y and Y-X both fails!!!!!
-                      
+
                 return path_coords
 
             def handle_single_dest(source_node, dest_node, dest_index=None, router_list=None, init_addr_save=True):
@@ -1243,35 +1229,35 @@ class PolicyTableGenerator:
                     self.start_addr_dict[(source_node, dest_index)] = entry_addr
                 if source_coord == dest_coord: # if same node, return
                     return
-                
+
                 # Try X-Y routing first
                 path_coords = get_path_coords(source_coord, dest_coord)
                 if router_list is not None:
                     #if dest_index is provided, save all nodes along the path
                     router_list.extend(path_coords)
-                    
+
                 current_coord = source_coord
                 current_node = source_node
                 # Apply the successful path to tables
                 for next_coord in path_coords:
                     direction = get_direction(current_coord, next_coord)
                     next_node = get_mapped_node(next_coord)
-                    
+
                     entry = {"Local": None, "North": None, "South": None, "East": None, "West": None}
                     target_addr = len(policy_tables[next_node])
                     entry[direction] = target_addr
                     policy_tables[current_node].append(entry)
-                    
+
                     #switch to next node
                     current_coord = next_coord
                     current_node = get_mapped_node(current_coord)
-                    
+
                 # insert entry for destination node
                 entry = {"Local": True, "North": None, "South": None, "East": None, "West": None}
                 policy_tables[dest_node].append(entry)
 
                 return router_list
-                
+
             def handle_multi_dest(source_node, destinations):
                 """Handle multiple destinations with potential path sharing"""
                 router_list = {}
@@ -1280,7 +1266,7 @@ class PolicyTableGenerator:
                     dest_index = dest[2] if len(dest) > 2 else None  # Get index if it exists
                     if source_node == dest_node: # if same node, return
                         break
-                    
+
                     # check if there's previous path with same index
                     if (source_node, dest_index) in self.start_addr_dict:
                         # Follow existing path and modify at divergence point
@@ -1294,17 +1280,17 @@ class PolicyTableGenerator:
                             entry = policy_tables[current_node][entry_addr] # current policy table entry
 
                             # Find which direction to go next.
-                            path_coords = get_path_coords(current_coord, dest_coord, router_list[dest_index])                            
+                            path_coords = get_path_coords(current_coord, dest_coord, router_list[dest_index])
                             next_coord = path_coords[0]
                             next_node = get_mapped_node(next_coord)
                             direction = get_direction(current_coord, next_coord)
-                            
+
                             # If direction is different from previous path, diverge!
-                            if entry[direction] is None: 
+                            if entry[direction] is None:
                                 # modify entry
                                 target_addr = len(policy_tables[next_node])
                                 entry[direction] = target_addr
-                                # diverge into new path                                
+                                # diverge into new path
                                 router_list[dest_index] = handle_single_dest(current_node, dest_node, dest_index, router_list=router_list[dest_index], init_addr_save=False)
                                 break
                             else:
@@ -1329,17 +1315,17 @@ class PolicyTableGenerator:
                     handle_single_dest(source_node, destinations[0][1][0])
 
             self.Policytable = policy_tables
-            
+
         def traverse_func(self, func):
             # traverse input function by visit() to make PathDict and generate policy table for it
             self.visit(func)
-            self.generate_policy_table()            
+            self.generate_policy_table()
             return self.Policytable
         
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
       items = mod.functions_items()
       function_names = [item[0].name_hint for item in items]
-      
+
       num_func = len(function_names)
       for i in range(num_func):
         if function_names[i]=="main": continue

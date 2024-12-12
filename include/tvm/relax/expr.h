@@ -1042,6 +1042,8 @@ constexpr const char* kPrimitive = "Primitive";
 constexpr const char* kCodegen = "Codegen";
 /*! \brief Treat the function as a composite operator. */
 constexpr const char* kComposite = "Composite";
+/*! \brief Store the hash of the function. */
+constexpr const char* kHash = "hash";
 /*! \brief Indicate the function was created by the Pattern Partitioning Pass. */
 constexpr const char* kPartitionedFromPattern = "PartitionedFromPattern";
 /*! \brief The required workspace for an external function. */

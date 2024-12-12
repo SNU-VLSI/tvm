@@ -1,0 +1,351 @@
+{
+  "inodes": [
+    {
+      "metadata": {
+        "hid": 0,
+        "wid": 0
+      },
+      "memory_layout": [
+        {
+          "region": "Inst",
+          "region_base_address": 128,
+          "region_size": 1024,
+          "blocks": [
+            {
+              "name": "block_0",
+              "block_offset": 0,
+              "block_size": 1024
+            }
+          ]
+        },
+        {
+          "region": "Data",
+          "region_base_address": 1152,
+          "region_size": 65536,
+          "blocks": [
+            {
+              "name": "node_0_0_relu_send_data",
+              "block_offset": 0,
+              "block_size": 1024
+            },
+            {
+              "name": "policy_table_0_0",
+              "block_offset": 1024,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_0_1",
+              "block_offset": 1152,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_0_2",
+              "block_offset": 1280,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_0_3",
+              "block_offset": 1408,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_0_4",
+              "block_offset": 1536,
+              "block_size": 128
+            },
+            {
+              "name": "imce_inst_0_1",
+              "block_offset": 3072,
+              "block_size": 160
+            },
+            {
+              "name": "imce_inst_0_2",
+              "block_offset": 3232,
+              "block_size": 32
+            },
+            {
+              "name": "imce_inst_0_3",
+              "block_offset": 3264,
+              "block_size": 32
+            },
+            {
+              "name": "imce_inst_0_4",
+              "block_offset": 3296,
+              "block_size": 32
+            }
+          ]
+        }
+      ],
+      "code_blocks": [
+        {
+          "type": "AddPolicyUpdate",
+          "entries": [
+            {
+              "col_id": 0,
+              "data_block": "policy_table_0_0"
+            },
+            {
+              "col_id": 1,
+              "data_block": "policy_table_0_1"
+            },
+            {
+              "col_id": 2,
+              "data_block": "policy_table_0_2"
+            },
+            {
+              "col_id": 3,
+              "data_block": "policy_table_0_3"
+            },
+            {
+              "col_id": 4,
+              "data_block": "policy_table_0_4"
+            }
+          ]
+        },
+        {
+          "type": "AddCtrl",
+          "entries": [
+            {
+              "operation": "setflag",
+              "flag_value": 0
+            },
+            {
+              "operation": "halt"
+            }
+          ]
+        },
+        {
+          "type": "AddWriteIMEM",
+          "entries": [
+            {
+              "data_block": "imce_inst_0_1",
+              "policy_addr": 0
+            },
+            {
+              "data_block": "imce_inst_0_2",
+              "policy_addr": 1
+            },
+            {
+              "data_block": "imce_inst_0_3",
+              "policy_addr": 2
+            },
+            {
+              "data_block": "imce_inst_0_4",
+              "policy_addr": 3
+            }
+          ]
+        },
+        {
+          "type": "AddSend",
+          "entries": [
+            {
+              "data_block": "node_0_0_relu_send_data",
+              "policy_addr": 4,
+              "fifo_id": 1
+            }
+          ]
+        },
+        {
+          "type": "AddCtrl",
+          "entries": [
+            {
+              "operation": "setflag",
+              "flag_value": 1
+            },
+            {
+              "operation": "halt"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "metadata": {
+        "hid": 1,
+        "wid": 0
+      },
+      "memory_layout": [
+        {
+          "region": "Inst",
+          "region_base_address": 66688,
+          "region_size": 1024,
+          "blocks": [
+            {
+              "name": "block_0",
+              "block_offset": 0,
+              "block_size": 1024
+            }
+          ]
+        },
+        {
+          "region": "Data",
+          "region_base_address": 67712,
+          "region_size": 65536,
+          "blocks": [
+            {
+              "name": "node_1_0_relu_recv_data",
+              "block_offset": 0,
+              "block_size": 1024
+            },
+            {
+              "name": "policy_table_1_0",
+              "block_offset": 1024,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_1_1",
+              "block_offset": 1152,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_1_2",
+              "block_offset": 1280,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_1_3",
+              "block_offset": 1408,
+              "block_size": 128
+            },
+            {
+              "name": "policy_table_1_4",
+              "block_offset": 1536,
+              "block_size": 128
+            },
+            {
+              "name": "imce_inst_1_1",
+              "block_offset": 3072,
+              "block_size": 160
+            },
+            {
+              "name": "imce_inst_1_2",
+              "block_offset": 3232,
+              "block_size": 32
+            },
+            {
+              "name": "imce_inst_1_3",
+              "block_offset": 3264,
+              "block_size": 32
+            },
+            {
+              "name": "imce_inst_1_4",
+              "block_offset": 3296,
+              "block_size": 32
+            }
+          ]
+        }
+      ],
+      "code_blocks": [
+        {
+          "type": "AddPolicyUpdate",
+          "entries": [
+            {
+              "col_id": 0,
+              "data_block": "policy_table_1_0"
+            },
+            {
+              "col_id": 1,
+              "data_block": "policy_table_1_1"
+            },
+            {
+              "col_id": 2,
+              "data_block": "policy_table_1_2"
+            },
+            {
+              "col_id": 3,
+              "data_block": "policy_table_1_3"
+            },
+            {
+              "col_id": 4,
+              "data_block": "policy_table_1_4"
+            }
+          ]
+        },
+        {
+          "type": "AddCtrl",
+          "entries": [
+            {
+              "operation": "standby",
+              "flag_value": 0,
+              "target_id": 0
+            },
+            {
+              "operation": "done"
+            },
+            {
+              "operation": "interrupt"
+            },
+            {
+              "operation": "halt"
+            }
+          ]
+        },
+        {
+          "type": "AddWriteIMEM",
+          "entries": [
+            {
+              "data_block": "imce_inst_1_1",
+              "policy_addr": 0
+            },
+            {
+              "data_block": "imce_inst_1_2",
+              "policy_addr": 1
+            },
+            {
+              "data_block": "imce_inst_1_3",
+              "policy_addr": 2
+            },
+            {
+              "data_block": "imce_inst_1_4",
+              "policy_addr": 3
+            }
+          ]
+        },
+        {
+          "type": "AddRecv",
+          "entries": [
+            {
+              "data_block": "node_1_0_relu_recv_data",
+              "fifo_id": 1
+            }
+          ]
+        },
+        {
+          "type": "AddCtrl",
+          "entries": [
+            {
+              "operation": "standby",
+              "flag_value": 1,
+              "target_id": 0
+            },
+            {
+              "operation": "done"
+            },
+            {
+              "operation": "interrupt"
+            },
+            {
+              "operation": "halt"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "imces": [
+    {
+      "metadata": {
+        "hid": 0,
+        "wid": 1
+      },
+      "code_blocks": []
+    },
+    {
+      "metadata": {
+        "hid": 1,
+        "wid": 1
+      },
+      "code_blocks": []
+    }
+  ]
+}

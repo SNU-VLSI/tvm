@@ -1,15 +1,11 @@
 #ifndef TVM_RELAY_CONTRIB_DEVICE_CODEGEN_H_
 #define TVM_RELAY_CONTRIB_DEVICE_CODEGEN_H_
 
-#include <tvm/runtime/logging.h>
-
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
-
-#include "inode_codegen.h"
 
 namespace tvm {
 namespace relay {
@@ -32,7 +28,7 @@ class DeviceCodegen {
    * \param args The arguments for the operator.
    * \return The file path of the compiled shared library.
    */
-  void HandleDeviceCodeGeneration(const std::string& op_name, const std::vector<std::string>& args);
+  void HandleCodeGeneration(const std::string& op_name, const std::vector<std::string>& args);
 
  private:
   /*!
@@ -50,14 +46,14 @@ class DeviceCodegen {
    * \param op_name The name of the operator or function for naming the file.
    * \return The file path where the code was saved.
    */
-  std::string SaveCodeToFile(const std::string& code, const std::string& op_name,
-                             const std::string& target);
+  std::string SaveTargetCodeToFile(const std::string& code, const std::string& op_name,
+                                   const std::string& target);
   /*!
    * \brief Compile the target code using clang.
    * \param cpp_name The file path of the code to compile.
    * \return The file path of the compiled shared library.
    */
-  void CompileDeviceCode(const std::string& cpp_name, const std::string& target);
+  void CompileTargetCode(const std::string& cpp_name, const std::string& target);
   void CompileCppToObject(const std::string& cpp_name, const std::string& obj_file,
                           const std::string& hid, const std::string& wid);
   void LinkObjectToBinary(const std::string& obj_file, const std::string& out_file);

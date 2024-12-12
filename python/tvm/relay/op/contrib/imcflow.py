@@ -477,7 +477,7 @@ def pattern_table():
     #   ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
     #   ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
     #   ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
-      
+
     #   # 2
     #   ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
     #   ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
@@ -1345,7 +1345,7 @@ class ImcflowAnnotationPass:
                 return NewNode
               else:
                 return super().visit_tuple_getitem(op)
-            
+
             def visit_tuple(self, op):
               if RegionNum := getRegion(op):
                 NewFields = []
@@ -1363,7 +1363,7 @@ class ImcflowCleanRegionTag:
         class _Mutator(tvm.relay.ExprMutator):
             def visit_call(self, call):
               if hasattr(call.op, "name") and (call.op.name == "annotation.compiler_begin" or call.op.name == "annotation.compiler_end"):
-                if re.match(r"imcflow_region\d+", call.attrs.compiler): 
+                if re.match(r"imcflow_region\d+", call.attrs.compiler):
                   if call.op.name == "annotation.compiler_begin":
                     return compiler_begin(super().visit(call.args[0]), "imcflow")
                   elif call.op.name == "annotation.compiler_end":
@@ -1492,7 +1492,7 @@ def flattenSubgraphs(mod):
         def visit_call(self, call):
             if isinstance(call.op, GlobalVar):
                 name = call.op.name_hint
-                if "imcflow" in name: 
+                if "imcflow" in name:
                     self.subgraph_calls.append(name)
             for arg in call.args:
               self.visit(arg)
@@ -1522,7 +1522,7 @@ def flattenSubgraphs(mod):
           return super().visit_call(call)
     for func_name in TopImcflowFuncs:
       mod[func_name] = SubgraphFlatter().visit(mod[func_name])
-    
+
     # remove unused functions
     mod = transform.RemoveUnusedFunctions()(mod)
 

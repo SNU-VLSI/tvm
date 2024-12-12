@@ -55,7 +55,7 @@ def buildAndRun(name, mod, data_dict, param_dict):
 
   dev = tvm.cpu()
   Executor_ = Executor("graph")
-  Runtime_  = Runtime("cpp") 
+  Runtime_  = Runtime("cpp")
 
   # build
   with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
@@ -65,7 +65,7 @@ def buildAndRun(name, mod, data_dict, param_dict):
 
   mod.export_library(f"{name}.so")
   lib = tvm.runtime.load_module(f"{name}.so")
-  
+
   gmod = tvm.contrib.graph_executor.GraphModule(lib["default"](dev))
   gmod.set_input(**data_dict)
   gmod.run()
@@ -165,21 +165,24 @@ def RunTestModel(name):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_prune_model")
 
+  # eval_mod = imcflow.clear_compiler_tag(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_clear_tag_model")
+
   # # Run
-  # dtype="float32"
-  # input_dict = {
-  #     k: np.random.uniform(-1, 1, v).astype(dtype)
-  #     for k, v in shape_dict.items()
-  # }
+  dtype="float32"
+  input_dict = {
+      k: np.random.uniform(-1, 1, v).astype(dtype)
+      for k, v in shape_dict.items()
+  }
 
-  # Data1 = buildAndRun(TestName+"_ref", irmod, input_dict, param_dict)
-  # Data2 = buildAndRun(TestName+"_evl", eval_mod, input_dict, eval_param_dict)
-  # tvm.testing.assert_allclose(Data1.numpy(), Data2.numpy(), rtol=1e-3, atol=1e-3)
+  Data1 = buildAndRun(TestName+"_ref", irmod, input_dict, param_dict)
+  Data2 = buildAndRun(TestName+"_evl", eval_mod, input_dict, eval_param_dict)
+  tvm.testing.assert_allclose(Data1.numpy(), Data2.numpy(), rtol=1e-3, atol=1e-3)
 
-  # # clean
-  # os.system("rm " + f"{TestName}_ref.so " + f"{TestName}_evl.so")
-  # with open(f"{TestName}/good.txt", "w") as f:
-  #   f.write("good")
+  # clean
+  os.system("rm " + f"{TestName}_ref.so " + f"{TestName}_evl.so")
+  with open(f"{TestName}/good.txt", "w") as f:
+    f.write("good")
 
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}

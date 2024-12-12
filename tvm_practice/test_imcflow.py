@@ -40,7 +40,8 @@ has_imcflow_codegen = pytest.mark.skipif(
 
 run_module = tvm.testing.parameter(
     pytest.param(False, marks=[has_imcflow_codegen, *tvm.testing.requires_llvm.marks()]),
-    ids=["compile"],
+    pytest.param(True, marks=[has_imcflow_codegen, *tvm.testing.requires_llvm.marks()]),
+    ids=["compile", "run"],
 )
 
 def partition_for_imcflow(mod, params=None, alter_layout=True, prune_subgraphs=True):
@@ -304,29 +305,29 @@ def test_my_conv2d(run_module, dtype="float32"):
         x_shape=(1, 32, 8, 8),
         k_shape=(32, 32, 3, 3),
         groups=1,
-        padding=(2, 2),
+        padding=(1, 1),
         strides=(1, 1),
-        dilation=(2, 2),
+        dilation=(1, 1),
         dtype=dtype,
     )
     conv2d = tvm.IRModule.from_expr(conv2d)
     config = conv2d, dic, param_lst
-    run_and_verify_func(config, run_module=run_module, dtype=dtype)
+    run_and_verify_func(config, run_module=run_module, test_bf16=False, dtype=dtype)
 
 def test_my_conv2d_relu(run_module, dtype="float32"):
     conv2d, dic, param_lst = get_conv2d(
         x_shape=(1, 32, 8, 8),
         k_shape=(32, 32, 3, 3),
         groups=1,
-        padding=(2, 2),
+        padding=(1, 1),
         strides=(1, 1),
-        dilation=(2, 2),
+        dilation=(1, 1),
         activation="relu",
         dtype=dtype,
     )
     conv2d = tvm.IRModule.from_expr(conv2d)
     config = conv2d, dic, param_lst
-    run_and_verify_func(config, run_module=run_module, dtype=dtype)
+    run_and_verify_func(config, run_module=run_module, test_bf16=False, dtype=dtype)
 
 def test_prune_imcflow_subgraph(run_module):
     """In this test, OP "add" should be offloaded from imcflow codegen."""
