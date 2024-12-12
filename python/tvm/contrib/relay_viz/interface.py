@@ -254,6 +254,11 @@ class DefaultVizParser(VizParser):
         else:
             op_name = str(type(node.op)).split(".")[-1].split("'")[0]
 
+        if hasattr(node, "CustomID"):
+          node_detail.append(f"CustomID : {node.CustomID}")
+        else:
+          node_detail.append(f"CustomID : NoID")
+
         # Arguments -> CallNode
         viz_node = VizNode(node_id, f"Call {op_name}", "\n".join(node_detail))
         args = [node_to_id[arg] for arg in node.args]

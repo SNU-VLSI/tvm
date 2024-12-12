@@ -833,6 +833,7 @@ class PolicyTableGenerator:
       self.Policytable_2D = {}
       self.IMCE_NUM = IMCE_NUM
       self.INODE_NUM = INODE_NUM
+      self.PathList = None
 
     def transform_function(self, func, mod, ctx):
       IMCE_NUM = self.IMCE_NUM
@@ -849,12 +850,17 @@ class PolicyTableGenerator:
             self.MappingDict = MappingDict
             self.Policytable = []
             self.PathDict = {} # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
+            self.PathList = [] # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
             self.start_addr_dict = {}
             self.IMCE_NUM = IMCE_NUM
             self.INODE_NUM = INODE_NUM
             import math
             self.IMCE_NUM_SQRT = math.sqrt(self.IMCE_NUM)
             self.table_capacity = 16
+            self.InSubFunction = False
+            self.SubFunctionMapping = None
+            self.SubFunctionNodeID = None
+            self.VarProperties = {}
 
         def generate_policy_table(self):
             # Initialize policy tables for all nodes
@@ -1046,43 +1052,151 @@ class PolicyTableGenerator:
         def traverse_func(self, func):
             # traverse input function by visit() to make PathDict and generate policy table for it
             self.visit(func)
+            return self.PathList
             self.generate_policy_table()            
             return self.Policytable
+        
+        def getInputNodeProperties(self, node):
+          if isinstance(node, Call):
+            source_id = int(hash(node))
+            source_mapping = self.MappingDict[source_id]
+            return [(source_mapping, source_id)]
+          elif isinstance(node, Tuple):
+            result = []
+            for b in node.fields:
+              source_id = int(hash(b))
+              source_mapping = self.MappingDict[source_id]
+              result.append((source_mapping, source_id))
+            return result
+          elif isinstance(node, TupleGetItem):
+              source_id = int(hash(node.tuple_value))
+              source_mapping = self.MappingDict[source_id]
+              return [(source_mapping, source_id, node.index)]
+          elif isinstance(node, Var):
+              source_mapping = 'inode_placeholder'
+              return [(source_mapping, -1)]
+          elif isinstance(node, Constant):
+              source_mapping = 'inode_placeholder'
+              return [(source_mapping, -1)]
+        
+        def getInodePlaceHolderInputProperty(self):
+          return [('inode_placeholder', -1)]
+        
+        def appendToPathList(self, SrcNodeProperties, DstNodeProperty, tag):
+          if isinstance(SrcNodeProperties, list):
+            if len(SrcNodeProperties) > 1: # tuple case
+              for SrcNodeProperty in SrcNodeProperties:
+                self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag)
+            else:
+              SrcNodeProperty = SrcNodeProperties[0]
+              self.appendToPathList(SrcNodeProperty, DstNodeProperty, tag)
+          else:
+            SrcNodeProperty = SrcNodeProperties
+            if len(SrcNodeProperty) == 3: # from split
+              NewSrcNodeProperty = (SrcNodeProperty[0], SrcNodeProperty[1])
+              NewDstNodeProperty = (DstNodeProperty[0], DstNodeProperty[1], SrcNodeProperty[2])
+              self.PathList.append((NewSrcNodeProperty, NewDstNodeProperty, tag))
+            else:
+              self.PathList.append((SrcNodeProperty, DstNodeProperty, tag))
+        
+        def visit_function(self, fn):
+          if self.InSubFunction:
+            self.VarProperties = {}
+            for x in fn.params:
+              self.VarProperties[x] = {}
+              self.visit(x)
+            self.visit(fn.body)
+          else:
+            super().visit_function(fn)
 
         def visit_call(self, call):
             current_node_id = int(hash(call))  # Unique identifier for the current node
-            current_mapping = self.MappingDict[current_node_id]
+            current_mapping = self.MappingDict[current_node_id] if not self.InSubFunction else self.SubFunctionMapping
+            DstNodeProperty = (current_mapping, current_node_id) if not self.InSubFunction else (current_mapping, (self.SubFunctionNodeID, current_node_id))
 
             if current_mapping is None:
                 return  # Skip nodes not included in the mapping
-            
-            # register paths into PathDict
-            for a in call.args:
-                if isinstance(a, Call):
-                  source_id = int(hash(a))
-                  source_mapping = self.MappingDict[source_id]
-                  if (source_id, source_mapping) in self.PathDict:
-                      self.PathDict[(source_id, source_mapping)].append((current_node_id, current_mapping))
-                  else:
-                      self.PathDict[(source_id, source_mapping)] = [(current_node_id, current_mapping)]
-                elif isinstance(a, Tuple):
-                  for b in a.fields:
-                    source_id = int(hash(b))
-                    source_mapping = self.MappingDict[source_id]
-                    if (source_id, source_mapping) in self.PathDict:
-                        self.PathDict[(source_id, source_mapping)].append((current_node_id, current_mapping))
-                    else:
-                        self.PathDict[(source_id, source_mapping)] = [(current_node_id, current_mapping)]
-                elif isinstance(a, TupleGetItem):
-                    source_id = int(hash(a.tuple_value))
-                    source_mapping = self.MappingDict[source_id]
-                    #For TupleGetItem, save pair with index for further path generation
-                    if (source_id, source_mapping) in self.PathDict:
-                        self.PathDict[(source_id, source_mapping)].append((current_node_id, current_mapping, a.index))
-                    else:
-                        self.PathDict[(source_id, source_mapping)] = [(current_node_id, current_mapping, a.index)]
-                else: continue
 
+            IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
+            IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+
+            if not IsComposite and not IsSupportedOp:
+              raise ValueError("Unsupported operator detected. please check.")
+
+            # visit composite function
+            # we will collect Var Nodes usage and its properties
+            def _processInputNode(InputNode, CheckFunc, tag, DstNodeProperty_=None):
+              DstNodeProperty_ = DstNodeProperty if DstNodeProperty_ is None else DstNodeProperty_
+              if not self.InSubFunction:
+                InputNodeProperty = self.getInputNodeProperties(InputNode)
+                if not CheckFunc(InputNodeProperty):
+                  return False
+                self.appendToPathList(InputNodeProperty, DstNodeProperty_, tag)
+                return True
+              else:
+                 if isinstance(InputNode, Var):
+                    self.VarProperties[InputNode]["tag"] = tag
+                    self.VarProperties[InputNode]["dst_property"] = DstNodeProperty_
+
+            if IsComposite:
+              self.InSubFunction = True
+              self.SubFunctionMapping = current_mapping
+              self.SubFunctionNodeID = current_node_id
+              self.visit(call.op)
+              self.InSubFunction = False
+              ParamToArg = {x: y for x, y in zip(call.op.params, call.args)}
+              for var, arg in ParamToArg.items():
+                # print(f"var: {var}, arg: {arg}, var_properties: {self.VarProperties[var]}")
+                _processInputNode(arg, lambda x: len(x) == 1, self.VarProperties[var]["tag"], self.VarProperties[var]["dst_property"])
+            elif IsSupportedOp:
+              if call.op == op.get("split"):
+                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+                # InputNodeProperty = self.getInputNodeProperties(call.args[0])
+                # assert len(InputNodeProperty) == 1, "Split should have only one input node"
+                # self.appendToPathList(InputNodeProperty, DstNodeProperty, "data")
+              if call.op == op.get("concatenate"):
+                _processInputNode(call.args[0], lambda x: len(x) > 1, "data")
+                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
+                # assert len(InputNodeProperties) > 1, "Concatenate should have more than one input node"
+                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
+              if call.op == op.get("nn.conv2d"):
+                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
+                # assert len(InputNodeProperties) == 1, "Conv2d should have only one input node"
+                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
+                InputNodeProperties = self.getInputNodeProperties(call.args[1])
+                assert len(InputNodeProperties) == 1, "Conv2d should have only one weight node"
+                self.appendToPathList(InputNodeProperties, DstNodeProperty, "weight")
+              if call.op == op.get("nn.bias_add"):
+                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
+                # assert len(InputNodeProperties) == 1, "Bias_add should have only one input node"
+                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
+                InputNodeProperties = self.getInputNodeProperties(call.args[1])
+                assert len(InputNodeProperties) == 1, "Bias_add should have only one bias node"
+                self.appendToPathList(InputNodeProperties, DstNodeProperty, "bias")
+              if call.op == op.get("nn.batch_norm"):
+                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
+                # assert len(InputNodeProperties) == 1, "Batch_norm should have only one input node"
+                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
+                self.appendToPathList(self.getInodePlaceHolderInputProperty(), DstNodeProperty, "scale")
+                self.appendToPathList(self.getInodePlaceHolderInputProperty(), DstNodeProperty, "bias")
+              if call.op == op.get("nn.relu"):
+                _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
+                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
+                # assert len(InputNodeProperties) == 1, "Relu should have only one input node"
+                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data")
+              if call.op == op.get("add"):
+                _processInputNode(call.args[0], lambda x: len(x) == 1, "data0")
+                # InputNodeProperties = self.getInputNodeProperties(call.args[0])
+                # assert len(InputNodeProperties) == 1, "Add should have only one input node"
+                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data0")
+                _processInputNode(call.args[1], lambda x: len(x) == 1, "data1")
+                # InputNodeProperties = self.getInputNodeProperties(call.args[1])
+                # assert len(InputNodeProperties) == 1, "Add should have only one input node"
+                # self.appendToPathList(InputNodeProperties, DstNodeProperty, "data1")
+            
             #Pre DFS search: Traverse child nodes
             for a in call.args:
                 self.visit(a)
@@ -1102,6 +1216,28 @@ class PolicyTableGenerator:
         if function_names[i]=="main": continue
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
           self.Policytable_2D[function_names[i]] = _PolicyTableGenerator(self.MappingDict_2D[function_names[i]]).traverse_func(mod[function_names[i]])
+          for x in self.Policytable_2D[function_names[i]]:
+            print(x)
 
       # # find all regions
       return func 
+
+@relay.transform.function_pass(opt_level=0)
+class IDAssigner:
+    def transform_function(self, func, mod, ctx):
+      class _Visitor(tvm.relay.ExprVisitor):
+        def __init__(self):
+          super().__init__()
+          self.Cnt = 0
+
+        def visit_call(self, call):
+          setattr(call, "CustomID", self.Cnt)
+          print(call.CustomID)
+          self.Cnt = self.Cnt + 1
+          super().visit_call(call)
+
+      print("-----------------------func--------------------")
+      print(func)      
+      _Visitor().visit(func)
+      
+      return func
