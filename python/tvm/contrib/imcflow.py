@@ -29,16 +29,13 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 
-  HWNodeMap = {}
-  TensorIDtoEdge = {}
-  TensorEdgetoInfo = {}
-  _instance = None
-
   def __new__(cls, *args, **kwargs):
-    if cls._instance is None:
-      cls._instance = super(ImcflowDeviceConfig, cls).__new__(
-          cls, *args, **kwargs)
-      cls._instance.mem_layout = MemoryLayout(
+    if not hasattr(cls, "instance"):
+      cls.instance = super(ImcflowDeviceConfig, cls).__new__(cls)
+      cls.instance.HWNodeMap = {}
+      cls.instance.TensorIDtoEdge = {}
+      cls.instance.TensorEdgetoInfo = {}
+      cls.instance.mem_layout = MemoryLayout(
           MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
           MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
           MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
@@ -49,38 +46,32 @@ class ImcflowDeviceConfig:
           MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
           MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
       )
-    return cls._instance
+    return cls.instance
 
   def __init__(self):
     pass
 
-  @staticmethod
+  @ staticmethod
   def is_supported_kernel(KH, KW):
     return (KH, KW) in {(1, 1), (3, 3), (5, 5), (7, 7)}
 
-  @classmethod
-  def add_hw_node(cls, graph_node_id, hwnode_id):
-    cls.HWNodeMap[graph_node_id] = hwnode_id
+  def add_hw_node(self, graph_node_id, hwnode_id):
+    self.HWNodeMap[graph_node_id] = hwnode_id
 
-  @classmethod
-  def get_hw_node(cls, graph_node_id):
-    return cls.HWNodeMap.get(graph_node_id, None)
+  def get_hw_node(self, graph_node_id):
+    return self.HWNodeMap.get(graph_node_id, None)
 
-  @classmethod
-  def add_tensor_edge(cls, tensor_id, tensor_edge):
-    cls.TensorIDtoEdge[tensor_id] = tensor_edge
+  def add_tensor_edge(self, tensor_id, tensor_edge):
+    self.TensorIDtoEdge[tensor_id] = tensor_edge
 
-  @classmethod
-  def get_tensor_edge(cls, tensor_id):
-    return cls.TensorIDtoEdge.get(tensor_id, None)
+  def get_tensor_edge(self, tensor_id):
+    return self.TensorIDtoEdge.get(tensor_id, None)
 
-  @classmethod
-  def add_tensor_edge_info(cls, tensor_edge, tensor_edge_info):
-    cls.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
+  def add_tensor_edge_info(self, tensor_edge, tensor_edge_info):
+    self.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
 
-  @classmethod
-  def get_tensor_edge_info(cls, tensor_edge):
-    return cls.TensorEdgetoInfo.get(tensor_edge, None)
+  def get_tensor_edge_info(self, tensor_edge):
+    return self.TensorEdgetoInfo.get(tensor_edge, None)
 
 
 class DataBlock:
