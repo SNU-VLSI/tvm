@@ -73,10 +73,10 @@ class TensorID:
 
   def __str__(self):
     return f"TensorID({self.graph_node_id}, {self.tensor_type})"
-  
+
   def __eq__(self, other):
     return isinstance(other, TensorID) and self.graph_node_id == other.graph_node_id and self.tensor_type == other.tensor_type
-  
+
   def __hash__(self) -> int:
     return hash((self.graph_node_id, self.tensor_type))
 
@@ -89,7 +89,7 @@ class TensorEdge:
 
   def __str__(self):
     return f"TensorEdge({self.src_id}, {self.dst_id}, {self.split_idx})"
-  
+
   def __repr__(self):
     return self.__str__()
 
@@ -245,13 +245,10 @@ class ImcflowDeviceConfig:
           MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
           MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
       )
-<<<<<<< HEAD
-=======
       cls.instance.TensorEdgeList = []
       cls.instance.TensorEdgeListDict = {}
       cls.instance.ActiveIMCEPerFunc = {}
       cls.instance.NoCPaths = {}
->>>>>>> origin/path_pair
     return cls.instance
 
   def __init__(self):
@@ -278,10 +275,3 @@ class ImcflowDeviceConfig:
 
   def get_tensor_edge_info(self, tensor_edge: TensorEdge):
     return self.TensorEdgetoInfo.get(tensor_edge, None)
-HWNodeMap = {}
-TensorEdgeList = []
-TensorEdgeListDict = {}
-TensorIDtoEdge = {}
-TensorEdgetoInfo = {}
-ActiveIMCEPerFunc = {}
-NoCPaths = {}
