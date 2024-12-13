@@ -19,7 +19,7 @@ from typing import Tuple, List, Dict, Union
 from enum import Enum
 
 
-class Node(Enum):
+class NodeID(Enum):
   inode_0 = 0
   imce_0 = 1
   imce_1 = 2
@@ -42,36 +42,46 @@ class Node(Enum):
   imce_15 = 19
 
   @staticmethod
-  def from_coord(x: int, y: int) -> 'Node':
-    """Returns the Node corresponding to a 2D coordinate."""
+  def from_coord(x: int, y: int) -> 'NodeID':
+    """Returns the NodeID corresponding to a 2D coordinate."""
     value = x * ImcflowDeviceConfig.NODE_COL_NUM + y
-    for node in Node:
+    for node in NodeID:
       if node.value == value:
         return node
     raise ValueError(f"No Node found for coordinate ({x}, {y})")
-  
+
   @staticmethod
-  def from_inode_coord(x:int) -> 'Node':
-    return Node(ImcflowDeviceConfig.NODE_COL_NUM*x)
-  
+  def from_inode_coord(x:int) -> 'NodeID':
+    return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x)
+
   @staticmethod
-  def from_imce_coord(x:int, y:Union[None|int]=None) -> 'Node':
+  def from_imce_coord(x:int, y:Union[None|int]=None) -> 'NodeID':
     if y is None:
       ImceHeight = x//ImcflowDeviceConfig.IMCE_W_NUM
       ImceWidth = x%ImcflowDeviceConfig.IMCE_W_NUM
-      return Node(ImcflowDeviceConfig.NODE_COL_NUM*ImceHeight + (ImceWidth+1))
+      return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*ImceHeight + (ImceWidth+1))
     else:
-      return Node(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
-  
+      return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
+
   def is_inode(self) -> bool:
     return self.value % ImcflowDeviceConfig.NODE_COL_NUM == 0
-  
+
   def is_imce(self) -> bool:
     return not self.is_inode()
 
   def to_coord(self) -> tuple:
     """Converts this node to its 2D coordinate."""
     return divmod(self.value, ImcflowDeviceConfig.NODE_COL_NUM)
+
+  def slaves(self) -> List['NodeID']:
+    """Returns a list of imces that are slaved to this inode."""
+    assert self.is_inode(), "Only inode nodes have slaves"
+    return [NodeID(self.value + i) for i in range(1, ImcflowDeviceConfig.NODE_COL_NUM)]
+
+  def master(self) -> 'NodeID':
+    """Returns the inode that is master to this imce."""
+    assert self.is_imce(), "Only imce nodes have master"
+    return NodeID(self.value - self.value % ImcflowDeviceConfig.NODE_COL_NUM)
 
 
 class TensorID:
@@ -234,6 +244,7 @@ class TensorEdgeInfo(EdgeInfo):
 
 class ImcflowDeviceConfig:
   """Imcflow config class"""
+  NODE_COL_NUM = 5
   INODE_NUM = 4
   IMCE_H_NUM = 4
   IMCE_W_NUM = 4
@@ -253,7 +264,7 @@ class ImcflowDeviceConfig:
       cls.instance.TensorEdgeList = []   # list of tensor edges
       cls.instance.TensorEdgeListDict = {}  # maps func to list of tensor edges
       cls.instance.PolicyTableDict = {}  # maps hw_node_id to policy table entries
-      cls.instance.InstEdgeDict = {}  # maps hw_node_id to inst_edge_info
+      cls.instance.InstEdgeInfoDict = {}  # maps hw_node_id to inst_edge_info
       cls.instance.MemLayout = MemoryLayout(
           MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
           MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),

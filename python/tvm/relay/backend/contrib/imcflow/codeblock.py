@@ -10,9 +10,9 @@ class CodeBlockBase(metaclass=ABCMeta):
 
 class PolicyUpdateCodeBlock(CodeBlockBase):
   """ Code block for updating policy table for given inode's hw node id  """
-  def __init__(self, tensor_edge: TensorEdge):
-    self.tensor_edge = tensor_edge
-    ImcflowDeviceConfig().PolicyTalbeDict
+  def __init__(self, inode: NodeID):
+    for imce in inode.slaves():
+      policytabledict = ImcflowDeviceConfig.PolicyTableDict[imce]
 
 
   def generate(self) -> str:
@@ -31,7 +31,7 @@ class PolicyUpdateCodeBlock(CodeBlockBase):
 
 # for op:
 #   if op == "relu":
-#     codeblocks.append(PolicyUpdateBlock(TensorEdge()))
+#     codeblocks.append(PolicyUpdateBlock(Node.inode_0))
 #     codeblocks.append(CtrlBlock())
 #     codeblocks.append(Conv2dBlock())
 

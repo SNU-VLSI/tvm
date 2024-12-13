@@ -7,7 +7,7 @@ from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
-from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, Node
+from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
@@ -810,8 +810,8 @@ class NodeMapper:
           #   indicator = call.op.attrs["Composite"]
           # else:
           #   indicator = call.op
-          
-          # check if this node is 
+
+          # check if this node is
           IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
           IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
           if IsConcat:
@@ -821,7 +821,7 @@ class NodeMapper:
               # self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
           elif IsSplit:
               if last_child_mapping is None:
-                  self.MappingDict[getNodeID(call)] = Node.from_inode_coord(self.inode_index)
+                  self.MappingDict[getNodeID(call)] = NodeID.from_inode_coord(self.inode_index)
                   # self.MappingDict[getNodeID(call)] = f"inode_{self.inode_index}"
                   # self.MappingDict[int(hash(call))] = (f"inode_{self.inode_index}", indicator)
                   self.inode_index -= 1
@@ -829,7 +829,7 @@ class NodeMapper:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = last_child_mapping
           else:
-              self.MappingDict[getNodeID(call)] = Node.from_imce_coord(self.imce_index)
+              self.MappingDict[getNodeID(call)] = NodeID.from_imce_coord(self.imce_index)
               # self.MappingDict[getNodeID(call)] = f"imce_{self.imce_index}"
               self.imce_index -= 1
               # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
@@ -850,7 +850,7 @@ class NodeMapper:
           # _Nodemapper().visit(mod["main"])
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
           self.MappingDict.update(_Nodemapper().traverse_func(mod[function_names[i]]))
-      
+
       ImcflowDeviceConfig().HWNodeMap = self.MappingDict
 
       # # find all regions
@@ -889,19 +889,19 @@ def constructTensorEdgeList(mod):
           return getNodeID(node)
       elif isinstance(node, Constant):
           return getNodeID(node)
-    
+
     def getInputGraphNodeSplitIndex(self, node):
       if isinstance(node, TupleGetItem):
         return node.index
       else:
         return None
-    
+
     # def getInodePlaceHolderInputVar(self):
     #   return TensorIDPair(VAR_NODE_ID, 'inode_placeholder')
 
     # def getInodePlaceHolderInputConstant(self):
     #   return TensorIDPair(CONST_NODE_ID, 'inode_placeholder')
-    
+
     def appendToTensorEdgeList(self, SrcGraphNodeIDs, DstGraphNodeID, SrcTag, DstTag, SplitIdx=None):
       if isinstance(SrcGraphNodeIDs, list):
         for SrcGraphNodeID in SrcGraphNodeIDs:
@@ -915,7 +915,7 @@ def constructTensorEdgeList(mod):
         )
       else:
         raise ValueError("Invalid input tensor id pair")
-    
+
     def visit_function(self, fn):
       if self.InSubFunction:
         self.VarProperties = {}
@@ -968,7 +968,7 @@ def constructTensorEdgeList(mod):
           ParamToArg = {x: y for x, y in zip(call.op.params, call.args)}
           for var, arg in ParamToArg.items():
             # print(f"var: {var}, arg: {arg}, var_properties: {self.VarProperties[var]}")
-            _processInputNode(arg, self.VarProperties[var]["src_tag"], 
+            _processInputNode(arg, self.VarProperties[var]["src_tag"],
                               self.VarProperties[var]["dst_graph_node_id"], self.VarProperties[var]["dst_tag"],
                               self.getInputGraphNodeSplitIndex(arg))
         elif IsSupportedOp:
@@ -1006,21 +1006,21 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[1], "odata", DstGraphNodeID, "idata1", self.getInputGraphNodeSplitIndex(call.args[1]))
             # _processInputNode(call.args[0], lambda x: len(x) == 1, "data0")
             # _processInputNode(call.args[1], lambda x: len(x) == 1, "data1")
-        
+
         #Pre DFS search: Traverse child nodes
         for a in call.args:
             self.visit(a)
 
     def visit_tuple_getitem(self, op):
       super().visit_tuple_getitem(op)
-    
+
     def visit_tuple(self, op):
       super().visit_tuple(op)
-    
+
     def getTensorEdgeList(self, func_name, func):
       self.visit(func)
       return self.TensorEdgeList
-    
+
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif func.attrs["Compiler"]=="imcflow":
@@ -1061,7 +1061,7 @@ def constructNoCPathDict(mod):
           # if "inode" not in DstHwNodeID:
           if not DstHwNodeID.is_inode():
             # DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
-            InodeID = Node.from_inode_coord(Node.to_coord(DstHwNodeID)[0])
+            InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
             # InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
             # NocPaths[func_name_var.name_hint].append(
             #   (InodeID, DstHwNodeID, SplitIdx)
@@ -1078,10 +1078,10 @@ def constructNoCPathDict(mod):
           #   (HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)], HwMapping[getFlagNodeID(DstTensorID.graph_node_id)], SplitIdx)
           # )
 
-      for ActiveIMCE in ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint]: 
+      for ActiveIMCE in ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint]:
         DstHwNodeID = ActiveIMCE
         # DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
-        InodeID = Node.from_inode_coord(Node.to_coord(DstHwNodeID)[0])
+        InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
         # InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
         NocPaths[func_name_var.name_hint][DstHwNodeID] = (
           (InodeID, DstHwNodeID, None)
@@ -1322,7 +1322,7 @@ class PolicyTableGenerator:
             self.visit(func)
             self.generate_policy_table()
             return self.Policytable
-        
+
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
       items = mod.functions_items()
       function_names = [item[0].name_hint for item in items]
@@ -1336,7 +1336,7 @@ class PolicyTableGenerator:
             print(x)
 
       # # find all regions
-      return func 
+      return func
 
 # @relay.transform.function_pass(opt_level=0)
 # class IDAssigner:
@@ -1373,9 +1373,9 @@ class PolicyTableGenerator:
 #           return Call(new_fn, new_args, new_call_attrs, call.type_args, call.span)
 
 #       print("-----------------------func--------------------")
-#       print(func)      
+#       print(func)
 #       # _Visitor().visit(func)
-      
+
 #       return _Visitor().visit(func)
 
 # def assignID(mod):
@@ -1387,7 +1387,7 @@ class PolicyTableGenerator:
 #     def visit_call(self, call):
 #       setattr(call, "CustomID", self.Cnt)
 #       return call
-  
+
 #   vis = _Visitor()
 #   for func_name in mod.functions:
 #     mod[func_name] = vis.visit(mod[func_name])
@@ -1398,7 +1398,7 @@ class PolicyTableGenerator:
 #     def visit_call(self, call):
 #       print(call.CustomID)
 #       super().visit_call(call)
-  
+
 #   vis = _Visitor()
 #   for func_name in mod.functions:
 #     vis.visit(mod[func_name])
@@ -1418,21 +1418,21 @@ def constructUsefulMappings(mod):
       data[id_dict[int(hash(call))]] = call
       self.Cnt = self.Cnt + 1
       super().visit_call(call)
-    
+
     def visit_var(self, var):
       id_dict[int(hash(var))] = self.Cnt
       name_dict[self.Cnt] = var.name_hint
       data[id_dict[int(hash(var))]] = var
       self.Cnt = self.Cnt + 1
       super().visit_var(var)
-    
+
     def visit_constant(self, const):
       id_dict[int(hash(const))] = self.Cnt
       name_dict[self.Cnt] = "Const"
       data[id_dict[int(hash(const))]] = const
       self.Cnt = self.Cnt + 1
       super().visit_constant(const)
-  
+
   vis = _Visitor()
   for func_name in mod.functions:
     vis.visit(mod[func_name])
@@ -1448,6 +1448,6 @@ def constructCustomIDInFunc(mod):
     def visit_call(self, call):
       data[self.func_name].append(getNodeID(call))
       super().visit_call(call)
-    
+
   for func_name in mod.functions:
     if "imcflow" in func_name.name_hint: _Visitor(func_name.name_hint).visit(mod[func_name.name_hint])
