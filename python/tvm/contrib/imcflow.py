@@ -17,76 +17,6 @@
 
 from typing import Tuple, List, Dict, Union
 
-
-class ImcflowDeviceConfig:
-  """Imcflow config class"""
-  INODE_NUM = 4
-  IMCE_H_NUM = 4
-  IMCE_W_NUM = 4
-  IMCE_NUM = 16
-  INODE_MMREG_SIZE = 128
-  INODE_DATA_MEM_SIZE = 65536
-  INODE_INST_MEM_SIZE = 1024
-  IMCE_INST_MEM_SIZE = 1024
-
-  HWNodeMap = {}
-  TensorEdgeList = []
-  TensorEdgeListDict = {}
-  TensorIDtoEdge = {}
-  TensorEdgetoInfo = {}
-  ActiveIMCEPerFunc = {}
-  NoCPaths = {}
-  _instance = None
-
-  def __new__(cls, *args, **kwargs):
-    if cls._instance is None:
-      cls._instance = super(ImcflowDeviceConfig, cls).__new__(
-          cls, *args, **kwargs)
-      cls._instance.mem_layout = MemoryLayout(
-          MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-          MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-          MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-          MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-          MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-      )
-    return cls._instance
-
-  def __init__(self):
-    pass
-
-  @staticmethod
-  def is_supported_kernel(KH, KW):
-    return (KH, KW) in {(1, 1), (3, 3), (5, 5), (7, 7)}
-
-  @classmethod
-  def add_hw_node(cls, graph_node_id, hwnode_id):
-    cls.HWNodeMap[graph_node_id] = hwnode_id
-
-  @classmethod
-  def get_hw_node(cls, graph_node_id):
-    return cls.HWNodeMap.get(graph_node_id, None)
-
-  @classmethod
-  def add_tensor_edge(cls, tensor_id, tensor_edge):
-    cls.TensorIDtoEdge[tensor_id] = tensor_edge
-
-  @classmethod
-  def get_tensor_edge(cls, tensor_id):
-    return cls.TensorIDtoEdge.get(tensor_id, None)
-
-  @classmethod
-  def add_tensor_edge_info(cls, tensor_edge, tensor_edge_info):
-    cls.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
-
-  @classmethod
-  def get_tensor_edge_info(cls, tensor_edge):
-    return cls.TensorEdgetoInfo.get(tensor_edge, None)
-
-
 class DataBlock:
   def __init__(self, name: str, size: int):
     self.name = name
@@ -153,7 +83,7 @@ class MemoryLayout:
 
 
 class TensorID:
-  def __init__(self, graph_node_id: int, tensor_type: str):
+  def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
     assert tensor_type in {"idata", "odata", "weight",
                            "bias", "scale", "idata0", "idata1"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
@@ -209,3 +139,61 @@ class TensorEdgeInfo:
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.PolicyInfo)
     return f"TensorEdgeInfo([{policy_info_str}], {self.MemInfo}, {self.fifo_id})"
+
+
+class ImcflowDeviceConfig:
+  """Imcflow config class"""
+  INODE_NUM = 4
+  IMCE_H_NUM = 4
+  IMCE_W_NUM = 4
+  IMCE_NUM = 16
+  INODE_MMREG_SIZE = 128
+  INODE_DATA_MEM_SIZE = 65536
+  INODE_INST_MEM_SIZE = 1024
+  IMCE_INST_MEM_SIZE = 1024
+
+  def __new__(cls, *args, **kwargs):
+    if not hasattr(cls, "instance"):
+      cls.instance = super(ImcflowDeviceConfig, cls).__new__(cls)
+      cls.instance.HWNodeMap = {}
+      cls.instance.TensorIDtoEdge = {}
+      cls.instance.TensorEdgetoInfo = {}
+      cls.instance.MemLayout = MemoryLayout(
+          MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+          MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+          MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+          MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+          MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+          MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+      )
+      cls.instance.TensorEdgeList = []
+      cls.instance.TensorEdgeListDict = {}
+    return cls.instance
+
+  def __init__(self):
+    pass
+
+  @ staticmethod
+  def is_supported_kernel(KH, KW):
+    return (KH, KW) in {(1, 1), (3, 3), (5, 5), (7, 7)}
+
+  def add_hw_node(self, graph_node_id: Union[int,Tuple], hwnode_id: int):
+    self.HWNodeMap[graph_node_id] = hwnode_id
+
+  def get_hw_node(self, graph_node_id: Union[int,Tuple]):
+    return self.HWNodeMap.get(graph_node_id, None)
+
+  def add_tensor_edge(self, tensor_id: TensorID, tensor_edge: TensorEdge):
+    self.TensorIDtoEdge[tensor_id] = tensor_edge
+
+  def get_tensor_edge(self, tensor_id: TensorID):
+    return self.TensorIDtoEdge.get(tensor_id, None)
+
+  def add_tensor_edge_info(self, tensor_edge: TensorEdge, tensor_edge_info: TensorEdgeInfo):
+    self.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
+
+  def get_tensor_edge_info(self, tensor_edge: TensorEdge):
+    return self.TensorEdgetoInfo.get(tensor_edge, None)
