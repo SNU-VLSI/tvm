@@ -7,7 +7,7 @@ from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
-from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID
+from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
@@ -1105,54 +1105,31 @@ def constructTensorIDToTensorEdgeDict():
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
-    def __init__(self, MappingDict_2D):
-      self.MappingDict_2D = MappingDict_2D
+    def __init__(self, NoCPaths):
+      self.NoCPaths = NoCPaths
       self.PolicyTable_2D = {}
 
     def transform_function(self, func, mod, ctx):
       class _PolicyTableGenerator(tvm.relay.ExprVisitor):
-        """
-          Target Operators:
-            conv2d, bias_add, batch_norm, relu, add and fused versions
-            split, concat
-        """
-        def __init__(self, MappingDict):
+        def __init__(self, NoCPaths):
             super().__init__()
-            self.MappingDict = MappingDict
+            self.NoCPaths = NoCPaths
+            self.TensorEdgetoInfo_temp = {}
             self.Policytable = []
-            self.PathDict = {} # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
-            self.PathList = [] # {(source hash, (source node, source node op)) : (dest hash, (dest node, dest node op)), (...)}
-            self.start_addr_dict = {}
-            self.IMCE_NUM_SQRT = math.sqrt(ImcflowDeviceConfig.IMCE_NUM)
-            self.table_capacity = 16
+            self.explored_router_list = {}
+            
+            # Dictionary to store initial addresses for each source-index pair
+            self.start_addr_dict = {}  # {(source, data type): start_address}
+            
+            self.table_capacity = 32
             self.InSubFunction = False
             self.SubFunctionMapping = None
             self.SubFunctionNodeID = None
             self.VarProperties = {}
 
         def generate_policy_table(self):
-            # Initialize policy tables for all nodes
-            policy_tables = { f"imce_{i}": [] for i in range(ImcflowDeviceConfig.IMCE_NUM) }
-            policy_tables.update({f"inode_{i}": [] for i in range(ImcflowDeviceConfig.INODE_NUM)})
-
-            # Dictionary to store initial addresses for each source-index pair
-            self.start_addr_dict = {}  # {(source, index): start_address}
-
-            def get_mapped_node(coord):
-                if coord[1] != 0: # imce
-                    return f"imce_{coord[0]*4 + coord[1] - 1}"
-                else:  # inode
-                    return f"inode_{coord[0]}"
-
-                return
-
-            def get_coordinates(node_name):
-                if "imce" in node_name:
-                    idx = int(node_name.split('_')[1])
-                    return (idx // 4, idx % 4 + 1)
-                else:  # inode
-                    idx = int(node_name.split('_')[1])
-                    return (idx, 0)
+            # Initialize policy tables for all nodes using NodeID as keys
+            policy_tables = {node_id: [] for node_id in NodeID}
 
             def get_direction(source_coord, dest_coord):
                 if source_coord[1] < dest_coord[1]:
@@ -1165,18 +1142,18 @@ class PolicyTableGenerator:
                     return "North"
                 return None
 
-            def check_path_capacity(path_coords, current_tables, router_list):
+            def check_path_capacity(path_coords, explored_router_list):
                 """Check if all nodes in the path have available capacity"""
                 for coord in path_coords:
-                    node = get_mapped_node(coord)
-                    if len(current_tables[node]) >= self.table_capacity:
-                        if coord in router_list:
+                    node = NodeID.from_coord(coord[0],coord[1])
+                    if len(policy_tables[node]) >= self.table_capacity:
+                        if explored_router_list is not None and coord in explored_router_list:
                             continue
                         else:
                             return False
                 return True
 
-            def get_path_coords(source_coord, dest_coord, is_xy_routing=True, router_list=None):
+            def get_path_coords(source_coord, dest_coord, is_xy_routing=True, explored_router_list=None):
                 """Get list of coordinates for the path"""
                 path_coords = []
                 current_coord = source_coord
@@ -1211,118 +1188,180 @@ class PolicyTableGenerator:
                         current_coord = next_coord
 
                 # check policy table's capacity along the designated routing path
-                if not check_path_capacity(path_coords, policy_tables, router_list):
+                if not check_path_capacity(path_coords, explored_router_list):
                     # If X-Y fails, try Y-X routing
-                    path_coords = get_path_coords(source_coord, dest_coord, False)
-                    if not check_path_capacity(path_coords, policy_tables, router_list):
+                    path_coords = get_path_coords(source_coord, dest_coord, False, explored_router_list)
+                    if not check_path_capacity(path_coords, explored_router_list):
                         raise ValueError("Routing failed for both X-Y and Y-X!")
 
                 #TODO: there may be cases that X-Y and Y-X both fails!!!!!
 
                 return path_coords
 
-            def handle_single_dest(source_node, dest_node, dest_index=None, router_list=None, init_addr_save=True):
+            def handle_single_dest(edge, mapping_info, init_addr_save=True, router_entry_list=None):
                 """Append new entries to policy tables for a single destination"""
-                source_coord = get_coordinates(source_node)
-                dest_coord = get_coordinates(dest_node)
+                source_node = mapping_info[0]
+                dest_node = mapping_info[1]
+                dest_index = mapping_info[2]                
+                if isinstance(edge, NodeID):
+                  source_node_data_type ="instruction"
+                else:
+                  source_node_data_type = edge.src_id.tensor_type
+                
+                source_coord = NodeID.to_coord(source_node)
+                dest_coord = NodeID.to_coord(dest_node)
                 entry_addr = len(policy_tables[source_node])
-                if init_addr_save is True:
-                    self.start_addr_dict[(source_node, dest_index)] = entry_addr
-                if source_coord == dest_coord: # if same node, return
-                    return
-
+                
+                if router_entry_list is None: # initial handling
+                    router_entry_list= []
+                    if source_coord == dest_coord: # if same node, return
+                        return                
+                    # check if there's previous path with same source and same tensor type, which means multicast
+                    elif (source_node, source_node_data_type) in self.start_addr_dict:
+                        handle_multicast(edge, mapping_info)
+                        return
+                    else:
+                        self.start_addr_dict[(source_node, source_node_data_type)] = entry_addr # each source can have several tensor type
+                                                
                 # Try X-Y routing first
-                path_coords = get_path_coords(source_coord, dest_coord)
-                if router_list is not None:
-                    #if dest_index is provided, save all nodes along the path
-                    router_list.extend(path_coords)
+                path_coords = get_path_coords(source_coord, dest_coord, True)
+                if (source_node, source_node_data_type) not in self.explored_router_list:
+                    self.explored_router_list[(source_node, source_node_data_type)] = path_coords
+                else:
+                    self.explored_router_list[(source_node, source_node_data_type)].extend(path_coords)                
 
                 current_coord = source_coord
                 current_node = source_node
                 # Apply the successful path to tables
                 for next_coord in path_coords:
                     direction = get_direction(current_coord, next_coord)
-                    next_node = get_mapped_node(next_coord)
+                    next_node = NodeID.from_coord(next_coord[0], next_coord[1])
 
-                    entry = {"Local": None, "North": None, "South": None, "East": None, "West": None}
+                    #append entry to router's policy table                  
+                    entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0}, \
+                      "North": {"enable": False, "addr": 0}, \
+                      "South": {"enable": False, "addr": 0}, \
+                      "East": {"enable": False, "addr": 0},  \
+                      "West": {"enable": False, "addr": 0}}                
+                        
                     target_addr = len(policy_tables[next_node])
-                    entry[direction] = target_addr
+                    entry[direction]["addr"] = target_addr
                     policy_tables[current_node].append(entry)
+                    
+                    #create RouterEntry and append to router_entry_list
+                    router_entry_list.append((current_node, len(policy_tables[current_node])-1))
 
                     #switch to next node
                     current_coord = next_coord
-                    current_node = get_mapped_node(current_coord)
+                    current_node = NodeID.from_coord(current_coord[0], current_coord[1])
 
                 # insert entry for destination node
-                entry = {"Local": True, "North": None, "South": None, "East": None, "West": None}
+                entry = {"Local": {"enable": True, "chunk_index": dest_index, "addr": 0}, \
+                  "North": {"enable": False, "addr": 0}, \
+                  "South": {"enable": False, "addr": 0}, \
+                  "East": {"enable": False, "addr": 0},  \
+                  "West": {"enable": False, "addr": 0}}
+                
                 policy_tables[dest_node].append(entry)
 
-                return router_list
+                #create RouterEntry and append to RouterEntry_list
+                router_entry_list.append((dest_node, len(policy_tables[dest_node])-1))
+                
+                # temporary saving. Final saving is done after whole paths finish.
+                self.TensorEdgetoInfo_temp[edge] = router_entry_list
 
-            def handle_multi_dest(source_node, destinations):
+            def handle_multicast(edge, mapping_info):
                 """Handle multiple destinations with potential path sharing"""
-                router_list = {}
-                for dest in destinations:
-                    dest_node = dest[1][0]
-                    dest_index = dest[2] if len(dest) > 2 else None  # Get index if it exists
-                    if source_node == dest_node: # if same node, return
+                source_node = mapping_info[0]
+                dest_node = mapping_info[1]
+                # dest_index = mapping_info[2]
+                if isinstance(edge, NodeID):
+                  source_node_data_type ="instruction"
+                else:
+                  source_node_data_type = edge.src_id.tensor_type
+                
+                router_entry_list= []
+
+                if source_node == dest_node: # if same node, return
+                    return
+
+                # Follow existing path and modify at divergence point
+                entry_addr = self.start_addr_dict[(source_node, source_node_data_type)]
+                current_node = source_node
+                current_coord = NodeID.to_coord(current_node)
+                dest_coord = NodeID.to_coord(dest_node)
+                next_coord = None
+
+                while current_coord != dest_coord:
+                    entry = policy_tables[current_node][entry_addr] # current policy table entry
+
+                    # Find which direction to go next.
+                    path_coords = get_path_coords(current_coord, dest_coord, self.explored_router_list[(source_node, source_node_data_type)])
+                    next_coord = path_coords[0]
+                    next_node = NodeID.from_coord(next_coord[0],next_coord[1])
+                    direction = get_direction(current_coord, next_coord)
+
+                    # If direction is different from previous path, diverge!
+                    if entry[direction]["enable"] is False:
+                        # modify entry
+                        target_addr = len(policy_tables[next_node])
+                        policy_tables[current_node][entry_addr][direction]["addr"] = target_addr
+                        
+                        #create RouterEntry and append to router_entry_list
+                        router_entry_list.append((current_node, entry_addr))
+                        
+                        # diverge into new path
+                        new_mapping = (next_node, mapping_info[1], mapping_info[2])
+                        handle_single_dest(edge, new_mapping, init_addr_save=False, router_entry_list=router_entry_list)                        
                         break
-
-                    # check if there's previous path with same index
-                    if (source_node, dest_index) in self.start_addr_dict:
-                        # Follow existing path and modify at divergence point
-                        entry_addr = self.start_addr_dict[(source_node, dest_index)]
-                        current_node = source_node
-                        current_coord = get_coordinates(current_node)
-                        dest_coord = get_coordinates(dest_node)
-                        next_coord = None
-
-                        while current_coord != dest_coord:
-                            entry = policy_tables[current_node][entry_addr] # current policy table entry
-
-                            # Find which direction to go next.
-                            path_coords = get_path_coords(current_coord, dest_coord, router_list[dest_index])
-                            next_coord = path_coords[0]
-                            next_node = get_mapped_node(next_coord)
-                            direction = get_direction(current_coord, next_coord)
-
-                            # If direction is different from previous path, diverge!
-                            if entry[direction] is None:
-                                # modify entry
-                                target_addr = len(policy_tables[next_node])
-                                entry[direction] = target_addr
-                                # diverge into new path
-                                router_list[dest_index] = handle_single_dest(current_node, dest_node, dest_index, router_list=router_list[dest_index], init_addr_save=False)
-                                break
-                            else:
-                                # otherwise, keep following the previous path
-                                current_coord = next_coord
-                                current_node = next_node
-                                entry_addr = entry[direction]
-                                if current_node == dest_node: # if same node, return
-                                    policy_tables[dest_node][entry_addr]["Local"] = True
-                                    break
-
                     else:
-                        # if not, create new path
-                        router_list[dest_index] = handle_single_dest(source_node, dest_node, dest_index, router_list=[])
+                        # create RouterEntry and append to router_entry_list
+                        router_entry_list.append((current_node, entry_addr))
+
+                        # keep following the previous path
+                        current_coord = next_coord
+                        current_node = next_node
+                        entry_addr = entry[direction]["addr"]
+
+                        if current_node == dest_node: # if same node, return
+                            policy_tables[dest_node][entry_addr]["Local"]["enable"] = True
+                            # create RouterEntry and append to router_entry_list
+                            router_entry_list.append((current_node, entry_addr))                                
+                            # temporary saving. Final saving is done after whole paths finish.
+                            self.TensorEdgetoInfo_temp[edge] = router_entry_list
+                            break
 
             # Main logic
-            for source, destinations in self.PathDict.items():
-                source_node = source[1][0]
-                if len(destinations) > 1:
-                    handle_multi_dest(source_node, destinations)
-                else:
-                    handle_single_dest(source_node, destinations[0][1][0])
+            for edge, mapping_info in self.NoCPaths.items():
+                handle_single_dest(edge, mapping_info)
 
             self.Policytable = policy_tables
 
+        def add_EdgeInfo(self):
+            # after policy table entry generation finished, add to TensorEdgeToInfo
+            fifo_id_cnt = {node_id: 0 for node_id in NodeID}
+            for edge, mapping_info in self.NoCPaths.items():
+              # if tensoredge, save to TensorEdgetoInfo
+              dest_node = mapping_info[1]
+              router_entry_list=[]
+              if edge in self.TensorEdgetoInfo_temp:
+                  for entry_tuple in self.TensorEdgetoInfo_temp[edge]:
+                      router_entry_list.append(RouterEntry(entry_tuple[0], entry_tuple[1], self.Policytable[entry_tuple[0]][entry_tuple[1]]))
+
+                  if isinstance(edge, TensorEdge): # TensorEdge
+                      edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
+                      ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
+                      fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
+                  else: # Instruction edge
+                      edgeinfo = InstEdgeInfo(router_entry_list, None)
+                      ImcflowDeviceConfig().add_inst_edge_info(edge, edgeinfo)
+                      
         def traverse_func(self, func):
             # traverse input function by visit() to make PathDict and generate policy table for it
-            self.visit(func)
             self.generate_policy_table()
+            self.add_EdgeInfo()
             return self.Policytable
-
+        
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
       items = mod.functions_items()
       function_names = [item[0].name_hint for item in items]
@@ -1331,12 +1370,11 @@ class PolicyTableGenerator:
       for i in range(num_func):
         if function_names[i]=="main": continue
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          self.Policytable_2D[function_names[i]] = _PolicyTableGenerator(self.MappingDict_2D[function_names[i]]).traverse_func(mod[function_names[i]])
-          for x in self.Policytable_2D[function_names[i]]:
+          self.PolicyTable_2D[function_names[i]] = _PolicyTableGenerator(self.NoCPaths[function_names[i]]).traverse_func(mod[function_names[i]])
+          for x in self.PolicyTable_2D[function_names[i]]:
             print(x)
 
-      # # find all regions
-      return func
+      return func 
 
 # @relay.transform.function_pass(opt_level=0)
 # class IDAssigner:

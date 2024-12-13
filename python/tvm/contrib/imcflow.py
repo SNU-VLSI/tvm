@@ -306,3 +306,9 @@ class ImcflowDeviceConfig:
 
   def get_tensor_edge_info(self, tensor_edge: TensorEdge):
     return self.TensorEdgetoInfo.get(tensor_edge, None)
+  
+  def add_inst_edge_info(self, graph_node_id: Union[int, Tuple], inst_edge_info: InstEdgeInfo):
+    self.InstEdgeInfoDict[graph_node_id] = inst_edge_info
+
+  def get_inst_edge_info(self, graph_node_id: Union[int, Tuple]):
+    return self.InstEdgeInfoDict.get(graph_node_id, None)
