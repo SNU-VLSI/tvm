@@ -20,3 +20,20 @@ class CodegenSuite:
     kernel_codegen.visit(func)
     device_codegen = DeviceCodegen(output_dir="./output")
     device_codegen.handle_code_generation("example_op", [])
+
+class CodeBlockBuilder(tvm.relay.ExprVisitor):
+  def __init__(self, func):
+    self.func = func
+    self.codeblocks = []
+    self.current_block = None
+    self.current_block_id = 0
+    self.current_block_name = None
+
+  def visit_call(self, call):
+    if isinstance(call.op, tvm.relay.op.Op):
+      if call.op.name == "example_op":
+        self.current_block = CodeBlock(self.current_block_id, "example_op")
+        self.current_block_id += 1
+        self.current_block_name = "example_op"
+        self.codeblocks.append(self.current_block)
+    self.generic_visit(call)
