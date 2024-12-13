@@ -1198,7 +1198,7 @@ class PolicyTableGenerator:
 
                 return path_coords
 
-            def handle_single_dest(edge, mapping_info, init_addr_save=True, router_entry_list=None):
+            def handle_single_path(edge, mapping_info, init_addr_save=True, router_entry_list=None):
                 """Append new entries to policy tables for a single destination"""
                 source_node = mapping_info[0]
                 dest_node = mapping_info[1]
@@ -1312,7 +1312,7 @@ class PolicyTableGenerator:
                         
                         # diverge into new path
                         new_mapping = (next_node, mapping_info[1], mapping_info[2])
-                        handle_single_dest(edge, new_mapping, init_addr_save=False, router_entry_list=router_entry_list)                        
+                        handle_single_path(edge, new_mapping, init_addr_save=False, router_entry_list=router_entry_list)                        
                         break
                     else:
                         # create RouterEntry and append to router_entry_list
@@ -1333,7 +1333,7 @@ class PolicyTableGenerator:
 
             # Main logic
             for edge, mapping_info in self.NoCPaths.items():
-                handle_single_dest(edge, mapping_info)
+                handle_single_path(edge, mapping_info)
 
             self.Policytable = policy_tables
 
