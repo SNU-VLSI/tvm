@@ -986,8 +986,8 @@ def constructTensorEdgeList(mod):
       elif isinstance(SrcGraphNodeIDs, (int, tuple)):
         SrcGraphNodeID = SrcGraphNodeIDs
         self.TensorEdgeList.append(
-          TensorEdge(TensorID(SrcGraphNodeID, SrcTag),
-                     TensorID(DstGraphNodeID, DstTag),
+          TensorEdge(TensorID.get(SrcGraphNodeID, SrcTag),
+                     TensorID.get(DstGraphNodeID, DstTag),
                      SplitIdx)
         )
       else:
@@ -1158,13 +1158,13 @@ def constructNoCPathDict(mod):
 def constructTensorIDToTensorEdgeDict():
   TensorEdgeList = ImcflowDeviceConfig().TensorEdgeList
   TensorEdgeMap = ImcflowDeviceConfig().TensorIDtoEdge
-  def _add(tensor_id, tensor_edge):
-    if tensor_id not in TensorEdgeMap:
-      TensorEdgeMap[tensor_id] = tensor_edge
-    elif isinstance(TensorEdgeMap[tensor_id], list):
-      TensorEdgeMap[tensor_id].append(tensor_edge)
+  def _add(tensor_id_, tensor_edge_):
+    if tensor_id_ not in TensorEdgeMap.keys():
+      TensorEdgeMap[tensor_id_] = tensor_edge_
+    elif isinstance(TensorEdgeMap[tensor_id_], list):
+      TensorEdgeMap[tensor_id_].append(tensor_edge_)
     else:
-      TensorEdgeMap[tensor_id] = [TensorEdgeMap[tensor_id], tensor_edge]
+      TensorEdgeMap[tensor_id_] = [TensorEdgeMap[tensor_id_], tensor_edge_]
   for tensor_edge in TensorEdgeList:
     SrcID = tensor_edge.src_id
     DstID = tensor_edge.dst_id

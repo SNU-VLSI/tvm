@@ -83,6 +83,15 @@ class MemoryLayout:
 
 
 class TensorID:
+  Pool = {}
+
+  @staticmethod
+  def get(graph_node_id: Union[int, Tuple], tensor_type: str):
+    if (graph_node_id, tensor_type) not in TensorID.Pool:
+      return TensorID(graph_node_id, tensor_type)
+    else:
+      return TensorID.Pool[(graph_node_id, tensor_type)]
+
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
     assert tensor_type in {"idata", "odata", "weight",
                            "bias", "scale", "idata0", "idata1"}, "Invalid tensor type"
@@ -91,6 +100,12 @@ class TensorID:
 
   def __str__(self):
     return f"TensorID({self.graph_node_id}, {self.tensor_type})"
+  
+  def __eq__(self, other):
+    return isinstance(other, TensorID) and self.graph_node_id == other.graph_node_id and self.tensor_type == other.tensor_type
+  
+  def __hash__(self) -> int:
+    return hash((self.graph_node_id, self.tensor_type))
 
 
 class TensorEdge:
@@ -171,6 +186,8 @@ class ImcflowDeviceConfig:
       )
       cls.instance.TensorEdgeList = []
       cls.instance.TensorEdgeListDict = {}
+      cls.instance.ActiveIMCEPerFunc = {}
+      cls.instance.NoCPaths = {}
     return cls.instance
 
   def __init__(self):
@@ -197,3 +214,10 @@ class ImcflowDeviceConfig:
 
   def get_tensor_edge_info(self, tensor_edge: TensorEdge):
     return self.TensorEdgetoInfo.get(tensor_edge, None)
+HWNodeMap = {}
+TensorEdgeList = []
+TensorEdgeListDict = {}
+TensorIDtoEdge = {}
+TensorEdgetoInfo = {}
+ActiveIMCEPerFunc = {}
+NoCPaths = {}
