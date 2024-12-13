@@ -1,73 +1,66 @@
 import os
+import subprocess
 import logging
+from tvm.contrib.imcflow import ImcflowDeviceConfig, NodeID
 
 class DeviceCodegen:
-  def __init__(self, output_dir="/tmp"):
+  def __init__(self, target, output_dir="/tmp"):
+    assert target in ["inode", "imce"], f"Unknown target: {target}"
+    self.target = target
     self.output_dir = output_dir
-    self.compile_options = "-O1 --target=INODE -c -fPIC -mllvm=-force-hardware-loops -mllvm=-force-nested-hardware-loop"
+    self.compile_options = f"-O1 --target={target} -c -fPIC -mllvm=-force-hardware-loops -mllvm=-force-nested-hardware-loop"
     self.objcopy_options = "-O binary --only-section=.text"
     self.lld_options = "-e 0 -Ttext 0x0"
     self.ld_options = "-r -b binary"
     logging.basicConfig(level=logging.INFO)
 
-  def handle_code_generation(self, op_name, args):
-    logging.info(f"Generating inode code for operator: {op_name}")
-    inode_code = self.generate_target_code(op_name, args, "inode")
-    cpp_name = self.save_target_code_to_file(inode_code, op_name, "inode")
-    self.compile_target_code(cpp_name, "inode")
+  def handle_code_generation(self, func_name, codeblocks):
+    """
+    The main entry point for DeviceCodegen.
+    Handles code generation, saving to file, compilation, linking, and host object creation.
+    """
+    logging.info(f"Generating {self.target} code for function: {func_name}")
+    code = self.generate_target_code(func_name, codeblocks)
+    cpp_name = self.save_target_code_to_file(code, func_name)
+    self.compile_target_code(cpp_name)
 
-    logging.info(f"Generating imce code not implemented yet for: {op_name}")
-
-  def generate_target_code(self, op_name, args, target):
-    if target == "inode":
-      code = f"// Generated code for {op_name} with args {args} targeting {target}\n"
-    elif target == "imce":
-      raise NotImplementedError("IMCE codegen not implemented yet.")
-    else:
-      raise ValueError(f"Unknown target: {target}")
+  def generate_target_code(self, func_name, codeblocks):
+    # TODO: codeblocks should be grouped according to its NodeID
+    code = ""
+    for codeblock in codeblocks:
+      code += codeblock.generate()
 
     return code
 
-  def save_target_code_to_file(self, code, op_name, target):
-    cpp_name = os.path.join(self.output_dir, f"{op_name}_{target}.cpp")
+  def save_target_code_to_file(self, code, func_name):
+    cpp_name = os.path.join(self.output_dir, f"{func_name}_{self.target}.cpp")
     with open(cpp_name, "w") as file:
       file.write(code)
     return cpp_name
 
-  def compile_target_code(self, cpp_name, target):
+  def compile_target_code(self, cpp_name):
     if not cpp_name.endswith(".cpp"):
       raise ValueError(f"Invalid cpp_name: {cpp_name}")
 
     base_name = cpp_name[:-4]
-    if target == "inode":
-      hids = list(range(ImcflowDeviceConfig.INODE_NUM))
-      wids = [0]
-    elif target == "imce":
-      hids = list(range(ImcflowDeviceConfig.IMCE_H_NUM))
-      wids = list(range(1, 1 + ImcflowDeviceConfig.IMCE_W_NUM))
-    else:
-      raise ValueError(f"Unknown target: {target}")
+    nodes = NodeID.inodes() if self.target == "inode" else NodeID.imces()
+    for node in nodes:
+      file_name = f"{base_name}_{node.name}"
+      obj_file = f"{file_name}.o"
+      out_file = f"{file_name}.out"
+      bin_file = f"{file_name}.bin"
+      host_obj_file = f"{file_name}.host.o"
+      self.compile_cpp_to_object(cpp_name, obj_file, node)
+      self.link_object_to_binary(obj_file, out_file)
+      self.extract_text_section(out_file, bin_file)
+      self.create_host_object(bin_file, host_obj_file)
 
-    for hid in hids:
-      for wid in wids:
-        hid_str = str(hid)
-        wid_str = str(wid)
-        obj_file = f"{base_name}_{hid_str}.o"
-        out_file = f"{base_name}_{hid_str}.out"
-        bin_file = f"{base_name}_{hid_str}.bin"
-        host_obj_file = f"{base_name}_{hid_str}.host.o"
-
-        self.compile_cpp_to_object(cpp_name, obj_file, hid_str, wid_str)
-        self.link_object_to_binary(obj_file, out_file)
-        self.extract_text_section(out_file, bin_file)
-        self.create_host_object(bin_file, host_obj_file)
-
-  def compile_cpp_to_object(self, cpp_name, obj_file, hid, wid):
+  def compile_cpp_to_object(self, cpp_name, obj_file, node):
     command = [
         "clang",
         *self.compile_options.split(),
-        f"-mllvm=-INODE_hid={hid}",
-        f"-mllvm=-INODE_wid={wid}",
+        f"-mllvm=-{self.target}_hid={node.to_coord(0)}",
+        f"-mllvm=-{self.target}_wid={node.to_coord(1)}",
         "-o", obj_file,
         cpp_name
     ]

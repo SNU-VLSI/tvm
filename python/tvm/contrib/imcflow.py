@@ -63,6 +63,16 @@ class NodeID(Enum):
     else:
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
 
+  @staticmethod
+  def inodes() -> List['NodeID']:
+    """Returns a list of all inode nodes."""
+    return [node for node in NodeID if node.is_inode()]
+
+  @staticmethod
+  def imces() -> List['NodeID']:
+    """Returns a list of all imce nodes."""
+    return [node for node in NodeID if node.is_imce()]
+
   def is_inode(self) -> bool:
     return self.value % ImcflowDeviceConfig.NODE_COL_NUM == 0
 
@@ -102,6 +112,9 @@ class TensorID:
 
   def __str__(self):
     return f"TensorID({self.graph_node_id}, {self.tensor_type})"
+
+  def __repr__(self):
+    return self.__str__()
 
   def __eq__(self, other):
     return isinstance(other, TensorID) and self.graph_node_id == other.graph_node_id and self.tensor_type == other.tensor_type
@@ -263,7 +276,7 @@ class ImcflowDeviceConfig:
       cls.instance.TensorEdgetoInfo = {}  # maps tensor_edge to tensor_edge_info
       cls.instance.TensorEdgeList = []   # list of tensor edges
       cls.instance.TensorEdgeListDict = {}  # maps func to list of tensor edges
-      cls.instance.PolicyTableDict = {}  # maps hw_node_id to policy table entries
+      cls.instance.PolicyTableDict = {}  # maps hw_node_id to policy table data block
       cls.instance.InstEdgeInfoDict = {}  # maps hw_node_id to inst_edge_info
       cls.instance.MemLayout = MemoryLayout(
           MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
@@ -276,8 +289,6 @@ class ImcflowDeviceConfig:
           MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
           MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
       )
-      cls.instance.TensorEdgeList = []
-      cls.instance.TensorEdgeListDict = {}
       cls.instance.ActiveIMCEPerFunc = {}
       cls.instance.NoCPaths = {}
     return cls.instance
@@ -306,3 +317,14 @@ class ImcflowDeviceConfig:
 
   def get_tensor_edge_info(self, tensor_edge: TensorEdge):
     return self.TensorEdgetoInfo.get(tensor_edge, None)
+
+  def get_tensor_ids_from_graph_node_id(self, graph_node_id: Union[int, Tuple]):
+    tids = []
+    for tid in self.TensorIDtoEdge.keys():
+      if tid.graph_node_id == graph_node_id:
+        tids.append(tid)
+    return tids
+
+  def get_tensor_edges_from_graph_node_id(self, graph_node_id: Union[int, Tuple]):
+    for tid in self.get_tensor_edges_from_graph_node_id(graph_node_id):
+      yield self.get_tensor_edge(tid)

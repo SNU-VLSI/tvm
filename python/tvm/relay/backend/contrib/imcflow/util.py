@@ -61,7 +61,6 @@ def create_imcflow_function_pass(opt_level: int, name: str = ""):
         imcflow_functions = filter(
             lambda x: is_imcflow_func(x[1]), mod.functions.items())
         for global_var, func in imcflow_functions:
-          import pdb; pdb.set_trace()
           imcflow_pass = imcflow_pass_class(*self.args, **self.kwargs)
           func = imcflow_pass.transform_function(global_var, func)
           mod.update_func(global_var, func)
