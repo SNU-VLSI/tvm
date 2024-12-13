@@ -44,15 +44,34 @@ class Node(Enum):
   @staticmethod
   def from_coord(x: int, y: int) -> 'Node':
     """Returns the Node corresponding to a 2D coordinate."""
-    value = x * 5 + y
+    value = x * ImcflowDeviceConfig.NODE_COL_NUM + y
     for node in Node:
       if node.value == value:
         return node
     raise ValueError(f"No Node found for coordinate ({x}, {y})")
+  
+  @staticmethod
+  def from_inode_coord(x:int) -> 'Node':
+    return Node(ImcflowDeviceConfig.NODE_COL_NUM*x)
+  
+  @staticmethod
+  def from_imce_coord(x:int, y:Union[None|int]=None) -> 'Node':
+    if y is None:
+      ImceHeight = x//ImcflowDeviceConfig.IMCE_W_NUM
+      ImceWidth = x%ImcflowDeviceConfig.IMCE_W_NUM
+      return Node(ImcflowDeviceConfig.NODE_COL_NUM*ImceHeight + (ImceWidth+1))
+    else:
+      return Node(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
+  
+  def is_inode(self) -> bool:
+    return self.value % ImcflowDeviceConfig.NODE_COL_NUM == 0
+  
+  def is_imce(self) -> bool:
+    return not self.is_inode()
 
   def to_coord(self) -> tuple:
     """Converts this node to its 2D coordinate."""
-    return divmod(self.value, 5)
+    return divmod(self.value, ImcflowDeviceConfig.NODE_COL_NUM)
 
 
 class TensorID:
@@ -219,6 +238,7 @@ class ImcflowDeviceConfig:
   IMCE_H_NUM = 4
   IMCE_W_NUM = 4
   IMCE_NUM = 16
+  NODE_COL_NUM = 5
   INODE_MMREG_SIZE = 128
   INODE_DATA_MEM_SIZE = 65536
   INODE_INST_MEM_SIZE = 1024

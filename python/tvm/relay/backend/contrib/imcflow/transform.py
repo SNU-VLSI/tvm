@@ -7,7 +7,7 @@ from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
-from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID
+from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, Node
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
@@ -768,85 +768,6 @@ class AnnotGenerator:
 
       return func
 
-# class SrcNode:
-#   def __init__(self, hwnode_id, node_id, node_name):
-#     self.hwnode_id = hwnode_id
-#     self.node_id = node_id
-#     self.node_name = node_name 
-  
-#   def __str__(self):
-#     return f"({self.hwnode_id}, {self.node_id}, {self.node_name})"
-
-#   def __repr__(self):
-#     return self.__str__()
-  
-#   # def __repr__(self):
-#   #   return f"SrcNode : {self.__str__()}"
-
-# class DstNode:
-#   def __init__(self, hwnode_id, node_id, node_name, split_idx=None):
-#     self.hwnode_id = hwnode_id
-#     self.node_id = node_id
-#     self.node_name = node_name
-#     self.split_idx = split_idx
-  
-#   def __str__(self):
-#     return f"({self.hwnode_id}, {self.node_id}, {self.node_name}" + (f", {self.split_idx}" if self.split_idx is not None else "") + ")"
-  
-#   def __repr__(self):
-#     return self.__str__()
-#     # return f"DstNode : {self.__str__()}"
-
-# class PathEntry:
-#   def __init__(self, src_node, dst_node, tag):
-#     self.src_node = src_node
-#     self.dst_node = dst_node
-#     self.tag = tag
-  
-#   def __str__(self):
-#     return f"({self.src_node}, {self.dst_node}, {self.tag})"
-  
-#   def __repr__(self):
-#     return self.__str__()
-#     # return f"PathEntry : {self.__str__()}"
-
-# class ImcflowPathList(list):
-#   def __init__(self, *args):
-#     super().__init__(*args)
-#     self.Merged = []
-  
-#   def assignNodeIDToPlaceHolder(self):
-#     Cnt = 0
-#     for entry in self:
-#       if entry.src_node.hwnode_id == "inode_placeholder":
-#         entry.src_node.hwnode_id = f"inode_{Cnt}"
-#         Cnt = (Cnt+1)%4
-#     return self
-  
-#   def mergeSplitEntries(self):
-#     data = {}
-#     SplitEntries = []
-#     for entry in self:
-#       if entry.dst_node.split_idx is not None:
-#         SplitEntries.append(entry)
-#         if entry.src_node not in data: data[entry.src_node] = {"tag":entry.tag, "dst_nodes":[]}
-#         data[entry.src_node]["dst_nodes"].append(entry.dst_node)
-
-#     self.Merged = []
-#     # for entry in SplitEntries:
-#     #   if entry in self.Merged: self.Merged.remove(entry)
-    
-#     for src_node, value in data.items():
-#       self.Merged.append(PathEntry(src_node, value["dst_nodes"], value["tag"]))
-
-#     return self
-  
-#   def __str__(self):
-#     return f"PathList : {super().__str__()}"
-  
-#   def __repr__(self):
-#     return f"PathList : {super().__str__()}"
-
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
     def __init__(self):
@@ -900,14 +821,16 @@ class NodeMapper:
               # self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
           elif IsSplit:
               if last_child_mapping is None:
-                  self.MappingDict[getNodeID(call)] = f"inode_{self.inode_index}"
+                  self.MappingDict[getNodeID(call)] = Node.from_inode_coord(self.inode_index)
+                  # self.MappingDict[getNodeID(call)] = f"inode_{self.inode_index}"
                   # self.MappingDict[int(hash(call))] = (f"inode_{self.inode_index}", indicator)
                   self.inode_index -= 1
               else:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = last_child_mapping
           else:
-              self.MappingDict[getNodeID(call)] = f"imce_{self.imce_index}"
+              self.MappingDict[getNodeID(call)] = Node.from_imce_coord(self.imce_index)
+              # self.MappingDict[getNodeID(call)] = f"imce_{self.imce_index}"
               self.imce_index -= 1
               # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
 
@@ -1111,7 +1034,7 @@ def constructActiveIMCEDict(mod):
       GraphNodeIDs = CustomIDInFunc()[func_name_var.name_hint]
       ActiveIMCEs = set()
       for GraphNodeID in GraphNodeIDs:
-        if GraphNodeID in ImcflowDeviceConfig().HWNodeMap and "imce" in ImcflowDeviceConfig().HWNodeMap[GraphNodeID]:
+        if GraphNodeID in ImcflowDeviceConfig().HWNodeMap and ImcflowDeviceConfig().HWNodeMap[GraphNodeID].is_imce():
           ActiveIMCEs.add(ImcflowDeviceConfig().HWNodeMap[GraphNodeID])
       ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint] = list(ActiveIMCEs)
 
@@ -1122,7 +1045,7 @@ def constructNoCPathDict(mod):
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif func.attrs["Compiler"]=="imcflow":
-      NocPaths[func_name_var.name_hint] = []
+      NocPaths[func_name_var.name_hint] = {}
       # ImcflowDeviceConfig().NoCPaths[func_name_var.name_hint] = []
       # tensor edge to path entry
       # if src graph is Var, hw_node_id is left-most inode of dst graph node hw_node_id
@@ -1135,23 +1058,32 @@ def constructNoCPathDict(mod):
         SrcGraphNode = CustomIDToNode()[getFlagNodeID(SrcTensorID.graph_node_id)]
         if isinstance(SrcGraphNode, (Var, Constant)):
           DstHwNodeID = HwMapping[getFlagNodeID(DstTensorID.graph_node_id)]
-          if "inode" not in DstHwNodeID:
-            DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
-            InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
-            NocPaths[func_name_var.name_hint].append(
+          # if "inode" not in DstHwNodeID:
+          if not DstHwNodeID.is_inode():
+            # DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
+            InodeID = Node.from_inode_coord(Node.to_coord(DstHwNodeID)[0])
+            # InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
+            # NocPaths[func_name_var.name_hint].append(
+            #   (InodeID, DstHwNodeID, SplitIdx)
+            # )
+            NocPaths[func_name_var.name_hint][tensor_edge] = (
               (InodeID, DstHwNodeID, SplitIdx)
             )
             HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)] = InodeID
         else:
-          NocPaths[func_name_var.name_hint].append(
+          NocPaths[func_name_var.name_hint][tensor_edge] = (
             (HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)], HwMapping[getFlagNodeID(DstTensorID.graph_node_id)], SplitIdx)
           )
+          # NocPaths[func_name_var.name_hint].append(
+          #   (HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)], HwMapping[getFlagNodeID(DstTensorID.graph_node_id)], SplitIdx)
+          # )
 
       for ActiveIMCE in ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint]: 
         DstHwNodeID = ActiveIMCE
-        DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
-        InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
-        NocPaths[func_name_var.name_hint].append(
+        # DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
+        InodeID = Node.from_inode_coord(Node.to_coord(DstHwNodeID)[0])
+        # InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
+        NocPaths[func_name_var.name_hint][DstHwNodeID] = (
           (InodeID, DstHwNodeID, None)
         )
 

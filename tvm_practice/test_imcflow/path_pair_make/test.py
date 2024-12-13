@@ -220,8 +220,8 @@ def RunTestModel(name):
   print("NoC Paths")
   for key, paths in ImcflowDeviceConfig().NoCPaths.items():
     print(key)
-    for path in paths:
-      print(path)
+    for k, v in paths.items():
+      print(k, v)
   
   # PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(NodeMapper.MappingDict_2D)
   # PolicyTableGenerator(eval_mod)
