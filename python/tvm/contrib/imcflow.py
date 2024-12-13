@@ -34,6 +34,8 @@ class ImcflowDeviceConfig:
   TensorEdgeListDict = {}
   TensorIDtoEdge = {}
   TensorEdgetoInfo = {}
+  ActiveIMCEPerFunc = {}
+  NoCPaths = {}
   _instance = None
 
   def __new__(cls, *args, **kwargs):
@@ -169,6 +171,9 @@ class TensorEdge:
 
   def __str__(self):
     return f"TensorEdge({self.src_id}, {self.dst_id}, {self.split_idx})"
+  
+  def __repr__(self):
+    return self.__str__()
 
 
 class MultiCastTensorEdge:

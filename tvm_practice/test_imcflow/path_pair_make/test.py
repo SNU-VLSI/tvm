@@ -188,20 +188,41 @@ def RunTestModel(name):
   printModel(eval_mod, eval_param_dict, "after_flatten")
 
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  imcflow_transform.constructHashToCustomID(eval_mod)
+  imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_prune_model")
 
   imcflow_transform.NodeMapper()(eval_mod)
   imcflow_transform.constructTensorEdgeList(eval_mod)
+  imcflow_transform.constructActiveIMCEDict(eval_mod)
 
+  print("Active IMCE list")
+  print(ImcflowDeviceConfig().ActiveIMCEPerFunc)
+
+  print("HW MAP")
   print(ImcflowDeviceConfig().HWNodeMap)
+
+  print("CustomID TO Name")
   print(imcflow.CustomIDToName())
+
+  print("Tensor Edge List")
   for key, paths in ImcflowDeviceConfig().TensorEdgeListDict.items():
     print(key)
     for path in paths:
       print(path)
-    
+  
+  imcflow_transform.constructTensorIDToTensorEdgeDict()
+  print("Tensor ID to Tensor Edge")
+  for key, paths in ImcflowDeviceConfig().TensorIDtoEdge.items():
+    print(f"{key} : {paths}")
+  
+  imcflow_transform.constructNoCPathDict(eval_mod)
+  print("NoC Paths")
+  for key, paths in ImcflowDeviceConfig().NoCPaths.items():
+    print(key)
+    for path in paths:
+      print(path)
+  
   # PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(NodeMapper.MappingDict_2D)
   # PolicyTableGenerator(eval_mod)
 
