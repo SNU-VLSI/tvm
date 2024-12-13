@@ -9,7 +9,7 @@ from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID
 from tvm.ir import Op
-from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc
+from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
 import math
 from copy import deepcopy
@@ -30,6 +30,12 @@ def getNodeDebugID(node):
   else:
     indicator = str(node.op)
   return indicator
+
+def getFlagNodeID(node):
+  if isinstance(node, tuple):
+    return node[0]
+  else:
+    return node
 
 @relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
@@ -980,8 +986,8 @@ def constructTensorEdgeList(mod):
       elif isinstance(SrcGraphNodeIDs, (int, tuple)):
         SrcGraphNodeID = SrcGraphNodeIDs
         self.TensorEdgeList.append(
-          TensorEdge(TensorID(SrcGraphNodeID, SrcTag),
-                     TensorID(DstGraphNodeID, DstTag),
+          TensorEdge(TensorID.get(SrcGraphNodeID, SrcTag),
+                     TensorID.get(DstGraphNodeID, DstTag),
                      SplitIdx)
         )
       else:
@@ -1097,6 +1103,73 @@ def constructTensorEdgeList(mod):
     elif func.attrs["Compiler"]=="imcflow":
       ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint] = _Visitor().getTensorEdgeList(func_name_var, func)
       ImcflowDeviceConfig().TensorEdgeList.extend(ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint])
+
+def constructActiveIMCEDict(mod):
+  for func_name_var, func in mod.functions.items():
+    if func_name_var.name_hint == "main": continue
+    elif func.attrs["Compiler"]=="imcflow":
+      GraphNodeIDs = CustomIDInFunc()[func_name_var.name_hint]
+      ActiveIMCEs = set()
+      for GraphNodeID in GraphNodeIDs:
+        if GraphNodeID in ImcflowDeviceConfig().HWNodeMap and "imce" in ImcflowDeviceConfig().HWNodeMap[GraphNodeID]:
+          ActiveIMCEs.add(ImcflowDeviceConfig().HWNodeMap[GraphNodeID])
+      ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint] = list(ActiveIMCEs)
+
+def constructNoCPathDict(mod):
+  HwMapping = ImcflowDeviceConfig().HWNodeMap
+  NocPaths = ImcflowDeviceConfig().NoCPaths
+  IMCECOL = ImcflowDeviceConfig.IMCE_W_NUM
+  for func_name_var, func in mod.functions.items():
+    if func_name_var.name_hint == "main": continue
+    elif func.attrs["Compiler"]=="imcflow":
+      NocPaths[func_name_var.name_hint] = []
+      # ImcflowDeviceConfig().NoCPaths[func_name_var.name_hint] = []
+      # tensor edge to path entry
+      # if src graph is Var, hw_node_id is left-most inode of dst graph node hw_node_id
+      # we will add instruction path to each IMCE node
+      TensorEdgeList_ = ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint]
+      for tensor_edge in TensorEdgeList_:
+        SrcTensorID = tensor_edge.src_id
+        DstTensorID = tensor_edge.dst_id
+        SplitIdx = tensor_edge.split_idx
+        SrcGraphNode = CustomIDToNode()[getFlagNodeID(SrcTensorID.graph_node_id)]
+        if isinstance(SrcGraphNode, (Var, Constant)):
+          DstHwNodeID = HwMapping[getFlagNodeID(DstTensorID.graph_node_id)]
+          if "inode" not in DstHwNodeID:
+            DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
+            InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
+            NocPaths[func_name_var.name_hint].append(
+              (InodeID, DstHwNodeID, SplitIdx)
+            )
+            HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)] = InodeID
+        else:
+          NocPaths[func_name_var.name_hint].append(
+            (HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)], HwMapping[getFlagNodeID(DstTensorID.graph_node_id)], SplitIdx)
+          )
+
+      for ActiveIMCE in ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint]: 
+        DstHwNodeID = ActiveIMCE
+        DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
+        InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
+        NocPaths[func_name_var.name_hint].append(
+          (InodeID, DstHwNodeID, None)
+        )
+
+def constructTensorIDToTensorEdgeDict():
+  TensorEdgeList = ImcflowDeviceConfig().TensorEdgeList
+  TensorEdgeMap = ImcflowDeviceConfig().TensorIDtoEdge
+  def _add(tensor_id_, tensor_edge_):
+    if tensor_id_ not in TensorEdgeMap.keys():
+      TensorEdgeMap[tensor_id_] = tensor_edge_
+    elif isinstance(TensorEdgeMap[tensor_id_], list):
+      TensorEdgeMap[tensor_id_].append(tensor_edge_)
+    else:
+      TensorEdgeMap[tensor_id_] = [TensorEdgeMap[tensor_id_], tensor_edge_]
+  for tensor_edge in TensorEdgeList:
+    SrcID = tensor_edge.src_id
+    DstID = tensor_edge.dst_id
+    _add(SrcID, tensor_edge)
+    _add(DstID, tensor_edge)
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
@@ -1398,9 +1471,10 @@ class PolicyTableGenerator:
 #   for func_name in mod.functions:
 #     vis.visit(mod[func_name])
 
-def constructHashToCustomID(mod):
+def constructUsefulMappings(mod):
   id_dict = HashToCustomID()
   name_dict = CustomIDToName()
+  data = CustomIDToNode()
   class _Visitor(tvm.relay.ExprVisitor):
     def __init__(self):
       super().__init__()
@@ -1409,18 +1483,21 @@ def constructHashToCustomID(mod):
     def visit_call(self, call):
       id_dict[int(hash(call))] = self.Cnt
       name_dict[self.Cnt] = getNodeDebugID(call)
+      data[id_dict[int(hash(call))]] = call
       self.Cnt = self.Cnt + 1
       super().visit_call(call)
     
     def visit_var(self, var):
       id_dict[int(hash(var))] = self.Cnt
       name_dict[self.Cnt] = var.name_hint
+      data[id_dict[int(hash(var))]] = var
       self.Cnt = self.Cnt + 1
       super().visit_var(var)
     
     def visit_constant(self, const):
       id_dict[int(hash(const))] = self.Cnt
       name_dict[self.Cnt] = "Const"
+      data[id_dict[int(hash(const))]] = const
       self.Cnt = self.Cnt + 1
       super().visit_constant(const)
   
@@ -1441,4 +1518,4 @@ def constructCustomIDInFunc(mod):
       super().visit_call(call)
     
   for func_name in mod.functions:
-    if "imcflow" in func_name: _Visitor(func_name).visit(mod[func_name])
+    if "imcflow" in func_name.name_hint: _Visitor(func_name.name_hint).visit(mod[func_name.name_hint])

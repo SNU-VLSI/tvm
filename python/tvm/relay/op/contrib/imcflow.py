@@ -1550,12 +1550,23 @@ class CustomIDToName(dict):
   def __init__(self):
     super().__init__()
 
+class CustomIDToNode(dict):
+  _instance = None
+
+  def __new__(cls, *args, **kwargs):
+    if cls._instance is None:
+      cls._instance = super(CustomIDToNode, cls).__new__(cls, *args, **kwargs)
+    return cls._instance
+
+  def __init__(self):
+    super().__init__()
+
 class CustomIDInFunc(dict):
   _instance = None
 
   def __new__(cls, *args, **kwargs):
     if cls._instance is None:
-      cls._instance = super(CustomIDToName, cls).__new__(cls, *args, **kwargs)
+      cls._instance = super(CustomIDInFunc, cls).__new__(cls, *args, **kwargs)
     return cls._instance
 
   def __init__(self):
