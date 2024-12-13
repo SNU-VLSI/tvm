@@ -83,9 +83,9 @@ class MemoryLayout:
 
 
 class TensorID:
-  def __init__(self, graph_node_id: int, tensor_type: str):
+  def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
     assert tensor_type in {"idata", "odata", "weight",
-                           "bias", "scale"}, "Invalid tensor type"
+                           "bias", "scale", "idata0", "idata1"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
@@ -166,6 +166,8 @@ class ImcflowDeviceConfig:
           MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
           MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
       )
+      cls.instance.TensorEdgeList = []
+      cls.instance.TensorEdgeListDict = {}
     return cls.instance
 
   def __init__(self):
@@ -175,10 +177,10 @@ class ImcflowDeviceConfig:
   def is_supported_kernel(KH, KW):
     return (KH, KW) in {(1, 1), (3, 3), (5, 5), (7, 7)}
 
-  def add_hw_node(self, graph_node_id: int, hwnode_id: int):
+  def add_hw_node(self, graph_node_id: Union[int,Tuple], hwnode_id: int):
     self.HWNodeMap[graph_node_id] = hwnode_id
 
-  def get_hw_node(self, graph_node_id: int):
+  def get_hw_node(self, graph_node_id: Union[int,Tuple]):
     return self.HWNodeMap.get(graph_node_id, None)
 
   def add_tensor_edge(self, tensor_id: TensorID, tensor_edge: TensorEdge):

@@ -23,6 +23,7 @@ from tvm.relay import pretty_print
 
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.op.contrib import imcflow
+from tvm.contrib.imcflow import ImcflowDeviceConfig
 
 from models import *
 
@@ -187,22 +188,20 @@ def RunTestModel(name):
   printModel(eval_mod, eval_param_dict, "after_flatten")
 
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  imcflow_transform.constructIDDict(eval_mod)
+  imcflow_transform.constructHashToCustomID(eval_mod)
+  imcflow_transform.constructCustomIDInFunc(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_prune_model")
 
-  NodeMapper = imcflow_transform.NodeMapper()
-  NodeMapper(eval_mod)
+  imcflow_transform.NodeMapper()(eval_mod)
+  imcflow_transform.constructTensorEdgeList(eval_mod)
 
-  PathListDict = imcflow_transform.getPathListDict(eval_mod, NodeMapper.MappingDict_2D)
-  for key, paths in PathListDict.items():
+  print(ImcflowDeviceConfig().HWNodeMap)
+  print(imcflow.CustomIDToName())
+  for key, paths in ImcflowDeviceConfig().TensorEdgeListDict.items():
     print(key)
     for path in paths:
       print(path)
     
-    print("Merged Paths")
-    for merged_path in paths.Merged:
-      print(merged_path)
-
   # PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(NodeMapper.MappingDict_2D)
   # PolicyTableGenerator(eval_mod)
 

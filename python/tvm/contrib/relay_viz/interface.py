@@ -28,7 +28,18 @@ from tvm import relay
 
 UNKNOWN_TYPE = "unknown"
 
-from tvm.relay.op.contrib.imcflow import IDDict
+from tvm.relay.op.contrib.imcflow import HashToCustomID
+
+def addCustomID(node, node_detail):
+  id_dict = HashToCustomID()
+  if int(hash(node)) in id_dict:
+    if isinstance(node_detail, str):
+      node_detail += f"\nCustomID : {id_dict[int(hash(node))]}"
+    elif isinstance(node_detail, list):
+      node_detail.append(f"CustomID : {id_dict[int(hash(node))]}")
+    else:
+      raise ValueError("node_detail must be either str or list for custom ID")
+  return node_detail
 
 
 class VizNode:
@@ -204,6 +215,8 @@ class DefaultVizParser(VizParser):
             else:
                 node_detail = f"{node_detail}\ntype_annotation: {node.type_annotation}"
 
+        node_detail = addCustomID(node, node_detail)
+
         # only node
         viz_node = VizNode(node_id, node_type, node_detail)
         viz_edges = []
@@ -256,9 +269,7 @@ class DefaultVizParser(VizParser):
         else:
             op_name = str(type(node.op)).split(".")[-1].split("'")[0]
 
-        id_dict = IDDict()
-        if int(hash(node)) in id_dict:
-          node_detail.append(f"CustomID : {id_dict[int(hash(node))]}")
+        node_detail = addCustomID(node, node_detail)
 
         # Arguments -> CallNode
         viz_node = VizNode(node_id, f"Call {op_name}", "\n".join(node_detail))
@@ -297,6 +308,8 @@ class DefaultVizParser(VizParser):
     ) -> Tuple[Union[VizNode, None], List[VizEdge]]:
         node_id = node_to_id[node]
         node_detail = f"shape: {node.data.shape}, dtype: {node.data.dtype}"
+
+        node_detail = addCustomID(node, node_detail)
 
         # only node
         viz_node = VizNode(node_id, "Const", node_detail)
