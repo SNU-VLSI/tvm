@@ -16,6 +16,44 @@
 # under the License.
 
 from typing import Tuple, List, Dict, Union
+from enum import Enum
+
+
+class Node(Enum):
+  inode_0 = 0
+  imce_0 = 1
+  imce_1 = 2
+  imce_2 = 3
+  imce_3 = 4
+  inode_1 = 5
+  imce_4 = 6
+  imce_5 = 7
+  imce_6 = 8
+  imce_7 = 9
+  inode_2 = 10
+  imce_8 = 11
+  imce_9 = 12
+  imce_10 = 13
+  imce_11 = 14
+  inode_3 = 15
+  imce_12 = 16
+  imce_13 = 17
+  imce_14 = 18
+  imce_15 = 19
+
+  @staticmethod
+  def from_coord(x: int, y: int) -> 'Node':
+    """Returns the Node corresponding to a 2D coordinate."""
+    value = x * 5 + y
+    for node in Node:
+      if node.value == value:
+        return node
+    raise ValueError(f"No Node found for coordinate ({x}, {y})")
+
+  def to_coord(self) -> tuple:
+    """Converts this node to its 2D coordinate."""
+    return divmod(self.value, 5)
+
 
 class TensorID:
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
