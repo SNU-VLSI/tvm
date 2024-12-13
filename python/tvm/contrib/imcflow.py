@@ -317,7 +317,6 @@ class ImcflowDeviceConfig:
 
   def get_tensor_edge_info(self, tensor_edge: TensorEdge):
     return self.TensorEdgetoInfo.get(tensor_edge, None)
-<<<<<<< HEAD
 
   def get_tensor_ids_from_graph_node_id(self, graph_node_id: Union[int, Tuple]):
     tids = []
@@ -329,11 +328,9 @@ class ImcflowDeviceConfig:
   def get_tensor_edges_from_graph_node_id(self, graph_node_id: Union[int, Tuple]):
     for tid in self.get_tensor_edges_from_graph_node_id(graph_node_id):
       yield self.get_tensor_edge(tid)
-=======
-  
+
   def add_inst_edge_info(self, graph_node_id: Union[int, Tuple], inst_edge_info: InstEdgeInfo):
     self.InstEdgeInfoDict[graph_node_id] = inst_edge_info
 
   def get_inst_edge_info(self, graph_node_id: Union[int, Tuple]):
     return self.InstEdgeInfoDict.get(graph_node_id, None)
->>>>>>> origin/imcflow
