@@ -9,9 +9,10 @@ class CodeBlockBase(metaclass=ABCMeta):
 
 
 class PolicyUpdateCodeBlock(CodeBlockBase):
+  """ Code block for updating policy table for given inode's hw node id  """
   def __init__(self, tensor_edge: TensorEdge):
     self.tensor_edge = tensor_edge
-    self.tensor_edge_info = ImcflowDeviceConfig.get_tensor_edge_info(tensor_edge)
+    ImcflowDeviceConfig().PolicyTalbeDict
 
 
   def generate(self) -> str:

@@ -34,7 +34,7 @@ def test_tensor_edge_info():
 
     new_router_entry = RouterEntry(1, 101, {"Local": None, "North": None, "South": None, "East": None, "West": None})
     edge_info.append_policy_info(new_router_entry)
-    assert len(edge_info.PolicyInfo) == 2
+    assert len(edge_info.policy_info) == 2
 
 def test_data_block():
     data_block = DataBlock("block1", 1024)
