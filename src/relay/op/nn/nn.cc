@@ -1676,5 +1676,56 @@ Example::
     .set_attr<FTVMCompute>("FTVMCompute", BatchToSpaceNDCompute)
     .set_attr<TOpPattern>("TOpPattern", kInjective);
 
+
+bool ImcflowBatchNormRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                  const TypeReporter& reporter) {
+  ICHECK_EQ(types.size(), 4);
+  const auto* data = types[0].as<TensorTypeNode>();
+  if (data == nullptr) return false;
+
+  const ImcflowBatchNormAttrs* param = attrs.as<ImcflowBatchNormAttrs>();
+
+  // axis of -1 means use the last dimension
+  ICHECK(param->axis >= -1 && param->axis < (int)data->shape.size());
+  int axis = (param->axis != -1) ? param->axis : data->shape.size() - 1;
+  auto axis_size = data->shape[axis];
+
+  // if we are using beta and gamma, they need to be of shape (dim,)
+  reporter->Assign(types[1], TensorType({axis_size}, data->dtype));
+  reporter->Assign(types[2], TensorType({axis_size}, data->dtype));
+
+  // output is a tuple of the normed data (same shape as input), new running mean,
+  // new running variance, saved mean and saved variance (the latter are all
+  // vectors of length dim)
+  std::vector<Type> fields;
+  auto vec_ty = TensorType(Array<IndexExpr>({data->shape[axis]}), data->dtype);
+  fields.push_back(TensorType(data->shape, data->dtype));
+  fields.push_back(vec_ty);
+  fields.push_back(vec_ty);
+  reporter->Assign(types[3], TupleType(Array<Type>(fields)));
+  return true;
+}
+
+Expr MakeImcflowBatchNorm(Expr data, Expr fused_scale, Expr fused_bias, int axis) {
+  auto attrs = make_object<ImcflowBatchNormAttrs>();
+  attrs->axis = axis;
+  static const Op& op = Op::Get("imcflow.fused_batch_norm");
+  return Call(op, {data, fused_scale, fused_bias}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_fused_batch_norm").set_body_typed(MakeImcflowBatchNorm);
+
+RELAY_REGISTER_OP("imcflow.fused_batch_norm")
+    .describe(R"code(Imcflow fused batch norm)code" TVM_ADD_FILELINE)
+    .set_attrs_type<ImcflowBatchNormAttrs>()
+    .set_num_inputs(3)
+    .add_argument("data", "Tensor", "Input to which batch_norm will be applied.")
+    .add_argument("fused_scale", "Tensor", "The scale factor.")
+    .add_argument("fused_bias", "Tensor", "The bias.")
+    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BatchNormInferCorrectLayout)
+    .set_support_level(1)
+    .add_type_rel("ImcflowBatchNorm", ImcflowBatchNormRel)
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+
 }  // namespace relay
 }  // namespace tvm

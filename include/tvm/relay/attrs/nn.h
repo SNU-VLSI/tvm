@@ -1588,6 +1588,14 @@ struct NLLLossAttrs : public tvm::AttrsNode<NLLLossAttrs> {
   }
 };  // struct NLLLossAttrs
 
+struct ImcflowBatchNormAttrs : public tvm::AttrsNode<ImcflowBatchNormAttrs> {
+  int axis;
+
+  TVM_DECLARE_ATTRS(BatchNormAttrs, "relay.attrs.ImcflowBatchNormAttrs") {
+    TVM_ATTR_FIELD(axis).describe("Specify which shape axis denotes the channel.").set_default(1);
+  }
+};  // struct BatchNormAttrs
+
 }  // namespace relay
 }  // namespace tvm
 #endif  // TVM_RELAY_ATTRS_NN_H_

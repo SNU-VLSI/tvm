@@ -1,0 +1,842 @@
+[13:19:28] /root/project/tvm/src/runtime/logging.cc:390: TVM_LOG_DEBUG enables VLOG statements in 'DEFAULT' up to level 3
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[12]: dynamic (overflow): BaseExpr, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[13]: dynamic: PrimExpr, parent BaseExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[14]: dynamic: arith.CanonicalExpr, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[15]: dynamic: arith.SplitExpr, parent arith.CanonicalExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[16]: dynamic: arith.SumExpr, parent arith.CanonicalExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[75]: dynamic (overflow): arith.ConstIntBound, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[76]: dynamic (overflow): arith.IntGroupBounds, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[77]: dynamic (overflow): arith.IntConstraints, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[78]: dynamic (overflow): arith.IntConstraintsTransform, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[17]: dynamic: tir.Var, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[79]: dynamic (overflow): Type, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[80]: dynamic: PrimType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[94]: dynamic (overflow): IntSet, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[95]: dynamic (overflow): arith.IntervalSet, parent IntSet
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[96]: dynamic (overflow): arith.IterMark, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[19]: dynamic: arith.IterMapExpr, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[20]: dynamic: arith.IterSplitExpr, parent arith.IterMapExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[21]: dynamic: arith.IterSumExpr, parent arith.IterMapExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[97]: dynamic (overflow): arith.IterMapResult, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[98]: dynamic (overflow): arith.ModularSet, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[99]: dynamic (overflow): arith.PresburgerSet, parent IntSet
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[100]: dynamic (overflow): arith.RewriteSimplifierStats, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[101]: dynamic (overflow): auto_scheduler.TuningOptions, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[102]: dynamic (overflow): auto_scheduler.ComputeDAG, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[103]: dynamic (overflow): auto_scheduler.AccessAnalyzer, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[104]: dynamic (overflow): auto_scheduler.CostModel, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[105]: dynamic (overflow): auto_scheduler.RandomModel, parent auto_scheduler.CostModel
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[106]: dynamic (overflow): auto_scheduler.PythonBasedModel, parent auto_scheduler.CostModel
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[107]: dynamic (overflow): auto_scheduler.Step, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[108]: dynamic (overflow): auto_scheduler.Stage, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[109]: dynamic (overflow): auto_scheduler.State, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[110]: dynamic (overflow): auto_scheduler.Iterator, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[111]: dynamic (overflow): auto_scheduler.MeasureInput, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[112]: dynamic (overflow): auto_scheduler.BuildResult, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[113]: dynamic (overflow): auto_scheduler.MeasureResult, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[114]: dynamic (overflow): auto_scheduler.MeasureCallback, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[115]: dynamic (overflow): auto_scheduler.PythonBasedMeasureCallback, parent auto_scheduler.MeasureCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[116]: dynamic (overflow): auto_scheduler.ProgramRunner, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[117]: dynamic (overflow): auto_scheduler.ProgramBuilder, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[118]: dynamic (overflow): auto_scheduler.ProgramMeasurer, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[119]: dynamic (overflow): auto_scheduler.LocalBuilder, parent auto_scheduler.ProgramBuilder
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[120]: dynamic (overflow): auto_scheduler.LocalRunner, parent auto_scheduler.ProgramRunner
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[121]: dynamic (overflow): auto_scheduler.RPCRunner, parent auto_scheduler.ProgramRunner
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[122]: dynamic (overflow): auto_scheduler.RecordToFile, parent auto_scheduler.MeasureCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[123]: dynamic (overflow): auto_scheduler.RecordReader, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[124]: dynamic (overflow): auto_scheduler.SearchPolicy, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[125]: dynamic (overflow): auto_scheduler.EmptyPolicy, parent auto_scheduler.SearchPolicy
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[126]: dynamic (overflow): auto_scheduler.SearchCallback, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[127]: dynamic (overflow): auto_scheduler.PreloadMeasuredStates, parent auto_scheduler.SearchCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[128]: dynamic (overflow): auto_scheduler.SketchPolicy, parent auto_scheduler.SearchPolicy
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[129]: dynamic (overflow): auto_scheduler.PreloadCustomSketchRule, parent auto_scheduler.SearchCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[130]: dynamic (overflow): auto_scheduler.HardwareParams, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[131]: dynamic (overflow): auto_scheduler.SearchTask, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[23]: dynamic: IntImm, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[4]: static: Array, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[52]: dynamic: RelayExpr, parent BaseExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[53]: dynamic: relay.Constructor, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[81]: dynamic: relay.TypeData, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[132]: dynamic (overflow): AffineType, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[133]: dynamic (overflow): TensorAffineType, parent AffineType
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[134]: dynamic (overflow): TupleAffineType, parent AffineType
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[135]: dynamic (overflow): Attrs, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[136]: dynamic (overflow): DictAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[137]: dynamic (overflow): AttrFieldInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[138]: dynamic (overflow): Diagnostic, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[139]: dynamic (overflow): DiagnosticRenderer, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[140]: dynamic (overflow): DiagnosticContext, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[141]: dynamic (overflow): EnvFunc, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[24]: dynamic: FloatImm, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[142]: dynamic (overflow): Range, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[54]: dynamic: GlobalVar, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[143]: dynamic (overflow): GlobalInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[144]: dynamic (overflow): DummyGlobalInfo, parent GlobalInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[145]: dynamic (overflow): VDevice, parent GlobalInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[146]: dynamic (overflow): GlobalVarSupply, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[147]: dynamic (overflow): instrument.PassInstrument, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[148]: dynamic (overflow): ir.PoolInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[149]: dynamic (overflow): ir.PoolInfoProperties, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[150]: dynamic (overflow): ir.WorkspacePoolInfo, parent ir.PoolInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[151]: dynamic (overflow): ir.ConstantInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[152]: dynamic (overflow): ir.ConstantPoolInfo, parent ir.PoolInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[153]: dynamic (overflow): ir.WorkspaceMemoryPools, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[154]: dynamic (overflow): ir.ConstantMemoryPools, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[155]: dynamic (overflow): IRModule, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[156]: dynamic (overflow): NameSupply, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[55]: dynamic: Op, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[157]: dynamic (overflow): SourceName, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[158]: dynamic (overflow): Span, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[159]: dynamic (overflow): SequentialSpan, parent Span
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[160]: dynamic (overflow): Source, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[161]: dynamic (overflow): SourceMap, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[82]: dynamic: relay.BaseTensorType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[83]: dynamic: relay.TensorType, parent relay.BaseTensorType
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[162]: dynamic (overflow): transform.PassInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[163]: dynamic (overflow): transform.Pass, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[164]: dynamic (overflow): transform.ModulePass, parent transform.Pass
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[165]: dynamic (overflow): transform.Sequential, parent transform.Pass
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[166]: dynamic (overflow): transform.PassContext, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[84]: dynamic: PointerType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[85]: dynamic: TypeVar, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[86]: dynamic: GlobalTypeVar, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[87]: dynamic: FuncType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[88]: dynamic: TupleType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[89]: dynamic: IncompleteType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[90]: dynamic: relay.RefType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[91]: dynamic: TypeCall, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[92]: dynamic: TypeConstraint, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[93]: dynamic: TypeRelation, parent TypeConstraint
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[167]: dynamic (overflow): meta_schedule.ArgInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[168]: dynamic (overflow): meta_schedule.TensorInfo, parent meta_schedule.ArgInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[169]: dynamic (overflow): meta_schedule.BuilderInput, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[170]: dynamic (overflow): meta_schedule.BuilderResult, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[171]: dynamic (overflow): meta_schedule.Builder, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[172]: dynamic (overflow): meta_schedule.PyBuilder, parent meta_schedule.Builder
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[173]: dynamic (overflow): meta_schedule.CostModel, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[174]: dynamic (overflow): meta_schedule.PyCostModel, parent meta_schedule.CostModel
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[175]: dynamic (overflow): meta_schedule.Workload, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[176]: dynamic (overflow): meta_schedule.TuningRecord, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[177]: dynamic (overflow): meta_schedule.Database, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[178]: dynamic (overflow): meta_schedule.PyDatabase, parent meta_schedule.Database
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[179]: dynamic (overflow): meta_schedule.JSONDatabase, parent meta_schedule.Database
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[180]: dynamic (overflow): meta_schedule.MemoryDatabase, parent meta_schedule.Database
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[181]: dynamic (overflow): meta_schedule.OrderedUnionDatabase, parent meta_schedule.Database
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[182]: dynamic (overflow): meta_schedule.ScheduleFnDatabase, parent meta_schedule.Database
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[183]: dynamic (overflow): meta_schedule.UnionDatabase, parent meta_schedule.Database
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[184]: dynamic (overflow): meta_schedule.ExtractedTask, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[185]: dynamic (overflow): meta_schedule.FeatureExtractor, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[186]: dynamic (overflow): meta_schedule.PyFeatureExtractor, parent meta_schedule.FeatureExtractor
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[187]: dynamic (overflow): meta_schedule.PerStoreFeature, parent meta_schedule.FeatureExtractor
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[188]: dynamic (overflow): meta_schedule.MeasureCallback, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[189]: dynamic (overflow): meta_schedule.AddToDatabase, parent meta_schedule.MeasureCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[190]: dynamic (overflow): meta_schedule.PyMeasureCallback, parent meta_schedule.MeasureCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[191]: dynamic (overflow): meta_schedule.RemoveBuildArtifact, parent meta_schedule.MeasureCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[192]: dynamic (overflow): meta_schedule.UpdateCostModel, parent meta_schedule.MeasureCallback
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[193]: dynamic (overflow): meta_schedule.Mutator, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[194]: dynamic (overflow): meta_schedule.MutateComputeLocation, parent meta_schedule.Mutator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[195]: dynamic (overflow): meta_schedule.MutateParallel, parent meta_schedule.Mutator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[196]: dynamic (overflow): meta_schedule.MutateThreadBinding, parent meta_schedule.Mutator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[197]: dynamic (overflow): meta_schedule.MutateTileSize, parent meta_schedule.Mutator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[198]: dynamic (overflow): meta_schedule.MutateUnroll, parent meta_schedule.Mutator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[199]: dynamic (overflow): meta_schedule.PyMutator, parent meta_schedule.Mutator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[200]: dynamic (overflow): meta_schedule.Postproc, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[201]: dynamic (overflow): meta_schedule.DisallowAsyncStridedMemCopy, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[202]: dynamic (overflow): meta_schedule.DisallowDynamicLoop, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[203]: dynamic (overflow): meta_schedule.PyPostproc, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[204]: dynamic (overflow): meta_schedule.RewriteCooperativeFetch, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[205]: dynamic (overflow): meta_schedule.RewriteLayout, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[206]: dynamic (overflow): meta_schedule.RewriteParallelVectorizeUnroll, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[207]: dynamic (overflow): meta_schedule.RewriteReductionBlock, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[208]: dynamic (overflow): meta_schedule.RewriteTensorize, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[209]: dynamic (overflow): meta_schedule.RewriteUnboundBlock, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[210]: dynamic (overflow): meta_schedule.VerifyGPUCode, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[211]: dynamic (overflow): meta_schedule.VerifyVTCMLimit, parent meta_schedule.Postproc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[212]: dynamic (overflow): meta_schedule.Profiler, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[213]: dynamic (overflow): meta_schedule.RunnerInput, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[214]: dynamic (overflow): meta_schedule.RunnerResult, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[215]: dynamic (overflow): meta_schedule.RunnerFuture, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[216]: dynamic (overflow): meta_schedule.Runner, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[217]: dynamic (overflow): meta_schedule.PyRunner, parent meta_schedule.Runner
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[218]: dynamic (overflow): meta_schedule.ScheduleRule, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[219]: dynamic (overflow): meta_schedule.AddRFactor, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[220]: dynamic (overflow): meta_schedule.ApplyCustomRule, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[221]: dynamic (overflow): meta_schedule.AutoBind, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[222]: dynamic (overflow): meta_schedule.AutoInline, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[223]: dynamic (overflow): meta_schedule.InlineConstantScalars, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[224]: dynamic (overflow): meta_schedule.CrossThreadReduction, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[225]: dynamic (overflow): meta_schedule.State, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[226]: dynamic (overflow): meta_schedule.MultiLevelTiling, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[227]: dynamic (overflow): meta_schedule.TensorCoreState, parent meta_schedule.State
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[228]: dynamic (overflow): meta_schedule.MultiLevelTilingTensorCore, parent meta_schedule.MultiLevelTiling
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[229]: dynamic (overflow): meta_schedule.MultiLevelTilingWideVector, parent meta_schedule.MultiLevelTiling
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[230]: dynamic (overflow): meta_schedule.MultiLevelTilingWithIntrin, parent meta_schedule.MultiLevelTiling
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[231]: dynamic (overflow): meta_schedule.ParallelizeVectorizeUnroll, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[232]: dynamic (overflow): meta_schedule.RandomComputeLocation, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[233]: dynamic (overflow): meta_schedule.PyScheduleRule, parent meta_schedule.ScheduleRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[234]: dynamic (overflow): meta_schedule.SearchStrategy, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[235]: dynamic (overflow): meta_schedule.EvolutionarySearch, parent meta_schedule.SearchStrategy
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[236]: dynamic (overflow): meta_schedule.ReplayFunc, parent meta_schedule.SearchStrategy
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[237]: dynamic (overflow): meta_schedule.ReplayTrace, parent meta_schedule.SearchStrategy
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[238]: dynamic (overflow): meta_schedule.MeasureCandidate, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[239]: dynamic (overflow): meta_schedule.PySearchStrategy, parent meta_schedule.SearchStrategy
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[240]: dynamic (overflow): meta_schedule.SpaceGenerator, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[241]: dynamic (overflow): meta_schedule.PostOrderApply, parent meta_schedule.SpaceGenerator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[242]: dynamic (overflow): meta_schedule.ScheduleFn, parent meta_schedule.SpaceGenerator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[243]: dynamic (overflow): meta_schedule.PySpaceGenerator, parent meta_schedule.SpaceGenerator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[244]: dynamic (overflow): meta_schedule.SpaceGeneratorUnion, parent meta_schedule.SpaceGenerator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[245]: dynamic (overflow): meta_schedule.TaskScheduler, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[246]: dynamic (overflow): meta_schedule.GradientBased, parent meta_schedule.TaskScheduler
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[247]: dynamic (overflow): meta_schedule.RoundRobin, parent meta_schedule.TaskScheduler
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[248]: dynamic (overflow): meta_schedule.TaskRecord, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[249]: dynamic (overflow): meta_schedule.PyTaskScheduler, parent meta_schedule.TaskScheduler
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[250]: dynamic (overflow): meta_schedule.TuneContext, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[251]: dynamic (overflow): runtime.BoxInt, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[252]: dynamic (overflow): runtime.BoxBool, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[253]: dynamic (overflow): runtime.BoxFloat, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[254]: dynamic (overflow): ObjectPath, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[255]: dynamic (overflow): RootPath, parent ObjectPath
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[256]: dynamic (overflow): AttributeAccessPath, parent ObjectPath
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[257]: dynamic (overflow): UnknownAttributeAccessPath, parent ObjectPath
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[258]: dynamic (overflow): ArrayIndexPath, parent ObjectPath
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[259]: dynamic (overflow): MissingArrayElementPath, parent ObjectPath
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[260]: dynamic (overflow): MapValuePath, parent ObjectPath
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[261]: dynamic (overflow): MissingMapEntryPath, parent ObjectPath
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[262]: dynamic (overflow): node.PrinterConfig, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[263]: dynamic (overflow): ObjectPathPair, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[264]: dynamic (overflow): runtime.profiling.Report, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[265]: dynamic (overflow): runtime.profiling.Count, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[266]: dynamic (overflow): runtime.profiling.Duration, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[267]: dynamic (overflow): runtime.profiling.Percent, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[268]: dynamic (overflow): runtime.profiling.Ratio, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[56]: dynamic: BaseFunc, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[57]: dynamic: relax.expr.Function, parent BaseFunc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[58]: dynamic: relax.expr.ExternFunc, parent BaseFunc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[269]: dynamic (overflow): relax.ExecBuilder, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[270]: dynamic (overflow): relax.distributed.DeviceMesh, parent GlobalInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[271]: dynamic (overflow): relax.distributed.PlacementSpec, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[272]: dynamic (overflow): relax.distributed.Placement, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[273]: dynamic (overflow): StructInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[274]: dynamic: relax.DTensorStructInfo, parent StructInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[279]: dynamic (overflow): relax.DataflowBlockRewrite, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[280]: dynamic (overflow): relax.BlockBuilder, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[281]: dynamic (overflow): relax.dpl.PatternMatchingRewriter, parent transform.Pass
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[282]: dynamic (overflow): relax.dpl.ExprPatternRewriter, parent relax.dpl.PatternMatchingRewriter
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[283]: dynamic (overflow): relax.dpl.OrRewriter, parent relax.dpl.PatternMatchingRewriter
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[284]: dynamic (overflow): relax.dpl.TupleRewriter, parent relax.dpl.PatternMatchingRewriter
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[285]: dynamic (overflow): DFPatternNode, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[286]: dynamic (overflow): relax.dpl.ExternFuncPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[287]: dynamic (overflow): relax.dpl.VarPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[288]: dynamic (overflow): relax.dpl.DataflowVarPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[289]: dynamic (overflow): relax.dpl.GlobalVarPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[290]: dynamic (overflow): relax.dpl.ExprPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[291]: dynamic (overflow): relax.dpl.ConstantPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[292]: dynamic (overflow): relax.dpl.CallPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[293]: dynamic (overflow): relax.dpl.PrimArrPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[294]: dynamic (overflow): relax.dpl.FunctionPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[295]: dynamic (overflow): relax.dpl.TuplePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[296]: dynamic (overflow): relax.dpl.UnorderedTuplePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[297]: dynamic (overflow): relax.dpl.TupleGetItemPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[298]: dynamic (overflow): relax.dpl.AndPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[299]: dynamic (overflow): relax.dpl.OrPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[300]: dynamic (overflow): relax.dpl.NotPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[301]: dynamic (overflow): relax.dpl.WildcardPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[302]: dynamic (overflow): relax.dpl.TypePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[303]: dynamic (overflow): relax.dpl.StructInfoPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[304]: dynamic (overflow): relax.dpl.ShapePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[305]: dynamic (overflow): DFConstraintNode, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[306]: dynamic: relax.dpl.SameShapeConstraint, parent DFConstraintNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[307]: dynamic (overflow): relax.dpl.DataTypePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[308]: dynamic (overflow): relax.dpl.AttrPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[309]: dynamic (overflow): relax.dpl.PatternSeq, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[310]: dynamic (overflow): Operation, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[311]: dynamic (overflow): PlaceholderOp, parent Operation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[312]: dynamic (overflow): RXPlaceholderOp, parent PlaceholderOp
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[313]: dynamic (overflow): relax.Id, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[59]: dynamic: relax.expr.Call, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[60]: dynamic: relax.expr.If, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[61]: dynamic: relax.expr.Tuple, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[62]: dynamic: relax.expr.TupleGetItem, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[63]: dynamic: relax.expr.LeafExpr, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[64]: dynamic: relax.expr.ShapeExpr, parent relax.expr.LeafExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[65]: dynamic: relax.expr.Var, parent relax.expr.LeafExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[66]: dynamic: relax.expr.DataflowVar, parent relax.expr.Var
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[68]: dynamic: relax.expr.Constant, parent relax.expr.LeafExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[69]: dynamic: relax.expr.PrimValue, parent relax.expr.LeafExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[70]: dynamic: relax.expr.StringImm, parent relax.expr.LeafExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[314]: dynamic (overflow): relax.expr.DataTypeImm, parent relax.expr.LeafExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[315]: dynamic (overflow): relax.expr.Binding, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[316]: dynamic (overflow): relax.expr.MatchCast, parent relax.expr.Binding
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[317]: dynamic (overflow): relax.expr.VarBinding, parent relax.expr.Binding
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[318]: dynamic (overflow): relax.expr.BindingBlock, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[319]: dynamic (overflow): relax.expr.DataflowBlock, parent relax.expr.BindingBlock
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[71]: dynamic: relax.expr.SeqExpr, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[320]: dynamic (overflow): expr_functor.PyExprVisitor, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[321]: dynamic (overflow): expr_functor.PyExprMutator, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[275]: dynamic: relax.ObjectStructInfo, parent StructInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[276]: dynamic: relax.PrimStructInfo, parent StructInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[277]: dynamic: relax.ShapeStructInfo, parent StructInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[278]: dynamic: relax.TensorStructInfo, parent StructInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[322]: dynamic (overflow): relax.TupleStructInfo, parent StructInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[323]: dynamic (overflow): relax.FuncStructInfo, parent StructInfo
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[324]: dynamic (overflow): relax.MatchResult, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[325]: dynamic (overflow): relax.FunctionPass, parent transform.Pass
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[326]: dynamic (overflow): relax.DataflowBlockPass, parent transform.Pass
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[327]: dynamic (overflow): relax.ShapeType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[328]: dynamic (overflow): relax.ObjectType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[329]: dynamic (overflow): relax.DynTensorType, parent relay.BaseTensorType
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[330]: dynamic (overflow): relax.PackedFuncType, parent Type
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[331]: dynamic (overflow): relax.attrs.AllReduceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[332]: dynamic (overflow): relax.attrs.AllGatherAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[333]: dynamic (overflow): relax.attrs.ScatterCollectiveAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[334]: dynamic (overflow): relax.attrs.DistributionAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[335]: dynamic (overflow): relax.attrs.Resize2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[336]: dynamic (overflow): relax.attrs.AttentionAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[337]: dynamic (overflow): relax.attrs.Conv1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[338]: dynamic (overflow): relax.attrs.Conv2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[339]: dynamic (overflow): relax.attrs.Conv3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[340]: dynamic (overflow): relax.attrs.Conv1DTransposeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[341]: dynamic (overflow): relax.attrs.Conv2DTransposeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[342]: dynamic (overflow): relax.attrs.LeakyReluAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[343]: dynamic (overflow): relax.attrs.SoftmaxAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[344]: dynamic (overflow): relay.attrs.PadAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[345]: dynamic (overflow): relax.attrs.BatchNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[346]: dynamic (overflow): relax.attrs.LayerNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[347]: dynamic (overflow): relax.attrs.GroupNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[348]: dynamic (overflow): relax.attrs.RMSNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[349]: dynamic (overflow): relax.attrs.DropoutAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[350]: dynamic (overflow): relax.attrs.NLLLossAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[351]: dynamic (overflow): relax.attrs.Pool1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[352]: dynamic (overflow): relax.attrs.Pool2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[353]: dynamic (overflow): relax.attrs.Pool3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[354]: dynamic (overflow): relax.attrs.AdaptivePool1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[355]: dynamic (overflow): relax.attrs.AdaptivePool2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[356]: dynamic (overflow): relax.attrs.AdaptivePool3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[357]: dynamic (overflow): relax.attrs.CallInplacePackedAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[358]: dynamic (overflow): relax.attrs.CallTIRWithGradAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[359]: dynamic (overflow): relax.attrs.CallTIRInplaceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[360]: dynamic (overflow): relax.attrs.ToVDeviceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[361]: dynamic (overflow): relax.attrs.HintOnDeviceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[362]: dynamic (overflow): relax.attrs.InitAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[363]: dynamic (overflow): relax.attrs.TriluAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[364]: dynamic (overflow): relax.attrs.AstypeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[365]: dynamic (overflow): relax.attrs.WrapParamAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[366]: dynamic (overflow): relax.attrs.TakeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[367]: dynamic (overflow): relax.attrs.StridedSliceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[368]: dynamic (overflow): relax.attrs.MatmulAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[369]: dynamic (overflow): relax.attrs.EinsumAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[370]: dynamic (overflow): relax.attrs.ConcatAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[371]: dynamic (overflow): relax.attrs.ExpandDimsAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[372]: dynamic (overflow): relax.attrs.LayoutTransformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[373]: dynamic (overflow): relax.attrs.PermuteDimsAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[374]: dynamic (overflow): relax.attrs.SplitAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[375]: dynamic (overflow): relax.attrs.SqueezeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[376]: dynamic (overflow): relax.attrs.RepeatAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[377]: dynamic (overflow): relax.attrs.TileAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[378]: dynamic (overflow): relax.attrs.FlipAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[379]: dynamic (overflow): relax.attrs.ScatterElementsAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[380]: dynamic (overflow): relax.attrs.ScatterNDAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[381]: dynamic (overflow): relax.attrs.QuantizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[382]: dynamic (overflow): relax.attrs.MultinomialFromUniformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[383]: dynamic (overflow): relax.attrs.ArgmaxArgminAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[384]: dynamic (overflow): relax.attrs.SortAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[385]: dynamic (overflow): relax.attrs.ArgsortAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[386]: dynamic (overflow): relax.attrs.TopKAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[387]: dynamic (overflow): relax.attrs.ScanopAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[388]: dynamic (overflow): relax.attrs.StatisticalAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[389]: dynamic (overflow): relax.transform.InplaceOpportunity, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[390]: dynamic (overflow): relax.transform.FusionPattern, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[391]: dynamic (overflow): relax.transform.PatternCheckContext, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[392]: dynamic (overflow): relax.tuning_api.TuningRecord, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[393]: dynamic (overflow): relax.tuning_api.Database, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[394]: dynamic (overflow): relax.tuning_api.JSONDatabase, parent relax.tuning_api.Database
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[395]: dynamic (overflow): relax.tuning_api.Choice, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[396]: dynamic (overflow): relax.tuning_api.Knob, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[397]: dynamic (overflow): relax.tuning_api.Trace, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[398]: dynamic (overflow): script.ir_builder.IRBuilderFrame, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[399]: dynamic (overflow): script.ir_builder.IRBuilder, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[400]: dynamic (overflow): script.ir_builder.IRModuleFrame, parent script.ir_builder.IRBuilderFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[401]: dynamic (overflow): script.ir_builder.relax.RelaxFrame, parent script.ir_builder.IRBuilderFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[402]: dynamic (overflow): script.ir_builder.relax.SeqExprFrame, parent script.ir_builder.relax.RelaxFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[403]: dynamic (overflow): script.ir_builder.relax.FunctionFrame, parent script.ir_builder.relax.SeqExprFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[404]: dynamic (overflow): script.ir_builder.relax.BlockFrame, parent script.ir_builder.relax.RelaxFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[405]: dynamic (overflow): script.ir_builder.relax.IfFrame, parent script.ir_builder.relax.RelaxFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[406]: dynamic (overflow): script.ir_builder.relax.ThenFrame, parent script.ir_builder.relax.SeqExprFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[407]: dynamic (overflow): script.ir_builder.relax.ElseFrame, parent script.ir_builder.relax.SeqExprFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[408]: dynamic (overflow): script.ir_builder.tir.TIRFrame, parent script.ir_builder.IRBuilderFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[409]: dynamic (overflow): script.ir_builder.tir.PrimFuncFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[410]: dynamic (overflow): script.ir_builder.tir.BlockFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[411]: dynamic (overflow): script.ir_builder.tir.BlockInitFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[412]: dynamic (overflow): script.ir_builder.tir.ForFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[413]: dynamic (overflow): script.ir_builder.tir.AssertFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[414]: dynamic (overflow): script.ir_builder.tir.LetFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[415]: dynamic (overflow): script.ir_builder.tir.RealizeFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[416]: dynamic (overflow): script.ir_builder.tir.LaunchThreadFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[417]: dynamic (overflow): script.ir_builder.tir.AllocateFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[418]: dynamic (overflow): script.ir_builder.tir.AllocateConstFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[419]: dynamic (overflow): script.ir_builder.tir.AttrFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[420]: dynamic (overflow): script.ir_builder.tir.WhileFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[421]: dynamic (overflow): script.ir_builder.tir.IfFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[422]: dynamic (overflow): script.ir_builder.tir.ThenFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[423]: dynamic (overflow): script.ir_builder.tir.ElseFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[424]: dynamic (overflow): script.ir_builder.tir.DeclBufferFrame, parent script.ir_builder.tir.TIRFrame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[425]: dynamic (overflow): tir.Buffer, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[18]: dynamic: tir.SizeVar, parent tir.Var
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[426]: dynamic (overflow): tir.IterVar, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[427]: dynamic (overflow): script.printer.Doc, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[428]: dynamic (overflow): script.printer.ExprDoc, parent script.printer.Doc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[429]: dynamic (overflow): script.printer.StmtDoc, parent script.printer.Doc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[430]: dynamic (overflow): script.printer.StmtBlockDoc, parent script.printer.Doc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[431]: dynamic (overflow): script.printer.LiteralDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[432]: dynamic (overflow): script.printer.IdDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[433]: dynamic (overflow): script.printer.AttrAccessDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[434]: dynamic (overflow): script.printer.IndexDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[435]: dynamic (overflow): script.printer.CallDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[436]: dynamic (overflow): script.printer.OperationDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[437]: dynamic (overflow): script.printer.LambdaDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[438]: dynamic (overflow): script.printer.TupleDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[439]: dynamic (overflow): script.printer.ListDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[440]: dynamic (overflow): script.printer.DictDoc, parent script.printer.ExprDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[441]: dynamic (overflow): script.printer.SliceDoc, parent script.printer.Doc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[442]: dynamic (overflow): script.printer.AssignDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[443]: dynamic (overflow): script.printer.IfDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[444]: dynamic (overflow): script.printer.WhileDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[445]: dynamic (overflow): script.printer.ForDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[446]: dynamic (overflow): script.printer.ScopeDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[447]: dynamic (overflow): script.printer.ExprStmtDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[448]: dynamic (overflow): script.printer.AssertDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[449]: dynamic (overflow): script.printer.ReturnDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[450]: dynamic (overflow): script.printer.FunctionDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[451]: dynamic (overflow): script.printer.ClassDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[452]: dynamic (overflow): script.printer.CommentDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[453]: dynamic (overflow): script.printer.DocStringDoc, parent script.printer.StmtDoc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[454]: dynamic (overflow): script.printer.Frame, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[455]: dynamic (overflow): script.printer.IRFrame, parent script.printer.Frame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[456]: dynamic (overflow): script.printer.IRDocsifier, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[25]: dynamic: tir.StringImm, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[26]: dynamic: tir.Cast, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[27]: dynamic: tir.Add, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[28]: dynamic: tir.Sub, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[29]: dynamic: tir.Mul, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[30]: dynamic: tir.Div, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[31]: dynamic: tir.Mod, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[32]: dynamic: tir.FloorDiv, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[33]: dynamic: tir.FloorMod, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[34]: dynamic: tir.Min, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[35]: dynamic: tir.Max, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[36]: dynamic: tir.EQ, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[37]: dynamic: tir.NE, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[38]: dynamic: tir.LT, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[39]: dynamic: tir.LE, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[40]: dynamic: tir.GT, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[41]: dynamic: tir.GE, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[42]: dynamic: tir.And, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[43]: dynamic: tir.Or, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[44]: dynamic: tir.Not, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[45]: dynamic: tir.Select, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[46]: dynamic: tir.Ramp, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[47]: dynamic: tir.Broadcast, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[48]: dynamic: tir.Let, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[49]: dynamic: tir.Call, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[50]: dynamic: tir.Shuffle, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[457]: dynamic (overflow): tir.CommReducer, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[51]: dynamic: tir.Reduce, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[458]: dynamic (overflow): tir.Any, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[459]: dynamic (overflow): tir.BufferLoad, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[460]: dynamic (overflow): tir.ProducerLoad, parent PrimExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[461]: dynamic (overflow): tir.PrimFunc, parent BaseFunc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[462]: dynamic (overflow): tir.Stmt, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[463]: dynamic: tir.LetStmt, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[464]: dynamic: tir.AttrStmt, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[465]: dynamic: tir.AssertStmt, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[466]: dynamic: tir.For, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[467]: dynamic: tir.While, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[468]: dynamic: tir.ProducerStore, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[469]: dynamic: tir.Allocate, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[470]: dynamic: tir.AllocateConst, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[471]: dynamic: tir.DeclBuffer, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[472]: dynamic: tir.ProducerRealize, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[473]: dynamic: tir.Prefetch, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[474]: dynamic: tir.SeqStmt, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[475]: dynamic: tir.IfThenElse, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[476]: dynamic: tir.Evaluate, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[477]: dynamic: tir.BufferStore, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[478]: dynamic (overflow): tir.BufferRealize, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[479]: dynamic (overflow): tir.BufferRegion, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[480]: dynamic (overflow): tir.MatchBufferRegion, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[481]: dynamic (overflow): tir.Block, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[482]: dynamic (overflow): tir.BlockRealize, parent tir.Stmt
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[483]: dynamic (overflow): script.printer.RelaxFrame, parent script.printer.Frame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[484]: dynamic (overflow): tir.IndexMap, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[485]: dynamic (overflow): script.printer.TIRFrame, parent script.printer.Frame
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[486]: dynamic (overflow): Target, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[487]: dynamic (overflow): ir.AllocatedPoolInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[488]: dynamic (overflow): attrs.TestAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[489]: dynamic (overflow): BaseComputeOp, parent Operation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[490]: dynamic (overflow): ComputeOp, parent BaseComputeOp
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[491]: dynamic (overflow): ExternOp, parent Operation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[492]: dynamic (overflow): HybridOp, parent Operation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[493]: dynamic (overflow): ScanOp, parent Operation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[494]: dynamic (overflow): TensorComputeOp, parent BaseComputeOp
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[495]: dynamic (overflow): Stage, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[496]: dynamic (overflow): IterVarAttr, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[497]: dynamic (overflow): IterVarRelation, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[498]: dynamic (overflow): Split, parent IterVarRelation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[499]: dynamic (overflow): Fuse, parent IterVarRelation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[500]: dynamic (overflow): Rebase, parent IterVarRelation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[501]: dynamic (overflow): Singleton, parent IterVarRelation
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[502]: dynamic (overflow): Schedule, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[503]: dynamic (overflow): SpecializedCondition, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[504]: dynamic (overflow): tir.DataProducer, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[505]: dynamic (overflow): Tensor, parent tir.DataProducer
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[506]: dynamic (overflow): TensorIntrin, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[507]: dynamic (overflow): TensorIntrinCall, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[508]: dynamic (overflow): tir.BlockDependenceInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[509]: dynamic (overflow): tir.StmtSRef, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[510]: dynamic (overflow): tir.Dependency, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[511]: dynamic (overflow): tir.BlockScope, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[512]: dynamic (overflow): tir.Layout, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[513]: dynamic (overflow): tir.BijectiveLayout, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[514]: dynamic (overflow): tir.TensorIntrin, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[515]: dynamic (overflow): tir.PrimFuncPass, parent transform.Pass
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[516]: dynamic (overflow): tir.schedule.TensorizeInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[517]: dynamic (overflow): tir.schedule.AutoTensorizeMappingInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[518]: dynamic (overflow): tir.Instruction, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[519]: dynamic (overflow): tir.InstructionKind, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[520]: dynamic (overflow): tir.BlockRV, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[521]: dynamic (overflow): tir.LoopRV, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[522]: dynamic (overflow): tir.Schedule, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[523]: dynamic (overflow): tir.ScheduleState, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[524]: dynamic (overflow): tir.Trace, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[525]: dynamic (overflow): tir.transform.HoistExpressionConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[526]: dynamic (overflow): tir.transform.HoistIfThenElseConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[527]: dynamic (overflow): tir.transform.InjectDoubleBufferConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[528]: dynamic (overflow): tir.transform.LoopPartitionConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[529]: dynamic (overflow): tir.transform.ReduceBranchingThroughOvercomputeConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[530]: dynamic (overflow): tir.transform.RemoveNoOpConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[531]: dynamic (overflow): tir.transform.SimplifyConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[532]: dynamic (overflow): tir.transform.UnrollLoopConfig, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[3]: static: runtime.String, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[533]: dynamic (overflow): tir.usmp.BufferInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[534]: dynamic (overflow): tir.usmp.PoolAllocation, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[535]: dynamic (overflow): GenericFunc, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[536]: dynamic (overflow): CompilationConfig, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[537]: dynamic (overflow): metadata.MetadataBaseNode, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[538]: dynamic (overflow): metadata.MetadataNode, parent metadata.MetadataBaseNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[539]: dynamic (overflow): metadata.TensorInfoNode, parent metadata.MetadataBaseNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[540]: dynamic (overflow): metadata.ConstantInfoNode, parent metadata.MetadataBaseNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[541]: dynamic (overflow): TargetTag, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[542]: dynamic (overflow): MemoryInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[543]: dynamic (overflow): TargetKind, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[544]: dynamic (overflow): VirtualDevice, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[545]: dynamic (overflow): relay.attrs.ArgsortAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[546]: dynamic (overflow): relay.attrs.SearchSortedAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[547]: dynamic (overflow): relay.attrs.TopkAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[548]: dynamic (overflow): relay.attrs.CastHintAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[549]: dynamic (overflow): relay.attrs.CompilerAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[550]: dynamic (overflow): relay.attrs.CallLoweredAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[551]: dynamic (overflow): relay.attrs.EthosuBinaryElementwiseAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[552]: dynamic (overflow): relay.attrs.EthosuConv2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[553]: dynamic (overflow): relay.attrs.EthosuDepthwiseConv2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[554]: dynamic (overflow): relay.attrs.EthosuIdentityAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[555]: dynamic (overflow): relay.attrs.EthosuPoolingAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[556]: dynamic (overflow): relay.attrs.EthosuUnaryElementwiseAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[557]: dynamic (overflow): relay.attrs.DebugAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[558]: dynamic (overflow): relay.attrs.Resize2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[559]: dynamic (overflow): relay.attrs.UpSamplingAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[560]: dynamic (overflow): relay.attrs.UpSampling3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[561]: dynamic (overflow): relay.attrs.ReshapeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[562]: dynamic (overflow): relay.attrs.TileAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[563]: dynamic (overflow): relay.attrs.InitOpAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[564]: dynamic (overflow): relay.attrs.OneHotAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[565]: dynamic (overflow): relay.attrs.StridedSliceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[566]: dynamic (overflow): relay.attrs.DynExpandDimsAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[567]: dynamic (overflow): relay.attrs.SqueezeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[568]: dynamic (overflow): relay.attrs.Dilation2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[569]: dynamic (overflow): relay.attrs.AffineGridAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[570]: dynamic (overflow): relay.attrs.GridSampleAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[571]: dynamic (overflow): relay.attrs.Resize1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[572]: dynamic (overflow): relay.attrs.Resize3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[573]: dynamic (overflow): relay.attrs.CropAndResizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[574]: dynamic (overflow): relay.attrs.DeviceCopyAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[575]: dynamic (overflow): relay.attrs.AllocStorageAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[576]: dynamic (overflow): relay.attrs.AllocTensorAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[577]: dynamic (overflow): relay.attrs.OnDeviceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[578]: dynamic (overflow): relay.attrs.BitPackAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[579]: dynamic (overflow): relay.attrs.BinaryConv2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[580]: dynamic (overflow): relay.attrs.BinaryDenseAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[581]: dynamic (overflow): relay.attrs.Conv1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[582]: dynamic (overflow): relay.attrs.Conv2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[583]: dynamic (overflow): relay.attrs.Conv3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[584]: dynamic (overflow): relay.attrs.Conv3DTransposeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[585]: dynamic (overflow): relay.attrs.Conv2DTransposeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[586]: dynamic (overflow): relay.attrs.Conv1DTransposeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[587]: dynamic (overflow): relay.attrs.Conv2DWinogradAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[588]: dynamic (overflow): relay.attrs.ConvWinogradWeightTransformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[589]: dynamic (overflow): relay.attrs.Conv3DWinogradAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[590]: dynamic (overflow): relay.attrs.Conv2DWinogradNNPACKWeightTransformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[591]: dynamic (overflow): relay.attrs.ConvGemmWeightTransformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[592]: dynamic (overflow): relay.attrs.DeformableConv2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[593]: dynamic (overflow): relay.attrs.CorrelationAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[594]: dynamic (overflow): relay.attrs.BiasAddAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[595]: dynamic (overflow): relay.attrs.FIFOBufferAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[596]: dynamic (overflow): relay.attrs.MatmulAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[597]: dynamic (overflow): relay.attrs.DenseAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[598]: dynamic (overflow): relay.attrs.DensePackAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[599]: dynamic (overflow): relay.attrs.LeakyReluAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[600]: dynamic (overflow): relay.attrs.PReluAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[601]: dynamic (overflow): relay.attrs.SoftmaxAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[602]: dynamic (overflow): relay.attrs.LRNAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[603]: dynamic (overflow): relay.attrs.L2NormalizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[604]: dynamic (overflow): relay.attrs.DropoutAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[605]: dynamic (overflow): relay.attrs.BatchNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[606]: dynamic (overflow): relay.attrs.InstanceNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[607]: dynamic (overflow): relay.attrs.LayerNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[608]: dynamic (overflow): relay.attrs.GroupNormAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[609]: dynamic (overflow): relay.attrs.BatchMatmulAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[610]: dynamic (overflow): relay.attrs.DilateAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[611]: dynamic (overflow): relay.attrs.SubPixelAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[612]: dynamic (overflow): relay.attrs.NLLLossAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[613]: dynamic (overflow): relay.attrs.SpaceToBatchNDAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[614]: dynamic (overflow): relay.attrs.BatchToSpaceNDAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[615]: dynamic (overflow): relay.attrs.MirrorPadAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[616]: dynamic (overflow): relay.attrs.MaxPool2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[617]: dynamic (overflow): relay.attrs.AvgPool2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[618]: dynamic (overflow): relay.attrs.GlobalPool2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[619]: dynamic (overflow): relay.attrs.AdaptivePool1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[620]: dynamic (overflow): relay.attrs.AdaptivePool2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[621]: dynamic (overflow): relay.attrs.AdaptivePool3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[622]: dynamic (overflow): relay.attrs.MaxPool1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[623]: dynamic (overflow): relay.attrs.AvgPool1DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[624]: dynamic (overflow): relay.attrs.MaxPool3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[625]: dynamic (overflow): relay.attrs.AvgPool3DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[626]: dynamic (overflow): relay.attrs.SparseDenseAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[627]: dynamic (overflow): relay.attrs.SparseTransposeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[628]: dynamic (overflow): relay.attrs.SparseConv2DAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[629]: dynamic (overflow): relay.attrs.ThreefryGenerateAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[630]: dynamic (overflow): relay.attrs.UniformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[631]: dynamic (overflow): relay.attrs.NormalAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[632]: dynamic (overflow): relay.attrs.MultinomialAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[633]: dynamic (overflow): relay.attrs.EinsumAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[634]: dynamic (overflow): relay.attrs.ReduceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[635]: dynamic (overflow): relay.attrs.ArgReduceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[636]: dynamic (overflow): relay.attrs.VarianceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[637]: dynamic (overflow): relay.attrs.SlidingWindowAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[638]: dynamic (overflow): relay.attrs.CastAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[639]: dynamic (overflow): relay.attrs.ExpandDimsAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[640]: dynamic (overflow): relay.attrs.ConcatenateAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[641]: dynamic (overflow): relay.attrs.StackAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[642]: dynamic (overflow): relay.attrs.TransposeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[643]: dynamic (overflow): relay.attrs.ReshapeLikeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[644]: dynamic (overflow): relay.attrs.ScatterElementsAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[645]: dynamic (overflow): relay.attrs.ScatterNDAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[646]: dynamic (overflow): relay.attrs.TakeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[647]: dynamic (overflow): relay.attrs.ArangeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[648]: dynamic (overflow): relay.attrs.RepeatAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[649]: dynamic (overflow): relay.attrs.StftAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[650]: dynamic (overflow): relay.attrs.DFTAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[651]: dynamic (overflow): relay.attrs.MeshgridAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[652]: dynamic (overflow): relay.attrs.ReverseAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[653]: dynamic (overflow): relay.attrs.ReverseSequenceAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[654]: dynamic (overflow): relay.attrs.SplitAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[655]: dynamic (overflow): relay.attrs.SliceLikeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[656]: dynamic (overflow): relay.attrs.LayoutTransformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[657]: dynamic (overflow): relay.attrs.AutoSchedulerLayoutTransformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[658]: dynamic (overflow): relay.attrs.MetaScheduleLayoutTransformAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[659]: dynamic (overflow): relay.attrs.GatherAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[660]: dynamic (overflow): relay.attrs.GatherNDAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[661]: dynamic (overflow): relay.attrs.SequenceMaskAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[662]: dynamic (overflow): relay.attrs.SparseToDenseAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[663]: dynamic (overflow): relay.attrs.MatrixSetDiagAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[664]: dynamic (overflow): relay.attrs.ScanopAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[665]: dynamic (overflow): relay.attrs.UniqueAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[666]: dynamic (overflow): relay.attrs.TriluAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[667]: dynamic (overflow): relay.attrs.FixedPointMultiplyPerAxisAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[668]: dynamic (overflow): relay.attrs.ClipAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[669]: dynamic (overflow): relay.attrs.FixedPointMultiplyAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[670]: dynamic (overflow): relay.attrs.ShapeOfAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[671]: dynamic (overflow): relay.attrs.NdarraySizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[672]: dynamic (overflow): relay.attrs.MultiBoxPriorAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[673]: dynamic (overflow): relay.attrs.MultiBoxTransformLocAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[674]: dynamic (overflow): relay.attrs.GetValidCountsAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[675]: dynamic (overflow): relay.attrs.NonMaximumSuppressionAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[676]: dynamic (overflow): relay.attrs.AllClassNonMaximumSuppressionAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[677]: dynamic (overflow): relay.attrs.RegularNonMaximumSuppressionAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[678]: dynamic (overflow): relay.attrs.ROIAlignAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[679]: dynamic (overflow): relay.attrs.ROIPoolAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[680]: dynamic (overflow): relay.attrs.ProposalAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[681]: dynamic (overflow): relay.attrs.YoloReorgAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[682]: dynamic (overflow): relay.attrs.ShapeFuncAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[683]: dynamic (overflow): relay.attrs.ReshapeTensorAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[684]: dynamic (overflow): relay.AnnotatedRegion, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[685]: dynamic (overflow): relay.AnnotatedRegionSet, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[686]: dynamic (overflow): relay.CallGraph, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[687]: dynamic (overflow): relay.collage.CandidatePartition, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[688]: dynamic (overflow): relay.collage.SimpleCombinerRule, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[689]: dynamic: relay.collage.ByKindSimpleCombinerRule, parent relay.collage.SimpleCombinerRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[690]: dynamic (overflow): relay.collage.CombinerRule, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[691]: dynamic: relay.collage.AllSimpleCombinerRule, parent relay.collage.CombinerRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[692]: dynamic: relay.collage.TupleArgCombinerRule, parent relay.collage.CombinerRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[693]: dynamic: relay.collage.TupleProjCombinerRule, parent relay.collage.CombinerRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[694]: dynamic: relay.collage.ConstantCombinerRule, parent relay.collage.CombinerRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[695]: dynamic (overflow): relay.collage.CostEstimator, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[696]: dynamic (overflow): relay.collage.CustomCostEstimator, parent relay.collage.CostEstimator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[697]: dynamic (overflow): relay.collage.MockCostEstimator, parent relay.collage.CostEstimator
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[698]: dynamic (overflow): relay.collage.PartitionRule, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[699]: dynamic: relay.collage.DFPatternPartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[700]: dynamic: relay.collage.CompositePartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[701]: dynamic: relay.collage.PrimitivePartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[702]: dynamic: relay.collage.UnionPartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[703]: dynamic: relay.collage.OpCallByKindPartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[704]: dynamic: relay.collage.CombinePartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[705]: dynamic: relay.collage.OnlyValidPartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[706]: dynamic: relay.collage.HostPartitionRule, parent relay.collage.PartitionRule
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[709]: dynamic (overflow): relay.collage.PartitionSpec, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[710]: dynamic (overflow): relay.collage.NestedSubGraph, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[711]: dynamic (overflow): relay.collage.SubGraph, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[72]: dynamic: relay.TempExpr, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[712]: dynamic (overflow): relay.QAnnotateExpr, parent relay.TempExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[713]: dynamic (overflow): relay.QPartitionExpr, parent relay.TempExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[714]: dynamic (overflow): relay.attrs.SimulatedQuantizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[715]: dynamic (overflow): relay.quantize.QConfig, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[716]: dynamic (overflow): relay._transform.InferCorrectLayoutOutput, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[717]: dynamic (overflow): relay.attrs.WithFuncIdAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[718]: dynamic (overflow): relay.attrs.TupleGetItemAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[719]: dynamic (overflow): Executor, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[720]: dynamic (overflow): interpreter.RecClosure, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[721]: dynamic (overflow): relay.RefValue, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[722]: dynamic (overflow): relay.ConstructorValue, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[723]: dynamic (overflow): Runtime, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[724]: dynamic (overflow): relay.TECompiler, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[725]: dynamic (overflow): relay.LoweredOutput, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[726]: dynamic (overflow): relay.CachedFunc, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[727]: dynamic (overflow): relay.CCacheKey, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[728]: dynamic (overflow): relay.CCacheValue, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[729]: dynamic (overflow): relay.StorageInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[730]: dynamic (overflow): relay.StaticMemoryPlan, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[731]: dynamic (overflow): relay.backend.FunctionInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[732]: dynamic (overflow): MetadataObj, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[733]: dynamic (overflow): relay.Pattern, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[734]: dynamic (overflow): relay.PatternWildcard, parent relay.Pattern
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[735]: dynamic (overflow): relay.PatternVar, parent relay.Pattern
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[736]: dynamic (overflow): relay.PatternConstructor, parent relay.Pattern
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[737]: dynamic (overflow): relay.PatternTuple, parent relay.Pattern
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[738]: dynamic (overflow): relay.Clause, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[73]: dynamic: relay.Match, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[739]: dynamic (overflow): relay.Id, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[740]: dynamic (overflow): DFPatternCallbackNode, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[741]: dynamic (overflow): relay.dataflow_pattern.ExprPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[742]: dynamic (overflow): relay.dataflow_pattern.VarPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[743]: dynamic (overflow): relay.dataflow_pattern.ConstantPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[744]: dynamic (overflow): relay.dataflow_pattern.CallPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[745]: dynamic (overflow): relay.dataflow_pattern.FunctionPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[746]: dynamic (overflow): relay.dataflow_pattern.LetPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[747]: dynamic (overflow): relay.dataflow_pattern.IfPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[748]: dynamic (overflow): relay.dataflow_pattern.TuplePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[749]: dynamic (overflow): relay.dataflow_pattern.TupleGetItemPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[750]: dynamic (overflow): relay.dataflow_pattern.AltPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[751]: dynamic (overflow): relay.dataflow_pattern.WildcardPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[752]: dynamic (overflow): relay.dataflow_pattern.TypePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[753]: dynamic (overflow): relay.dataflow_pattern.ShapePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[754]: dynamic (overflow): relay.dataflow_pattern.DataTypePattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[755]: dynamic (overflow): relay.dataflow_pattern.AttrPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[756]: dynamic (overflow): relay.dataflow_pattern.DominatorPattern, parent DFPatternNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:116: TypeIndex[74]: dynamic: relay.Constant, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[757]: dynamic (overflow): relay.Tuple, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[758]: dynamic (overflow): relay.Var, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[759]: dynamic (overflow): relay.Call, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[760]: dynamic (overflow): relay.Let, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[761]: dynamic (overflow): relay.If, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[762]: dynamic (overflow): relay.TupleGetItem, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[763]: dynamic (overflow): relay.RefCreate, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[764]: dynamic (overflow): relay.RefRead, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[765]: dynamic (overflow): relay.RefWrite, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[766]: dynamic (overflow): relay.Function, parent BaseFunc
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[767]: dynamic (overflow): relay.OpImplementation, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[768]: dynamic (overflow): relay.OpSpecialization, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[769]: dynamic (overflow): relay.OpStrategy, parent RelayExpr
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[770]: dynamic (overflow): relay.FunctionPass, parent transform.Pass
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[771]: dynamic (overflow): relay.attrs.MetaRefAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[772]: dynamic (overflow): parser.Token, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[773]: dynamic (overflow): printer.DocAtom, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[774]: dynamic (overflow): printer.DocText, parent printer.DocAtom
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[775]: dynamic (overflow): printer.DocLine, parent printer.DocAtom
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[776]: dynamic (overflow): relay.attrs.BroadcastAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[777]: dynamic (overflow): relay.attrs.DequantizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[778]: dynamic (overflow): relay.attrs.QuantizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[779]: dynamic (overflow): relay.attrs.RequantizeAttrs, parent Attrs
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[780]: dynamic (overflow): relay.qnn.op.RequantizeConfig, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[781]: dynamic (overflow): contrib.ethosu.cascader.BlockConfig, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[782]: dynamic (overflow): contrib.ethosu.cascader.CascaderOptions, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[783]: dynamic (overflow): contrib.ethosu.cascader.PerformanceInfo, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[784]: dynamic (overflow): contrib.ethosu.cascader.Tensor, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[785]: dynamic (overflow): contrib.ethosu.cascader.CascaderGraph, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[786]: dynamic (overflow): contrib.ethosu.cascader.Part, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[787]: dynamic (overflow): contrib.ethosu.cascader.EthosuPart, parent contrib.ethosu.cascader.Part
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[788]: dynamic (overflow): contrib.ethosu.cascader.InlinePart, parent contrib.ethosu.cascader.Part
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[789]: dynamic (overflow): contrib.ethosu.cascader.Plan, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[790]: dynamic (overflow): contrib.ethosu.cascader.Propagator, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[791]: dynamic (overflow): contrib.ethosu.cascader.Proposal, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[792]: dynamic (overflow): contrib.ethosu.cascader.StripeConfig, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[793]: dynamic (overflow): contrib.ethosu.cascader.MemoryRegion, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[794]: dynamic (overflow): contrib.ethosu.cascader.TensorConfig, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[795]: dynamic (overflow): relay.ext.ethos-u.BaseAddress, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[796]: dynamic (overflow): relay.ext.ethos-u.CompilationArtifact, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[11]: static: runtime.ADT, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[5]: static: Map, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[10]: static: runtime.Closure, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[6]: static: runtime.ShapeTuple, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[797]: dynamic (overflow): runtime.disco.ShardLoader, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[798]: dynamic (overflow): runtime.disco.Session, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[799]: dynamic (overflow): runtime.disco.DiscoDebugObject, parent runtime.disco.Session
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[800]: dynamic (overflow): runtime.disco.ProcessSession, parent runtime.disco.Session
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[8]: static: runtime.disco.DRef, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[801]: dynamic (overflow): runtime.disco.ThreadedSession, parent runtime.disco.Session
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[802]: dynamic (overflow): metadata.MetadataArrayNode, parent metadata.MetadataBaseNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[1]: static: runtime.Module, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[2]: static: runtime.NDArray, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[7]: static: runtime.PackedFunc, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[803]: dynamic (overflow): TimerNode, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[804]: dynamic (overflow): DefaultTimerNode, parent TimerNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[805]: dynamic (overflow): CPUTimerNode, parent TimerNode
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[806]: dynamic (overflow): runtime.profiling.DeviceWrapper, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[807]: dynamic (overflow): runtime.profiling.MetricCollector, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[808]: dynamic (overflow): relax.vm.KVState, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[809]: dynamic (overflow): relax.vm.AttentionKVCache, parent relax.vm.KVState
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[810]: dynamic (overflow): relax.vm.RNNState, parent relax.vm.KVState
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[811]: dynamic (overflow): relax.vm.AttentionKVCacheLegacy, parent runtime.Object
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[812]: dynamic (overflow): relax.vm.PagedAttentionKVCache, parent relax.vm.AttentionKVCache
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[813]: dynamic (overflow): relax.vm.RNNStateImp, parent relax.vm.RNNState
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[814]: dynamic (overflow): relax.vm.Closure, parent runtime.Closure
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[815]: dynamic (overflow): vm.Closure, parent runtime.Closure
+[13:19:28] /root/project/tvm/src/runtime/object.cc:121: TypeIndex[816]: dynamic (overflow): runtime.disco.SocketSession, parent runtime.disco.Session
+[13:19:28] /root/project/tvm/src/runtime/object.cc:106: TypeIndex[9]: static: runtime.RPCObjectRef, parent runtime.Object
+2024-12-17 13:19:29.272999: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2024-12-17 13:19:29.276207: I external/local_tsl/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2024-12-17 13:19:29.314246: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+2024-12-17 13:19:29.314276: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:607] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2024-12-17 13:19:29.315620: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1515] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2024-12-17 13:19:29.325572: I external/local_tsl/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2024-12-17 13:19:29.325804: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2024-12-17 13:19:30.040531: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+[13:19:31] /root/project/tvm/src/target/target_kind.cc:171: Warning: Unable to detect CUDA version, default to "-arch=sm_50" instead
+enabled targets: llvm
+pytest marker: 
+============================= test session starts ==============================
+platform linux -- Python 3.10.9, pytest-8.3.3, pluggy-1.5.0
+rootdir: /root/project/tvm
+configfile: pyproject.toml
+plugins: anyio-4.6.2, typeguard-4.3.0
+collected 1 item
+
+test.py [13:19:31] /root/project/tvm/src/ir/transform.cc:419: InferType: Executing module pass with opt level: 0
+[13:19:31] /root/project/tvm/src/runtime/object.cc:121: InferType: TypeIndex[817]: dynamic (overflow): TypeReporter, parent runtime.Object
+def @main(%data: Tensor[(1, 64, 32, 32), int16] /* ty=Tensor[(1, 64, 32, 32), int16] */, %fused_scale: Tensor[(64), int16] /* ty=Tensor[(64), int16] */, %fused_bias: Tensor[(64), int16] /* ty=Tensor[(64), int16] */) -> Tensor[(1, 64, 32, 32), int16] {
+  %0 = imcflow.fused_batch_norm(%data, %fused_scale, %fused_bias) /* ty=(Tensor[(1, 64, 32, 32), int16], Tensor[(64), int16], Tensor[(64), int16]) */;
+  %0.0 /* ty=Tensor[(1, 64, 32, 32), int16] */
+}
+
+.
+
+============================== 1 passed in 0.02s ===============================
