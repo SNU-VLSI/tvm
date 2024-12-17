@@ -31,7 +31,13 @@ def getNodeDebugID(node):
     indicator = str(node.op)
   return indicator
 
-def getFlagNodeID(node):
+def getInnerNodeID(node):
+  if isinstance(node, tuple):
+    return node[1]
+  else:
+    return node
+
+def getOuterNodeID(node):
   if isinstance(node, tuple):
     return node[0]
   else:
@@ -1059,9 +1065,9 @@ def constructNoCPathDict(mod):
         SrcTensorID = tensor_edge.src_id
         DstTensorID = tensor_edge.dst_id
         SplitIdx = tensor_edge.split_idx
-        SrcGraphNode = CustomIDToNode()[getFlagNodeID(SrcTensorID.graph_node_id)]
+        SrcGraphNode = CustomIDToNode()[getInnerNodeID(SrcTensorID.graph_node_id)]
         if isinstance(SrcGraphNode, (Var, Constant)):
-          DstHwNodeID = HwMapping[getFlagNodeID(DstTensorID.graph_node_id)]
+          DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
           # if "inode" not in DstHwNodeID:
           if not DstHwNodeID.is_inode():
             # DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
@@ -1073,13 +1079,14 @@ def constructNoCPathDict(mod):
             NocPaths[func_name_var.name_hint][tensor_edge] = (
               (InodeID, DstHwNodeID, SplitIdx)
             )
-            HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)] = InodeID
+            # HwMapping[getFlatNodeID(SrcTensorID.graph_node_id)] = InodeID
+            HwMapping[SrcTensorID.graph_node_id] = InodeID
         else:
           NocPaths[func_name_var.name_hint][tensor_edge] = (
-            (HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)], HwMapping[getFlagNodeID(DstTensorID.graph_node_id)], SplitIdx)
+            (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], HwMapping[getOuterNodeID(DstTensorID.graph_node_id)], SplitIdx)
           )
           # NocPaths[func_name_var.name_hint].append(
-          #   (HwMapping[getFlagNodeID(SrcTensorID.graph_node_id)], HwMapping[getFlagNodeID(DstTensorID.graph_node_id)], SplitIdx)
+          #   (HwMapping[getFlatNodeID(SrcTensorID.graph_node_id)], HwMapping[getFlatNodeID(DstTensorID.graph_node_id)], SplitIdx)
           # )
 
       for ActiveIMCE in ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint]:
