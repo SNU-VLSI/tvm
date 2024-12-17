@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
-def getNodeID(node):
+def getNodeID(node) -> int:
   id_dict = HashToCustomID()
   if int(hash(node)) in id_dict:
     return id_dict[int(hash(node))]
@@ -958,6 +958,10 @@ def constructTensorEdgeList(mod):
                 self.VarProperties[SrcGraphNode]["src_tag"] = SrcTag
                 self.VarProperties[SrcGraphNode]["dst_tag"] = DstTag
                 self.VarProperties[SrcGraphNode]["dst_graph_node_id"] = DstGraphNodeID
+              if isinstance(SrcGraphNode, Constant):
+                InputGraphNodeID = (self.SubFunctionNodeID, self.getInputGraphNodeID(SrcGraphNode))
+                self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
+                return True
 
         if IsComposite:
           self.InSubFunction = True
