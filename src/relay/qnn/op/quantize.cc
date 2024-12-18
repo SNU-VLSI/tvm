@@ -185,6 +185,127 @@ scale and zero point.
 
 TVM_REGISTER_GLOBAL("relay.qnn.op._make.quantize").set_body_typed(MakeQuantize);
 
+TVM_REGISTER_NODE_TYPE(ImcflowMinMaxQuantizeAttrs);
+bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                              const TypeReporter& reporter) {
+  ICHECK_EQ(types.size(), 4);
+  const auto* data = types[0].as<TensorTypeNode>();
+
+  if (data == nullptr) {
+    return false;
+  }
+
+  const auto input_dtype = data->dtype;
+  ICHECK(input_dtype == DataType::Int(16))
+      << "Input type should be one of int16 but was " << input_dtype;
+
+  const auto* quantize_attrs = attrs.as<ImcflowMinMaxQuantizeAttrs>();
+  int axis = quantize_attrs->axis;
+  auto rank = static_cast<int>(data->shape.size());
+  axis = (axis < 0) ? ((rank > 0) ? data->shape.size() + axis : 0) : axis;
+
+  // PrimExpr axis_shape;
+  // if (rank > 0) {
+  //   axis_shape = data->shape[axis];
+  // } else {
+    // axis_shape = Integer(1);
+  // }
+  // axis_shape = Integer(1);
+  // Check and assign types for scale and zero points.
+  // AssignType(types[1], DataType::Int(16), axis_shape, reporter);  // scale
+  // AssignType(types[2], DataType::Int(16), axis_shape, reporter);    // zero point
+  // reporter->Assign(types[1], TensorType({1}, DataType::Int(16)));
+  // reporter->Assign(types[2], TensorType({1}, DataType::Int(16)));
+  reporter->Assign(types[1], TensorType({}, DataType::Int(16)));
+  reporter->Assign(types[2], TensorType({}, DataType::Int(16)));
+
+  const Array<tvm::PrimExpr> oshape = data->shape;
+  const DataType out_dtype = quantize_attrs->out_dtype;
+  // assign output type
+  reporter->Assign(types[3], TensorType(oshape, out_dtype));
+  return true;
+}
+
+Expr MakeImcflowMinMaxQuantize(Expr data, Expr min, Expr max, int axis, DataType out_dtype) {
+  auto attrs = make_object<ImcflowMinMaxQuantizeAttrs>();
+  attrs->axis = axis;
+  attrs->out_dtype = std::move(out_dtype);
+  static const Op& op = Op::Get("qnn.imcflow_min_max_quantize");
+  return Call(op, {data, min, max}, Attrs(attrs), {});
+}
+
+RELAY_REGISTER_OP("qnn.imcflow_min_max_quantize")
+    .describe(R"code(Quantizes the input and produces quantized output.
+The input can be either float or quantized(int8, unit8). If the input is float,
+this op takes scale and zero point and quantize the float value to
+quantized output, in int8 or uint8 format. If the input is quantized value,
+the op requantize the input (of a certain type, with a given scale and zero
+point) to the output of the same or different type with a same or different
+scale and zero point.
+- **data**: Tensor of any shape to quantize. The input data can be of floating point
+          or quantized.
+)code" TVM_ADD_FILELINE)
+    .set_attrs_type<ImcflowMinMaxQuantizeAttrs>()
+    .set_num_inputs(3)
+    .add_argument("data", "Tensor", "The tensor to quantize.")
+    .add_argument("min", "Expr", "min")
+    .add_argument("max", "Expr", "max")
+    .set_support_level(11)
+    .add_type_rel("ImcflowMinMaxQuantize", ImcflowMinMaxQuantizeRel)
+    .set_attr<TNonComputational>("TNonComputational", true);
+
+TVM_REGISTER_GLOBAL("relay.qnn.op._make.imcflow_min_max_quantize").set_body_typed(MakeImcflowMinMaxQuantize);
+
+TVM_REGISTER_NODE_TYPE(ImcflowNUQuantizeAttrs);
+bool ImcflowNUQuantizeRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                              const TypeReporter& reporter) {
+  ICHECK_EQ(types.size(), 3);
+  const auto* data = types[0].as<TensorTypeNode>();
+
+  if (data == nullptr) {
+    return false;
+  }
+
+  const auto input_dtype = data->dtype;
+  ICHECK(input_dtype == DataType::Int(16))
+      << "Input type should be one of int16 but was " << input_dtype;
+
+  const auto* quantize_attrs = attrs.as<ImcflowNUQuantizeAttrs>();
+  int axis = quantize_attrs->axis;
+  auto rank = static_cast<int>(data->shape.size());
+  axis = (axis < 0) ? ((rank > 0) ? data->shape.size() + axis : 0) : axis;
+
+  const auto* threshold = types[1].as<TensorTypeNode>();
+  const IntImmNode* Size = threshold->shape[0].as<IntImmNode>();
+  ICHECK(Size->value == 16) << "Threshold should be of shape 16 but was " << Size->value;
+  reporter->Assign(types[1], TensorType({16}, DataType::Int(16)));
+
+  const Array<tvm::PrimExpr> oshape = data->shape;
+  const DataType out_dtype = quantize_attrs->out_dtype;
+  reporter->Assign(types[2], TensorType(oshape, out_dtype));
+  return true;
+}
+
+Expr MakeImcflowNUQuantize(Expr data, Expr Threshold, int axis, DataType out_dtype) {
+  auto attrs = make_object<ImcflowNUQuantizeAttrs>();
+  attrs->axis = axis;
+  attrs->out_dtype = std::move(out_dtype);
+  static const Op& op = Op::Get("qnn.imcflow_nu_quantize");
+  return Call(op, {data, Threshold}, Attrs(attrs), {});
+}
+
+RELAY_REGISTER_OP("qnn.imcflow_nu_quantize")
+    .describe(R"code(Imcflow NU QUantization)code" TVM_ADD_FILELINE)
+    .set_attrs_type<ImcflowNUQuantizeAttrs>()
+    .set_num_inputs(2)
+    .add_argument("data", "Tensor", "The tensor to quantize.")
+    .add_argument("threshold", "Tensor", "threshold")
+    .set_support_level(11)
+    .add_type_rel("ImcflowNUQuantize", ImcflowNUQuantizeRel)
+    .set_attr<TNonComputational>("TNonComputational", true);
+
+TVM_REGISTER_GLOBAL("relay.qnn.op._make.imcflow_nu_quantize").set_body_typed(MakeImcflowNUQuantize);
+
 }  // namespace qnn
 }  // namespace relay
 }  // namespace tvm

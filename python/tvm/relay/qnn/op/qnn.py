@@ -1319,3 +1319,9 @@ def avg_pool2d(
         layout,
         out_layout,
     )
+
+def imcflow_min_max_quantize(data, min, max, axis=-1, out_dtype="int4"):
+    return _make.imcflow_min_max_quantize(data, min, max, axis, out_dtype)
+
+def imcflow_nu_quantize(data, threshold, axis=-1, out_dtype="int4"):
+    return _make.imcflow_nu_quantize(data, threshold, axis, out_dtype)

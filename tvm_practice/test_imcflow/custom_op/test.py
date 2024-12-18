@@ -21,6 +21,7 @@ from tvm.contrib import graph_executor
 from tvm.relay.backend import Executor, Runtime
 from tvm.relay import pretty_print
 from tvm.relay.op.nn.nn import imcflow_batch_norm
+from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.op.contrib import imcflow
@@ -62,6 +63,34 @@ def test_batchnorm():
   fused_bias = relay.var("fused_bias", shape=(IC,), dtype="int16")
   y = imcflow_batch_norm(data, fused_scale, fused_bias, 1)
   out = tvm.IRModule.from_expr(y[0])
+  out = relay.transform.InferType()(out)
+  print(out)
+
+if __name__ == "__main__":
+  tvm.testing.main()
+
+def test_min_max_quant():
+  IC = 64
+  IH, IW = 32, 32
+
+  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
+  # min = relay.var("min", type_annotation=relay.TensorType([1], "int16"))
+  # max = relay.var("max", type_annotation=relay.TensorType([1], "int16"))
+  min = relay.var("min", shape=(), dtype="int16")
+  max = relay.var("max", shape=(), dtype="int16")
+  y = imcflow_min_max_quantize(data, min, max, 1, "int4")
+  out = tvm.IRModule.from_expr(y)
+  out = relay.transform.InferType()(out)
+  print(out)
+
+def test_nu_quant():
+  IC = 64
+  IH, IW = 32, 32
+
+  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
+  threshold = relay.var("threshold", shape=(16,), dtype="int16")
+  y = imcflow_nu_quantize(data, threshold, 1, "int4")
+  out = tvm.IRModule.from_expr(y)
   out = relay.transform.InferType()(out)
   print(out)
 

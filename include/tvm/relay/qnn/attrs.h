@@ -127,6 +127,34 @@ struct BroadcastAttrs : public tvm::AttrsNode<BroadcastAttrs> {
   }
 };
 
+struct ImcflowMinMaxQuantizeAttrs : public tvm::AttrsNode<ImcflowMinMaxQuantizeAttrs> {
+  DataType out_dtype;
+  int axis;
+
+  TVM_DECLARE_ATTRS(ImcflowMinMaxQuantizeAttrs, "relay.attrs.ImcflowMinMaxQuantizeAttrs") {
+    TVM_ATTR_FIELD(out_dtype).describe("Output data type, always int4.").set_default(DataType::Int(4));
+    TVM_ATTR_FIELD(axis)
+        .describe(
+            "The output channel axis for channel wise quantization. Default value is -1,"
+            "which corresponds to the last axis.")
+        .set_default(-1);
+  }
+};
+
+struct ImcflowNUQuantizeAttrs : public tvm::AttrsNode<ImcflowNUQuantizeAttrs> {
+  DataType out_dtype;
+  int axis;
+
+  TVM_DECLARE_ATTRS(ImcflowNUQuantizeAttrs, "relay.attrs.ImcflowNUQuantizeAttrs") {
+    TVM_ATTR_FIELD(out_dtype).describe("Output data type, always int4.").set_default(DataType::Int(4));
+    TVM_ATTR_FIELD(axis)
+        .describe(
+            "The output channel axis for channel wise quantization. Default value is -1,"
+            "which corresponds to the last axis.")
+        .set_default(-1);
+  }
+};
+
 }  // namespace qnn
 }  // namespace relay
 }  // namespace tvm
