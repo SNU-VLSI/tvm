@@ -1116,10 +1116,6 @@ def constructTensorIDToTensorEdgeDict():
 
 @relay.transform.function_pass(opt_level=0)
 class MemoryCalculator:
-    def __init__(self):
-      # self.MappingDict_2D = {}
-      self.DataBlockDict = {}
-
     def transform_function(self, func, mod, ctx):
       class _MemoryCalculator(tvm.relay.ExprVisitor):
         """
@@ -1130,7 +1126,8 @@ class MemoryCalculator:
         def __init__(self):
             super().__init__()
             self.TensorEdgeList = ImcflowDeviceConfig().TensorEdgeList
-            self.DataBlockDict ={edge: DataBlock(edge.dst_id, None) for edge in self.TensorEdgeList}
+            # self.DataBlockDict ={edge: DataBlock(edge.dst_id, None) for edge in self.TensorEdgeList}
+            self.DataBlockDict ={}
             
             self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
             self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
@@ -1138,33 +1135,72 @@ class MemoryCalculator:
             self.id_dict = HashToCustomID()
             self.name_dict = CustomIDToName()
             self.data = CustomIDToNode()
+            self.hwnodemap = ImcflowDeviceConfig().HWNodeMap
+            
+            self.memory_size = 10000000 #TODO: need to change!!
+            self.MemoryRegionDict = {node: MemoryRegion(str(node), self.memory_size) for node in NodeID}
 
         def traverse_func(self, func):
             self.visit(func)
             self.allocate(func)
             return self.DataBlockDict
 
-        def allocate(self, func):
+        def is_inode_in_edge(self, edge):
+          dst_hw_node_id = None
+          src_hw_node_id = None
+          is_inode = False
+          inode_tensorid = None
           
+          #dst id
+          if edge.dst_id.graph_node_id in self.hwnodemap:
+            dst_hw_node_id = self.hwnodemap[edge.dst_id.graph_node_id]
+            if dst_hw_node_id.name.startswith("inode"):
+              # determine whether inode is included in the edge and which id it is.
+              is_inode = True
+              inode_tensorid = edge.dst_id            
+
+          #src id
+          if edge.src_id.graph_node_id in self.hwnodemap:
+            src_hw_node_id = self.hwnodemap[edge.src_id.graph_node_id]
+            if src_hw_node_id.name.startswith("inode"):
+              # determine whether inode is included in the edge and which id it is.
+              is_inode = True
+              inode_tensorid = edge.src_id       
+          
+          return is_inode, inode_tensorid
+
+        def allocate(self, func):
+          for edge, mem_block in self.DataBlockDict.items():
+            if mem_block.size is None:
+              print("here!!!!!!!!!!!")
+            
+            _, inode_tensorid = self.is_inode_in_edge(edge)
+            hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
+            inode_num = hw_node_id.name[-1] # ex) inode_3 => 3
+            ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate(mem_block)
+                     
           return
           
-        def visit_call(self, call):
+        def visit_call(self, call):          
           def find_edge_from_list(call):
+            # find edges that call node belongs, and find valid edge which has inode
             tensor_edge_list = self.TensorEdgeList
             graph_node_id = getNodeID(call)
 
             def matches_node_id(node_id):
-                if isinstance(node_id, int):
-                    return node_id == graph_node_id
-                elif isinstance(node_id, tuple):
-                    return graph_node_id in node_id
-                return False
+              if isinstance(node_id, int):
+                return node_id == graph_node_id
+              elif isinstance(node_id, tuple):
+                return graph_node_id in node_id
+              return False
+            
+            edges = []
+            for edge in tensor_edge_list:
+              if matches_node_id(edge.dst_id.graph_node_id) and self.is_inode_in_edge(edge)[0]:
+                edges.append(edge)
 
-            return [
-                edge for edge in tensor_edge_list
-                if matches_node_id(edge.dst_id.graph_node_id)
-            ]          
-              
+            return edges 
+                       
           def get_size(edge, call):
             size = None
 
@@ -1225,8 +1261,11 @@ class MemoryCalculator:
             arg_idx, arg_shape = find_my_arg_from_call(edge, call)
             
             if arg_idx is not None:
+              if src_op == "Op(split)":
+                # when first node of subgraph is split, memoryblock is already allocated by split node.
+                pass
               # dst op
-              if dst_op == "Op(nn.conv2d)":
+              elif dst_op == "Op(nn.conv2d)":
                 if arg_idx == 0:
                   size = arg_shape[2] * arg_shape[3] * 4
                 elif arg_idx == 1:
@@ -1245,8 +1284,21 @@ class MemoryCalculator:
                   size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
                 else:
                   raise ValueError("nn.relu only has 1 argument, but you got over 1.")            
-              # elif dst_op == "Op(concatenate)":
-              #   pass #TODO: need to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+              elif dst_op == "Op(nn.bias_add)":
+                if arg_idx == 1:
+                  size = math.ceil(int(arg_shape[0]) / 16)                
+                else:
+                  raise ValueError("Const of nn.bias_add is only defined.")            
+              elif dst_op == "Op(split)":
+                # if split, same as conv2d
+                if arg_idx == 0:
+                  size = arg_shape[2] * arg_shape[3] * 4
+                else:
+                  raise ValueError("split only has 1 arguments, but you got over 1.")
+              elif dst_op == "Op(add)":
+                raise ValueError("add cannot receive data from inode.")               
+              elif dst_op == "Op(concatenate)":
+                raise ValueError("concat cannot receive data from inode.")               
               # src op
               elif str(src_op) == "Op(nn.conv2d)":
                 size = arg_shape[2] * arg_shape[3] * 4
@@ -1254,19 +1306,14 @@ class MemoryCalculator:
                 size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
               elif str(src_op) == "Op(nn.relu)":
                 size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
-              # rest case : neither dst and src in [conv2d, batch_norm, relu]
-              elif dst_op == "Op(nn.bias_add)" or dst_op == "Op(add)":
-                size = 0 #TODO: need to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-              elif dst_op == "Op(split)": # split도 edge에 있나?
-                pass #TODO: need to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+              # rest case
               else:
                 raise ValueError("Operation not defined!")
             
             return size
-
+            
           super().visit_call(call)
         
-          IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
          
           if IsSupportedOp:
@@ -1274,15 +1321,16 @@ class MemoryCalculator:
             for edge in edges:
               size = get_size(edge, call)
               if size is not None:
-                self.DataBlockDict[edge].set_size(size)
+                inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
+                datablock = DataBlock(inode_tensorid[1], None)
+                datablock.set_size(size)
+                self.DataBlockDict[edge] = datablock
                                 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
 
         def visit_tuple(self, op):
           super().visit_tuple(op)
-
-
 
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
       items = mod.functions_items()
@@ -1293,9 +1341,9 @@ class MemoryCalculator:
         if function_names[i]=="main": continue
           # _Nodemapper().visit(mod["main"])
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          self.DataBlockDict.update(_MemoryCalculator().traverse_func(mod[function_names[i]]))
+          _MemoryCalculator().traverse_func(mod[function_names[i]])
 
-      # # find all regions
+      # find all regions
       return func
 
 @relay.transform.function_pass(opt_level=0)
@@ -1306,10 +1354,9 @@ class PolicyTableGenerator:
 
     def transform_function(self, func, mod, ctx):
       class _PolicyTableGenerator(tvm.relay.ExprVisitor):
-        def __init__(self, NoCPaths, DataBlockDict):
+        def __init__(self, NoCPaths):
             super().__init__()
             self.NoCPaths = NoCPaths
-            self.DataBlockDict = DataBlockDict
             self.router_entry_list_temp = {}
             self.Policytable = []
             self.explored_router_list = {}
@@ -1534,21 +1581,21 @@ class PolicyTableGenerator:
             self.Policytable = policy_tables
 
         def add_EdgeInfo(self):
-            def get_meminfo(edge):
-                if isinstance(edge.src_id, tuple):
-                    id = edge.src_id[1]
-                else:
-                    id = edge.src_id
+            # def get_meminfo(edge):
+            #     if isinstance(edge.src_id, tuple):
+            #         id = edge.src_id[1]
+            #     else:
+            #         id = edge.src_id
 
-                size = self.DataBlockDict[id]["size"]
-                offset = self.DataBlockDict[id]["offset"]
-                base_address = self.DataBlockDict[id]["base_address"]
-                meminfo = Datablock(id, size) #TODO: id is right????????????????????check!!!!!!!!!!!!!
+            #     size = self.DataBlockDict[id]["size"]
+            #     offset = self.DataBlockDict[id]["offset"]
+            #     base_address = self.DataBlockDict[id]["base_address"]
+            #     meminfo = Datablock(id, size)
                 
-                meminfo.set_offset(offset)
-                meminfo.set_base_address(base_address)
+            #     meminfo.set_offset(offset)
+            #     meminfo.set_base_address(base_address)
                 
-                return meminfo
+            #     return meminfo
               
             # after policy table entry generation finished, add to TensorEdgeToInfo
             fifo_id_cnt = {node_id: 0 for node_id in NodeID}
@@ -1562,13 +1609,13 @@ class PolicyTableGenerator:
 
                   if isinstance(edge, TensorEdge): # TensorEdge
                       # find mem_info
-                      meminfo = get_meminfo(edge)
-                      edgeinfo = TensorEdgeInfo(router_entry_list, meminfo, fifo_id_cnt[dest_node])
+                      # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
+                      edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
                       ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
                       fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
                   else: # Instruction edge
-                      meminfo = get_meminfo(edge)
-                      edgeinfo = InstEdgeInfo(router_entry_list, meminfo)
+                      # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
+                      edgeinfo = InstEdgeInfo(router_entry_list, None)
                       ImcflowDeviceConfig().add_inst_edge_info(edge, edgeinfo)
                       
         def traverse_func(self, func):
@@ -1585,7 +1632,7 @@ class PolicyTableGenerator:
       for i in range(num_func):
         if function_names[i]=="main": continue
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          self.PolicyTable_2D[function_names[i]] = _PolicyTableGenerator(self.NoCPaths[function_names[i]], self.DataBlockDict[function_names[i]]).traverse_func(mod[function_names[i]])
+          self.PolicyTable_2D[function_names[i]] = _PolicyTableGenerator(self.NoCPaths[function_names[i]]).traverse_func(mod[function_names[i]])
           for x in self.PolicyTable_2D[function_names[i]]:
             print(x)
 
