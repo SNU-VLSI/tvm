@@ -7,7 +7,7 @@ from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
-from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry
+from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
@@ -1115,6 +1115,190 @@ def constructTensorIDToTensorEdgeDict():
     _add(DstID, tensor_edge)
 
 @relay.transform.function_pass(opt_level=0)
+class MemoryCalculator:
+    def __init__(self):
+      # self.MappingDict_2D = {}
+      self.DataBlockDict = {}
+
+    def transform_function(self, func, mod, ctx):
+      class _MemoryCalculator(tvm.relay.ExprVisitor):
+        """
+          Target Operators:
+            conv2d, bias_add, batch_norm, relu, add and fused versions
+            split, concat
+        """
+        def __init__(self):
+            super().__init__()
+            self.TensorEdgeList = ImcflowDeviceConfig().TensorEdgeList
+            self.DataBlockDict ={edge: DataBlock(edge.dst_id, None) for edge in self.TensorEdgeList}
+            
+            self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
+            self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
+
+            self.id_dict = HashToCustomID()
+            self.name_dict = CustomIDToName()
+            self.data = CustomIDToNode()
+
+        def traverse_func(self, func):
+            self.visit(func)
+            self.allocate(func)
+            return self.DataBlockDict
+
+        def allocate(self, func):
+          
+          return
+          
+        def visit_call(self, call):
+          def find_edge_from_list(call):
+            tensor_edge_list = self.TensorEdgeList
+            graph_node_id = getNodeID(call)
+
+            def matches_node_id(node_id):
+                if isinstance(node_id, int):
+                    return node_id == graph_node_id
+                elif isinstance(node_id, tuple):
+                    return graph_node_id in node_id
+                return False
+
+            return [
+                edge for edge in tensor_edge_list
+                if matches_node_id(edge.dst_id.graph_node_id)
+            ]          
+              
+          def get_size(edge, call):
+            size = None
+
+            def get_op_from_id(node_id):
+                if isinstance(node_id, int):
+                    return self.name_dict[node_id]
+                elif isinstance(node_id, tuple):
+                    return self.name_dict[node_id[1]]
+                else:
+                  raise ValueError("CustomIDToName does not have this node id.")                
+
+            def find_my_arg_from_call(edge, call):
+              # find arg index from call by comparing edge's tensorid
+              idx = None
+              shape = None
+              for i, arg in enumerate(call.args):
+                if isinstance(arg, Tuple):
+                    idx = -1 # concat's arg_idx is not needed in get_size
+                    for j, arg in enumerate(arg.fields):
+                      src_id = getNodeID(arg)
+                      #src node
+                      if isinstance(edge.src_id.graph_node_id, tuple):
+                        #concat's arg_idx is not needed in get_size
+                        if src_id in edge.src_id.graph_node_id:
+                          shape = call.type_args[idx].fields[j].shape
+                      else:
+                        if src_id == edge.src_id.graph_node_id:
+                          shape = call.type_args[idx].fields[j].shape
+                else:
+                  if isinstance(arg, TupleGetItem):
+                      src_id = getNodeID(arg.tuple_value)
+                  else: 
+                      src_id = getNodeID(arg)
+                  #src node
+                  if isinstance(edge.src_id.graph_node_id, tuple):
+                    if src_id in edge.src_id.graph_node_id:
+                      idx = i
+                      shape = call.type_args[idx].shape
+                  else:
+                    if src_id == edge.src_id.graph_node_id:
+                      idx = i
+                      shape = call.type_args[idx].shape
+                
+                #dst node
+                dst_id = getNodeID(call)
+                if isinstance(edge.dst_id.graph_node_id, tuple): # Composite input params' TensorEdge.dst_id is always tuple
+                  if dst_id in edge.dst_id.graph_node_id and isinstance(arg, Var):
+                    idx = i
+                    shape = call.type_args[idx].shape
+              if idx is None:
+                raise ValueError("No arg is matched to TensorEdge.")
+              return idx, shape #if idx is None, the edge is from outside of the Composite. It was already handled by Composite node.
+
+            src_op = get_op_from_id(edge.src_id.graph_node_id)
+            dst_op = get_op_from_id(edge.dst_id.graph_node_id)
+
+            #find my arg from call to find corresponding shape by type_args.shape
+            arg_idx, arg_shape = find_my_arg_from_call(edge, call)
+            
+            if arg_idx is not None:
+              # dst op
+              if dst_op == "Op(nn.conv2d)":
+                if arg_idx == 0:
+                  size = arg_shape[2] * arg_shape[3] * 4
+                elif arg_idx == 1:
+                  size = 256
+                else:
+                  raise ValueError("nn.conv2d only has 2 arguments, but you got over 2.")
+              elif dst_op == "Op(nn.batch_norm)":
+                if arg_idx == 0:
+                  size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+                elif arg_idx <= 4:
+                  size = math.ceil(int(arg_shape[0]) / 16)
+                else:
+                  raise ValueError("nn.batchnorm only has 5 argument, but you got over 5.")            
+              elif dst_op == "Op(nn.relu)":
+                if arg_idx == 0:
+                  size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+                else:
+                  raise ValueError("nn.relu only has 1 argument, but you got over 1.")            
+              # elif dst_op == "Op(concatenate)":
+              #   pass #TODO: need to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+              # src op
+              elif str(src_op) == "Op(nn.conv2d)":
+                size = arg_shape[2] * arg_shape[3] * 4
+              elif str(src_op) == "Op(nn.batch_norm)":
+                size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+              elif str(src_op) == "Op(nn.relu)":
+                size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+              # rest case : neither dst and src in [conv2d, batch_norm, relu]
+              elif dst_op == "Op(nn.bias_add)" or dst_op == "Op(add)":
+                size = 0 #TODO: need to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+              elif dst_op == "Op(split)": # split도 edge에 있나?
+                pass #TODO: need to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+              else:
+                raise ValueError("Operation not defined!")
+            
+            return size
+
+          super().visit_call(call)
+        
+          IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+         
+          if IsSupportedOp:
+            edges = find_edge_from_list(call)
+            for edge in edges:
+              size = get_size(edge, call)
+              if size is not None:
+                self.DataBlockDict[edge].set_size(size)
+                                
+        def visit_tuple_getitem(self, op):
+          super().visit_tuple_getitem(op)
+
+        def visit_tuple(self, op):
+          super().visit_tuple(op)
+
+
+
+      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
+      items = mod.functions_items()
+      function_names = [item[0].name_hint for item in items]
+
+      num_func = len(function_names)
+      for i in range(num_func):
+        if function_names[i]=="main": continue
+          # _Nodemapper().visit(mod["main"])
+        elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
+          self.DataBlockDict.update(_MemoryCalculator().traverse_func(mod[function_names[i]]))
+
+      # # find all regions
+      return func
+
+@relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
     def __init__(self, NoCPaths):
       self.NoCPaths = NoCPaths
@@ -1122,10 +1306,11 @@ class PolicyTableGenerator:
 
     def transform_function(self, func, mod, ctx):
       class _PolicyTableGenerator(tvm.relay.ExprVisitor):
-        def __init__(self, NoCPaths):
+        def __init__(self, NoCPaths, DataBlockDict):
             super().__init__()
             self.NoCPaths = NoCPaths
-            self.TensorEdgetoInfo_temp = {}
+            self.DataBlockDict = DataBlockDict
+            self.router_entry_list_temp = {}
             self.Policytable = []
             self.explored_router_list = {}
             
@@ -1279,7 +1464,7 @@ class PolicyTableGenerator:
                 router_entry_list.append((dest_node, len(policy_tables[dest_node])-1))
                 
                 # temporary saving. Final saving is done after whole paths finish.
-                self.TensorEdgetoInfo_temp[edge] = router_entry_list
+                self.router_entry_list_temp[edge] = router_entry_list
 
             def handle_multicast(edge, mapping_info):
                 """Handle multiple destinations with potential path sharing"""
@@ -1339,7 +1524,7 @@ class PolicyTableGenerator:
                             # create RouterEntry and append to router_entry_list
                             router_entry_list.append((current_node, entry_addr))                                
                             # temporary saving. Final saving is done after whole paths finish.
-                            self.TensorEdgetoInfo_temp[edge] = router_entry_list
+                            self.router_entry_list_temp[edge] = router_entry_list
                             break
 
             # Main logic
@@ -1349,22 +1534,41 @@ class PolicyTableGenerator:
             self.Policytable = policy_tables
 
         def add_EdgeInfo(self):
+            def get_meminfo(edge):
+                if isinstance(edge.src_id, tuple):
+                    id = edge.src_id[1]
+                else:
+                    id = edge.src_id
+
+                size = self.DataBlockDict[id]["size"]
+                offset = self.DataBlockDict[id]["offset"]
+                base_address = self.DataBlockDict[id]["base_address"]
+                meminfo = Datablock(id, size) #TODO: id is right????????????????????check!!!!!!!!!!!!!
+                
+                meminfo.set_offset(offset)
+                meminfo.set_base_address(base_address)
+                
+                return meminfo
+              
             # after policy table entry generation finished, add to TensorEdgeToInfo
             fifo_id_cnt = {node_id: 0 for node_id in NodeID}
             for edge, mapping_info in self.NoCPaths.items():
               # if tensoredge, save to TensorEdgetoInfo
               dest_node = mapping_info[1]
               router_entry_list=[]
-              if edge in self.TensorEdgetoInfo_temp:
-                  for entry_tuple in self.TensorEdgetoInfo_temp[edge]:
+              if edge in self.router_entry_list_temp:
+                  for entry_tuple in self.router_entry_list_temp[edge]:
                       router_entry_list.append(RouterEntry(entry_tuple[0], entry_tuple[1], self.Policytable[entry_tuple[0]][entry_tuple[1]]))
 
                   if isinstance(edge, TensorEdge): # TensorEdge
-                      edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
+                      # find mem_info
+                      meminfo = get_meminfo(edge)
+                      edgeinfo = TensorEdgeInfo(router_entry_list, meminfo, fifo_id_cnt[dest_node])
                       ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
                       fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
                   else: # Instruction edge
-                      edgeinfo = InstEdgeInfo(router_entry_list, None)
+                      meminfo = get_meminfo(edge)
+                      edgeinfo = InstEdgeInfo(router_entry_list, meminfo)
                       ImcflowDeviceConfig().add_inst_edge_info(edge, edgeinfo)
                       
         def traverse_func(self, func):
@@ -1381,7 +1585,7 @@ class PolicyTableGenerator:
       for i in range(num_func):
         if function_names[i]=="main": continue
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          self.PolicyTable_2D[function_names[i]] = _PolicyTableGenerator(self.NoCPaths[function_names[i]]).traverse_func(mod[function_names[i]])
+          self.PolicyTable_2D[function_names[i]] = _PolicyTableGenerator(self.NoCPaths[function_names[i]], self.DataBlockDict[function_names[i]]).traverse_func(mod[function_names[i]])
           for x in self.PolicyTable_2D[function_names[i]]:
             print(x)
 

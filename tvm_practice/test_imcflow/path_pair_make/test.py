@@ -222,9 +222,9 @@ def RunTestModel(name):
     print(key)
     for k, v in paths.items():
       print(k, v)
-  
-  PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(ImcflowDeviceConfig().NoCPaths)
-  PolicyTableGenerator(eval_mod)
+
+  MemoryCalculator = imcflow_transform.MemoryCalculator()(eval_mod)
+  PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(ImcflowDeviceConfig().NoCPaths, MemoryCalculator.SizeDict)(eval_mod)
 
 def test_1x1_small():
   Shapes = { "IC": 257, "IH": 16, "IW": 16, "OC": 65, "KH": 1, "KW": 1}
