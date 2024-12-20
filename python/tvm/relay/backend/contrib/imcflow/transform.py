@@ -884,7 +884,9 @@ def constructTensorEdgeList(mod):
         self.SubFunctionNodeID = None
         self.VarProperties = {}
 
-    def getInputGraphNodeID(self, node):
+    def getCustomID(self, node):
+      if isinstance(node, Function):
+          return getNodeID(node)
       if isinstance(node, Call):
         if isinstance(node.op, relay.Function) and "Composite" in node.op.attrs and re.match(r"imcflow\..*", node.op.attrs["Composite"]):
           return (getNodeID(node), getNodeID(node.op.body))
@@ -893,10 +895,10 @@ def constructTensorEdgeList(mod):
       elif isinstance(node, Tuple):
         result = []
         for b in node.fields:
-          result.append(self.getInputGraphNodeID(b))
+          result.append(self.getCustomID(b))
         return result
       elif isinstance(node, TupleGetItem):
-          return self.getInputGraphNodeID(node.tuple_value)
+          return self.getCustomID(node.tuple_value)
       elif isinstance(node, Var):
           return getNodeID(node)
       elif isinstance(node, Constant):
@@ -929,6 +931,14 @@ def constructTensorEdgeList(mod):
         raise ValueError("Invalid input tensor id pair")
 
     def visit_function(self, fn):
+      # append to TensorEdgeList if fn is entrance node of subgraph function
+      if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
+        InputGraphNodeID = self.getCustomID(fn.body)
+        DstGraphNodeID = self.getCustomID(fn)
+        SrcTag = "odata"
+        DstTag = "odata"
+        self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, None)
+      
       if self.InSubFunction:
         self.VarProperties = {}
         for x in fn.params:
@@ -963,7 +973,7 @@ def constructTensorEdgeList(mod):
         # we will collect Var Nodes usage and its properties
         def _processInputNode(SrcGraphNode, SrcTag, DstGraphNodeID, DstTag, SplitIdx):
           if not self.InSubFunction:
-            InputGraphNodeID = self.getInputGraphNodeID(SrcGraphNode)
+            InputGraphNodeID = self.getCustomID(SrcGraphNode)
             self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
             return True
           else:
@@ -972,7 +982,7 @@ def constructTensorEdgeList(mod):
                 self.VarProperties[SrcGraphNode]["dst_tag"] = DstTag
                 self.VarProperties[SrcGraphNode]["dst_graph_node_id"] = DstGraphNodeID
               if isinstance(SrcGraphNode, Constant):
-                InputGraphNodeID = (self.SubFunctionNodeID, self.getInputGraphNodeID(SrcGraphNode))
+                InputGraphNodeID = (self.SubFunctionNodeID, self.getCustomID(SrcGraphNode))
                 self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
                 return True
 
@@ -1119,9 +1129,9 @@ def constructTensorIDToTensorEdgeDict():
     _add(DstID, tensor_edge)
 
 @relay.transform.function_pass(opt_level=0)
-class MemoryCalculator:
+class MemoryAllocator:
     def transform_function(self, func, mod, ctx):
-      class _MemoryCalculator(tvm.relay.ExprVisitor):
+      class _MemoryAllocator(tvm.relay.ExprVisitor):
         """
           Target Operators:
             conv2d, bias_add, batch_norm, relu, add and fused versions
@@ -1345,7 +1355,7 @@ class MemoryCalculator:
         if function_names[i]=="main": continue
           # _Nodemapper().visit(mod["main"])
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          _MemoryCalculator().traverse_func(mod[function_names[i]])
+          _MemoryAllocator().traverse_func(mod[function_names[i]])
 
       # find all regions
       return func
@@ -1722,6 +1732,13 @@ def constructUsefulMappings(mod):
       data[id_dict[int(hash(call))]] = call
       self.Cnt = self.Cnt + 1
       super().visit_call(call)
+
+    def visit_function(self, call):
+      id_dict[int(hash(call))] = self.Cnt
+      name_dict[self.Cnt] = "Function"
+      data[id_dict[int(hash(call))]] = call
+      self.Cnt = self.Cnt + 1
+      super().visit_function(call)
 
     def visit_var(self, var):
       id_dict[int(hash(var))] = self.Cnt
