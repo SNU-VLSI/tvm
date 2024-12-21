@@ -154,6 +154,9 @@ class DataBlock:
     self.offset = -1  # offset in the region
     self.base_address = -1  # base address in the device memory
 
+  def set_size(self, size: int):
+    self.size = size
+
   def set_offset(self, offset: int):
     self.offset = offset
 
