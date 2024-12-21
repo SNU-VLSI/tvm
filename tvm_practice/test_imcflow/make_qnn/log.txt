@@ -1,0 +1,96 @@
+enabled targets: llvm
+pytest marker: 
+============================= test session starts ==============================
+platform linux -- Python 3.10.9, pytest-8.3.3, pluggy-1.5.0
+rootdir: /root/project/tvm
+configfile: pyproject.toml
+plugins: anyio-4.6.2, typeguard-4.3.0
+collected 1 item
+
+test.py Running Test make_qnn
+#[version = "0.0.5"]
+def @main(%input: Tensor[(1, 16, 16, 16), int8]) {
+  nn.conv2d(%input, meta[relay.Constant][0], padding=[1, 1, 1, 1], channels=16, kernel_size=[3, 3])
+}
+
+#[metadata]
+{
+  "root": 1, 
+  "nodes": [
+    {
+      "type_key": ""
+    }, 
+    {
+      "type_key": "Map", 
+      "keys": [
+        "relay.Constant"
+      ], 
+      "data": [2]
+    }, 
+    {
+      "type_key": "Array", 
+      "data": [3]
+    }, 
+    {
+      "type_key": "relay.Constant", 
+      "attrs": {
+        "_checked_type_": "0", 
+        "data": "0", 
+        "span": "0", 
+        "virtual_device_": "4"
+      }
+    }, 
+    {
+      "type_key": "VirtualDevice", 
+      "attrs": {
+        "device_type_int": "-1", 
+        "memory_scope": "5", 
+        "target": "0", 
+        "virtual_device_id": "-1"
+      }
+    }, 
+    {
+      "type_key": "runtime.String"
+    }
+  ], 
+  "b64ndarrays": [
+    "P6G0lvBAXt0AAAAAAAAAAAEAAAAAAAAABAAAAAAIAQAQAAAAAAAAAAgAAAAAAAAAAwAAAAAAAAADAAAAAAAAAIAEAAAAAAAABAf9+PsD+/8B+/36/P/+AAAEAvn+//8GAPn9AQUAAfz7+Pv9BgcH+Pr7APn7Bfv7Bv/4+QEBB/gHAvz/+wYD+v8E+vj4/P39/gD8+Qf8AQICBwD5+f8BAfv+/wMG+gP4Bvv9BAEC/AP8/vwHB/z7BPz8AAYH/PsC/wcF/f34+f0B+/gH/Qb4+fr8+vgF+/oCBfj//QEH+AL6AwIH/wP6AfoG+wYD+/oG+/z5+gMGAQL5/AL+AwAD+vv4+P74/vsGAvsABAAFBgAF+vsG+gMF+AAA+wcAAvoA/PsEBQb4/PsFAwT+BQEFAwD4AAX9BgH4BAH+/QX7+QD4/AMDAf79BwX/AAAHAfoA/gcD/gcFAfkH/gQABQD7+gf7AgT++/4GBf3/A/gDAPwC/gP9BQQHAPoD+wH//fsG/P0F+/v/AQEB//sGAvoE+wcBAgMF//8F/fkE+voA+f0AB/z4A/r9Bv0G+AYABfn5+PsAAwD8/PgB+/8E+/oGBfn5+vkF/AX6/f0EBP0F+gcD/f//A/4G+f7/+gQD+/kBBQb9AQH6+AMBBAP5AQL4/gf4AvwGAPwH+/sAAAMFAwb/+PsA//8FAvkA/P/4AwT8AfgCBv4E/Pr8/vsC+/8ABQX9+AAHB/0D/P8EBQIC/Ab5A/v7Afr9+vsG/QID/wQE+gX/+f4C/fgGA/gCBPsC+QIBBAUB/v7/AAUA//gA/gAHAQD7/vn//AH6BPgA+gX/APz8BPn/Bv4B/Pn9Af8DBfn7/f/7/v7/AfkB/vj7APz5/P34+wYC+fz8/Pj4BwIFAAYDAwcH/P4BBAMH+/sE+vkC+vkD+wT8Avn5+P8AAvz7/f77+gEABPkE/AL4AAX7Af39+f8FBgD+/P/7/QME+/78//sH+P0DAwYB+//9/QQAAwb4APv+AQL7+gP/+PsCBvj7/vkEAwH6BQH8AQUD+fv6/AUBB//8AQb8+foFBgX/+vsBAv8C/v4EB/oC+/4G+AUEBwIA+AIDBf8G/gX9BgcB/v0D+v8E+QH6+gQG/QP+/AcF+gQGBfr5BPgB+PoA+wUC+AIDAAD5+P0A+gf7BAb9A/sA/vz+BPv++gQE/v0D/QUB/P4F/QMH+fsF+wIABgH9Bf3++AEG//0H+f3+BAICA/4GBgD/Bf0HAwL7AvoBAwH7BQb6/QL8+f0HBgD7/QD8Avn/APn6+Qb5//0DBvj8B/n5BQT+Bv74+vv/BAEG+gP8AQb4BP4B+vz/+/gE/fwF+AX6+/n/AvkGBfsC/AL5//z4AvoEAv/8+Pr+Afr8BAEBBP38AvwBAgQA+f3/+AL5AvsB+gD6/AYEAPoBAP8CAwQA+vsE+wX++AL7/gP7Af77+vr6/vwD/vj8BQH6+QQH/vn/BP3++QL+Bf7+/gP6/Qb6+vv6BAUB+wD9/P0D+QMHBgQHBP0A+gEFBgQEAf3+/PgAAgb9Bwf9/QP5B/j4+PgGAgQF+AUC//77/fz7B/z9BAQC+fsE/v/8+AX4/wcCBPsF+/j4Afz8/QcABgD4+f0BAQQG"
+  ], 
+  "attrs": {"tvm_version": "0.18.0"}
+}
+F
+
+=================================== FAILURES ===================================
+__________________________________ test_main ___________________________________
+
+    def test_main():
+>     RunTestModel("make_qnn")
+
+test.py:102: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+test.py:97: in RunTestModel
+    transform.InferType()(eval_mod)
+../../../python/tvm/ir/transform.py:238: in __call__
+    return _ffi_transform_api.RunPass(self, mod)
+../../../python/tvm/_ffi/_ctypes/packed_func.py:245: in __call__
+    raise_last_ffi_error()
+../../../python/tvm/_ffi/base.py:481: in raise_last_ffi_error
+    raise py_err
+../../../src/relay/transforms/type_infer.cc:983: in operator()
+    pass_ctx->diag_ctx.value().Render();
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+>   LOG(FATAL) << "DiagnosticError: one or more error diagnostics were "
+E   tvm.error.DiagnosticError: Traceback (most recent call last):
+E     2: tvm::runtime::TVMRetValue tvm::runtime::PackedFunc::operator()<tvm::IRModule, tvm::transform::PassContext>(tvm::IRModule&&, tvm::transform::PassContext&&) const
+E     1: operator()
+E           at /root/project/tvm/src/relay/transforms/type_infer.cc:983
+E     0: tvm::DiagnosticContext::Render()
+E           at /root/project/tvm/src/ir/diagnostic.cc:132
+E     File "/root/project/tvm/src/ir/diagnostic.cc", line 132
+E   DiagnosticError: one or more error diagnostics were emitted, please check diagnostic render for output.
+
+../../../src/ir/diagnostic.cc:132: DiagnosticError
+=========================== short test summary info ============================
+FAILED test.py::test_main - tvm.error.DiagnosticError: Traceback (most recent...
+============================== 1 failed in 3.46s ===============================

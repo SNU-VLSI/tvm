@@ -161,11 +161,12 @@ def build(runtime="cpp", executor="graph", system_lib=False):
     kwargs = {}
     kwargs["options"] = ["-I/root/anaconda3/envs/py3.10/include", f"-I{contrib_path}"]
 
-    lib_name = "lib.so"
-    # lib_name = "lib.tar"
+    # lib_name = "lib.so"
+    lib_name = "lib.tar"
     os.makedirs(result_key, exist_ok=True)
     lib_path = os.path.join(result_key, lib_name)
-    mod.export_library(lib_path, fcompile=False, **kwargs)
+    # mod.export_library(lib_path, fcompile=False, **kwargs)
+    mod.export_library(lib_path)
     # mod.export_library(lib_path, )
 
     return mod

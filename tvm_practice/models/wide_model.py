@@ -51,7 +51,7 @@ def getTestModel():
   from PIL import Image
   from tensorflow.keras.applications.resnet50 import preprocess_input
   import tvm.relay as relay
-  data = np.ones((1, 32, 8, 8)).astype("float32")
+  data = np.ones((1, 32, 8, 8)).astype("int4")
   shape_dict = {"input_1": data.shape}
   mod, params = relay.frontend.from_keras(model(), shape_dict)
   return mod, params, shape_dict
