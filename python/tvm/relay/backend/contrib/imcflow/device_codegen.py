@@ -26,6 +26,7 @@ class DeviceCodegen:
 
   def generate_target_code(self, func_name, codeblocks):
     # TODO: codeblocks should be grouped according to its NodeID
+    # TODO: code generation should handle duplicate variable names
     code = ""
     for codeblock in codeblocks:
       code += codeblock.generate()
