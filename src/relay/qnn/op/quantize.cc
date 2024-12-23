@@ -196,8 +196,8 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   }
 
   const auto input_dtype = data->dtype;
-  ICHECK(input_dtype == DataType::Int(16))
-      << "Input type should be one of int16 but was " << input_dtype;
+  // ICHECK(input_dtype == DataType::Int(16))
+  //     << "Input type should be one of int16 but was " << input_dtype;
 
   const auto* quantize_attrs = attrs.as<ImcflowMinMaxQuantizeAttrs>();
   int axis = quantize_attrs->axis;
@@ -216,8 +216,8 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   // AssignType(types[2], DataType::Int(16), axis_shape, reporter);    // zero point
   // reporter->Assign(types[1], TensorType({1}, DataType::Int(16)));
   // reporter->Assign(types[2], TensorType({1}, DataType::Int(16)));
-  reporter->Assign(types[1], TensorType({}, DataType::Int(16)));
-  reporter->Assign(types[2], TensorType({}, DataType::Int(16)));
+  reporter->Assign(types[1], TensorType({}, input_dtype));
+  reporter->Assign(types[2], TensorType({}, input_dtype));
 
   const Array<tvm::PrimExpr> oshape = data->shape;
   const DataType out_dtype = quantize_attrs->out_dtype;
@@ -267,8 +267,8 @@ bool ImcflowNUQuantizeRel(const Array<Type>& types, int num_inputs, const Attrs&
   }
 
   const auto input_dtype = data->dtype;
-  ICHECK(input_dtype == DataType::Int(16))
-      << "Input type should be one of int16 but was " << input_dtype;
+  // ICHECK(input_dtype == DataType::Int(16))
+  //     << "Input type should be one of int16 but was " << input_dtype;
 
   const auto* quantize_attrs = attrs.as<ImcflowNUQuantizeAttrs>();
   int axis = quantize_attrs->axis;
@@ -278,7 +278,8 @@ bool ImcflowNUQuantizeRel(const Array<Type>& types, int num_inputs, const Attrs&
   const auto* threshold = types[1].as<TensorTypeNode>();
   const IntImmNode* Size = threshold->shape[0].as<IntImmNode>();
   ICHECK(Size->value == 16) << "Threshold should be of shape 16 but was " << Size->value;
-  reporter->Assign(types[1], TensorType({16}, DataType::Int(16)));
+  // reporter->Assign(types[1], TensorType({16}, DataType::Int(16)));
+  reporter->Assign(types[1], TensorType({16}, input_dtype));
 
   const Array<tvm::PrimExpr> oshape = data->shape;
   const DataType out_dtype = quantize_attrs->out_dtype;

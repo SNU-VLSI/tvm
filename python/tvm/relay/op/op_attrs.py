@@ -667,3 +667,19 @@ class EinsumAttrs(Attrs):
 @tvm._ffi.register_object("relay.attrs.StftAttrs")
 class StftAttrs(Attrs):
     """Attributes used in stft operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowBatchNormAttrs")
+class ImcflowBatchNormAttrs(Attrs):
+    """Attributes for imcflow.batch_norm"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowMinMaxQuantizeAttrs")
+class ImcflowMinMaxQuantizeAttrs(Attrs):
+    """Attributes used in quantize operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowNUQuantizeAttrs")
+class ImcflowNUQuantizeAttrs(Attrs):
+    """Attributes used in quantize operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowQConv2DAttrs")
+class ImcflowQConv2DAttrs(Attrs):
+    """Attributes used in quantize operators"""

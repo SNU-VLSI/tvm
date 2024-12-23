@@ -1938,5 +1938,51 @@ given the original input data and the output gradient.
     .set_attr<FInferCorrectLayout>("FInferCorrectLayout", ConvInferCorrectLayout<Conv2DAttrs>)
     .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
 
+// relay.nn.conv2d
+TVM_REGISTER_NODE_TYPE(ImcflowQConv2DAttrs);
+bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+               const TypeReporter& reporter) {}
+
+inline Expr MakeImcflowQConv(Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
+                     Array<IndexExpr> dilation, int groups, IndexExpr channels,
+                     Array<IndexExpr> kernel_size, std::string data_layout,
+                     std::string kernel_layout, std::string out_layout, DataType out_dtype,
+                     std::string op_name) {
+  auto attrs = make_object<ImcflowQConv2DAttrs>();
+  attrs->strides = std::move(strides);
+  attrs->padding = std::move(padding);
+  attrs->dilation = std::move(dilation);
+  attrs->groups = groups;
+  attrs->channels = std::move(channels);
+  attrs->kernel_size = std::move(kernel_size);
+  attrs->data_layout = std::move(data_layout);
+  attrs->kernel_layout = std::move(kernel_layout);
+  attrs->out_layout = std::move(out_layout);
+  attrs->out_dtype = std::move(out_dtype);
+  const Op& op = Op::Get(op_name);
+  return Call(op, {data, weight}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qconv")
+    .set_body_typed([](Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
+                       Array<IndexExpr> dilation, int groups, IndexExpr channels,
+                       Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
+                       String out_layout, DataType out_dtype) {
+      return MakeImcflowQConv(data, weight, strides, padding, dilation, groups, channels,
+                                   kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
+                                   "nn.imcflow_qconv");
+    });
+
+RELAY_REGISTER_OP("nn.imcflow_qconv")
+    .describe(R"code()code" TVM_ADD_FILELINE)
+    .set_attrs_type<ImcflowQConv2DAttrs>()
+    .set_num_inputs(2)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .add_argument("weight", "Tensor", "The weight tensor.")
+    .set_support_level(2)
+    .add_type_rel("ImcflowQConv2D", ImcflowQConv2DRel)
+    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", ConvInferCorrectLayout<ImcflowQConv2DAttrs>)
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+
 }  // namespace relay
 }  // namespace tvm

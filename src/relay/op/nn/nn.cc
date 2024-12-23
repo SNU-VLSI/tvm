@@ -1677,6 +1677,7 @@ Example::
     .set_attr<TOpPattern>("TOpPattern", kInjective);
 
 
+TVM_REGISTER_NODE_TYPE(ImcflowBatchNormAttrs);
 bool ImcflowBatchNormRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
                   const TypeReporter& reporter) {
   ICHECK_EQ(types.size(), 4);
