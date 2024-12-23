@@ -175,8 +175,8 @@ class MemoryRegion:
     self.base_address = -1  # offset in the device memory
     self._last_offset = 0
 
-  def __getitem__(self, block_name: str):
-    return self.blocks.get(block_name, None)
+  def __getitem__(self, id: Union[str, TensorID]):
+    return self.blocks.get(id, None)
 
   def allocate(self, block: DataBlock):
     """Allocate a data block in the region sequentially, assuming they are not delocated"""
@@ -206,6 +206,13 @@ class MemoryLayout:
       self.regions[region.name] = region
       region.set_base_address(_last_end_address)
       _last_end_address += region.size
+
+  def get_data_block_by_id(self, id: Union[str, TensorID]):
+    for region in self.regions.values():
+      block = region[id]
+      if block is not None:
+        return block
+    return None
 
   def __getitem__(self, region_name: str):
     return self.regions.get(region_name, None)
@@ -265,6 +272,7 @@ class ImcflowDeviceConfig:
   IMCE_H_NUM = 4
   IMCE_W_NUM = 4
   IMCE_NUM = 16
+  IMCU_ROW_NUM = 256
   NODE_COL_NUM = 5
   INODE_MMREG_SIZE = 128
   INODE_DATA_MEM_SIZE = 65536

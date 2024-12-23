@@ -9,6 +9,7 @@ from tvm.relay.expr import (Call, TupleGetItem, Tuple)
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
+import pdb
 
 @util.create_imcflow_function_pass(opt_level=0)
 class CodegenSuite:
@@ -17,15 +18,12 @@ class CodegenSuite:
   def transform_function(self, _, func):
     func_name = func.attrs.global_symbol
     _builder = ImceCodeBlockBuilder(func_name).visit(func)
-    import pdb; pdb.set_trace()
-
     DeviceCodegen("imce").handle_code_generation(_builder.codeblocks)
 
     # _builder = InodeCodeBlockBuilder(func_name).visit(func)
     # DeviceCodegen("inode").handle_code_generation(_builder.codeblocks)
 
 
-import pdb
 class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name):
     super().__init__()
@@ -34,14 +32,28 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self._init_codeblock()
 
   def _init_codeblock(self):
-    self.codeblocks.append(CodeBlockStart(self.func_name))
+    self.codeblocks.append(CodeBlockStart(self.func_name, "imce"))
     self.codeblocks.append(CodeBlockEnd())
 
   def visit_call(self, call):
     if call.op == op.get("nn.conv2d"):
-      tid = ImcflowDeviceConfig().get_tensor_ids_from_graph_node_id(self.get_gid(call))
-      self.codeblocks.append(RecvCodeBlock())
-      import pdb; pdb.set_trace()
+      gid = self.get_gid(call)
+      hid = ImcflowDeviceConfig().get_hw_node(gid)
+
+      # scan reg
+      # TODO: add scan reg code block
+
+      # config reg
+      # TODO: add config reg code block
+
+      # write weights using recv
+      block = RecvCodeBlock(hid, "weight write")
+      block.set_recv_info(ImcflowDeviceConfig.IMCU_ROW_NUM, fifo_id=-1)
+      self.codeblocks.append(block)
+      pdb.set_trace()
+
+      # load input
+      block = ConvCodeBlock(hid, "input load")
 
     IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs
     if IsComposite:
