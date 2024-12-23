@@ -1080,6 +1080,7 @@ def constructNoCPathDict(mod):
         DstTensorID = tensor_edge.dst_id
         SplitIdx = tensor_edge.split_idx
         SrcGraphNode = CustomIDToNode()[getInnerNodeID(SrcTensorID.graph_node_id)]
+        DstGraphNode = CustomIDToNode()[getInnerNodeID(DstTensorID.graph_node_id)]
         if isinstance(SrcGraphNode, (Var, Constant)):
           DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
           # if "inode" not in DstHwNodeID:
@@ -1095,6 +1096,12 @@ def constructNoCPathDict(mod):
             )
             # HwMapping[getFlatNodeID(SrcTensorID.graph_node_id)] = InodeID
             HwMapping[SrcTensorID.graph_node_id] = InodeID
+        elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" : # if the tensor edge is the final edge toward host (=if destination is function)
+          SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
+          InodeID = NodeID.from_inode_coord(NodeID.to_coord(SrcHwNodeID)[0])
+          NocPaths[func_name_var.name_hint][tensor_edge] = (
+            (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], InodeID, SplitIdx)
+          )
         else:
           NocPaths[func_name_var.name_hint][tensor_edge] = (
             (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], HwMapping[getOuterNodeID(DstTensorID.graph_node_id)], SplitIdx)
@@ -1151,9 +1158,6 @@ class MemoryAllocator:
             self.data = CustomIDToNode()
             self.hwnodemap = ImcflowDeviceConfig().HWNodeMap
             
-            self.memory_size = 10000000 #TODO: need to change!!
-            self.MemoryRegionDict = {node: MemoryRegion(str(node), self.memory_size) for node in NodeID}
-
         def traverse_func(self, func):
             self.visit(func)
             self.allocate(func)
@@ -1186,7 +1190,7 @@ class MemoryAllocator:
         def allocate(self, func):
           for edge, mem_block in self.DataBlockDict.items():
             if mem_block.size is None:
-              print("here!!!!!!!!!!!")
+              raise ValueError("Memory size cannot be none.")
             
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
@@ -1278,7 +1282,7 @@ class MemoryAllocator:
               if src_op == "Op(split)":
                 # when first node of subgraph is split, memoryblock is already allocated by split node.
                 pass
-              # dst op
+              # src = inode, dst = op
               elif dst_op == "Op(nn.conv2d)":
                 if arg_idx == 0:
                   size = arg_shape[2] * arg_shape[3] * 4
@@ -1313,7 +1317,7 @@ class MemoryAllocator:
                 raise ValueError("add cannot receive data from inode.")               
               elif dst_op == "Op(concatenate)":
                 raise ValueError("concat cannot receive data from inode.")               
-              # src op
+              # src = op, dst = inode
               elif str(src_op) == "Op(nn.conv2d)":
                 size = arg_shape[2] * arg_shape[3] * 4
               elif str(src_op) == "Op(nn.batch_norm)":
@@ -1323,7 +1327,11 @@ class MemoryAllocator:
               # rest case
               else:
                 raise ValueError("Operation not defined!")
-            
+              
+              if size is not None:
+                # imcflow word width = 256 bit
+                size = int(size) * 256 / 8 #unit: bytes
+
             return size
             
           super().visit_call(call)
