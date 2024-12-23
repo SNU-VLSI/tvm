@@ -18,6 +18,7 @@
 from typing import Tuple, List, Dict, Union
 from enum import Enum
 
+SMALL_DEBUG = 0
 
 class NodeID(Enum):
   inode_0 = 0
@@ -106,7 +107,8 @@ class TensorID:
 
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
     assert tensor_type in {"idata", "odata", "weight",
-                           "bias", "scale", "idata0", "idata1"}, "Invalid tensor type"
+                           "bias", "scale", "idata0", "idata1",
+                           "quant_min", "quant_max", "quant_threshold"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
@@ -260,11 +262,20 @@ class TensorEdgeInfo(EdgeInfo):
 
 class ImcflowDeviceConfig:
   """Imcflow config class"""
-  NODE_COL_NUM = 5
-  INODE_NUM = 4
-  IMCE_H_NUM = 4
-  IMCE_W_NUM = 4
-  IMCE_NUM = 16
+  if SMALL_DEBUG:
+    NODE_COL_NUM = 3
+    INODE_NUM = 4
+    IMCE_H_NUM = 4
+    IMCE_W_NUM = 2
+    IMCE_NUM = 8
+  else:
+    NODE_COL_NUM = 5
+    INODE_NUM = 4
+    IMCE_H_NUM = 4
+    IMCE_W_NUM = 4
+    IMCE_NUM = 16
+    NODE_COL_NUM = 5
+
   NODE_COL_NUM = 5
   INODE_MMREG_SIZE = 128
   INODE_DATA_MEM_SIZE = 65536

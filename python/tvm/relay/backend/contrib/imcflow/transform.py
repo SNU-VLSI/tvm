@@ -45,6 +45,9 @@ def getOuterNodeID(node):
 
 @relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
+    """
+    Depracted..! split will be done in pytorch level
+    """
     def __init__(self, OldParamDict):
       self.OldParamDict = OldParamDict
       self.NewParamDict = {}
@@ -115,7 +118,8 @@ class ConvSplitToAtom:
             return expr
 
           for PostNode in PostProcess:
-            assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm")], "Unsupported post process node"
+            assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm"), op.get("divide"),
+                                   op.get("qnn.imcflow_min_max_quantize"), op.get("qnn.imcflow_nu_quantize")], "Unsupported post process node"
 
           groups = expr.attrs.groups
           assert (groups == 1 or groups == IC), "Grouped convolutions are not supported"
@@ -615,6 +619,7 @@ class AnnotGenerator:
         """
           Target Operators:
             conv2d, bias_add, batch_norm, relu, add and fused versions
+              + min_max_quant, nu_quant, div
             split, concat
         """
         def createRegion(self):
@@ -653,7 +658,7 @@ class AnnotGenerator:
              return 0
 
           IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
           IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
           IsNoCostCall = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split", "concatenate"]
 
@@ -691,7 +696,8 @@ class AnnotGenerator:
 
           # check this node is for imcflow
           IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+          # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
           IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
 
           if IsComposite or IsSupportedOp or IsSuperNode:
@@ -947,7 +953,8 @@ def constructTensorEdgeList(mod):
         #     return  # Skip nodes not included in the mapping
 
         IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
-        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+        # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
 
         if not IsComposite and not IsSupportedOp:
           raise ValueError("Unsupported operator detected. please check.")
@@ -986,36 +993,33 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("concatenate"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-            # _processInputNode(call.args[0], lambda x: len(x) > 1, "data")
           if call.op == op.get("nn.conv2d"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
-            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-            # InputNodeProperties = self.getInputTensorIDPair(call.args[1])
-            # assert len(InputNodeProperties) == 1, "Conv2d should have only one weight node"
-            # self.appendToPathList(InputNodeProperties, DstNodeProperty, "weight")
           if call.op == op.get("nn.bias_add"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
-            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-            # InputNodeProperties = self.getInputTensorIDPair(call.args[1])
-            # assert len(InputNodeProperties) == 1, "Bias_add should have only one bias node"
-            # self.appendToPathList(InputNodeProperties, DstNodeProperty, "bias")
           if call.op == op.get("nn.batch_norm"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "scale", DstGraphNodeID, "scale", None)
             _processInputNode(call.args[2], "bias", DstGraphNodeID, "bias", None)
-            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
-            # self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "scale")
-            # self.appendToPathList(self.getInodePlaceHolderInputConstant(), DstNodeProperty, "bias")
           if call.op == op.get("nn.relu"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data")
           if call.op == op.get("add"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata0", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "odata", DstGraphNodeID, "idata1", self.getInputGraphNodeSplitIndex(call.args[1]))
-            # _processInputNode(call.args[0], lambda x: len(x) == 1, "data0")
-            # _processInputNode(call.args[1], lambda x: len(x) == 1, "data1")
+          if call.op == op.get("qnn.imcflow_min_max_quantize"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "quant_min", DstGraphNodeID, "quant_min", None)
+            _processInputNode(call.args[2], "quant_max", DstGraphNodeID, "quant_max", None)
+          if call.op == op.get("qnn.imcflow_nu_quantize"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "quant_threshold", DstGraphNodeID, "quant_threshold", None)
+          if call.op == op.get("divide"):
+            ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
+            InputNode = 1 if ScaleNode == 0 else 0
+            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
 
         #Pre DFS search: Traverse child nodes
         for a in call.args:

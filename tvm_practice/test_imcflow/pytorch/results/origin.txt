@@ -171,28 +171,30 @@ def @main(%input0: Tensor[(1, 64, 28, 28), float32] /* span=aten::split_with_siz
   %56 = add(%54, %55) /* span=aten::add_7:0:0 */;
   %57 = nn.batch_norm(%56, %aten::batch_norm_2.weight, %aten::batch_norm_2.bias, %aten::batch_norm_2.running_mean, %aten::batch_norm_2.running_var) /* span=aten::batch_norm_2:0:0 */;
   %58 = %57.0 /* span=aten::batch_norm_2:0:0 */;
-  %59 = nn.conv2d(%35, %aten::_convolution_11.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_11:0:0 */;
-  %60 = nn.conv2d(%37, %aten::_convolution_12.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_12:0:0 */;
-  %61 = nn.bias_add(%59, %aten::_convolution_11.bias) /* span=aten::_convolution_11:0:0 */;
-  %62 = nn.bias_add(%60, %aten::_convolution_12.bias) /* span=aten::_convolution_12:0:0 */;
-  %63 = add(%61, %62) /* span=aten::add_8:0:0 */;
-  %64 = nn.conv2d(%42, %aten::_convolution_13.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_13:0:0 */;
-  %65 = nn.conv2d(%44, %aten::_convolution_14.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_14:0:0 */;
-  %66 = nn.bias_add(%64, %aten::_convolution_13.bias) /* span=aten::_convolution_13:0:0 */;
-  %67 = nn.bias_add(%65, %aten::_convolution_14.bias) /* span=aten::_convolution_14:0:0 */;
-  %68 = add(%66, %67) /* span=aten::add_9:0:0 */;
-  %69 = divide(%63, 2f /* span=aten::div_7:0:0 */) /* span=aten::div_7:0:0 */;
-  %70 = divide(%68, 2f /* span=aten::div_8:0:0 */) /* span=aten::div_8:0:0 */;
-  %71 = nn.conv2d(%51, %aten::_convolution_15.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_15:0:0 */;
-  %72 = nn.bias_add(%71, %aten::_convolution_15.bias) /* span=aten::_convolution_15:0:0 */;
-  %73 = add(%69, %70) /* span=aten::add_10:0:0 */;
-  %74 = divide(%72, 2f /* span=aten::div_9:0:0 */) /* span=aten::div_9:0:0 */;
-  %75 = add(%73, %74) /* span=aten::add_11:0:0 */;
-  %76 = nn.batch_norm(%75, %aten::batch_norm_3.weight, %aten::batch_norm_3.bias, %aten::batch_norm_3.running_mean, %aten::batch_norm_3.running_var) /* span=aten::batch_norm_3:0:0 */;
-  %77 = %76.0 /* span=aten::batch_norm_3:0:0 */;
-  %78 = nn.relu(%58) /* span=aten::relu_2:0:0 */;
-  %79 = nn.relu(%77) /* span=aten::relu_3:0:0 */;
-  %80 = (%78, %79) /* span=aten::cat_1:0:0 */;
-  concatenate(%80, axis=1) /* span=aten::cat_1:0:0 */
+  %59 = nn.relu(%58) /* span=aten::relu_2:0:0 */;
+  %60 = nn.conv2d(%35, %aten::_convolution_11.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_11:0:0 */;
+  %61 = nn.conv2d(%37, %aten::_convolution_12.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_12:0:0 */;
+  %62 = nn.bias_add(%60, %aten::_convolution_11.bias) /* span=aten::_convolution_11:0:0 */;
+  %63 = nn.bias_add(%61, %aten::_convolution_12.bias) /* span=aten::_convolution_12:0:0 */;
+  %64 = add(%62, %63) /* span=aten::add_8:0:0 */;
+  %65 = nn.conv2d(%42, %aten::_convolution_13.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_13:0:0 */;
+  %66 = nn.conv2d(%44, %aten::_convolution_14.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_14:0:0 */;
+  %67 = nn.bias_add(%65, %aten::_convolution_13.bias) /* span=aten::_convolution_13:0:0 */;
+  %68 = nn.bias_add(%66, %aten::_convolution_14.bias) /* span=aten::_convolution_14:0:0 */;
+  %69 = add(%67, %68) /* span=aten::add_9:0:0 */;
+  %70 = divide(%64, 2f /* span=aten::div_7:0:0 */) /* span=aten::div_7:0:0 */;
+  %71 = divide(%69, 2f /* span=aten::div_8:0:0 */) /* span=aten::div_8:0:0 */;
+  %72 = nn.conv2d(%51, %aten::_convolution_15.weight, padding=[1, 1, 1, 1], channels=64, kernel_size=[3, 3]) /* span=aten::_convolution_15:0:0 */;
+  %73 = nn.bias_add(%72, %aten::_convolution_15.bias) /* span=aten::_convolution_15:0:0 */;
+  %74 = add(%70, %71) /* span=aten::add_10:0:0 */;
+  %75 = divide(%73, 2f /* span=aten::div_9:0:0 */) /* span=aten::div_9:0:0 */;
+  %76 = add(%74, %75) /* span=aten::add_11:0:0 */;
+  %77 = nn.batch_norm(%76, %aten::batch_norm_3.weight, %aten::batch_norm_3.bias, %aten::batch_norm_3.running_mean, %aten::batch_norm_3.running_var) /* span=aten::batch_norm_3:0:0 */;
+  %78 = %77.0 /* span=aten::batch_norm_3:0:0 */;
+  %79 = nn.relu(%78) /* span=aten::relu_3:0:0 */;
+  %80 = qnn.imcflow_min_max_quantize(%59, 0f /* span=imcflow::min_max_quant_2:0:0 */, 1f /* span=imcflow::min_max_quant_2:0:0 */, out_dtype="float32", axis=1) /* span=imcflow::min_max_quant_2:0:0 */;
+  %81 = qnn.imcflow_min_max_quantize(%79, 0f /* span=imcflow::min_max_quant_3:0:0 */, 1f /* span=imcflow::min_max_quant_3:0:0 */, out_dtype="float32", axis=1) /* span=imcflow::min_max_quant_3:0:0 */;
+  %82 = (%80, %81) /* span=aten::cat_1:0:0 */;
+  concatenate(%82, axis=1) /* span=aten::cat_1:0:0 */
 }
 
