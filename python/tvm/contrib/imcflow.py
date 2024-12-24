@@ -176,6 +176,8 @@ class MemoryRegion:
     self.blocks = {}
     self.base_address = -1  # offset in the device memory
     self._last_offset = 0
+    self.weight_offset = 0
+    self.weight_allocated = False
 
   def __getitem__(self, block_name: str):
     return self.blocks.get(block_name, None)
@@ -186,6 +188,17 @@ class MemoryRegion:
     block.set_offset(self._last_offset)
     block.set_base_address(self._last_offset + self.base_address)
     self._last_offset += block.size
+    self.blocks[block.id] = block
+
+  def allocate_allow_overlap(self, block: DataBlock):
+    """Allocate a data block in the region, allowing overlapping in case of weight params."""
+    if self.weight_allocated is False:
+      self.weight_allocated = True
+      self.weight_offset = self._last_offset
+      self._last_offset += block.size
+      
+    block.set_offset(self.weight_offset)
+    block.set_base_address(self.weight_offset + self.base_address)
     self.blocks[block.id] = block
 
   def set_base_address(self, address: int):

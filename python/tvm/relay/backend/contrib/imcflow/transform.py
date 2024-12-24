@@ -1195,7 +1195,11 @@ class MemoryAllocator:
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
             inode_num = hw_node_id.name[-1] # ex) inode_3 => 3
-            ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate(mem_block)
+
+            if inode_tensorid.tensor_type == "weight":
+              ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate_allow_overlap(mem_block)
+            else:
+              ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate(mem_block)
                      
           return
           
@@ -1278,38 +1282,40 @@ class MemoryAllocator:
             #find my arg from call to find corresponding shape by type_args.shape
             arg_idx, arg_shape = find_my_arg_from_call(edge, call)
             
+            # calculate size for inode memory allocation
             if arg_idx is not None:
               if src_op == "Op(split)":
                 # when first node of subgraph is split, memoryblock is already allocated by split node.
                 pass
+
               # src = inode, dst = op
               elif dst_op == "Op(nn.conv2d)":
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * 4
-                elif arg_idx == 1:
+                elif arg_idx == 1: # const(weight)
                   size = 256
                 else:
                   raise ValueError("nn.conv2d only has 2 arguments, but you got over 2.")
               elif dst_op == "Op(nn.batch_norm)":
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
-                elif arg_idx <= 4:
+                elif arg_idx <= 4: # const
                   size = math.ceil(int(arg_shape[0]) / 16)
                 else:
                   raise ValueError("nn.batchnorm only has 5 argument, but you got over 5.")            
               elif dst_op == "Op(nn.relu)":
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
                 else:
                   raise ValueError("nn.relu only has 1 argument, but you got over 1.")            
               elif dst_op == "Op(nn.bias_add)":
-                if arg_idx == 1:
+                if arg_idx == 1: # const
                   size = math.ceil(int(arg_shape[0]) / 16)                
                 else:
                   raise ValueError("Const of nn.bias_add is only defined.")            
               elif dst_op == "Op(split)":
                 # if split, same as conv2d
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * 4
                 else:
                   raise ValueError("split only has 1 arguments, but you got over 1.")
@@ -1317,6 +1323,7 @@ class MemoryAllocator:
                 raise ValueError("add cannot receive data from inode.")               
               elif dst_op == "Op(concatenate)":
                 raise ValueError("concat cannot receive data from inode.")               
+
               # src = op, dst = inode
               elif str(src_op) == "Op(nn.conv2d)":
                 size = arg_shape[2] * arg_shape[3] * 4
