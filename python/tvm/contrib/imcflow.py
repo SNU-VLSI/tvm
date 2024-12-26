@@ -18,6 +18,7 @@
 from typing import Tuple, List, Dict, Union
 from enum import Enum
 
+SMALL_DEBUG = 0
 
 class NodeID(Enum):
   inode_0 = 0
@@ -106,7 +107,8 @@ class TensorID:
 
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
     assert tensor_type in {"idata", "odata", "weight",
-                           "bias", "scale", "idata0", "idata1"}, "Invalid tensor type"
+                           "bias", "scale", "idata0", "idata1",
+                           "quant_min", "quant_max", "quant_threshold"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
@@ -174,6 +176,8 @@ class MemoryRegion:
     self.blocks = {}
     self.base_address = -1  # offset in the device memory
     self._last_offset = 0
+    self.weight_offset = 0
+    self.weight_allocated = False
 
   def __getitem__(self, id: Union[str, TensorID]):
     return self.blocks.get(id, None)
@@ -184,6 +188,17 @@ class MemoryRegion:
     block.set_offset(self._last_offset)
     block.set_base_address(self._last_offset + self.base_address)
     self._last_offset += block.size
+    self.blocks[block.id] = block
+
+  def allocate_allow_overlap(self, block: DataBlock):
+    """Allocate a data block in the region, allowing overlapping in case of weight params."""
+    if self.weight_allocated is False:
+      self.weight_allocated = True
+      self.weight_offset = self._last_offset
+      self._last_offset += block.size
+
+    block.set_offset(self.weight_offset)
+    block.set_base_address(self.weight_offset + self.base_address)
     self.blocks[block.id] = block
 
   def set_base_address(self, address: int):
@@ -267,15 +282,23 @@ class TensorEdgeInfo(EdgeInfo):
 
 class ImcflowDeviceConfig:
   """Imcflow config class"""
-  NODE_COL_NUM = 5
-  INODE_NUM = 4
-  IMCE_H_NUM = 4
-  IMCE_W_NUM = 4
-  IMCE_NUM = 16
+  if SMALL_DEBUG:
+    NODE_COL_NUM = 3
+    INODE_NUM = 4
+    IMCE_H_NUM = 4
+    IMCE_W_NUM = 2
+    IMCE_NUM = 8
+  else:
+    NODE_COL_NUM = 5
+    INODE_NUM = 4
+    IMCE_H_NUM = 4
+    IMCE_W_NUM = 4
+    IMCE_NUM = 16
+
   IMCU_ROW_NUM = 256
-  NODE_COL_NUM = 5
   INODE_MMREG_SIZE = 128
   INODE_DATA_MEM_SIZE = 65536
+  # INODE_DATA_MEM_SIZE = 131072
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 

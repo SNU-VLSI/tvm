@@ -229,17 +229,18 @@ class DefaultVizParser(VizParser):
     ) -> Tuple[Union[VizNode, None], List[VizEdge]]:
         """Render rule for a relay function node"""
         func_attrs = node.attrs
-        node_details = [f"{k}: {func_attrs.get_str(k)}" for k in func_attrs.keys()]
+        node_detail = [f"{k}: {func_attrs.get_str(k)}" for k in func_attrs.keys()]
         # "Composite" might from relay.transform.MergeComposite
         if "Composite" in func_attrs.keys():
             name = func_attrs["Composite"]
         else:
             name = ""
 
+        node_detail = addCustomID(node, node_detail)
         node_id = node_to_id[node]
 
         # Body -> FunctionNode
-        viz_node = VizNode(node_id, f"Func {name}", "\n".join(node_details))
+        viz_node = VizNode(node_id, f"Func {name}", "\n".join(node_detail))
         viz_edges = [VizEdge(node_to_id[node.body], node_id)]
         return viz_node, viz_edges
 
