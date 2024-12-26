@@ -5,7 +5,7 @@ from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
 from tvm.relay.backend.contrib.imcflow import util
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
-from tvm.contrib.imcflow import ImcflowDeviceConfig
+from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.expr import (Call, TupleGetItem, Tuple)
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
@@ -19,11 +19,12 @@ class CodegenSuite:
 
   def transform_function(self, _, func):
     func_name = func.attrs.global_symbol
-    _builder = ImceCodeBlockBuilder(func_name).visit(func)
-    DeviceCodegen("imce").handle_code_generation(_builder.codeblocks)
+    builder = ImceCodeBlockBuilder(func_name)
+    builder.visit(func)
+    DeviceCodegen("imce").handle_code_generation(func_name, builder.codeblocks)
 
-    # _builder = InodeCodeBlockBuilder(func_name).visit(func)
-    # DeviceCodegen("inode").handle_code_generation(_builder.codeblocks)
+    # builder = InodeCodeBlockBuilder(func_name).visit(func)
+    # DeviceCodegen("inode").handle_code_generation(builder.codeblocks)
 
 
 class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
@@ -52,8 +53,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_conv_call(self, call):
     gid = self.get_gid(call)
-    hid = ImcflowDeviceConfig().get_hw_node(gid)
-    pdb.set_trace()
+    hid = DevConfig().get_hw_node(gid)
 
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
@@ -66,17 +66,15 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # TODO: add config reg code block
 
     # write weights using recv
-    block = SimpleRecvCodeBlock(hid, "weight write")
     weight_tid = TensorID(getNodeID(args["weight"]), "weight")
-    weight_size = ImcflowDeviceConfig().MemLayout.get_data_block_by_id(
-        weight_tid).size  # TODO: this is rather long
-    block.set_info(weight_size, fifo_id=-1)
+    size = DevConfig().MemLayout.get_data_block_by_id(weight_tid).size  # TODO: this is rather long
+    block = SimpleRecvBlock(size, -1, hid, "weight write")
     self.codeblocks.append(block)
-    pdb.set_trace()
 
     # load input
-    block = ConvCodeBlock(hid, "input load")
-    block.set_info(shapes, call.attrs, fifo_id=-1)
+    block = ConvBlock(shapes, call.attrs, -1, -1, hid, "input load")
+    self.codeblocks.append(block)
+
 
   def visit_composite_call(self, call):
     # skip composite for now (the TensorID is not available yet)
@@ -95,11 +93,11 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     super().visit_constant(const)
 
   def inspect(self, tmp, graph_node_id):
-    if graph_node_id in ImcflowDeviceConfig().HWNodeMap.keys():
-      hw_node_id = ImcflowDeviceConfig().HWNodeMap[graph_node_id]
+    if graph_node_id in DevConfig().HWNodeMap.keys():
+      hw_node_id = DevConfig().HWNodeMap[graph_node_id]
     else:
       hw_node_id = None
-    tid = ImcflowDeviceConfig().get_tensor_ids_from_graph_node_id(graph_node_id)
+    tid = DevConfig().get_tensor_ids_from_graph_node_id(graph_node_id)
     print(f"{tmp.__class__} graph_node_id: {graph_node_id}, hw_node_id: {hw_node_id}, tid: {tid}")
     print("----------------------")
 

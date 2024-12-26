@@ -20,16 +20,16 @@ class DeviceCodegen:
     Handles code generation, saving to file, compilation, linking, and host object creation.
     """
     logging.info(f"Generating {self.target} code for function: {func_name}")
-    code = self.generate_target_code(func_name, codeblocks)
+    code = self.generate_target_code(codeblocks)
     cpp_name = self.save_target_code_to_file(code, func_name)
     self.compile_target_code(cpp_name)
 
-  def generate_target_code(self, func_name, codeblocks):
+  def generate_target_code(self, codeblocks):
     # TODO: codeblocks should be grouped according to its NodeID
     # TODO: code generation should handle duplicate variable names
     code = ""
     for codeblock in codeblocks:
-      code += codeblock.generate()
+      code += codeblock
 
     return code
 

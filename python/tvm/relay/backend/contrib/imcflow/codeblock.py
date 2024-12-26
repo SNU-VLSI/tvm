@@ -1,50 +1,91 @@
 from abc import *
 from tvm.contrib.imcflow import *
 from tvm.relay.op.op_attrs import Conv2DAttrs
+from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
+from textwrap import indent
+import pdb
 
 
-class CodeBlockBase(metaclass=ABCMeta):
-  def __init__(self, annotation: str):
+class CodeBlock(metaclass=ABCMeta):
+  def __init__(self, annotation: str = ""):
     self.annotation = annotation
 
-  def _generate(self) -> str:
+  def _content(self) -> str:
     pass
 
-  def generate(self) -> str:
-    code = f"// generate: {self.annotation}\n"
-    code += self._generate()
-    code = f"// endgenerate\n"
-    return code
+  def __str__(self) -> str:
+    _content = str(self._content())
+    if self.annotation and _content:
+      return (
+          f"// generate: {self.annotation}\n"
+          f"{_content}"
+          f"// endgenerate: {self.annotation}\n"
+      )
+    else:
+      return _content
 
-class ImceCodeBlockBase(CodeBlockBase):
-  def __init__(self, node_id: NodeID, annotation: str):
+  def __add__(self, other):
+    return str(self) + str(other)
+
+  def __radd__(self, other):
+    return str(other) + str(self)
+
+
+class SimpleFor(CodeBlock):
+  def __init__(self, count: int, body: Union[str, CodeBlock], annotation: str = ""):
     super().__init__(annotation)
-    assert node_id.is_imce(), "ImceCodeBlockBase can only be used for imce"
+    self.count = count
+    self.body = body
+
+  def __str__(self) -> str:
+    if self.count == 0:
+      return ""
+    elif self.count == 1:
+      return f"{self.body}\n"
+    elif self.annotation:
+      return (
+          f"for (int i = 0; i < {self.count}; i++) {{ // generate: {self.annotation}\n"
+          f"{indent(self.body, '  ')}\n"
+          f"}} // endgenerate: {self.annotation}\n"
+      )
+    else:
+      return (
+          f"for (int i = 0; i < {self.count}; i++) {{\n"
+          f"{indent(self.body, '  ')}\n"
+          f"}}\n"
+      )
+
+
+class ImceCodeBlock(CodeBlock):
+  def __init__(self, node_id: NodeID, annotation: str = ""):
+    super().__init__(annotation)
+    assert node_id.is_imce(), "ImceCodeBlock can only be used for imce"
     self.node_id = node_id
 
   @abstractmethod
-  def _generate(self) -> str:
+  def _content(self) -> Union[str, CodeBlock]:
     pass
 
 
-class InodeCodeBlockBase(CodeBlockBase):
-  def __init__(self, node_id: NodeID, annotation: str):
+class InodeCodeBlock(CodeBlock):
+  def __init__(self, node_id: NodeID, annotation: str = ""):
     super().__init__(annotation)
-    assert node_id.is_inode(), "InodeCodeBlockBase can only be used for inode"
+    assert node_id.is_inode(), "InodeCodeBlock can only be used for inode"
     self.node_id = node_id
 
   @abstractmethod
-  def _generate(self) -> str:
+  def _content(self) -> Union[str, CodeBlock]:
     pass
 
-class CodeBlockStart(CodeBlockBase):
+
+class CodeBlockStart(CodeBlock):
   def __init__(self, name: str, target: str):
     assert target in ["inode", "imce"], \
         "target must be either 'inode' or 'imce'"
     self.target = target
     self.func_name = name
 
-  def generate(self) -> str:
+  def __str__(self) -> str:
     code = f"void {self.func_name}() {{"
     if self.target == "imce":
       code += f"  int hid = __builtin_IMCE_GET_CORE_HID();\n"
@@ -54,18 +95,18 @@ class CodeBlockStart(CodeBlockBase):
     return code
 
 
-class CodeBlockEnd(CodeBlockBase):
+class CodeBlockEnd(CodeBlock):
   def __init__(self):
     pass
 
-  def generate(self) -> str:
+  def __str__(self) -> str:
     return "}\n"
 
 
-class PolicyUpdateCodeBlock(InodeCodeBlockBase):
+class PolicyUpdateBlock(InodeCodeBlock):
   """ Code block for updating policy table for given inode's hw node id  """
 
-  def generate(self) -> str:
+  def _content(self) -> Union[str, CodeBlock]:
     assert self.node_id.is_inode(), "PolicyUpdateCodeBlock can only be used for inode"
     same_row_node_ids = [self.node_id] + self.node_id.slaves()
     code = "int policy_table_start_address;\n"
@@ -78,15 +119,15 @@ class PolicyUpdateCodeBlock(InodeCodeBlockBase):
     return code
 
 
-class WriteIMEMCodeBlock(InodeCodeBlockBase):
+class WriteIMEMBlock(InodeCodeBlock):
   pass
 
 
-class WriteIMCUCodeBlock(InodeCodeBlockBase):
+class WriteIMCUBlock(InodeCodeBlock):
   pass
 
 
-class CtrlCodeBlock(CodeBlockBase):
+class CtrlBlock(CodeBlock):
   """
   DONE, HALT, INTRT, STANDBY, SET_ADDR_CNT, SET_FLAG
   NOP, STEP, STOP
@@ -94,44 +135,61 @@ class CtrlCodeBlock(CodeBlockBase):
   pass
 
 
-class RecvCodeBlock(InodeCodeBlockBase):
+class RecvBlock(InodeCodeBlock):
   """ Code block for receiving data from given fifo id """
 
-  def set_info(self, block: DataBlock, fifo_id: int):
+  def __init__(self, block: DataBlock, fifo_id: int, node_id: NodeID, annotation: str = ""):
+    super().__init__(node_id, annotation)
     self.block = block
     self.fifo_id = fifo_id
 
-  def _generate(self) -> str:
-    code += f"int recv_data_base_address = {self.block.base_address};\n"
-    code += f"for (int i = 0; i < {self.block.size}; i += 32) {{\n"
-    code += f"  __builtin_INODE_RECV(recv_data_base_address + i, 0, 0, {self.fifo_id});\n" # TODO: use imm?
-    code += f"}}\n"
+  def _content(self) -> Union[str, CodeBlock]:
+    assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
+    recv_count = self.block.size // 32
+
+    code = f"int recv_data_base_address = {self.block.base_address};\n"
+    code += SimpleFor(recv_count,
+                      f"__builtin_INODE_RECV(recv_data_base_address + i*32, 0, 0, {self.fifo_id});")
 
     return code
 
-class SimpleRecvCodeBlock(ImceCodeBlockBase):
+
+class SimpleRecvBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id """
 
-  def set_info(self, size: int, fifo_id: int):
-    self.size = size
+  def __init__(self, count: int, fifo_id: int, node_id: NodeID, annotation: str = ""):
+    super().__init__(node_id, annotation)
+    self.count = count
     self.fifo_id = fifo_id
 
-  def _generate(self) -> str:
-    code += f"for (int i = 0; i < {self.size}; i += 32) {{\n"
-    code += f"  __builtin_IMCE_RECV({self.fifo_id});\n"
-    code += f"}}\n"
+  def _content(self) -> Union[str, CodeBlock]:
+    if self.count == 0:
+      return ""
+    elif self.count == 1:
+      return f"__builtin_IMCE_RECV({self.fifo_id});\n"
+    else:
+      return SimpleFor(self.count, f"__builtin_IMCE_RECV({self.fifo_id});")
 
-    return code
 
-class InodeSendCodeBlock(InodeCodeBlockBase):
+class SendBlock(InodeCodeBlock):
   pass
 
 
-class SimpleSendCodeBlock(ImceCodeBlockBase):
+class SimpleSendBlock(ImceCodeBlock):
   pass
 
-class ConvCodeBlock(ImceCodeBlockBase):
+
+class ConvBlock(ImceCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
+
+  def __init__(self, shapes: dict, conv_attrs: Conv2DAttrs, fifo_id: int, policy_addr: int,
+               node_id: NodeID, annotation: str = ""):
+    super().__init__(node_id, annotation)
+    self.fifo_id = fifo_id
+    self.policy_addr = policy_addr
+    self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
+                         conv_attrs.padding[0], conv_attrs.strides[0],
+                         conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
 
   def add_tensor(self):
     # TODO: for adding another tensor
@@ -141,39 +199,30 @@ class ConvCodeBlock(ImceCodeBlockBase):
     # TODO: add support for vector ops with operands, etc.
     self.op = op
 
-  def set_info(self, shapes: dict, conv_attr: Conv2DAttrs, fifo_id: int, policy_addr: int):
-    self.kH, self.kW = conv_attr.kernel_size
-    self.iH, self.iW = shapes["data"][2], shapes["data"][3]
-    self.oH, self.oW = shapes["output"][2], shapes["output"][3]
-    self.padding = conv_attr.padding
-    self.dilation = conv_attr.dilation
-    self.strides = conv_attr.strides
-    self.fifo_id = fifo_id
-    self.policy_addr = policy_addr
-
-  def _get_linebuffer_length(self) -> int:
-    length = (self.kH - 1) * self.iW + self.kW
-
-  def _generate_loop_head(self) -> str:
-    block = SimpleRecvCodeBlock(self.node_id, "loop_head")
-    recv_size = self._get_linebuffer_length() * 32 # in bytes
-    block.set_info(recv_size, self.fifo_id)
-    return block._generate()
-
-
-  def _generate_loop_body(self) -> str:
-    pass
-
-  def _generate_loop_tail(self) -> str:
-    pass
-
-  def _generate(self) -> str:
-    code += self._generate_loop_head()
-    code += self._generate_loop_body()
-    code += self._generate_loop_tail()
-
+  def _loop_body_content(self, recv_count: int) -> str:
+    code = ""
+    code += SimpleRecvBlock(recv_count, self.fifo_id, self.node_id)
+    code += "__builtin_IMCE_STEP();\n"
     return code
 
+  def _inner_loop_content(self, loop_count: int, recv_count: int) -> str:
+    return SimpleFor(loop_count, self._loop_body_content(recv_count), "inner_loop")
+
+  def _outer_loop_content(self, loop_count: int, loop_pattern: dict) -> str:
+    code = ""
+    for pat in loop_pattern:
+      code += self._inner_loop_content(pat["count"], pat["pattern"])
+
+    return SimpleFor(loop_count, code, "outer_loop")
+
+  def _content(self) -> Union[str, CodeBlock]:
+    row_pattern = self.conv.extract_2d_pattern()
+    code = ""
+    for row_pat in row_pattern:
+      code += self._outer_loop_content(row_pat["count"], row_pat["pattern"])
+    pdb.set_trace()
+
+    return code
 
 
 """

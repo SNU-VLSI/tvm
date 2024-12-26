@@ -1,26 +1,27 @@
 import numpy as np
 
+
 class ConvUtil:
-  def __init__(self, iH, iW, padding, stride, kH, kW):
-    self.iH = iH
-    self.iW = iW
-    self.padding = padding
-    self.stride = stride
-    self.kH = kH
-    self.kW = kW
-    self.oH = (iH - kH + 2 * padding) // stride + 1
-    self.oW = (iW - kW + 2 * padding) // stride + 1
-    self.padded_width = iW + 2 * padding
-    self.padded_height = iH + 2 * padding
+  def __init__(self, iH: int, iW: int, padding: int, stride: int, kH: int, kW: int):
+    self.iH = int(iH)
+    self.iW = int(iW)
+    self.padding = int(padding)
+    self.stride = int(stride)
+    self.kH = int(kH)
+    self.kW = int(kW)
+    self.oH = (self.iH - self.kH + 2 * self.padding) // self.stride + 1
+    self.oW = (self.iW - self.kW + 2 * self.padding) // self.stride + 1
+    self.padded_width = self.iW + 2 * self.padding
+    self.padded_height = self.iH + 2 * self.padding
     self.current_row = 0
     self.current_col = 0
 
   def is_padding_location(self, row, col):
     return (
-      row < self.padding or
-      row >= (self.iH + self.padding) or
-      col < self.padding or
-      col >= (self.iW + self.padding)
+        row < self.padding or
+        row >= (self.iH + self.padding) or
+        col < self.padding or
+        col >= (self.iW + self.padding)
     )
 
   def update_coordinates(self):
@@ -55,11 +56,12 @@ class ConvUtil:
         target_row = out_row * self.stride + self.kH - 1
         target_col = out_col * self.stride + self.kW - 1
 
-        read_counts[out_row, out_col] = self.compute_pixel_read_count(target_row, target_col)
+        read_counts[out_row, out_col] = self.compute_pixel_read_count(
+            target_row, target_col)
 
     return read_counts
 
-  def extract_patterns(self, matrix):
+  def extract_pattern(self, matrix):
     groups = []
     current_pattern = matrix[0]
     count = 0
@@ -76,30 +78,31 @@ class ConvUtil:
 
   def _create_group(self, pattern, count):
     return {
-      "pattern": pattern,
-      "count": count
+        "pattern": pattern,
+        "count": count
     }
 
-  def get_convolution_patterns(self):
+  def get_convolution_pattern(self):
     read_count_matrix = self.calculate_input_read_counts()
-    return self.extract_patterns(read_count_matrix)
+    return self.extract_pattern(read_count_matrix)
 
-  def extract_row_patterns(self, row_pattern):
-    return self.extract_patterns(np.array(row_pattern))
+  def extract_row_pattern(self, row_pattern):
+    return self.extract_pattern(np.array(row_pattern))
 
-  def extract_2d_patterns(self):
+  def extract_2d_pattern(self):
     # Extract row-level patterns
-    row_patterns = self.get_convolution_patterns()
-    all_2d_patterns = []
+    row_pattern = self.get_convolution_pattern()
+    all_2d_pattern = []
 
-    for row_group in row_patterns:
-      col_patterns = self.extract_patterns(row_group["pattern"])
-      all_2d_patterns.append({
-        "count": row_group["count"],
-        "patterns": col_patterns
+    for row_group in row_pattern:
+      col_pattern = self.extract_pattern(row_group["pattern"])
+      all_2d_pattern.append({
+          "count": row_group["count"],
+          "pattern": col_pattern
       })
 
-    return all_2d_patterns
+    return all_2d_pattern
+
 
 # Test code
 if __name__ == "__main__":
@@ -108,7 +111,7 @@ if __name__ == "__main__":
   print(utils.calculate_input_read_counts())
 
   print("Convolution Patterns:")
-  print(utils.get_convolution_patterns())
+  print(utils.get_convolution_pattern())
 
   print("2D Patterns:")
-  print(utils.extract_2d_patterns())
+  print(utils.extract_2d_pattern())
