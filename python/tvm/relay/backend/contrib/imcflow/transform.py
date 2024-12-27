@@ -939,7 +939,9 @@ def constructTensorEdgeList(mod):
         self.SubFunctionNodeID = None
         self.VarProperties = {}
 
-    def getInputGraphNodeID(self, node):
+    def getCustomID(self, node):
+      if isinstance(node, Function):
+          return getNodeID(node)
       if isinstance(node, Call):
         if isinstance(node.op, relay.Function) and "Composite" in node.op.attrs and re.match(r"imcflow\..*", node.op.attrs["Composite"]):
           return (getNodeID(node), getNodeID(node.op.body))
@@ -948,10 +950,10 @@ def constructTensorEdgeList(mod):
       elif isinstance(node, Tuple):
         result = []
         for b in node.fields:
-          result.append(self.getInputGraphNodeID(b))
+          result.append(self.getCustomID(b))
         return result
       elif isinstance(node, TupleGetItem):
-          return self.getInputGraphNodeID(node.tuple_value)
+          return self.getCustomID(node.tuple_value)
       elif isinstance(node, Var):
           return getNodeID(node)
       elif isinstance(node, Constant):
@@ -984,6 +986,14 @@ def constructTensorEdgeList(mod):
         raise ValueError("Invalid input tensor id pair")
 
     def visit_function(self, fn):
+      # append to TensorEdgeList if fn is entrance node of subgraph function
+      if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
+        InputGraphNodeID = self.getCustomID(fn.body)
+        DstGraphNodeID = self.getCustomID(fn)
+        SrcTag = "odata"
+        DstTag = "odata"
+        self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, None)
+      
       if self.InSubFunction:
         self.VarProperties = {}
         for x in fn.params:
@@ -1018,7 +1028,7 @@ def constructTensorEdgeList(mod):
         # we will collect Var Nodes usage and its properties
         def _processInputNode(SrcGraphNode, SrcTag, DstGraphNodeID, DstTag, SplitIdx):
           if not self.InSubFunction:
-            InputGraphNodeID = self.getInputGraphNodeID(SrcGraphNode)
+            InputGraphNodeID = self.getCustomID(SrcGraphNode)
             self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
             return True
           else:
@@ -1027,7 +1037,7 @@ def constructTensorEdgeList(mod):
                 self.VarProperties[SrcGraphNode]["dst_tag"] = DstTag
                 self.VarProperties[SrcGraphNode]["dst_graph_node_id"] = DstGraphNodeID
               if isinstance(SrcGraphNode, Constant):
-                InputGraphNodeID = (self.SubFunctionNodeID, self.getInputGraphNodeID(SrcGraphNode))
+                InputGraphNodeID = (self.SubFunctionNodeID, self.getCustomID(SrcGraphNode))
                 self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
                 return True
 
@@ -1125,6 +1135,7 @@ def constructNoCPathDict(mod):
         DstTensorID = tensor_edge.dst_id
         SplitIdx = tensor_edge.split_idx
         SrcGraphNode = CustomIDToNode()[getInnerNodeID(SrcTensorID.graph_node_id)]
+        DstGraphNode = CustomIDToNode()[getInnerNodeID(DstTensorID.graph_node_id)]
         if isinstance(SrcGraphNode, (Var, Constant)):
           DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
           # if "inode" not in DstHwNodeID:
@@ -1140,6 +1151,12 @@ def constructNoCPathDict(mod):
             )
             # HwMapping[getFlatNodeID(SrcTensorID.graph_node_id)] = InodeID
             HwMapping[SrcTensorID.graph_node_id] = InodeID
+        elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" : # if the tensor edge is the final edge toward host (=if destination is function)
+          SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
+          InodeID = NodeID.from_inode_coord(NodeID.to_coord(SrcHwNodeID)[0])
+          NocPaths[func_name_var.name_hint][tensor_edge] = (
+            (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], InodeID, SplitIdx)
+          )
         else:
           NocPaths[func_name_var.name_hint][tensor_edge] = (
             (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], HwMapping[getOuterNodeID(DstTensorID.graph_node_id)], SplitIdx)
@@ -1174,9 +1191,9 @@ def constructTensorIDToTensorEdgeDict():
     _add(DstID, tensor_edge)
 
 @relay.transform.function_pass(opt_level=0)
-class MemoryCalculator:
+class MemoryAllocator:
     def transform_function(self, func, mod, ctx):
-      class _MemoryCalculator(tvm.relay.ExprVisitor):
+      class _MemoryAllocator(tvm.relay.ExprVisitor):
         """
           Target Operators:
             conv2d, bias_add, batch_norm, relu, add and fused versions
@@ -1196,9 +1213,6 @@ class MemoryCalculator:
             self.data = CustomIDToNode()
             self.hwnodemap = ImcflowDeviceConfig().HWNodeMap
             
-            self.memory_size = 10000000 #TODO: need to change!!
-            self.MemoryRegionDict = {node: MemoryRegion(str(node), self.memory_size) for node in NodeID}
-
         def traverse_func(self, func):
             self.visit(func)
             self.allocate(func)
@@ -1231,12 +1245,16 @@ class MemoryCalculator:
         def allocate(self, func):
           for edge, mem_block in self.DataBlockDict.items():
             if mem_block.size is None:
-              print("here!!!!!!!!!!!")
+              raise ValueError("Memory size cannot be none.")
             
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
             inode_num = hw_node_id.name[-1] # ex) inode_3 => 3
-            ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate(mem_block)
+
+            if inode_tensorid.tensor_type == "weight":
+              ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate_allow_overlap(mem_block)
+            else:
+              ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate(mem_block)
                      
           return
           
@@ -1319,38 +1337,40 @@ class MemoryCalculator:
             #find my arg from call to find corresponding shape by type_args.shape
             arg_idx, arg_shape = find_my_arg_from_call(edge, call)
             
+            # calculate size for inode memory allocation
             if arg_idx is not None:
               if src_op == "Op(split)":
                 # when first node of subgraph is split, memoryblock is already allocated by split node.
                 pass
-              # dst op
+
+              # src = inode, dst = op
               elif dst_op == "Op(nn.conv2d)":
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * 4
-                elif arg_idx == 1:
+                elif arg_idx == 1: # const(weight)
                   size = 256
                 else:
                   raise ValueError("nn.conv2d only has 2 arguments, but you got over 2.")
               elif dst_op == "Op(nn.batch_norm)":
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
-                elif arg_idx <= 4:
+                elif arg_idx <= 4: # const
                   size = math.ceil(int(arg_shape[0]) / 16)
                 else:
                   raise ValueError("nn.batchnorm only has 5 argument, but you got over 5.")            
               elif dst_op == "Op(nn.relu)":
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
                 else:
                   raise ValueError("nn.relu only has 1 argument, but you got over 1.")            
               elif dst_op == "Op(nn.bias_add)":
-                if arg_idx == 1:
+                if arg_idx == 1: # const
                   size = math.ceil(int(arg_shape[0]) / 16)                
                 else:
                   raise ValueError("Const of nn.bias_add is only defined.")            
               elif dst_op == "Op(split)":
                 # if split, same as conv2d
-                if arg_idx == 0:
+                if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * 4
                 else:
                   raise ValueError("split only has 1 arguments, but you got over 1.")
@@ -1358,7 +1378,8 @@ class MemoryCalculator:
                 raise ValueError("add cannot receive data from inode.")               
               elif dst_op == "Op(concatenate)":
                 raise ValueError("concat cannot receive data from inode.")               
-              # src op
+
+              # src = op, dst = inode
               elif str(src_op) == "Op(nn.conv2d)":
                 size = arg_shape[2] * arg_shape[3] * 4
               elif str(src_op) == "Op(nn.batch_norm)":
@@ -1368,7 +1389,11 @@ class MemoryCalculator:
               # rest case
               else:
                 raise ValueError("Operation not defined!")
-            
+              
+              if size is not None:
+                # imcflow word width = 256 bit
+                size = int(size) * 256 / 8 #unit: bytes
+
             return size
             
           super().visit_call(call)
@@ -1400,7 +1425,7 @@ class MemoryCalculator:
         if function_names[i]=="main": continue
           # _Nodemapper().visit(mod["main"])
         elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          _MemoryCalculator().traverse_func(mod[function_names[i]])
+          _MemoryAllocator().traverse_func(mod[function_names[i]])
 
       # find all regions
       return func
@@ -1777,6 +1802,13 @@ def constructUsefulMappings(mod):
       data[id_dict[int(hash(call))]] = call
       self.Cnt = self.Cnt + 1
       super().visit_call(call)
+
+    def visit_function(self, call):
+      id_dict[int(hash(call))] = self.Cnt
+      name_dict[self.Cnt] = "Function"
+      data[id_dict[int(hash(call))]] = call
+      self.Cnt = self.Cnt + 1
+      super().visit_function(call)
 
     def visit_var(self, var):
       id_dict[int(hash(var))] = self.Cnt

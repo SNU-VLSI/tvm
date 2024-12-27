@@ -223,7 +223,7 @@ def RunTestModel(name):
     for k, v in paths.items():
       print(k, v)
 
-  MemoryCalculator = imcflow_transform.MemoryCalculator()(eval_mod)
+  MemoryAllocator = imcflow_transform.MemoryAllocator()(eval_mod)
   PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(ImcflowDeviceConfig().NoCPaths)(eval_mod)
 
 def test_1x1_small():
