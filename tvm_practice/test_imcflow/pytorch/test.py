@@ -17,14 +17,24 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig
 def min_max_quant(pic: torch.Tensor, min:int, max:int) -> torch.Tensor:
     return pic.clone()
 
+@torch.library.custom_op("imcflow::linear_quant", mutates_args=())
+def linear_quant(x:torch.Tensor, scale:float, zero_point:int) -> torch.Tensor:
+  return x.clone()
+
 def make_min_max(input, input_types):
   MinNDArray = tvm.runtime.ndarray.array(np.array(input[1], dtype=np.float32))
   MaxNDArray = tvm.runtime.ndarray.array(np.array(input[2], dtype=np.float32))
   return imcflow_min_max_quantize(input[0], tvm.relay.Constant(MinNDArray), tvm.relay.Constant(MaxNDArray), 1, "float32")
 
+def make_quantize(input, input_types):
+  scale = tvm.relay.Constant(tvm.runtime.ndarray.array(np.array(input[1], dtype=np.float32)))
+  bias = tvm.relay.Constant(tvm.runtime.ndarray.array(np.array(input[2], dtype=np.int32)))
+  return tvm.relay.qnn.op.quantize(input[0], scale, bias, 1, "float32")
+
 class TestNetwork(torch.nn.Module):
     def __init__(self):
       super(TestNetwork, self).__init__()
+      self.conv = torch.nn.Conv2d(64, 64, 3, 1, 1)
       self.conv1_1 = torch.nn.Conv2d(28, 64, 3, 1, 1)
       self.conv1_2 = torch.nn.Conv2d(28, 64, 3, 1, 1)
       self.conv1_3 = torch.nn.Conv2d(8, 64, 3, 1, 1)
@@ -50,6 +60,8 @@ class TestNetwork(torch.nn.Module):
       self.quant = min_max_quant
 
     def forward(self, x):
+      x = self.conv(x)
+      x = x/2.0
       x1, x2, x3 = torch.split(x, [28, 28, 8], dim=1)
       y1 = (self.conv1_1(x1) + self.conv1_2(x2))/2 + self.conv1_3(x3)/2
       y1 = self.bn1(y1)
@@ -92,7 +104,12 @@ if __name__ == "__main__":
   TestNetwork_ = TestNetwork()
   x = torch.rand((1, 64, 28, 28))
   traced_model = torch.jit.trace(TestNetwork_, x)
-  mod, params = tvm.relay.frontend.from_pytorch(traced_model, [("input0", x.shape)], custom_convert_map={"imcflow::min_max_quant": make_min_max})
+  mod, params = tvm.relay.frontend.from_pytorch(
+    traced_model,
+    [("input0", x.shape)],
+    custom_convert_map={
+      "imcflow::min_max_quant": make_min_max,
+      "imcflow::linear_quant" : make_quantize})
   eval_mod, eval_param_dict = mod, params
 
   # origin
@@ -100,73 +117,80 @@ if __name__ == "__main__":
 
   # bind param
   eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
+  eval_mod = transform.InferType()(eval_mod)
   printModel(eval_mod, eval_param_dict, "after_bind")
 
-  # byoc pass
-  eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_merge")
+  # transform to QuantModel
+  eval_mod = imcflow_transform.makeToQuantizedForm(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_quant1")
+  eval_mod = transform.InferType()(eval_mod)
+  printModel(eval_mod, eval_param_dict, "after_quant2")
 
-  # merge split and concat nodes
-  SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(eval_mod["main"])
-  eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
-  eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  eval_mod = transform.PartitionGraph()(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_split_concat_partition")
+  # # byoc pass
+  # eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_merge")
 
-  # annotation
-  AnnotGenerator = imcflow_transform.AnnotGenerator()
-  AnnotGenerator(eval_mod)
-  # print(AnnotGenerator.RegionList)
-  eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_annot")
+  # # merge split and concat nodes
+  # SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(eval_mod["main"])
+  # eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
+  # eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  # eval_mod = transform.PartitionGraph()(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_split_concat_partition")
 
-  eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_merge_region")
+  # # annotation
+  # AnnotGenerator = imcflow_transform.AnnotGenerator()
+  # AnnotGenerator(eval_mod)
+  # # print(AnnotGenerator.RegionList)
+  # eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_annot")
 
-  eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_clean_region")
+  # eval_mod = transform.MergeCompilerRegions()(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_merge_region")
 
-  eval_mod = transform.PartitionGraph()(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_partition_graph")
+  # eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_clean_region")
 
-  eval_mod = imcflow.flattenSubgraphs(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_flatten")
+  # eval_mod = transform.PartitionGraph()(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_partition_graph")
 
-  eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  imcflow_transform.constructUsefulMappings(eval_mod)
-  imcflow_transform.constructCustomIDInFunc(eval_mod)
-  printModel(eval_mod, eval_param_dict, "after_prune_model")
+  # eval_mod = imcflow.flattenSubgraphs(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_flatten")
 
-  imcflow_transform.NodeMapper()(eval_mod)
-  imcflow_transform.constructTensorEdgeList(eval_mod)
-  imcflow_transform.constructActiveIMCEDict(eval_mod)
+  # eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
+  # imcflow_transform.constructUsefulMappings(eval_mod)
+  # imcflow_transform.constructCustomIDInFunc(eval_mod)
+  # printModel(eval_mod, eval_param_dict, "after_prune_model")
 
-  print("Active IMCE list")
-  print(ImcflowDeviceConfig().ActiveIMCEPerFunc)
+  # imcflow_transform.NodeMapper()(eval_mod)
+  # imcflow_transform.constructTensorEdgeList(eval_mod)
+  # imcflow_transform.constructActiveIMCEDict(eval_mod)
 
-  print("HW MAP")
-  print(ImcflowDeviceConfig().HWNodeMap)
+  # print("Active IMCE list")
+  # print(ImcflowDeviceConfig().ActiveIMCEPerFunc)
 
-  print("CustomID TO Name")
-  print(imcflow.CustomIDToName())
+  # print("HW MAP")
+  # print(ImcflowDeviceConfig().HWNodeMap)
 
-  print("Tensor Edge List")
-  for key, paths in ImcflowDeviceConfig().TensorEdgeListDict.items():
-    print(key)
-    for path in paths:
-      print(path)
+  # print("CustomID TO Name")
+  # print(imcflow.CustomIDToName())
+
+  # print("Tensor Edge List")
+  # for key, paths in ImcflowDeviceConfig().TensorEdgeListDict.items():
+  #   print(key)
+  #   for path in paths:
+  #     print(path)
   
-  imcflow_transform.constructTensorIDToTensorEdgeDict()
-  print("Tensor ID to Tensor Edge")
-  for key, paths in ImcflowDeviceConfig().TensorIDtoEdge.items():
-    print(f"{key} : {paths}")
+  # imcflow_transform.constructTensorIDToTensorEdgeDict()
+  # print("Tensor ID to Tensor Edge")
+  # for key, paths in ImcflowDeviceConfig().TensorIDtoEdge.items():
+  #   print(f"{key} : {paths}")
   
-  imcflow_transform.constructNoCPathDict(eval_mod)
-  print("NoC Paths")
-  for key, paths in ImcflowDeviceConfig().NoCPaths.items():
-    print(key)
-    for k, v in paths.items():
-      print(k, v)
+  # imcflow_transform.constructNoCPathDict(eval_mod)
+  # print("NoC Paths")
+  # for key, paths in ImcflowDeviceConfig().NoCPaths.items():
+  #   print(key)
+  #   for k, v in paths.items():
+  #     print(k, v)
 
-  MemoryCalculator = imcflow_transform.MemoryCalculator()(eval_mod)
-  PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(ImcflowDeviceConfig().NoCPaths)(eval_mod)
+  # MemoryCalculator = imcflow_transform.MemoryCalculator()(eval_mod)
+  # PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(ImcflowDeviceConfig().NoCPaths)(eval_mod)
