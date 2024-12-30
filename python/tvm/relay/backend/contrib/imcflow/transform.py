@@ -10,6 +10,9 @@ from tvm.relay.adt import Constructor, Match, Clause
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
+from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
+from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
+import numpy as np
 
 import math
 from copy import deepcopy
@@ -43,6 +46,58 @@ def getOuterNodeID(node):
   else:
     return node
 
+def makeToQuantizedForm(mod):
+  """
+  List of transformations:
+    1. convert Conv to ImcflowQConv2D 
+    2. data type conversion to int form
+      conv2d input  : packed 1D int8
+      conv2d weight : packed 1D int8
+      bias, relu, etc -> int16 data type
+  """
+  param_map = {}
+  class _OpConverter(tvm.relay.ExprMutator):
+    def __init__(self):
+      super().__init__()
+    
+    def visit_call(self, call):
+      if call.op == op.get("nn.conv2d"):
+        new_op = op.get("nn.imcflow_qconv")
+        args = [self.visit(arg) for arg in call.args]
+        type_args = []
+        type_args.append(relay.TensorType(call.type_args[0].shape, "int8"))
+        type_args.append(relay.TensorType(call.type_args[1].shape, "int8"))
+        return imcflow_qconv2d(args[0], args[1], strides=(1, 1), padding=(1, 1))
+        # return Call(new_op, args, call.attrs, type_args, call.span) 
+      elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+        args = [self.visit(arg) for arg in call.args]
+        return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
+      else:
+        return super().visit_call(call)
+    
+    def visit_var(self, var):
+      new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
+      param_map[var.name_hint] = new_var
+      return new_var
+    
+    def visit_constant(self, const):
+      Data = const.data.numpy().astype(np.int8)
+      return relay.const(Data, "int8")
+    
+    def visit_function(self, func):
+      # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
+      # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
+      # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
+      # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
+      new_body = self.visit(func.body)
+      new_params = [param_map.get(p.name_hint, p) for p in func.params]
+      new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
+      return relay.Function(new_params, new_body, new_ret_type)
+  
+  mod['main'] = _OpConverter().visit(mod['main'])
+  return mod
+
+    
 @relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
     """

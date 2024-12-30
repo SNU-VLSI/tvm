@@ -609,6 +609,27 @@ struct TriluAttrs : public tvm::AttrsNode<TriluAttrs> {
   }
 };  // struct TriluAttrs
 
+struct ImcflowPackingAttrs : public tvm::AttrsNode<ImcflowPackingAttrs> {
+  Array<Integer> newshape;
+  bool allowzero;
+  TVM_DECLARE_ATTRS(ImcflowPackingAttrs, "relay.attrs.ImcflowPackingAttrs") {
+    TVM_ATTR_FIELD(newshape).describe(
+        "The new shape. Should be compatible with the original shape.");
+    TVM_ATTR_FIELD(allowzero).set_default(0).describe(
+        "Whether to honor the value of zero in newshape.");
+  }
+};
+
+struct ImcflowFakeTensorAttrs : public tvm::AttrsNode<ImcflowFakeTensorAttrs> {
+  Array<Integer> newshape;
+  DataType dtype;
+  TVM_DECLARE_ATTRS(ImcflowFakeTensorAttrs, "relay.attrs.ImcflowFakeTensorAttrs") {
+    TVM_ATTR_FIELD(newshape).describe(
+        "The new shape. Should be compatible with the original shape.");
+    TVM_ATTR_FIELD(dtype).describe("Target data type");
+  }
+};
+
 }  // namespace relay
 }  // namespace tvm
 #endif  // TVM_RELAY_ATTRS_TRANSFORM_H_

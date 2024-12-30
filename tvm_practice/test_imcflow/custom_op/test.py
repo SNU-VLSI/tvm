@@ -20,7 +20,7 @@ from tvm.contrib import graph_executor
 
 from tvm.relay.backend import Executor, Runtime
 from tvm.relay import pretty_print
-from tvm.relay.op.nn.nn import imcflow_batch_norm
+from tvm.relay.op.nn.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
@@ -90,6 +90,18 @@ def test_nu_quant():
   data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
   threshold = relay.var("threshold", shape=(16,), dtype="int16")
   y = imcflow_nu_quantize(data, threshold, 1, "int4")
+  out = tvm.IRModule.from_expr(y)
+  out = relay.transform.InferType()(out)
+  print(out)
+
+def test_qconv():
+  IC = 64
+  OC =64
+  IH, IW = 32, 32
+
+  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int4")
+  weight = relay.var("weight", shape=(OC, IC, 3, 3), dtype="int4")
+  y = imcflow_qconv2d(data, weight)
   out = tvm.IRModule.from_expr(y)
   out = relay.transform.InferType()(out)
   print(out)
