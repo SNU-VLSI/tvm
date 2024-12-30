@@ -20,6 +20,7 @@ class DeviceCodegen:
     Handles code generation, saving to file, compilation, linking, and host object creation.
     """
     logging.info(f"Generating {self.target} code for function: {func_name}")
+    import pdb; pdb.set_trace()
     code = self.generate_target_code(codeblocks)
     cpp_name = self.save_target_code_to_file(code, func_name)
     self.compile_target_code(cpp_name)

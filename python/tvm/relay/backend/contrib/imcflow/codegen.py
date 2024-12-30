@@ -42,7 +42,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     IsConv2d = call.op == op.get("nn.conv2d")
 
     if IsComposite:
-      self.visit_composite_call(call)
+      pdb.set_trace()
+      self.visit_composite_func(call.op, getNodeID(call))
     elif IsConv2d:
       self.visit_conv_call(call)
     else:
@@ -67,6 +68,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # write weights using recv
     weight_tid = TensorID(getNodeID(args["weight"]), "weight")
+    pdb.set_trace()
     size = DevConfig().MemLayout.get_data_block_by_id(weight_tid).size  # TODO: this is rather long
     block = SimpleRecvBlock(size, -1, hid, "weight write")
     self.codeblocks.append(block)
@@ -76,9 +78,9 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.codeblocks.append(block)
 
 
-  def visit_composite_call(self, call):
-    # skip composite for now (the TensorID is not available yet)
-    pass
+  def visit_composite_func(self, func, fid):
+    pdb.set_trace()
+    super().visit(func.body)
 
   def visit_op(self, op):
     self.inspect(op, getNodeID(op))

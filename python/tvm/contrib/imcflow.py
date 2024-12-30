@@ -80,9 +80,17 @@ class NodeID(Enum):
   def is_imce(self) -> bool:
     return not self.is_inode()
 
-  def to_coord(self) -> tuple:
+  def to_coord(self, *args) -> Union[tuple, int]:
     """Converts this node to its 2D coordinate."""
-    return divmod(self.value, ImcflowDeviceConfig.NODE_COL_NUM)
+    coord = divmod(self.value, ImcflowDeviceConfig.NODE_COL_NUM)
+    if len(args) == 1 and args[0] == 0:
+      return coord[args[0]]
+    elif len(args) == 1 and args[0] == 1:
+      return coord[args[1]]
+    elif len(args) == 0:
+      return coord
+    else:
+      raise ValueError("Invalid number of arguments")
 
   def slaves(self) -> List['NodeID']:
     """Returns a list of imces that are slaved to this inode."""
