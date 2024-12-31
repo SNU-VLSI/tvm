@@ -84,9 +84,9 @@ class NodeID(Enum):
     """Converts this node to its 2D coordinate."""
     coord = divmod(self.value, ImcflowDeviceConfig.NODE_COL_NUM)
     if len(args) == 1 and args[0] == 0:
-      return coord[args[0]]
+      return coord[0]
     elif len(args) == 1 and args[0] == 1:
-      return coord[args[1]]
+      return coord[1]
     elif len(args) == 0:
       return coord
     else:

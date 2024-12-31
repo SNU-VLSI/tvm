@@ -2,6 +2,7 @@ from abc import *
 from tvm.contrib.imcflow import *
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
+from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from textwrap import indent
 import pdb
 
@@ -86,7 +87,7 @@ class CodeBlockStart(CodeBlock):
     self.func_name = name
 
   def __str__(self) -> str:
-    code = f"void {self.func_name}() {{"
+    code = f"void {self.func_name}() {{\n"
     if self.target == "imce":
       code += f"  int hid = __builtin_IMCE_GET_CORE_HID();\n"
       code += f"  int wid = __builtin_IMCE_GET_CORE_WID();\n\n"
@@ -111,7 +112,7 @@ class PolicyUpdateBlock(InodeCodeBlock):
     same_row_node_ids = [self.node_id] + self.node_id.slaves()
     code = "int policy_table_start_address;\n"
     for id in same_row_node_ids:
-      db = ImcflowDeviceConfig().PolicyTableDict[id]
+      db = DevConfig().PolicyTableDict[id]
       code += f"\npolicy_table_start_address = {db.base_address};\n"
       for i in range(0, db.size, 32):
         code += f"__builtin_INODE_PU(policy_table_start_address, {i}, {int(i / 32)}, {id.to_coord(1)});\n"
@@ -220,7 +221,37 @@ class ConvBlock(ImceCodeBlock):
     code = ""
     for row_pat in row_pattern:
       code += self._outer_loop_content(row_pat["count"], row_pat["pattern"])
-    pdb.set_trace()
+
+    return code
+
+
+class CodeBlocks:
+  """A class that manages and generates code blocks for each node."""
+
+  def __init__(self, name, target="imce"):
+    if target == "imce":
+      self.nodes = NodeID.imces()
+    elif target == "inode":
+      self.nodes = NodeID.inodes()
+    else:
+      raise ValueError(f"Unknown target: {target}")
+
+    self.start = CodeBlockStart(name, target)
+    self.blocks = {key: [] for key in self.nodes}
+    self.end = CodeBlockEnd()
+
+  def append(self, block):
+    self.blocks[block.node_id].append(block)
+
+  def generate(self):
+    # TODO: code generation should handle duplicate variable names
+    code = str(self.start)
+    for node in self.nodes:
+      code += f"if (hid == " + str(node.to_coord(0)) + " && wid == " + str(node.to_coord(1)) + ") {{\n"
+      for codeblock in self.blocks[node]:
+        code += f"{indent(str(codeblock), '  ')}\n"
+      code += "}\n"
+    code += str(self.end)
 
     return code
 

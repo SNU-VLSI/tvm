@@ -30,11 +30,8 @@ class CodegenSuite:
 class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name):
     super().__init__()
-    self.func_name = func_name
-    self.codeblocks = [
-        CodeBlockStart(self.func_name, "imce"),
-        CodeBlockEnd()
-    ]
+    self.curr_composite_id = None
+    self.codeblocks = CodeBlocks(func_name, "imce")
 
   def visit_call(self, call):
     IsComposite = isinstance(
@@ -42,8 +39,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     IsConv2d = call.op == op.get("nn.conv2d")
 
     if IsComposite:
-      pdb.set_trace()
-      self.visit_composite_func(call.op, getNodeID(call))
+      self.visit_composite_call(call)
     elif IsConv2d:
       self.visit_conv_call(call)
     else:
@@ -53,12 +49,16 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit(a)
 
   def visit_conv_call(self, call):
-    gid = self.get_gid(call)
-    hid = DevConfig().get_hw_node(gid)
-
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
     shapes["output"] = infer_shape(call)
+
+    if self.curr_composite_id:
+      hid = DevConfig().get_hw_node(self.curr_composite_id)
+      w_tid = TensorID((self.curr_composite_id, getNodeID(args["weight"])), "weight")
+    else:
+      hid = DevConfig().get_hw_node(getNodeID(call))
+      w_tid = TensorID(getNodeID(args["weight"]), "weight")
 
     # scan reg
     # TODO: add scan reg code block
@@ -67,9 +67,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # TODO: add config reg code block
 
     # write weights using recv
-    weight_tid = TensorID(getNodeID(args["weight"]), "weight")
-    pdb.set_trace()
-    size = DevConfig().MemLayout.get_data_block_by_id(weight_tid).size  # TODO: this is rather long
+    size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size  # TODO: this is rather long
     block = SimpleRecvBlock(size, -1, hid, "weight write")
     self.codeblocks.append(block)
 
@@ -78,9 +76,10 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.codeblocks.append(block)
 
 
-  def visit_composite_func(self, func, fid):
-    pdb.set_trace()
-    super().visit(func.body)
+  def visit_composite_call(self, call):
+    self.curr_composite_id = getNodeID(call)
+    super().visit(call.op.body)
+    self.curr_composite_id = None
 
   def visit_op(self, op):
     self.inspect(op, getNodeID(op))

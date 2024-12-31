@@ -1,7 +1,9 @@
 import os
 import subprocess
 import logging
-from tvm.contrib.imcflow import ImcflowDeviceConfig, NodeID
+from tvm.contrib.imcflow import NodeID
+from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.relay.backend.contrib.imcflow.codeblock import *
 
 class DeviceCodegen:
   def __init__(self, target, output_dir="/tmp"):
@@ -21,7 +23,7 @@ class DeviceCodegen:
     """
     logging.info(f"Generating {self.target} code for function: {func_name}")
     import pdb; pdb.set_trace()
-    code = self.generate_target_code(codeblocks)
+    code = codeblocks.generate()
     cpp_name = self.save_target_code_to_file(code, func_name)
     self.compile_target_code(cpp_name)
 
@@ -30,6 +32,9 @@ class DeviceCodegen:
     # TODO: code generation should handle duplicate variable names
     code = ""
     for codeblock in codeblocks:
+      if isinstance(codeblock, CodeBlockStart):
+        code += str(codeblock)
+
       code += codeblock
 
     return code
