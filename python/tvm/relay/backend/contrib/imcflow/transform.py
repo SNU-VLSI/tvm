@@ -1699,6 +1699,8 @@ class PolicyTableGenerator:
                       edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
                       ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
                       fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
+                      if fifo_id_cnt[dest_node] >= 8:
+                        raise ValueError("FIFO ID cannot be over 7!")
                   else: # Instruction edge
                       # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
                       edgeinfo = InstEdgeInfo(router_entry_list, None)
