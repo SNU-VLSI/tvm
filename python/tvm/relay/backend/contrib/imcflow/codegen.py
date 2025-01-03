@@ -37,6 +37,9 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.codeblocks = CodeBlocks(func_name, "imce")
 
   def visit_call(self, call):
+    for a in call.args:
+      self.visit(a)
+
     IsComposite = isinstance(call.op, relay.Function) and \
       "Composite" in call.op.attrs
 
@@ -55,10 +58,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     else:
       self.visit(call.op)
 
-    for a in call.args:
-      self.visit(a)
-
   def visit_conv_call(self, call):
+    pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
     shapes["output"] = infer_shape(call)
@@ -80,40 +81,50 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # write weights using recv
     size = DevConfig().MemLayout.get_data_block_by_id(
         w_tid).size  # TODO: this is rather long
-    block = LoadLBBlock(size, 1, -1, hid, "weight write") # TODO: change to write weight block
-    self.codeblocks.append(block)
+    block = LoadLBBlock(size, 1, -1, "weight write") # TODO: change to write weight block
+    self.codeblocks.append(hid, block)
 
     # load input
-    block = ConvBlock(shapes, call.attrs, -1, -1, hid, "input load")
+    block = ConvBlock(shapes, call.attrs, -1, -1, "input load")
     if self.curr_composite_id:
       block.add_op(self.post_process)
-    self.codeblocks.append(block)
+    self.codeblocks.append(hid, block)
 
   def visit_add_call(self, call):
+    pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
-    for arg in call.args:
+    for idx, arg in enumerate(call.args):
       if isinstance(arg, relay.Var) or isinstance(arg, relay.Constant):
-        pass
+        tag = call.op.arguments[idx].name
+        # info = self.get_tensor_edge_info_from_tag(call, tag)
+        info = self.get_tensor_edge_info_from_tag(call, "idata0")
+        if info is None:
+          info = self.get_tensor_edge_info_from_tag(call, "idata1")
 
-    block = AddBlock("add")
+    block = AddBlock(info.fifo_id, "add")
     self.post_process.append(block)
-    pdb.set_trace()
 
   def visit_bias_add_call(self, call):
+    pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
-    pdb.set_trace()
+    info = self.get_tensor_edge_info_from_tag(call, "bias")
 
   def visit_batch_norm_call(self, call):
+    pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
-    pdb.set_trace()
+    scale_info = self.get_tensor_edge_info_from_tag(call, "scale")
+    bias_info = self.get_tensor_edge_info_from_tag(call, "bias")
 
   def visit_relu_call(self, call):
+    pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
-    pdb.set_trace()
+    info = self.get_tensor_edge_info_from_tag(call, "odata")
+    # block = ReLUBlock("relu")
+    # self.post_process.append(block)
 
 
   def visit_composite_call(self, call):
@@ -132,6 +143,18 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   def visit_constant(self, const):
     self.inspect(const, getNodeID(const))
     super().visit_constant(const)
+
+  def get_tensor_id(self, call, tag):
+    if self.curr_composite_id:
+      tid = TensorID((self.curr_composite_id, getNodeID(call)), tag)
+    else:
+      tid = TensorID(getNodeID(call), tag)
+    return tid
+
+  def get_tensor_edge_info_from_tag(self, call, tag):
+    tid = self.get_tensor_id(call, tag)
+    te = DevConfig().get_tensor_edge(tid)
+    return DevConfig().get_tensor_edge_info(te)
 
   def inspect(self, tmp, graph_node_id):
     if graph_node_id in DevConfig().HWNodeMap.keys():

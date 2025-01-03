@@ -1,5 +1,5 @@
 import tvm.testing
-from tvm.contrib.imcflow import TensorID, TensorEdge, MultiCastTensorEdge, RouterEntry, TensorEdgeInfo, DataBlock, MemoryRegion, MemoryLayout, ImcflowDeviceConfig
+from tvm.contrib.imcflow import TensorID, TensorEdge, RouterEntry, TensorEdgeInfo, DataBlock, MemoryRegion, MemoryLayout, ImcflowDeviceConfig
 
 def test_tensor_id():
     tensor_id1 = TensorID(1, "idata")
@@ -12,13 +12,6 @@ def test_tensor_edge():
     tensor_id2 = TensorID(2, "odata")
     tensor_edge = TensorEdge(tensor_id1, tensor_id2, split_idx=0)
     assert str(tensor_edge) == "TensorEdge(TensorID(1, idata), TensorID(2, odata), 0)"
-
-def test_multicast_tensor_edge():
-    tensor_id1 = TensorID(1, "idata")
-    tensor_id2 = TensorID(2, "odata")
-    tensor_id3 = TensorID(3, "weight")
-    multi_cast_edge = MultiCastTensorEdge(tensor_id1, [tensor_id2, tensor_id3], [None, 1])
-    assert str(multi_cast_edge) == "MultiCastTensorEdge(TensorID(1, idata), [TensorID(2, odata), TensorID(3, weight)], [None, 1])"
 
 def test_router_entry():
     router_entry = RouterEntry(0, 100, {"Local": True, "North": None, "South": None, "East": None, "West": None})

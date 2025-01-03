@@ -140,21 +140,10 @@ class TensorEdge:
     self.split_idx = split_idx
 
   def __str__(self):
-    return f"TensorEdge({self.src_id}, {self.dst_id}, {self.split_idx})"
+    return f"TensorEdge(({self.src_id.graph_node_id}, {self.src_id.tensor_type}), ({self.dst_id.graph_node_id}, {self.dst_id.tensor_type}), {self.split_idx})"
 
   def __repr__(self):
     return self.__str__()
-
-
-class MultiCastTensorEdge:
-  def __init__(self, src_id: TensorID, dst_ids: List[TensorID], split_idx: List[Union[None, int]]):
-    self.src_id = src_id
-    self.dst_ids = dst_ids
-    self.split_idx = split_idx
-
-  def __str__(self):
-    dst_id_strs = ", ".join(str(dst_id) for dst_id in self.dst_ids)
-    return f"MultiCastTensorEdge({self.src_id}, [{dst_id_strs}], {self.split_idx})"
 
 
 class DataBlock:
@@ -175,6 +164,9 @@ class DataBlock:
 
   def __str__(self):
     return (f"DataBlock({self.id}, {self.size}, {self.base_address})")
+
+  def __repr__(self):
+    return self.__str__()
 
 
 class MemoryRegion:
@@ -219,6 +211,9 @@ class MemoryRegion:
     return (f"MemoryRegion({self.name}, {self.size}, {self.base_address}, "
             f"blocks=[\n      {blocks_str}\n    ])")
 
+  def __repr__(self):
+    return self.__str__()
+
 
 class MemoryLayout:
   def __init__(self, *regions: MemoryRegion):
@@ -244,6 +239,9 @@ class MemoryLayout:
     regions_str = ",\n  ".join(str(region) for region in self.regions.values())
     return f"MemoryLayout(regions=[\n  {regions_str}\n])"
 
+  def __repr__(self):
+    return self.__str__()
+
 
 class RouterEntry:
   def __init__(self, router_id: int, address: int, data: Dict):
@@ -253,6 +251,9 @@ class RouterEntry:
 
   def __str__(self):
     return f"RouterEntry({self.router_id}, {self.address}, {self.data})"
+
+  def __repr__(self):
+    return self.__str__()
 
 
 class EdgeInfo:
@@ -274,6 +275,9 @@ class InstEdgeInfo(EdgeInfo):
     policy_info_str = ", ".join(str(entry) for entry in self.policy_info)
     return f"InstEdgeInfo([{policy_info_str}], {self.data_block}, {self.fifo_id})"
 
+  def __repr__(self):
+    return self.__str__()
+
 
 class TensorEdgeInfo(EdgeInfo):
   def __init__(self, policy_info: List[RouterEntry], data_block: Union[DataBlock, None] = None, fifo_id: int = -1):
@@ -286,6 +290,9 @@ class TensorEdgeInfo(EdgeInfo):
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.policy_info)
     return f"TensorEdgeInfo([{policy_info_str}], {self.data_block}, {self.fifo_id})"
+
+  def __repr__(self):
+    return self.__str__()
 
 
 class ImcflowDeviceConfig:

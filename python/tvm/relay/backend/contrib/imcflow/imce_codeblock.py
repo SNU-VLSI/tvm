@@ -28,12 +28,15 @@ class LoadLBBlock(ImceCodeBlock):
 
 
 class AddBlock(ImceCodeBlock):
-  def __init__(self, annotation: str = ""):
+  def __init__(self, fifo_id: int, annotation: str = ""):
     super().__init__(annotation)
+    self.fifo_id = fifo_id
 
   def _content(self) -> Union[str, CodeBlock]:
-    code = "__builtin_IMCE_RECV(a, b, 15);\n"
-    code = "__builtin_IMCE_ADD(a, b, 15);\n"
+    # code = f"{Var("y")} = __builtin_IMCE_RECV({self.fifo_id});\n"
+    # code = f"{Var("x")} = __builtin_IMCE_ADD({Var("x")}, {Var("y")}, 15);\n"
+    code = f"y = __builtin_IMCE_RECV({self.fifo_id});\n"
+    code = f"x = __builtin_IMCE_ADD(x, y, 15);\n"
     return code
 
 class ConvBlock(ImceCodeBlock):

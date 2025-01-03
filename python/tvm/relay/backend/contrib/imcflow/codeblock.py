@@ -3,6 +3,12 @@ from typing import *
 from tvm.contrib.imcflow import NodeID
 from textwrap import indent
 import pdb
+from enum import Enum
+
+
+class CodePhase(Enum):
+  INIT = "INIT"
+  EXEC = "EXEC"
 
 
 class CodeBlock(metaclass=ABCMeta):
@@ -100,23 +106,28 @@ class CodeBlocks:
       raise ValueError(f"Unknown target: {target}")
 
     self.start = CodeBlockStart(name, target)
-    self.blocks = {key: [] for key in self.nodes}
+    self.blocks = {key: {CodePhase.INIT: [], CodePhase.EXEC: []}
+                   for key in self.nodes}
     self.end = CodeBlockEnd()
 
-  def append(self, hid, block):
-    self.blocks[hid].append(block)
+  def append(self, hid, block, block_type: CodePhase = CodePhase.EXEC):
+    self.blocks[hid][block_type].append(block)
 
   def generate(self):
     # TODO: code generation should handle duplicate variable names
     code = str(self.start)
     first = True
     for node in self.nodes:
-        condition = f"if" if first else f"else if"
-        code += f"{condition} (hid == {node.to_coord(0)} && wid == {node.to_coord(1)}) {{\n"
-        for codeblock in self.blocks[node]:
-            code += f"{indent(str(codeblock), '  ')}\n"
-        code += "}\n"
-        first = False
+      condition = f"if" if first else f"else if"
+      code += f"{condition} (hid == {node.to_coord(0)} && wid == {node.to_coord(1)}) {{\n"
+      # Generate SETUP blocks first
+      for codeblock in self.blocks[node][CodePhase.INIT]:
+        code += f"{indent(str(codeblock), '  ')}\n"
+      # Generate COMPUTE blocks next
+      for codeblock in self.blocks[node][CodePhase.EXEC]:
+        code += f"{indent(str(codeblock), '  ')}\n"
+      code += "}\n"
+      first = False
     code += str(self.end)
 
     return code
