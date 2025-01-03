@@ -426,12 +426,10 @@ def make_qnn_dense_pattern():
     return "imcflow.qnn.dense", pat
 
 def makeBNPattern(data):
-  mean = is_constant()
-  var = is_constant()
   gamma = is_constant()
   beta = is_constant()
 
-  return is_tuple_get_item(is_op("nn.batch_norm")(data, gamma, beta, mean, var), 0)
+  return is_tuple_get_item(is_op("imcflow.fused_batch_norm")(data, gamma, beta), 0)
 
 def makeAddPattern(data):
   return is_op("add")(data, wildcard())
@@ -457,11 +455,10 @@ def makeNUQauntPattern(data):
 def makeDivPattern(data):
   return is_op("divide")(data, is_constant())
 
-def make_conv_with_postop_pattern(conv_type, postops):
+def make_conv_with_postop_pattern(conv_type, postop):
     data1, weight = wildcard(), is_constant()
     out = is_op(conv_type)(data1, weight)
-    for postop in postops:
-      out = postop(out)
+    out = postop(out)
     return out
 
 @register_pattern_table("imcflow")
@@ -476,50 +473,21 @@ def pattern_table():
     """
     imcflow_patterns = list()
 
-    # PostProcess = [
-    #     (makeBNPattern, "bn"), (makeAddPattern, "add"), (makeBiasAddPattern, "bias_add"), (makeReluPattern, "relu"),
-    #     (makeMinMaxQauntPattern, "min_max_quant"), (makeNUQauntPattern, "nu_quant"), (makeDivPattern, "div")]
-    # MaxNumPostOps = 6
+    def make_postop_pattern_start_with(conv_type):
+      data1, weight = wildcard(), is_constant()
+      data = is_op(conv_type)(data1, weight)
+      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data)
+      for i in range(1, 10):
+        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out)
+      
+      return out
 
-    BiasAddPattern = [[], [(makeBiasAddPattern, "bias_add")]]
-
-    PreAddMaxNum = 10
-    # PreAddSeq = [[(makeAddPattern, "add") for _ in range(i)] for i in range(PreAddMaxNum)]
-    PreAddSeq = [[], [(partial(makeAddPatternV2,max_num_adds=PreAddMaxNum), "add")]]
-
-    DivPattern = [[], [(makeDivPattern, "div")]]
-
-    PostAddMaxNum = 10
-    # PostAddSeq = [[(makeAddPattern, "add") for _ in range(i)] for i in range(PostAddMaxNum)]
-    PostAddSeq = [[], [(partial(makeAddPatternV2,max_num_adds=PostAddMaxNum), "add")]]
-
-    PostProcessSeq = [
-      [],
-      [(makeBNPattern, "bn")],
-      [(makeReluPattern, "relu")],
-      [(makeBNPattern, "bn"), (makeReluPattern, "relu")],
-      [(makeBNPattern, "bn"), (makeReluPattern, "relu"), (makeMinMaxQauntPattern, "min_max_quant")],
-      [(makeBNPattern, "bn"), (makeReluPattern, "relu"), (makeNUQauntPattern, "nu_quant")],
-    ]
-
-    for bias_add_pat in BiasAddPattern[::-1]:
-      for pre_add_pat in PreAddSeq[::-1]:
-        for div_pat in DivPattern[::-1]:
-          for post_add_pat in PostAddSeq[::-1]:
-            for post_process_pat in PostProcessSeq[::-1]:
-              postops = []
-              postops.extend(bias_add_pat)
-              postops.extend(pre_add_pat)
-              postops.extend(div_pat)
-              postops.extend(post_add_pat)
-              postops.extend(post_process_pat)
-              postop_names = [name for _, name in postops]
-              imcflow_patterns.append(
-                (
-                    "imcflow.conv2d-" + "-".join(postop_names),
-                    make_conv_with_postop_pattern("nn.conv2d", [postop for postop, _ in postops])
-                )
-              )
+    imcflow_patterns.append(
+      (
+          "imcflow.conv2d-with-postop",
+          make_postop_pattern_start_with("nn.imcflow_qconv")
+      )
+    )
 
     return imcflow_patterns
 
@@ -1408,7 +1376,8 @@ def is_valid_subgraph(body):
             self.valid = False
 
         def visit_call(self, call):
-            if hasattr(call.op, "name") and call.op.name == "nn.conv2d":
+            # if hasattr(call.op, "name") and call.op.name == "nn.conv2d":
+            if hasattr(call.op, "name") and call.op.name == "nn.imcflow_qconv":
               self.valid = True
             super().visit_call(call)
 

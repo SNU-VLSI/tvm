@@ -12,6 +12,7 @@ from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
+from tvm.relay.op.transform import imcflow_fake_tensor, imcflow_packing
 import numpy as np
 
 import math
@@ -713,9 +714,9 @@ class AnnotGenerator:
              return 0
 
           IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
           IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
-          IsNoCostCall = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split", "concatenate"]
+          IsNoCostCall = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.NO_COST_OPS
 
           class _CostVisitor(tvm.relay.ExprVisitor):
             def __init__(self, getCostFunc):
@@ -752,7 +753,8 @@ class AnnotGenerator:
           # check this node is for imcflow
           IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
           # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
+          # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
           IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
 
           if IsComposite or IsSupportedOp or IsSuperNode:
@@ -1721,6 +1723,59 @@ class PolicyTableGenerator:
             print(x)
 
       return func 
+
+@relay.transform.function_pass(opt_level=0)
+class PackingInserter:
+    def __init__(self):
+      pass
+    
+    def transform_function(self, func, mod, ctx):
+      class _PackingInserter(tvm.relay.ExprMutator):
+        def __init__(self):
+            super().__init__()
+        
+        def visit_global_var(self, gvar):
+          mod[gvar.name_hint] = self.visit(mod[gvar.name_hint])
+          return super().visit_global_var(gvar)
+        
+        def visit_call(self, call):
+          if isinstance(call.op, relay.Function):
+            return super().visit_call(call)
+
+          if call.op == op.get("nn.imcflow_qconv"):
+            OriginWeight = call.args[1]
+            Weight1D = relay.Constant(tvm.nd.array(OriginWeight.data.asnumpy().flatten().astype("int8")))
+            NewWeight = imcflow_packing(Weight1D, OriginWeight.checked_type.shape)
+            NewInput = super().visit(call.args[0])
+
+            return imcflow_qconv2d(NewInput, NewWeight, 
+                                   **call.attrs)
+          
+          if call.op == op.get("imcflow.fused_batch_norm"):
+            # convert dtype to int16
+            NewScale = relay.Constant(tvm.nd.array(call.args[1].data.asnumpy().astype("int16")))
+            NewBias = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
+            return imcflow_batch_norm(call.args[0], NewScale, NewBias,1).astuple()
+          
+          if call.op == op.get("qnn.imcflow_min_max_quantize"):
+            # convert dtype to int16
+            print(call)
+          
+          if call.op == op.get("qnn.imcflow_nu_quantize"):
+            # convert dtype to int16
+            print(call)
+
+          return super().visit_call(call)
+        
+        def visit_function(self, func):
+          # insert unpacking if function parameters from 1D data
+
+          # insert packing if function returns quant data
+
+          # visit body
+          return super().visit_function(func)
+      
+      return _PackingInserter().visit(func)
 
 # @relay.transform.function_pass(opt_level=0)
 # class IDAssigner:
