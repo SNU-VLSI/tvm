@@ -3,13 +3,15 @@ import tvm
 from tvm import relay
 from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
+from tvm.contrib.imcflow import TensorID
 from tvm.relay.backend.contrib.imcflow import util
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
-from tvm.relay.expr import (Call, TupleGetItem, Tuple)
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
+from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
+from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 import pdb
 
 
@@ -31,17 +33,25 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name):
     super().__init__()
     self.curr_composite_id = None
+    self.post_process = []
     self.codeblocks = CodeBlocks(func_name, "imce")
 
   def visit_call(self, call):
-    IsComposite = isinstance(
-        call.op, relay.Function) and "Composite" in call.op.attrs
-    IsConv2d = call.op == op.get("nn.conv2d")
+    IsComposite = isinstance(call.op, relay.Function) and \
+      "Composite" in call.op.attrs
 
     if IsComposite:
       self.visit_composite_call(call)
-    elif IsConv2d:
+    elif call.op == op.get("nn.conv2d"):
       self.visit_conv_call(call)
+    elif call.op == op.get("add"):
+      self.visit_add_call(call)
+    elif call.op == op.get("nn.bias_add"):
+      self.visit_bias_add_call(call)
+    elif call.op == op.get("nn.batch_norm"):
+      self.visit_batch_norm_call(call)
+    elif call.op == op.get("nn.relu"):
+      self.visit_relu_call(call)
     else:
       self.visit(call.op)
 
@@ -55,7 +65,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     if self.curr_composite_id:
       hid = DevConfig().get_hw_node(self.curr_composite_id)
-      w_tid = TensorID((self.curr_composite_id, getNodeID(args["weight"])), "weight")
+      w_tid = TensorID(
+          (self.curr_composite_id, getNodeID(args["weight"])), "weight")
     else:
       hid = DevConfig().get_hw_node(getNodeID(call))
       w_tid = TensorID(getNodeID(args["weight"]), "weight")
@@ -67,13 +78,42 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # TODO: add config reg code block
 
     # write weights using recv
-    size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size  # TODO: this is rather long
-    block = SimpleRecvBlock(size, -1, hid, "weight write")
+    size = DevConfig().MemLayout.get_data_block_by_id(
+        w_tid).size  # TODO: this is rather long
+    block = LoadLBBlock(size, 1, -1, hid, "weight write") # TODO: change to write weight block
     self.codeblocks.append(block)
 
     # load input
     block = ConvBlock(shapes, call.attrs, -1, -1, hid, "input load")
+    if self.curr_composite_id:
+      block.add_op(self.post_process)
     self.codeblocks.append(block)
+
+  def visit_add_call(self, call):
+    args = self.get_arg_dict(call)
+    shapes = self.get_arg_shape_dict(call)
+    for arg in call.args:
+      if isinstance(arg, relay.Var) or isinstance(arg, relay.Constant):
+        pass
+
+    block = AddBlock("add")
+    self.post_process.append(block)
+    pdb.set_trace()
+
+  def visit_bias_add_call(self, call):
+    args = self.get_arg_dict(call)
+    shapes = self.get_arg_shape_dict(call)
+    pdb.set_trace()
+
+  def visit_batch_norm_call(self, call):
+    args = self.get_arg_dict(call)
+    shapes = self.get_arg_shape_dict(call)
+    pdb.set_trace()
+
+  def visit_relu_call(self, call):
+    args = self.get_arg_dict(call)
+    shapes = self.get_arg_shape_dict(call)
+    pdb.set_trace()
 
 
   def visit_composite_call(self, call):
@@ -108,6 +148,9 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     else:
       gid = getNodeID(call)
     return gid
+
+  def get_arg_keys(self, call):
+    return [arg.name for arg in call.op.arguments]
 
   def get_arg_dict(self, call):
     args = {}

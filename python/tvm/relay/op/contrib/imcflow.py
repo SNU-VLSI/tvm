@@ -88,10 +88,6 @@ _register_external_op_helper("nn.batch_norm")
 _register_external_op_helper("nn.relu")
 _register_external_op_helper("nn.bias_add")
 _register_external_op_helper("nn.add")
-# _register_external_op_helper("qnn.imcflow_min_max_quantize")
-# _register_external_op_helper("qnn.imcflow_nu_quantize")
-# _register_external_op_helper("add")
-# _register_external_op_helper("divide")
 
 
 def append_eltwise_ops(op, eltwise):
@@ -436,26 +432,11 @@ def makeBNPattern(data):
 def makeAddPattern(data):
   return is_op("add")(data, wildcard())
 
-def makeAddPatternV2(data, max_num_adds):
-  pat = is_op("add")(data, wildcard())
-  for _ in range(max_num_adds - 1):
-    pat = is_op("add")(pat, wildcard()) | pat
-  return pat
-
 def makeBiasAddPattern(data):
   return is_op("nn.bias_add")(data, is_constant())
 
 def makeReluPattern(data):
   return is_op("nn.relu")(data)
-
-def makeMinMaxQauntPattern(data):
-  return is_op("qnn.imcflow_min_max_quantize")(data, is_constant(), is_constant())
-
-def makeNUQauntPattern(data):
-  return is_op("qnn.imcflow_nu_quantize")(data, is_constant())
-
-def makeDivPattern(data):
-  return is_op("divide")(data, is_constant())
 
 def make_conv_with_postop_pattern(conv_type, postops):
     data1, weight = wildcard(), is_constant()
@@ -466,7 +447,6 @@ def make_conv_with_postop_pattern(conv_type, postops):
 
 @register_pattern_table("imcflow")
 def pattern_table():
-    from functools import partial
     """Create imcflow patterns.
 
     Returns
@@ -476,50 +456,46 @@ def pattern_table():
     """
     imcflow_patterns = list()
 
-    # PostProcess = [
-    #     (makeBNPattern, "bn"), (makeAddPattern, "add"), (makeBiasAddPattern, "bias_add"), (makeReluPattern, "relu"),
-    #     (makeMinMaxQauntPattern, "min_max_quant"), (makeNUQauntPattern, "nu_quant"), (makeDivPattern, "div")]
-    # MaxNumPostOps = 6
+    PostProcess = [(makeBNPattern, "bn"), (makeAddPattern, "add"), (makeBiasAddPattern, "bias_add"), (makeReluPattern, "relu")]
+    MaxNumPostOps = 6
 
-    BiasAddPattern = [[], [(makeBiasAddPattern, "bias_add")]]
+    for i in range(MaxNumPostOps, 0, -1):
+      for postops in itertools.permutations(PostProcess, i):
+        postop_names = [name for _, name in postops]
+        imcflow_patterns.append(
+            (
+                "imcflow.conv2d_" + "_".join(postop_names),
+                make_conv_with_postop_pattern("nn.conv2d", [postop for postop, _ in postops])
+            )
+        )
 
-    PreAddMaxNum = 10
-    # PreAddSeq = [[(makeAddPattern, "add") for _ in range(i)] for i in range(PreAddMaxNum)]
-    PreAddSeq = [[], [(partial(makeAddPatternV2,max_num_adds=PreAddMaxNum), "add")]]
+    # post_patterns = [
+    #   # 4
+    #   ("imcflow.conv2d_add_bias_add_bn_relu",[makeAddPattern, makeBiasAddPattern, makeBNPattern, makeReluPattern]),
 
-    DivPattern = [[], [(makeDivPattern, "div")]]
+    #   # 3
+    #   ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
+    #   ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
+    #   ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
 
-    PostAddMaxNum = 10
-    # PostAddSeq = [[(makeAddPattern, "add") for _ in range(i)] for i in range(PostAddMaxNum)]
-    PostAddSeq = [[], [(partial(makeAddPatternV2,max_num_adds=PostAddMaxNum), "add")]]
+    #   # 2
+    #   ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
+    #   ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
+    #   ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
 
-    PostProcessSeq = [
-      [],
-      [(makeBNPattern, "bn")],
-      [(makeReluPattern, "relu")],
-      [(makeBNPattern, "bn"), (makeReluPattern, "relu")],
-      [(makeBNPattern, "bn"), (makeReluPattern, "relu"), (makeMinMaxQauntPattern, "min_max_quant")],
-      [(makeBNPattern, "bn"), (makeReluPattern, "relu"), (makeNUQauntPattern, "nu_quant")],
-    ]
+    #   # 1
+    #   ("imcflow.conv2d_add",[makeAddPattern]),
+    #   ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
+    #   ("imcflow.conv2d_bn", [makeBNPattern]),
+    # ]
 
-    for bias_add_pat in BiasAddPattern[::-1]:
-      for pre_add_pat in PreAddSeq[::-1]:
-        for div_pat in DivPattern[::-1]:
-          for post_add_pat in PostAddSeq[::-1]:
-            for post_process_pat in PostProcessSeq[::-1]:
-              postops = []
-              postops.extend(bias_add_pat)
-              postops.extend(pre_add_pat)
-              postops.extend(div_pat)
-              postops.extend(post_add_pat)
-              postops.extend(post_process_pat)
-              postop_names = [name for _, name in postops]
-              imcflow_patterns.append(
-                (
-                    "imcflow.conv2d-" + "-".join(postop_names),
-                    make_conv_with_postop_pattern("nn.conv2d", [postop for postop, _ in postops])
-                )
-              )
+    # for name, patterns in post_patterns:
+    #   imcflow_patterns.append(
+    #       (
+    #           name,
+    #           make_conv_with_postop_pattern("nn.conv2d", patterns)
+    #       )
+    #   )
 
     return imcflow_patterns
 
