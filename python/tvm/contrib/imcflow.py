@@ -298,7 +298,7 @@ class ImcflowDeviceConfig:
 
   SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
   NO_COST_OPS = ["split", "concatenate"]
-  QAUNT_OPS = ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant"]
+  QAUNT_OPS = ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize"]
 
   def __new__(cls, *args, **kwargs):
     if not hasattr(cls, "instance"):

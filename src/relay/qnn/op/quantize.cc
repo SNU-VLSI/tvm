@@ -216,8 +216,8 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   // AssignType(types[2], DataType::Int(16), axis_shape, reporter);    // zero point
   // reporter->Assign(types[1], TensorType({1}, DataType::Int(16)));
   // reporter->Assign(types[2], TensorType({1}, DataType::Int(16)));
-  reporter->Assign(types[1], TensorType({}, input_dtype));
-  reporter->Assign(types[2], TensorType({}, input_dtype));
+  reporter->Assign(types[1], TensorType({}, quantize_attrs->param_dtype));
+  reporter->Assign(types[2], TensorType({}, quantize_attrs->param_dtype));
 
   const Array<tvm::PrimExpr> oshape = data->shape;
   const DataType out_dtype = quantize_attrs->out_dtype;
@@ -226,10 +226,12 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   return true;
 }
 
-Expr MakeImcflowMinMaxQuantize(Expr data, Expr min, Expr max, int axis, DataType out_dtype) {
+Expr MakeImcflowMinMaxQuantize(Expr data, Expr min, Expr max, int axis, DataType out_dtype,
+                               DataType param_dtype) {
   auto attrs = make_object<ImcflowMinMaxQuantizeAttrs>();
   attrs->axis = axis;
   attrs->out_dtype = std::move(out_dtype);
+  attrs->param_dtype = std::move(param_dtype);
   static const Op& op = Op::Get("qnn.imcflow_min_max_quantize");
   return Call(op, {data, min, max}, Attrs(attrs), {});
 }
@@ -279,7 +281,7 @@ bool ImcflowNUQuantizeRel(const Array<Type>& types, int num_inputs, const Attrs&
   const IntImmNode* Size = threshold->shape[0].as<IntImmNode>();
   ICHECK(Size->value == 16) << "Threshold should be of shape 16 but was " << Size->value;
   // reporter->Assign(types[1], TensorType({16}, DataType::Int(16)));
-  reporter->Assign(types[1], TensorType({16}, input_dtype));
+  reporter->Assign(types[1], TensorType({16}, quantize_attrs->param_dtype));
 
   const Array<tvm::PrimExpr> oshape = data->shape;
   const DataType out_dtype = quantize_attrs->out_dtype;
@@ -287,10 +289,12 @@ bool ImcflowNUQuantizeRel(const Array<Type>& types, int num_inputs, const Attrs&
   return true;
 }
 
-Expr MakeImcflowNUQuantize(Expr data, Expr Threshold, int axis, DataType out_dtype) {
+Expr MakeImcflowNUQuantize(Expr data, Expr Threshold, int axis, DataType out_dtype,
+                               DataType param_dtype) {
   auto attrs = make_object<ImcflowNUQuantizeAttrs>();
   attrs->axis = axis;
   attrs->out_dtype = std::move(out_dtype);
+  attrs->param_dtype = std::move(param_dtype);
   static const Op& op = Op::Get("qnn.imcflow_nu_quantize");
   return Call(op, {data, Threshold}, Attrs(attrs), {});
 }

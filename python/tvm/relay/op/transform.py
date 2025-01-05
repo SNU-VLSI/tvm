@@ -2014,11 +2014,7 @@ def trilu(data, k, upper=True):
         k = const(k, dtype="int32")
     return _make.trilu(data, k, upper)
 
-def imcflow_packing(data, newshape, allowzero=False):
-    if isinstance(newshape, Constant):
-        newshape = list(newshape.data.numpy())
-    if isinstance(newshape, Expr):
-        return _dyn_make.reshape(data, newshape, allowzero)
+def imcflow_packing(data, newshape, out_dtype="float32"):
     if isinstance(newshape, int):
         newshape = [newshape]
     if isinstance(newshape, (tuple, list)):
@@ -2032,11 +2028,9 @@ def imcflow_packing(data, newshape, allowzero=False):
                 except ValueError as err:
                     raise RuntimeError(f"Unrecognized shape type: {err}")
         newshape = tempshape
-    return _make.imcflow_packing(data, list(newshape), allowzero)
+    return _make.imcflow_packing(data, list(newshape), out_dtype)
 
-def imcflow_fake_tensor(data, newshape, dtype):
-    if isinstance(newshape, Constant):
-        newshape = list(newshape.data.numpy())
+def imcflow_unpacking(data, newshape, out_dtype="float32"):
     if isinstance(newshape, int):
         newshape = [newshape]
     if isinstance(newshape, (tuple, list)):
@@ -2050,4 +2044,4 @@ def imcflow_fake_tensor(data, newshape, dtype):
                 except ValueError as err:
                     raise RuntimeError(f"Unrecognized shape type: {err}")
         newshape = tempshape
-    return _make.imcflow_fake_tensor(data, list(newshape), dtype)
+    return _make.imcflow_unpacking(data, list(newshape), out_dtype)

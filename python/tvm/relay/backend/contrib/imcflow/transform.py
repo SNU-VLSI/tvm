@@ -12,7 +12,7 @@ from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
-from tvm.relay.op.transform import imcflow_fake_tensor, imcflow_packing
+from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking
 import numpy as np
 
 import math
@@ -47,6 +47,36 @@ def getOuterNodeID(node):
   else:
     return node
 
+def _get_type(parent_mod, node):
+    """A method to infer the type of a relay expression."""
+    mod = tvm.IRModule.from_expr(node)
+    mod = relay.transform.InferType()(mod)
+    entry = mod["main"]
+
+    if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+      out_type = relay.transform.InferTypeLocal(node)
+    if isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
+      # out_type = node.op.body.checked_type
+      out_type = relay.transform.InferTypeLocal(node.op.body)
+    if isinstance(node, relay.Call) and isinstance(node.op, relay.GlobalVar):
+      out_type = _get_type(parent_mod, parent_mod[node.op.name_hint].body)
+    if isinstance(node, relay.Function):
+      out_type = relay.transform.InferTypeLocal(node.body)
+
+    # infer_out = entry if isinstance(node, relay.Function) else entry.body
+    # out_type = infer_out._checked_type_
+
+    # if isinstance(out_type, TensorType):
+    #     # Single tensor, get the shape directly
+    #     shapes = [int(dim) for dim in out_type.shape]
+    # elif isinstance(out_type, TupleType):
+    #     # Tuple of tensors, get the shape of each tensor in the tuple
+    #     shapes = [int(field) for field in out_type.fields]
+    # else:
+    #     raise RuntimeError(f"Unsupported output type {type(out_type)} in operator {node.op.name}")
+
+    return out_type
+
 def makeToQuantizedForm(mod):
   """
   List of transformations:
@@ -57,6 +87,7 @@ def makeToQuantizedForm(mod):
       bias, relu, etc -> int16 data type
   """
   param_map = {}
+
   class _OpConverter(tvm.relay.ExprMutator):
     def __init__(self):
       super().__init__()
@@ -1733,49 +1764,154 @@ class PackingInserter:
       class _PackingInserter(tvm.relay.ExprMutator):
         def __init__(self):
             super().__init__()
+            self.func_param_map = {}
+            self.InSubFunc = False
+            self.VarOriginShape = {}
+        
+        def visit_var(self, var):
+          if self.InSubFunc:
+            # check var shape is 1D. If so, unpack it.
+            input_node = self.func_param_map[var.name_hint]
+            input_node_type = _get_type(mod, input_node)
+            if len(input_node_type.shape) == 1:
+              new_var = relay.Var(var.name_hint, relay.TensorType(input_node_type.shape, input_node_type.dtype))
+              self.VarOriginShape[var.name_hint] = var.type_annotation.shape
+              return new_var
+              # return imcflow_unpacking(new_var, var.type_annotation.shape[0], "float32")
+            else:
+              return super().visit_var(var)
+          else:
+            return super().visit_var(var)
+        
+        def visit_function(self, func):
+          if self.InSubFunc:
+            new_params = [self.visit(param) for param in func.params]
+            new_body = self.visit(func.body)
+
+            # check last node is related to quantization like qnn.imcflow_min_max_quantize
+            # check also concat of quantized data. If so, pack it.
+            def _addPacking(node, parentNode=None):
+              parentNode = node if parentNode is None else parentNode
+              if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name in ImcflowDeviceConfig.QAUNT_OPS:
+                Shape1D = 1
+                for shape in node.type_args[0].shape:
+                  Shape1D = Shape1D * shape
+                node = imcflow_packing(parentNode, [Shape1D], "int8")
+              elif isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == "concatenate":
+                # check if all input nodes are quantized. If so, pack it.
+                AllQuant = True
+                for arg in node.args:
+                  if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op) and arg.op.name not in ImcflowDeviceConfig.QAUNT_OPS:
+                    AllQuant = False
+                if AllQuant: 
+                  Shape1D = 1
+                  for shape in _get_type(mod, node).shape:
+                    Shape1D = Shape1D * shape
+                  node = imcflow_packing(parentNode, [Shape1D], "int8")
+              elif isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
+                node = _addPacking(node.op.body, parentNode)
+              
+              return node
+
+            # if isinstance(new_body, relay.Call) and isinstance(new_body.op, tvm.ir.Op) and new_body.op.name in ImcflowDeviceConfig.QAUNT_OPS:
+            #   Shape1D = 1
+            #   for shape in new_body.type_args[0].shape:
+            #     Shape1D = Shape1D * shape
+            #   new_body = imcflow_packing(new_body, [Shape1D], "int8")
+            # elif isinstance(new_body, relay.Call) and isinstance(new_body.op, tvm.ir.Op) and new_body.op.name == "concatenate":
+            #   # check if all input nodes are quantized. If so, pack it.
+            #   AllQuant = True
+            #   for arg in new_body.args:
+            #     if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op) and arg.op.name not in ImcflowDeviceConfig.QAUNT_OPS:
+            #       AllQuant = False
+            #   if AllQuant: 
+            #     Shape1D = 1
+            #     for shape in _get_type(new_body).shape:
+            #       Shape1D = Shape1D * shape
+            #     new_body = imcflow_packing(new_body, [Shape1D], "int8")
+            # elif isinstance(new_body, relay.Call) and isinstance(new_body.op, relay.Function) and new_body.op.attrs["Compiler"] == "imcflow":
+
+            
+            new_body = _addPacking(new_body)
+            new_func_ret_type = _get_type(mod, new_body)
+            # new_type_params = [x.type_annotation for x in func.params]
+            new_type_params = func.type_params
+            return relay.Function(new_params, new_body, new_func_ret_type, new_type_params, func.attrs)
+          else:
+            new_params = [self.visit(param) for param in func.params]
+            new_body = self.visit(func.body)
+            new_ret_type = _get_type(mod, new_body)
+            return relay.Function(new_params, new_body, new_ret_type, func.type_params, func.attrs)
         
         def visit_global_var(self, gvar):
-          mod[gvar.name_hint] = self.visit(mod[gvar.name_hint])
-          return super().visit_global_var(gvar)
+          return relay.GlobalVar(gvar.name_hint)
         
         def visit_call(self, call):
+          #post DFS
+          new_args = [self.visit(arg) for arg in call.args]
+
+          if self.InSubFunc:
+            for idx, narg in enumerate(new_args):
+              if isinstance(narg, relay.Var) and len(narg.type_annotation.shape) == 1:
+                VarShape = self.VarOriginShape[narg.name_hint]
+                new_args[idx] = imcflow_unpacking(narg, VarShape, "float32")
+              else:
+                new_args[idx] = narg
+
           if isinstance(call.op, relay.Function):
-            return super().visit_call(call)
+            InSubFunc = self.InSubFunc
+            self.InSubFunc = False
+            new_func = self.visit_function(call.op)
+            self.InSubFunc = InSubFunc
+            return Call(new_func, new_args, call.attrs, call.type_args, call.span)
+          
+          if isinstance(call.op, relay.GlobalVar):
+             #make var to node mapping
+             args = new_args
+             params = mod[call.op.name_hint].params
+             self.func_param_map = {param.name_hint: arg for param, arg in zip(params, args)}
+             self.InSubFunc = True
+             mod[call.op.name_hint] = self.visit(mod[call.op.name_hint])
+             self.InSubFunc = False
+             return Call(call.op, new_args, call.attrs, call.type_args, call.span)
 
           if call.op == op.get("nn.imcflow_qconv"):
-            OriginWeight = call.args[1]
+            # OriginWeight = call.args[1]
+            OriginWeight = new_args[1]
             Weight1D = relay.Constant(tvm.nd.array(OriginWeight.data.asnumpy().flatten().astype("int8")))
-            NewWeight = imcflow_packing(Weight1D, OriginWeight.checked_type.shape)
-            NewInput = super().visit(call.args[0])
+            NewWeight = imcflow_unpacking(Weight1D, OriginWeight.checked_type.shape, "float32")
+            # NewInput = super().visit(call.args[0])
+            NewInput = new_args[0]
 
             return imcflow_qconv2d(NewInput, NewWeight, 
                                    **call.attrs)
           
           if call.op == op.get("imcflow.fused_batch_norm"):
             # convert dtype to int16
-            NewScale = relay.Constant(tvm.nd.array(call.args[1].data.asnumpy().astype("int16")))
-            NewBias = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
-            return imcflow_batch_norm(call.args[0], NewScale, NewBias,1).astuple()
+            # NewScale = relay.Constant(tvm.nd.array(call.args[1].data.asnumpy().astype("int16")))
+            # NewBias = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
+            NewScale = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
+            NewBias = relay.Constant(tvm.nd.array(new_args[2].data.asnumpy().astype("int16")))
+            return imcflow_batch_norm(new_args[0], NewScale, NewBias,1).astuple()
           
           if call.op == op.get("qnn.imcflow_min_max_quantize"):
             # convert dtype to int16
-            print(call)
+            # NewMin = relay.Constant(tvm.nd.array(call.args[1].data.asnumpy().astype("int16")))
+            # NewMax = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
+            NewMin = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
+            NewMax = relay.Constant(tvm.nd.array(new_args[2].data.asnumpy().astype("int16")))
+            return imcflow_min_max_quantize(new_args[0], NewMin, NewMax,1, "float32", "int16")
           
           if call.op == op.get("qnn.imcflow_nu_quantize"):
             # convert dtype to int16
-            print(call)
+            NewThreshold = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
+            return imcflow_nu_quantize(new_args[0], NewThreshold,1, "float32", "int16")
 
-          return super().visit_call(call)
-        
-        def visit_function(self, func):
-          # insert unpacking if function parameters from 1D data
+          new_op = self.visit(call.op)
+          return Call(new_op, new_args, call.attrs, call.type_args, call.span)
 
-          # insert packing if function returns quant data
-
-          # visit body
-          return super().visit_function(func)
-      
-      return _PackingInserter().visit(func)
+      new_func = _PackingInserter().visit(func)
+      return new_func
 
 # @relay.transform.function_pass(opt_level=0)
 # class IDAssigner:

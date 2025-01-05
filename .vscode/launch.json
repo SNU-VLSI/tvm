@@ -28,7 +28,7 @@
       "cwd": "${fileDirname}",
       "args": [
         "-k",
-        "wide_model",
+        "2",
         "-s"
       ]
     },
