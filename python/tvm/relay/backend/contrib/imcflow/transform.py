@@ -49,9 +49,11 @@ def getOuterNodeID(node):
 
 def _get_type(parent_mod, node):
     """A method to infer the type of a relay expression."""
-    mod = tvm.IRModule.from_expr(node)
-    mod = relay.transform.InferType()(mod)
-    entry = mod["main"]
+    print(f"node: {node}")
+
+    # mod = tvm.IRModule.from_expr(node)
+    # mod = relay.transform.InferType()(mod)
+    # entry = mod["main"]
 
     if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
       out_type = relay.transform.InferTypeLocal(node)
@@ -75,6 +77,7 @@ def _get_type(parent_mod, node):
     # else:
     #     raise RuntimeError(f"Unsupported output type {type(out_type)} in operator {node.op.name}")
 
+    print(f"out_type: {out_type}")
     return out_type
 
 def makeToQuantizedForm(mod):
@@ -1868,28 +1871,8 @@ class PackingInserter:
               
               return node
 
-            # if isinstance(new_body, relay.Call) and isinstance(new_body.op, tvm.ir.Op) and new_body.op.name in ImcflowDeviceConfig.QAUNT_OPS:
-            #   Shape1D = 1
-            #   for shape in new_body.type_args[0].shape:
-            #     Shape1D = Shape1D * shape
-            #   new_body = imcflow_packing(new_body, [Shape1D], "int8")
-            # elif isinstance(new_body, relay.Call) and isinstance(new_body.op, tvm.ir.Op) and new_body.op.name == "concatenate":
-            #   # check if all input nodes are quantized. If so, pack it.
-            #   AllQuant = True
-            #   for arg in new_body.args:
-            #     if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op) and arg.op.name not in ImcflowDeviceConfig.QAUNT_OPS:
-            #       AllQuant = False
-            #   if AllQuant: 
-            #     Shape1D = 1
-            #     for shape in _get_type(new_body).shape:
-            #       Shape1D = Shape1D * shape
-            #     new_body = imcflow_packing(new_body, [Shape1D], "int8")
-            # elif isinstance(new_body, relay.Call) and isinstance(new_body.op, relay.Function) and new_body.op.attrs["Compiler"] == "imcflow":
-
-            
             new_body = _addPacking(new_body)
             new_func_ret_type = _get_type(mod, new_body)
-            # new_type_params = [x.type_annotation for x in func.params]
             new_type_params = func.type_params
             return relay.Function(new_params, new_body, new_func_ret_type, new_type_params, func.attrs)
           else:
@@ -1926,6 +1909,7 @@ class PackingInserter:
              params = mod[call.op.name_hint].params
              self.func_param_map = {param.name_hint: arg for param, arg in zip(params, args)}
              self.InSubFunc = True
+            #  new_op = self.visit(call.op)
              mod[call.op.name_hint] = self.visit(mod[call.op.name_hint])
              self.InSubFunc = False
              return Call(call.op, new_args, call.attrs, call.type_args, call.span)
@@ -1961,6 +1945,15 @@ class PackingInserter:
             # convert dtype to int16
             NewThreshold = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
             return imcflow_nu_quantize(new_args[0], NewThreshold,1, "float32", "int16")
+          
+          if call.op == op.get("qnn.simulated_quantize"):
+            # convert dtype to int16
+            Shape = _get_type(mod, new_args[0]).shape
+            Shape1D = 1
+            for shape in Shape:
+              Shape1D = Shape1D * shape
+            NewQuantCall = relay.qnn.simulated_quantize(new_args[0], new_args[1], new_args[2], **call.attrs)
+            return imcflow_packing(NewQuantCall, [Shape1D], "int8")
 
           new_op = self.visit(call.op)
           return Call(new_op, new_args, call.attrs, call.type_args, call.span)
