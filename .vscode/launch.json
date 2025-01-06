@@ -28,7 +28,7 @@
       "cwd": "${fileDirname}",
       "args": [
         "-k",
-        "2",
+        "big",
         "-s"
       ]
     },
