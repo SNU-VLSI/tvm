@@ -1442,14 +1442,36 @@ class MemoryAllocator:
                 raise ValueError("add cannot receive data from inode.")               
               elif dst_op == "Op(concatenate)":
                 raise ValueError("concat cannot receive data from inode.")               
+              elif dst_op == "Op(imcflow_unpacking)":
+                # look at parent node and 
+                
+                
+              elif dst_op == "Op(nn.imcflow_qconv)":
+                if arg_idx == 0: # input var
+                  size = arg_shape[2] * arg_shape[3] * 4
+                elif arg_idx == 1: # const(weight)
+                  size = 256
+                else:
+                  raise ValueError("nn.conv2d only has 2 arguments, but you got over 2.")
+              elif dst_op == "Op(imcflow.fused_batch_norm)":
+                if arg_idx == 0: # input var
+                  size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+                elif arg_idx <= 4: # const
+                  size = math.ceil(int(arg_shape[0]) / 16)
+                else:
+                  raise ValueError("nn.batchnorm only has 5 argument, but you got over 5.")            
 
               # src = op, dst = inode
-              elif str(src_op) == "Op(nn.conv2d)":
+              elif src_op == "Op(nn.conv2d)":
                 size = arg_shape[2] * arg_shape[3] * 4
-              elif str(src_op) == "Op(nn.batch_norm)":
+              elif src_op == "Op(nn.batch_norm)":
                 size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
-              elif str(src_op) == "Op(nn.relu)":
+              elif src_op == "Op(nn.relu)":
                 size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+              elif src_op == "Op(imcflow_packing)":
+                #TODO: how to calculate size?
+
+
               # rest case
               else:
                 raise ValueError("Operation not defined!")
