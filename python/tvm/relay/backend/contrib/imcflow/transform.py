@@ -886,6 +886,9 @@ class NodeMapper:
             self.MappingDict ={}
             self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
             self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
+            
+            self.undetermined_callnode_exists = False
+            self.undetermined_callnode = None
 
         def traverse_func(self, func):
             self.visit(func)
@@ -899,7 +902,6 @@ class NodeMapper:
 
           # check constraint and map imcflow node
           if self.MappingDict:
-              # last_child_mapping, _ = list(self.MappingDict.items())[-1][1]
               last_child_mapping = list(self.MappingDict.items())[-1][1]
           else:
               last_child_mapping = None
@@ -914,6 +916,8 @@ class NodeMapper:
           # check if this node is
           IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
           IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
+          IsPacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_packing"]
+          IsUnpacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_unpacking"]
           if IsConcat:
               if last_child_mapping is None:
                   raise ValueError("split or concatenate should have at least 1 child node")
@@ -928,11 +932,21 @@ class NodeMapper:
               else:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = last_child_mapping
+          elif IsPacking:
+              self.MappingDict[getNodeID(call)] = last_child_mapping
+          elif IsUnpacking:
+              # keep unpacking node and determine its NodeID in parent node
+              self.undetermined_callnode_exists = True
+              self.undetermined_callnode = getNodeID(call)
           else:
               self.MappingDict[getNodeID(call)] = NodeID.from_imce_coord(self.imce_index)
-              # self.MappingDict[getNodeID(call)] = f"imce_{self.imce_index}"
               self.imce_index -= 1
               # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
+
+          # handle undetermined child node(unpacking node)
+          if IsUnpacking is False and self.undetermined_callnode_exists is True:
+              self.MappingDict[self.undetermined_callnode] = self.MappingDict[getNodeID(call)] # assign the same NodeID with parent node
+              self.undetermined_callnode_exists = False
 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
@@ -1052,7 +1066,7 @@ def constructTensorEdgeList(mod):
 
         IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
         # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
+        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "nn.imcflow_qconv", "imcflow_unpacking", "imcflow_packing"]
 
         if not IsComposite and not IsSupportedOp:
           raise ValueError("Unsupported operator detected. please check.")
@@ -1118,6 +1132,17 @@ def constructTensorEdgeList(mod):
             InputNode = 1 if ScaleNode == 0 else 0
             _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
             _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
+          if call.op == op.get("nn.imcflow_qconv"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
+          if call.op.name == "imcflow_unpacking":
+            _processInputNode(call.args[0], "packed_data", DstGraphNodeID, "unpacked_data", None)
+          if call.op.name == "imcflow_packing":
+            _processInputNode(call.args[0], "unpacked_data", DstGraphNodeID, "packed_data", None)
+          if call.op == "imcflow.batch_norm":
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "scale", DstGraphNodeID, "scale", None)
+            _processInputNode(call.args[2], "bias", DstGraphNodeID, "bias", None)
 
         #Pre DFS search: Traverse child nodes
         for a in call.args:
@@ -1366,6 +1391,12 @@ class MemoryAllocator:
 
             src_op = get_op_from_id(edge.src_id.graph_node_id)
             dst_op = get_op_from_id(edge.dst_id.graph_node_id)
+            
+            #####################if dst_op is unpacking, find its parent node with tensor edge list or anything!!!!!
+            
+            # if dst_op == "imcflow_unpacking": dst_op = find its parent(dst_op)
+            
+            
 
             #find my arg from call to find corresponding shape by type_args.shape
             arg_idx, arg_shape = find_my_arg_from_call(edge, call)

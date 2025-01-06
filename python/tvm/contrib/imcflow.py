@@ -108,7 +108,7 @@ class TensorID:
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
     assert tensor_type in {"idata", "odata", "weight",
                            "bias", "scale", "idata0", "idata1",
-                           "quant_min", "quant_max", "quant_threshold"}, "Invalid tensor type"
+                           "quant_min", "quant_max", "quant_threshold", "packed_data", "unpacked_data", "fused_batch_norm"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
