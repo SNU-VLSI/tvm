@@ -120,6 +120,12 @@ class TensorID:
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
+  def inner_gid_match(self, graph_node_id: Union[int, Tuple]):
+    if isinstance(self.graph_node_id, int):
+      return self.graph_node_id == graph_node_id
+    if isinstance(self.graph_node_id, tuple):
+      return graph_node_id == self.graph_node_id[1]
+
   def __str__(self):
     return f"TensorID({self.graph_node_id}, {self.tensor_type})"
 
@@ -138,6 +144,12 @@ class TensorEdge:
     self.src_id = src_id
     self.dst_id = dst_id
     self.split_idx = split_idx
+
+  def src_inner_gid_match(self, graph_node_id: Union[int, Tuple]):
+    return self.src_id.inner_gid_match(graph_node_id)
+
+  def dst_inner_gid_match(self, graph_node_id: Union[int, Tuple]):
+    return self.dst_id.inner_gid_match(graph_node_id)
 
   def __str__(self):
     if self.split_idx is None:

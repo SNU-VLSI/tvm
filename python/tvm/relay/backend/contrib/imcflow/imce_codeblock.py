@@ -35,22 +35,21 @@ class AddBlock(ImceCodeBlock):
     """ Code block for adding two tensors """
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
-    self.in0 = in_edges[0]
-    self.in1 = in_edges[1]
-    self.out = out_edge
+    self.in_edges = in_edges
+    self.out_edge = out_edge
 
   def _content(self) -> Union[str, CodeBlock]:
     num_blocks = 4
     src_mask = 15
 
-    var_o = UniqueVar(self.out)
-    var_i0 = UniqueVar(self.in0)
-    var_i1 = UniqueVar(self.in1)
+    var_o = UniqueVar(self.out_edge)
+    var_i0 = UniqueVar(self.in_edges[0])
+    var_i1 = UniqueVar(self.in_edges[1])
 
     code = ""
     pdb.set_trace()
-    te_info0 = DevConfig().get_tensor_edge_info_with_id_dir(self.in0.dst_id, "in") # a hack to get the tensor edge info
-    te_info1 = DevConfig().get_tensor_edge_info_with_id_dir(self.in1.dst_id, "in")
+    te_info0 = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edges[0].dst_id, "in") # a hack to get the tensor edge info
+    te_info1 = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edges[1].dst_id, "in")
 
     for i in range(num_blocks):
       if te_info0:
@@ -65,11 +64,14 @@ class AddBlock(ImceCodeBlock):
 class ConvBlock(ImceCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
 
-  def __init__(self, shapes: dict, conv_attrs: Conv2DAttrs, fifo_id: int, policy_addr: int,
+  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, shapes: dict, conv_attrs: Conv2DAttrs,
                annotation: str = ""):
     super().__init__(annotation)
-    self.fifo_id = fifo_id
-    self.policy_addr = policy_addr
+    assert len(in_edges) == 2
+    for edge in in_edges:
+      if edge.dst_id.tensor_type == "data":
+        self.in_edge = edge
+    self.out_edge = out_edge
     self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
@@ -79,22 +81,36 @@ class ConvBlock(ImceCodeBlock):
     self.post_ops.append(code)
 
   def _loop_body_content(self, recv_count: int) -> str:
+    num_blocks = 4
+    fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edge.dst_id, "in").fifo_id
+
+    var_creg = UniqueVar(self.out_edge)
+    # hack to get the last tensor edge
+    out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
+    var_o = UniqueVar(out_edge)
+    # fifo_id_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").fifo_id
+    # policy_addr_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").policy_addr
+    fifo_id_o = -1
+    policy_addr_o = -1
+
     code = ""
-    code += LoadLBBlock(recv_count, 4, self.fifo_id)
+    code += LoadLBBlock(recv_count, num_blocks, fifo_id_i)
     code += "__builtin_IMCE_STEP();\n"
-    code += "c0 = __builtin_IMCE_GET_CREG((short)0);\n"
-    code += "c1 = __builtin_IMCE_GET_CREG((short)1);\n"
-    code += "c2 = __builtin_IMCE_GET_CREG((short)2);\n"
-    code += "c3 = __builtin_IMCE_GET_CREG((short)3);\n"
+    code += f"{var_creg}_0 = __builtin_IMCE_GET_CREG((short)0);\n"
+    code += f"{var_creg}_1 = __builtin_IMCE_GET_CREG((short)1);\n"
+    code += f"{var_creg}_2 = __builtin_IMCE_GET_CREG((short)2);\n"
+    code += f"{var_creg}_3 = __builtin_IMCE_GET_CREG((short)3);\n"
 
-    pdb.set_trace()
     for op in self.post_ops:
-      code += str(self.op)
+      code += "\n"
+      code += str(op)
 
-    code += f"__builtin_IMCE_SEND({self.policy_addr}, c0, {self.fifo_id}, 0);\n"
-    code += f"__builtin_IMCE_SEND({self.policy_addr}, c1, {self.fifo_id}, 0);\n"
-    code += f"__builtin_IMCE_SEND({self.policy_addr}, c2, {self.fifo_id}, 0);\n"
-    code += f"__builtin_IMCE_SEND({self.policy_addr}, c3, {self.fifo_id}, 0);\n"
+    code += "\n"
+    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_0, {fifo_id_o}, 0);\n"
+    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_1, {fifo_id_o}, 0);\n"
+    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_2, {fifo_id_o}, 0);\n"
+    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_3, {fifo_id_o}, 0);\n"
+    pdb.set_trace()
 
     # code += SendBlock(1, self.policy_addr)
     return code
