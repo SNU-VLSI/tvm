@@ -1,9 +1,10 @@
 from abc import *
 from typing import *
-from tvm.contrib.imcflow import NodeID
+from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
-from tvm.relay.backend.contrib.imcflow.codeblock import CodeBlock, SimpleFor
+from tvm.relay.backend.contrib.imcflow.codeblock import CodeBlock, SimpleFor, UniqueVar
 import pdb
 
 
@@ -28,15 +29,37 @@ class LoadLBBlock(ImceCodeBlock):
 
 
 class AddBlock(ImceCodeBlock):
-  def __init__(self, fifo_id: int, annotation: str = ""):
+  num_in_edges = 2
+
+  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
+    """ Code block for adding two tensors """
     super().__init__(annotation)
-    self.fifo_id = fifo_id
+    assert len(in_edges) == self.num_in_edges
+    self.in0 = in_edges[0]
+    self.in1 = in_edges[1]
+    self.out = out_edge
 
   def _content(self) -> Union[str, CodeBlock]:
-    # code = f"{Var("y")} = __builtin_IMCE_RECV({self.fifo_id});\n"
-    # code = f"{Var("x")} = __builtin_IMCE_ADD({Var("x")}, {Var("y")}, 15);\n"
-    code = f"y = __builtin_IMCE_RECV({self.fifo_id});\n"
-    code = f"x = __builtin_IMCE_ADD(x, y, 15);\n"
+    num_blocks = 4
+    src_mask = 15
+
+    var_o = UniqueVar(self.out)
+    var_i0 = UniqueVar(self.in0)
+    var_i1 = UniqueVar(self.in1)
+
+    code = ""
+    pdb.set_trace()
+    te_info0 = DevConfig().get_tensor_edge_info_with_id_dir(self.in0.dst_id, "in") # a hack to get the tensor edge info
+    te_info1 = DevConfig().get_tensor_edge_info_with_id_dir(self.in1.dst_id, "in")
+
+    for i in range(num_blocks):
+      if te_info0:
+        code += f"short16 {var_i0}_{i} = __builtin_IMCE_RECV({te_info0.fifo_id});\n"
+      if te_info1:
+        code += f"short16 {var_i1}_{i} = __builtin_IMCE_RECV({te_info1.fifo_id});\n"
+
+      code += f"short16 {var_o}_{i} = __builtin_IMCE_ADD({var_i0}_{i}, {var_i1}_{i}, {src_mask});\n"
+
     return code
 
 class ConvBlock(ImceCodeBlock):
@@ -50,14 +73,10 @@ class ConvBlock(ImceCodeBlock):
     self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
+    self.post_ops = []
 
-  def add_tensor(self):
-    # TODO: for adding another tensor
-    pass
-
-  def add_op(self, op: List[str]):
-    # TODO: add support for vector ops with operands, etc.
-    self.op = op
+  def add_post_op(self, code: CodeBlock):
+    self.post_ops.append(code)
 
   def _loop_body_content(self, recv_count: int) -> str:
     code = ""
@@ -68,15 +87,9 @@ class ConvBlock(ImceCodeBlock):
     code += "c2 = __builtin_IMCE_GET_CREG((short)2);\n"
     code += "c3 = __builtin_IMCE_GET_CREG((short)3);\n"
 
-    code += "c0 = __builtin_IMCE_ADD(c0, a0, 15);\n"
-    code += "c1 = __builtin_IMCE_ADD(c1, a1, 15);\n"
-    code += "c2 = __builtin_IMCE_ADD(c2, a2, 15);\n"
-    code += "c3 = __builtin_IMCE_ADD(c3, a3, 15);\n"
-
-    code += "c0 = __builtin_IMCE_MAX(c0, 0, 0);\n"
-    code += "c1 = __builtin_IMCE_MAX(c1, 0, 0);\n"
-    code += "c2 = __builtin_IMCE_MAX(c2, 0, 0);\n"
-    code += "c3 = __builtin_IMCE_MAX(c3, 0, 0);\n"
+    pdb.set_trace()
+    for op in self.post_ops:
+      code += str(self.op)
 
     code += f"__builtin_IMCE_SEND({self.policy_addr}, c0, {self.fifo_id}, 0);\n"
     code += f"__builtin_IMCE_SEND({self.policy_addr}, c1, {self.fifo_id}, 0);\n"

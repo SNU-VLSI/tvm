@@ -6,6 +6,21 @@ import pdb
 from enum import Enum
 
 
+class UniqueVar:
+  _var_map = {}
+  _counter = 0
+
+  def __init__(self, obj):
+    """Generates a unique variable name for the given object or retrieves an existing one."""
+    if obj not in UniqueVar._var_map:
+      UniqueVar._var_map[obj] = f"var{UniqueVar._counter}"
+      UniqueVar._counter += 1
+    self.name = UniqueVar._var_map[obj]
+
+  def __str__(self):
+    return self.name
+
+
 class CodePhase(Enum):
   INIT = "INIT"
   EXEC = "EXEC"

@@ -49,7 +49,7 @@ def getOuterNodeID(node):
 def makeToQuantizedForm(mod):
   """
   List of transformations:
-    1. convert Conv to ImcflowQConv2D 
+    1. convert Conv to ImcflowQConv2D
     2. data type conversion to int form
       conv2d input  : packed 1D int8
       conv2d weight : packed 1D int8
@@ -59,7 +59,7 @@ def makeToQuantizedForm(mod):
   class _OpConverter(tvm.relay.ExprMutator):
     def __init__(self):
       super().__init__()
-    
+
     def visit_call(self, call):
       if call.op == op.get("nn.conv2d"):
         new_op = op.get("nn.imcflow_qconv")
@@ -68,22 +68,22 @@ def makeToQuantizedForm(mod):
         type_args.append(relay.TensorType(call.type_args[0].shape, "int8"))
         type_args.append(relay.TensorType(call.type_args[1].shape, "int8"))
         return imcflow_qconv2d(args[0], args[1], strides=(1, 1), padding=(1, 1))
-        # return Call(new_op, args, call.attrs, type_args, call.span) 
+        # return Call(new_op, args, call.attrs, type_args, call.span)
       elif call.op == op.get("qnn.imcflow_min_max_quantize"):
         args = [self.visit(arg) for arg in call.args]
         return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
       else:
         return super().visit_call(call)
-    
+
     def visit_var(self, var):
       new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
       param_map[var.name_hint] = new_var
       return new_var
-    
+
     def visit_constant(self, const):
       Data = const.data.numpy().astype(np.int8)
       return relay.const(Data, "int8")
-    
+
     def visit_function(self, func):
       # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
       # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
@@ -93,11 +93,11 @@ def makeToQuantizedForm(mod):
       new_params = [param_map.get(p.name_hint, p) for p in func.params]
       new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
       return relay.Function(new_params, new_body, new_ret_type)
-  
+
   mod['main'] = _OpConverter().visit(mod['main'])
   return mod
 
-    
+
 @relay.transform.function_pass(opt_level=0)
 class ConvSplitToAtom:
     """
@@ -993,7 +993,7 @@ def constructTensorEdgeList(mod):
         SrcTag = "odata"
         DstTag = "odata"
         self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, None)
-      
+
       if self.InSubFunction:
         self.VarProperties = {}
         for x in fn.params:
@@ -1055,35 +1055,35 @@ def constructTensorEdgeList(mod):
                               self.getInputGraphNodeSplitIndex(arg))
         elif IsSupportedOp:
           if call.op == op.get("split"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("concatenate"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("nn.conv2d"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
           if call.op == op.get("nn.bias_add"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
           if call.op == op.get("nn.batch_norm"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "scale", DstGraphNodeID, "scale", None)
             _processInputNode(call.args[2], "bias", DstGraphNodeID, "bias", None)
           if call.op == op.get("nn.relu"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("add"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata0", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "odata", DstGraphNodeID, "idata1", self.getInputGraphNodeSplitIndex(call.args[1]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
           if call.op == op.get("qnn.imcflow_min_max_quantize"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "quant_min", DstGraphNodeID, "quant_min", None)
             _processInputNode(call.args[2], "quant_max", DstGraphNodeID, "quant_max", None)
           if call.op == op.get("qnn.imcflow_nu_quantize"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "quant_threshold", DstGraphNodeID, "quant_threshold", None)
           if call.op == op.get("divide"):
             ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
             InputNode = 1 if ScaleNode == 0 else 0
-            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
             _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
 
         #Pre DFS search: Traverse child nodes
@@ -1204,7 +1204,7 @@ class MemoryAllocator:
             self.TensorEdgeList = ImcflowDeviceConfig().TensorEdgeList
             # self.DataBlockDict ={edge: DataBlock(edge.dst_id, None) for edge in self.TensorEdgeList}
             self.DataBlockDict ={}
-            
+
             self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
             self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
 
@@ -1212,7 +1212,7 @@ class MemoryAllocator:
             self.name_dict = CustomIDToName()
             self.data = CustomIDToNode()
             self.hwnodemap = ImcflowDeviceConfig().HWNodeMap
-            
+
         def traverse_func(self, func):
             self.visit(func)
             self.allocate(func)
@@ -1223,14 +1223,14 @@ class MemoryAllocator:
           src_hw_node_id = None
           is_inode = False
           inode_tensorid = None
-          
+
           #dst id
           if edge.dst_id.graph_node_id in self.hwnodemap:
             dst_hw_node_id = self.hwnodemap[edge.dst_id.graph_node_id]
             if dst_hw_node_id.name.startswith("inode"):
               # determine whether inode is included in the edge and which id it is.
               is_inode = True
-              inode_tensorid = edge.dst_id            
+              inode_tensorid = edge.dst_id
 
           #src id
           if edge.src_id.graph_node_id in self.hwnodemap:
@@ -1238,15 +1238,15 @@ class MemoryAllocator:
             if src_hw_node_id.name.startswith("inode"):
               # determine whether inode is included in the edge and which id it is.
               is_inode = True
-              inode_tensorid = edge.src_id       
-          
+              inode_tensorid = edge.src_id
+
           return is_inode, inode_tensorid
 
         def allocate(self, func):
           for edge, mem_block in self.DataBlockDict.items():
             if mem_block.size is None:
               raise ValueError("Memory size cannot be none.")
-            
+
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
             inode_num = hw_node_id.name[-1] # ex) inode_3 => 3
@@ -1255,10 +1255,10 @@ class MemoryAllocator:
               ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate_allow_overlap(mem_block)
             else:
               ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate(mem_block)
-                     
+
           return
-          
-        def visit_call(self, call):          
+
+        def visit_call(self, call):
           def find_edge_from_list(call):
             # find edges that call node belongs, and find valid edge which has inode
             tensor_edge_list = self.TensorEdgeList
@@ -1270,14 +1270,14 @@ class MemoryAllocator:
               elif isinstance(node_id, tuple):
                 return graph_node_id in node_id
               return False
-            
+
             edges = []
             for edge in tensor_edge_list:
               if matches_node_id(edge.dst_id.graph_node_id) and self.is_inode_in_edge(edge)[0]:
                 edges.append(edge)
 
-            return edges 
-                       
+            return edges
+
           def get_size(edge, call):
             size = None
 
@@ -1287,7 +1287,7 @@ class MemoryAllocator:
                 elif isinstance(node_id, tuple):
                     return self.name_dict[node_id[1]]
                 else:
-                  raise ValueError("CustomIDToName does not have this node id.")                
+                  raise ValueError("CustomIDToName does not have this node id.")
 
             def find_my_arg_from_call(edge, call):
               # find arg index from call by comparing edge's tensorid
@@ -1309,7 +1309,7 @@ class MemoryAllocator:
                 else:
                   if isinstance(arg, TupleGetItem):
                       src_id = getNodeID(arg.tuple_value)
-                  else: 
+                  else:
                       src_id = getNodeID(arg)
                   #src node
                   if isinstance(edge.src_id.graph_node_id, tuple):
@@ -1320,7 +1320,7 @@ class MemoryAllocator:
                     if src_id == edge.src_id.graph_node_id:
                       idx = i
                       shape = call.type_args[idx].shape
-                
+
                 #dst node
                 dst_id = getNodeID(call)
                 if isinstance(edge.dst_id.graph_node_id, tuple): # Composite input params' TensorEdge.dst_id is always tuple
@@ -1336,7 +1336,7 @@ class MemoryAllocator:
 
             #find my arg from call to find corresponding shape by type_args.shape
             arg_idx, arg_shape = find_my_arg_from_call(edge, call)
-            
+
             # calculate size for inode memory allocation
             if arg_idx is not None:
               if src_op == "Op(split)":
@@ -1357,17 +1357,17 @@ class MemoryAllocator:
                 elif arg_idx <= 4: # const
                   size = math.ceil(int(arg_shape[0]) / 16)
                 else:
-                  raise ValueError("nn.batchnorm only has 5 argument, but you got over 5.")            
+                  raise ValueError("nn.batchnorm only has 5 argument, but you got over 5.")
               elif dst_op == "Op(nn.relu)":
                 if arg_idx == 0: # input var
                   size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
                 else:
-                  raise ValueError("nn.relu only has 1 argument, but you got over 1.")            
+                  raise ValueError("nn.relu only has 1 argument, but you got over 1.")
               elif dst_op == "Op(nn.bias_add)":
                 if arg_idx == 1: # const
-                  size = math.ceil(int(arg_shape[0]) / 16)                
+                  size = math.ceil(int(arg_shape[0]) / 16)
                 else:
-                  raise ValueError("Const of nn.bias_add is only defined.")            
+                  raise ValueError("Const of nn.bias_add is only defined.")
               elif dst_op == "Op(split)":
                 # if split, same as conv2d
                 if arg_idx == 0: # input var
@@ -1375,9 +1375,9 @@ class MemoryAllocator:
                 else:
                   raise ValueError("split only has 1 arguments, but you got over 1.")
               elif dst_op == "Op(add)":
-                raise ValueError("add cannot receive data from inode.")               
+                raise ValueError("add cannot receive data from inode.")
               elif dst_op == "Op(concatenate)":
-                raise ValueError("concat cannot receive data from inode.")               
+                raise ValueError("concat cannot receive data from inode.")
 
               # src = op, dst = inode
               elif str(src_op) == "Op(nn.conv2d)":
@@ -1389,17 +1389,17 @@ class MemoryAllocator:
               # rest case
               else:
                 raise ValueError("Operation not defined!")
-              
+
               if size is not None:
                 # imcflow word width = 256 bit
                 size = int(size) * 256 / 8 #unit: bytes
 
             return size
-            
+
           super().visit_call(call)
-        
+
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-         
+
           if IsSupportedOp:
             edges = find_edge_from_list(call)
             for edge in edges:
@@ -1409,7 +1409,7 @@ class MemoryAllocator:
                 datablock = DataBlock(inode_tensorid[1], None)
                 datablock.set_size(size)
                 self.DataBlockDict[edge] = datablock
-                                
+
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
 
@@ -1444,10 +1444,10 @@ class PolicyTableGenerator:
             self.router_entry_list_temp = {}
             self.Policytable = []
             self.explored_router_list = {}
-            
+
             # Dictionary to store initial addresses for each source-index pair
             self.start_addr_dict = {}  # {(source, data type): start_address}
-            
+
             self.table_capacity = 32
             self.InSubFunction = False
             self.SubFunctionMapping = None
@@ -1529,33 +1529,33 @@ class PolicyTableGenerator:
                 """Append new entries to policy tables for a single destination"""
                 source_node = mapping_info[0]
                 dest_node = mapping_info[1]
-                dest_index = mapping_info[2]                
+                dest_index = mapping_info[2]
                 if isinstance(edge, NodeID):
                   source_node_data_type ="instruction"
                 else:
                   source_node_data_type = edge.src_id.tensor_type
-                
+
                 source_coord = NodeID.to_coord(source_node)
                 dest_coord = NodeID.to_coord(dest_node)
                 entry_addr = len(policy_tables[source_node])
-                
+
                 if router_entry_list is None: # initial handling
                     router_entry_list= []
                     if source_coord == dest_coord: # if same node, return
-                        return                
+                        return
                     # check if there's previous path with same source and same tensor type, which means multicast
                     elif (source_node, source_node_data_type) in self.start_addr_dict:
                         handle_multicast(edge, mapping_info)
                         return
                     else:
                         self.start_addr_dict[(source_node, source_node_data_type)] = entry_addr # each source can have several tensor type
-                                                
+
                 # Try X-Y routing first
                 path_coords = get_path_coords(source_coord, dest_coord, True)
                 if (source_node, source_node_data_type) not in self.explored_router_list:
                     self.explored_router_list[(source_node, source_node_data_type)] = path_coords
                 else:
-                    self.explored_router_list[(source_node, source_node_data_type)].extend(path_coords)                
+                    self.explored_router_list[(source_node, source_node_data_type)].extend(path_coords)
 
                 current_coord = source_coord
                 current_node = source_node
@@ -1564,17 +1564,17 @@ class PolicyTableGenerator:
                     direction = get_direction(current_coord, next_coord)
                     next_node = NodeID.from_coord(next_coord[0], next_coord[1])
 
-                    #append entry to router's policy table                  
+                    #append entry to router's policy table
                     entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0}, \
                       "North": {"enable": False, "addr": 0}, \
                       "South": {"enable": False, "addr": 0}, \
                       "East": {"enable": False, "addr": 0},  \
-                      "West": {"enable": False, "addr": 0}}                
-                        
+                      "West": {"enable": False, "addr": 0}}
+
                     target_addr = len(policy_tables[next_node])
                     entry[direction]["addr"] = target_addr
                     policy_tables[current_node].append(entry)
-                    
+
                     #create RouterEntry and append to router_entry_list
                     router_entry_list.append((current_node, len(policy_tables[current_node])-1))
 
@@ -1588,12 +1588,12 @@ class PolicyTableGenerator:
                   "South": {"enable": False, "addr": 0}, \
                   "East": {"enable": False, "addr": 0},  \
                   "West": {"enable": False, "addr": 0}}
-                
+
                 policy_tables[dest_node].append(entry)
 
                 #create RouterEntry and append to RouterEntry_list
                 router_entry_list.append((dest_node, len(policy_tables[dest_node])-1))
-                
+
                 # temporary saving. Final saving is done after whole paths finish.
                 self.router_entry_list_temp[edge] = router_entry_list
 
@@ -1606,7 +1606,7 @@ class PolicyTableGenerator:
                   source_node_data_type ="instruction"
                 else:
                   source_node_data_type = edge.src_id.tensor_type
-                
+
                 router_entry_list= []
 
                 if source_node == dest_node: # if same node, return
@@ -1633,13 +1633,13 @@ class PolicyTableGenerator:
                         # modify entry
                         target_addr = len(policy_tables[next_node])
                         policy_tables[current_node][entry_addr][direction]["addr"] = target_addr
-                        
+
                         #create RouterEntry and append to router_entry_list
                         router_entry_list.append((current_node, entry_addr))
-                        
+
                         # diverge into new path
                         new_mapping = (next_node, mapping_info[1], mapping_info[2])
-                        handle_single_path(edge, new_mapping, init_addr_save=False, router_entry_list=router_entry_list)                        
+                        handle_single_path(edge, new_mapping, init_addr_save=False, router_entry_list=router_entry_list)
                         break
                     else:
                         # create RouterEntry and append to router_entry_list
@@ -1653,7 +1653,7 @@ class PolicyTableGenerator:
                         if current_node == dest_node: # if same node, return
                             policy_tables[dest_node][entry_addr]["Local"]["enable"] = True
                             # create RouterEntry and append to router_entry_list
-                            router_entry_list.append((current_node, entry_addr))                                
+                            router_entry_list.append((current_node, entry_addr))
                             # temporary saving. Final saving is done after whole paths finish.
                             self.router_entry_list_temp[edge] = router_entry_list
                             break
@@ -1675,12 +1675,12 @@ class PolicyTableGenerator:
             #     offset = self.DataBlockDict[id]["offset"]
             #     base_address = self.DataBlockDict[id]["base_address"]
             #     meminfo = Datablock(id, size)
-                
+
             #     meminfo.set_offset(offset)
             #     meminfo.set_base_address(base_address)
-                
+
             #     return meminfo
-              
+
             # after policy table entry generation finished, add to TensorEdgeToInfo
             fifo_id_cnt = {node_id: 0 for node_id in NodeID}
             for edge, mapping_info in self.NoCPaths.items():
@@ -1701,13 +1701,13 @@ class PolicyTableGenerator:
                       # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
                       edgeinfo = InstEdgeInfo(router_entry_list, None)
                       ImcflowDeviceConfig().add_inst_edge_info(edge, edgeinfo)
-                      
+
         def traverse_func(self, func):
             # traverse input function by visit() to make PathDict and generate policy table for it
             self.generate_policy_table()
             self.add_EdgeInfo()
             return self.Policytable
-        
+
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
       items = mod.functions_items()
       function_names = [item[0].name_hint for item in items]
@@ -1720,7 +1720,7 @@ class PolicyTableGenerator:
           for x in self.PolicyTable_2D[function_names[i]]:
             print(x)
 
-      return func 
+      return func
 
 # @relay.transform.function_pass(opt_level=0)
 # class IDAssigner:

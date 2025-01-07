@@ -3,7 +3,7 @@ import tvm
 from tvm import relay
 from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
-from tvm.contrib.imcflow import TensorID
+from tvm.contrib.imcflow import TensorID, TensorEdge
 from tvm.relay.backend.contrib.imcflow import util
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
@@ -33,15 +33,35 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name):
     super().__init__()
     self.curr_composite_id = None
+    self.edges = []
     self.post_process = []
     self.codeblocks = CodeBlocks(func_name, "imce")
 
+  def add_edges(self, call, arg, idx):
+    if not self.curr_composite_id:
+      return
+    if isinstance(arg, relay.Tuple):
+      for a in arg.fields:
+        self.add_edges(call, a, idx)
+      return
+    elif isinstance(arg, relay.TupleGetItem):
+      self.add_edges(call, arg.tuple_value, idx)
+      return
+    elif isinstance(call.op, relay.Function):
+      tag = call.op.params[idx].name_hint
+    else:
+      tag = call.op.arguments[idx].name
+    src_tid = TensorID((self.curr_composite_id, getNodeID(arg)), "odata")
+    dst_tid = TensorID((self.curr_composite_id, getNodeID(call)), tag)
+    self.edges.append(TensorEdge(src_tid, dst_tid))
+
   def visit_call(self, call):
-    for a in call.args:
+    for idx, a in enumerate(call.args):
+      self.add_edges(call, a, idx)
       self.visit(a)
 
     IsComposite = isinstance(call.op, relay.Function) and \
-      "Composite" in call.op.attrs
+        "Composite" in call.op.attrs
 
     if IsComposite:
       self.visit_composite_call(call)
@@ -59,18 +79,14 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit(call.op)
 
   def visit_conv_call(self, call):
-    pdb.set_trace()
+    # pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
     shapes["output"] = infer_shape(call)
 
-    if self.curr_composite_id:
-      hid = DevConfig().get_hw_node(self.curr_composite_id)
-      w_tid = TensorID(
-          (self.curr_composite_id, getNodeID(args["weight"])), "weight")
-    else:
-      hid = DevConfig().get_hw_node(getNodeID(call))
-      w_tid = TensorID(getNodeID(args["weight"]), "weight")
+    w_tid = self.get_tensor_id(args["weight"], "weight")
+    node_id = self.curr_composite_id or getNodeID(call)
+    hid = DevConfig().get_hw_node(node_id)
 
     # scan reg
     # TODO: add scan reg code block
@@ -79,70 +95,56 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # TODO: add config reg code block
 
     # write weights using recv
-    size = DevConfig().MemLayout.get_data_block_by_id(
-        w_tid).size  # TODO: this is rather long
-    block = LoadLBBlock(size, 1, -1, "weight write") # TODO: change to write weight block
-    self.codeblocks.append(hid, block)
+    size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
+    # TODO: change to write weight block
+    block = LoadLBBlock(size, 1, -1, "weight write")
+    self.codeblocks.append(hid, block, CodePhase.INIT)
 
-    # load input
-    block = ConvBlock(shapes, call.attrs, -1, -1, "input load")
+    block = ConvBlock(shapes, call.attrs, -1, -1, "conv exec")
     if self.curr_composite_id:
       block.add_op(self.post_process)
-    self.codeblocks.append(hid, block)
+    self.codeblocks.append(hid, block, CodePhase.EXEC)
 
   def visit_add_call(self, call):
-    pdb.set_trace()
-    args = self.get_arg_dict(call)
-    shapes = self.get_arg_shape_dict(call)
-    for idx, arg in enumerate(call.args):
-      if isinstance(arg, relay.Var) or isinstance(arg, relay.Constant):
-        tag = call.op.arguments[idx].name
-        # info = self.get_tensor_edge_info_from_tag(call, tag)
-        info = self.get_tensor_edge_info_from_tag(call, "idata0")
-        if info is None:
-          info = self.get_tensor_edge_info_from_tag(call, "idata1")
+    assert self.curr_composite_id, "Add must be inside a composite function"
+    hid = DevConfig().get_hw_node(self.curr_composite_id)
 
-    block = AddBlock(info.fifo_id, "add")
-    self.post_process.append(block)
+    in_edges = self.get_input_edges(call)
+    out_edge = self.get_output_edge(call)
+    block = AddBlock(in_edges, out_edge, "add")
+    self.codeblocks.append(hid, block, CodePhase.EXEC)
 
   def visit_bias_add_call(self, call):
-    pdb.set_trace()
+    assert self.curr_composite_id, "BiasAdd must be inside a composite function"
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
     info = self.get_tensor_edge_info_from_tag(call, "bias")
 
   def visit_batch_norm_call(self, call):
-    pdb.set_trace()
+    assert self.curr_composite_id, "BatchNorm must be inside a composite function"
+    # pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
     scale_info = self.get_tensor_edge_info_from_tag(call, "scale")
     bias_info = self.get_tensor_edge_info_from_tag(call, "bias")
 
   def visit_relu_call(self, call):
-    pdb.set_trace()
+    assert self.curr_composite_id, "Relu must be inside a composite function"
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
     info = self.get_tensor_edge_info_from_tag(call, "odata")
     # block = ReLUBlock("relu")
     # self.post_process.append(block)
 
-
   def visit_composite_call(self, call):
     self.curr_composite_id = getNodeID(call)
+
+    for idx, a in enumerate(call.args):
+      self.visit(a)
+
     super().visit(call.op.body)
     self.curr_composite_id = None
-
-  def visit_op(self, op):
-    self.inspect(op, getNodeID(op))
-    super().visit_op(op)
-
-  def visit_var(self, var):
-    self.inspect(var, getNodeID(var))
-    super().visit_var(var)
-
-  def visit_constant(self, const):
-    self.inspect(const, getNodeID(const))
-    super().visit_constant(const)
+    self.edges = []
 
   def get_tensor_id(self, call, tag):
     if self.curr_composite_id:
@@ -150,6 +152,20 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     else:
       tid = TensorID(getNodeID(call), tag)
     return tid
+
+  def get_input_edges(self, call):
+    in_edges = []
+    for edge in self.edges:
+      # TODO: hard coded to check for only the internal node id
+      if edge.dst_id.graph_node_id[1] == getNodeID(call):
+        in_edges.append(edge)
+    return in_edges
+
+  def get_output_edge(self, call):
+    for edge in self.edges:
+      # TODO: hard coded to check for only the internal node id
+      if edge.src_id.graph_node_id[1] == getNodeID(call):
+        return edge
 
   def get_tensor_edge_info_from_tag(self, call, tag):
     tid = self.get_tensor_id(call, tag)

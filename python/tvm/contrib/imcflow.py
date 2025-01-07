@@ -114,9 +114,9 @@ class TensorID:
       return TensorID.Pool[(graph_node_id, tensor_type)]
 
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
-    assert tensor_type in {"idata", "odata", "weight",
-                           "bias", "scale", "idata0", "idata1",
-                           "quant_min", "quant_max", "quant_threshold"}, "Invalid tensor type"
+    # assert tensor_type in {"idata", "odata", "weight",
+    #                        "bias", "scale", "idata0", "idata1",
+    #                        "quant_min", "quant_max", "quant_threshold"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
@@ -140,7 +140,10 @@ class TensorEdge:
     self.split_idx = split_idx
 
   def __str__(self):
-    return f"TensorEdge(({self.src_id.graph_node_id}, {self.src_id.tensor_type}), ({self.dst_id.graph_node_id}, {self.dst_id.tensor_type}), {self.split_idx})"
+    if self.split_idx is None:
+      return f"TensorEdge(({self.src_id.graph_node_id}, {self.src_id.tensor_type}), ({self.dst_id.graph_node_id}, {self.dst_id.tensor_type}))"
+    else:
+      return f"TensorEdge(({self.src_id.graph_node_id}, {self.src_id.tensor_type}), ({self.dst_id.graph_node_id}, {self.dst_id.tensor_type}), {self.split_idx})"
 
   def __repr__(self):
     return self.__str__()
@@ -366,6 +369,18 @@ class ImcflowDeviceConfig:
 
   def get_tensor_edge_info(self, tensor_edge: TensorEdge):
     return self.TensorEdgetoInfo.get(tensor_edge, None)
+
+  def get_tensor_edge_info_with_id_dir(self, tensor_id: TensorID, dir: str):
+    if dir == "in":
+      for edge in self.TensorEdgetoInfo.keys():
+        if edge.dst_id == tensor_id:
+          return self.TensorEdgetoInfo[edge]
+    elif dir == "out":
+      for edge in self.TensorEdgetoInfo.keys():
+        if edge.src_id == tensor_id:
+          return self.TensorEdgetoInfo[edge]
+    else:
+      raise ValueError("Invalid direction")
 
   def get_tensor_ids_from_graph_node_id(self, graph_node_id: Union[int, Tuple]):
     tids = []
