@@ -1,6 +1,6 @@
 from abc import *
 from typing import *
-from copy import deepcopy
+from copy import copy
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
@@ -18,7 +18,7 @@ class ImceCodeBlock(CodeBlock):
     if self.annotation:
       code = TextBlock("")
       code += f"// generate: {self.annotation}"
-      code += deepcopy(self._content())
+      code += copy(self._content())
       code += f"// endgenerate: {self.annotation}"
       return code
     else:
@@ -43,6 +43,28 @@ class LoadLBBlock(ImceCodeBlock):
     for _ in range(self.repeat):
       code += f"__builtin_IMCE_LOAD_LB({self.fifo_id});"
     return SimpleFor(self.count, code, "load_block")
+
+class RecvConstBlock(ImceCodeBlock):
+  """ Code block for receiving constant from given fifo id into a variable """
+
+  def __init__(self, in_edge: TensorEdge, annotation: str = ""):
+    super().__init__(annotation)
+    self.in_edge = in_edge
+
+  def _content(self) -> CodeBlock:
+    code = TextBlock("")
+    te_info = DevConfig().get_tensor_edge_info_with_id_dir(
+        self.in_edge.dst_id, "in")  # a hack to get the tensor edge info
+    assert te_info, "Tensor edge info not found"
+
+    size = DevConfig().MemLayout.get_data_block_by_id(self.in_edge.src_id).size
+    assert size % 32 == 0, "Size must be a multiple of 32"
+    recv_count = int(size / 32) # recv operates on 32-byte word
+
+    for i in range(recv_count):
+      var = UniqueVar((self.in_edge, i))
+      code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id});"
+    return code
 
 
 class AddBlock(ImceCodeBlock):
@@ -122,7 +144,7 @@ class ConvBlock(ImceCodeBlock):
 
     for op in self.post_ops:
       code += "\n"
-      code += deepcopy(op)
+      code += copy(op) # FIXME: this is copying the TensorEdge objects too!!! :(
 
     code += "\n"
     for i in range(num_blocks):

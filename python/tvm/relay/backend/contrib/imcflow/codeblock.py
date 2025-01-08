@@ -1,6 +1,6 @@
 from abc import *
 from typing import *
-from copy import deepcopy
+from copy import copy
 from tvm.contrib.imcflow import NodeID
 from textwrap import indent
 from contextlib import contextmanager
@@ -53,11 +53,11 @@ class CodeBlock(metaclass=ABCMeta):
     if isinstance(other, str):
       other = TextBlock(other)
     if isinstance(other, CodeBlock):
-      new_block = deepcopy(self)
+      new_block = copy(self)
       ptr = new_block
       while ptr.next is not None:
         ptr = ptr.next
-      ptr.next = deepcopy(other)
+      ptr.next = copy(other)
       return new_block
     raise TypeError(
         f"unsupported operand type(s) for +: 'CodeBlock' and '{type(other)}'")

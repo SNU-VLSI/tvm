@@ -23,7 +23,7 @@ class CodegenSuite:
     func_name = func.attrs.global_symbol
     builder = ImceCodeBlockBuilder(func_name)
     builder.visit(func)
-    DeviceCodegen("imce").handle_code_generation(func_name, builder.codeblocks)
+    DeviceCodegen("imce", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
 
     # builder = InodeCodeBlockBuilder(func_name).visit(func)
     # DeviceCodegen("inode").handle_code_generation(builder.codeblocks)
@@ -46,11 +46,17 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.add_edges(call, arg.tuple_value, idx)
       return
     elif isinstance(call.op, relay.Function):
-      tag = call.op.params[idx].name_hint
+      dst_tag = call.op.params[idx].name_hint
     else:
-      tag = call.op.arguments[idx].name
-    src_tid = self.get_tensor_id(arg, "odata")
-    dst_tid = self.get_tensor_id(call, tag)
+      dst_tag = call.op.arguments[idx].name
+
+    if isinstance(arg, relay.Constant):
+      src_tag = dst_tag
+    else:
+      src_tag = "odata"
+
+    src_tid = self.get_tensor_id(arg, src_tag)
+    dst_tid = self.get_tensor_id(call, dst_tag)
     self.edges.append(TensorEdge(src_tid, dst_tid))
 
   def visit_call(self, call):
@@ -116,23 +122,31 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_bias_add_call(self, call):
     assert self.curr_composite_id, "BiasAdd must be inside a composite function"
-    args = self.get_arg_dict(call)
-    shapes = self.get_arg_shape_dict(call)
-    info = self.get_tensor_edge_info_from_tag(call, "bias")
+    hid = DevConfig().get_hw_node(self.curr_composite_id)
+
+    in_edge = self.get_input_edge(call, "bias")
+    block = RecvConstBlock(in_edge, "bias write")
+    self.codeblocks.append(hid, block, CodePhase.INIT)
+
+    in_edges = self.get_input_edges(call)
+    out_edge = self.get_output_edge(call)
+    block = AddBlock(in_edges, out_edge, "add_bias")
+    self.curr_conv_block.add_post_op(block)
+
 
   def visit_batch_norm_call(self, call):
     assert self.curr_composite_id, "BatchNorm must be inside a composite function"
     # pdb.set_trace()
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
-    scale_info = self.get_tensor_edge_info_from_tag(call, "scale")
-    bias_info = self.get_tensor_edge_info_from_tag(call, "bias")
+    scale_edge = self.get_tensor_edge_from_tag(call, "scale")
+    bias_edge = self.get_tensor_edge_from_tag(call, "bias")
 
   def visit_relu_call(self, call):
     assert self.curr_composite_id, "Relu must be inside a composite function"
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
-    info = self.get_tensor_edge_info_from_tag(call, "odata")
+    edge = self.get_tensor_edge_from_tag(call, "odata")
     # block = ReLUBlock("relu")
     # self.post_process.append(block)
 
@@ -152,6 +166,11 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   def get_tensor_id(self, call, tag):
     return TensorID.get(self.get_graph_node_id(call), tag)
 
+  def get_input_edge(self, call, tag):
+    for edge in self.edges:
+      if edge.dst_inner_gid_match(getNodeID(call)) and edge.dst_id.tensor_type == tag:
+        return edge
+
   def get_input_edges(self, call):
     in_edges = []
     for edge in self.edges:
@@ -165,10 +184,10 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       if edge.src_inner_gid_match(getNodeID(call)):
         return edge
 
-  def get_tensor_edge_info_from_tag(self, call, tag):
+  def get_tensor_edge_from_tag(self, call, tag):
     tid = self.get_tensor_id(call, tag)
     te = DevConfig().get_tensor_edge(tid)
-    return DevConfig().get_tensor_edge_info(te)
+    return te
 
   def inspect(self, tmp, graph_node_id):
     if graph_node_id in DevConfig().HWNodeMap.keys():
