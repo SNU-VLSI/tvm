@@ -78,8 +78,8 @@ class ConvUtil:
 
   def _create_group(self, pattern, count):
     return {
-        "pattern": pattern,
-        "count": count
+        "count": count,
+        "pattern": pattern
     }
 
   def get_convolution_pattern(self):

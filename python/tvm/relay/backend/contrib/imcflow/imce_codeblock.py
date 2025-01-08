@@ -1,5 +1,6 @@
 from abc import *
 from typing import *
+from copy import deepcopy
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
@@ -17,8 +18,8 @@ class ImceCodeBlock(CodeBlock):
   def content(self) -> CodeBlock:
     if self.annotation:
       code = TextBlock("")
-      code += f"// generate: {self.annotation})"
-      code += self._content()
+      code += f"// generate: {self.annotation}"
+      code += deepcopy(self._content())
       code += f"// endgenerate: {self.annotation}"
       return code
     else:
@@ -42,7 +43,7 @@ class LoadLBBlock(ImceCodeBlock):
     code = TextBlock("")
     for _ in range(self.repeat):
       code += f"__builtin_IMCE_LOAD_LB({self.fifo_id});"
-    return SimpleFor(self.count, code)
+    return SimpleFor(self.count, code, "load_block")
 
 
 class AddBlock(ImceCodeBlock):
@@ -118,7 +119,7 @@ class ConvBlock(ImceCodeBlock):
 
     for op in self.post_ops:
       code += "\n"
-      code += op
+      code += deepcopy(op)
 
     code += "\n"
     for i in range(num_blocks):
@@ -130,7 +131,9 @@ class ConvBlock(ImceCodeBlock):
     return code
 
   def _inner_loop_content(self, loop_count: int, recv_count: int) -> CodeBlock:
-    return SimpleFor(loop_count, self._loop_body_content(recv_count), "inner_loop")
+    code = SimpleFor(loop_count, self._loop_body_content(recv_count), "inner_loop")
+
+    return code
 
   def _outer_loop_content(self, loop_count: int, loop_pattern: dict) -> CodeBlock:
     code = TextBlock("")

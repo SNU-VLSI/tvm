@@ -82,7 +82,7 @@ class TextBlock(CodeBlock):
     return self.text
 
 class SimpleFor(CodeBlock):
-  scope_counter = 0
+  scope = 0
 
   def __init__(self, count: int, body: Union[str, CodeBlock], annotation: str = ""):
     super().__init__()
@@ -90,28 +90,34 @@ class SimpleFor(CodeBlock):
     self.count = int(count)
     self.body = body
 
-  def content(self) -> str:
+  @contextmanager
+  def manage_scope(self):
+    SimpleFor.scope += 1
+    try:
+      yield f"i{SimpleFor.scope}"
+    finally:
+      SimpleFor.scope -= 1
+
+  def content(self) -> CodeBlock:
     if self.count == 0:
-      return ""
+      return TextBlock("")
     elif self.count == 1:
-      return f"{self.body}"
+      return self.body
 
-    SimpleFor.scope_counter += 1
-
-    var_iter = f"i{SimpleFor.scope_counter}"
-    if self.annotation:
-      code = (
-          f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate: {self.annotation}\n"
-          f"{indent(str(self.body), '  ')}\n"
-          f"}} // endgenerate: {self.annotation}"
-      )
-    else:
-      code = (
-          f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{\n"
-          f"{indent(str(self.body), '  ')}\n"
-          f"}}"
-      )
-    SimpleFor.scope_counter -= 1
+    with self.manage_scope() as var_iter:
+      if self.annotation:
+        code = TextBlock("")
+        code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate: {self.annotation}"
+        # FIXME: explicit str is NOT the right way
+        # but currently is necessay for scope to work.
+        # since before current content exits, the body's content should be evaluated
+        code += indent(str(self.body), '  ')
+        code += f"}} // endgenerate: {self.annotation}"
+      else:
+        code = TextBlock("")
+        code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{"
+        code += indent(str(self.body), '  ')
+        code += f"}}"
     return code
 
 
@@ -133,6 +139,7 @@ class CodeBlockStart(CodeBlock):
       code += f"  int hid = __builtin_INODE_GET_CORE_HID();\n"
     for decl in UniqueVar.get_decls():
       code += f"  {decl}"
+    code += "\n"
 
     return code
 
