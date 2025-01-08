@@ -4,6 +4,7 @@ import logging
 from tvm.contrib.imcflow import NodeID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend.contrib.imcflow.codeblock import *
+import pdb
 
 class DeviceCodegen:
   def __init__(self, target, output_dir="/tmp"):
@@ -16,28 +17,17 @@ class DeviceCodegen:
     self.ld_options = "-r -b binary"
     logging.basicConfig(level=logging.INFO)
 
-  def handle_code_generation(self, func_name, codeblocks):
+  def handle_code_generation(self, func_name, codeblocks: CodeBlocks):
     """
     The main entry point for DeviceCodegen.
     Handles code generation, saving to file, compilation, linking, and host object creation.
     """
     logging.info(f"Generating {self.target} code for function: {func_name}")
-    import pdb; pdb.set_trace()
+    pdb.set_trace()
     code = codeblocks.generate()
+    pdb.set_trace()
     cpp_name = self.save_target_code_to_file(code, func_name)
     self.compile_target_code(cpp_name)
-
-  def generate_target_code(self, codeblocks):
-    # TODO: codeblocks should be grouped according to its NodeID
-    # TODO: code generation should handle duplicate variable names
-    code = ""
-    for codeblock in codeblocks:
-      if isinstance(codeblock, CodeBlockStart):
-        code += str(codeblock)
-
-      code += codeblock
-
-    return code
 
   def save_target_code_to_file(self, code, func_name):
     cpp_name = os.path.join(self.output_dir, f"{func_name}_{self.target}.cpp")

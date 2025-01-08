@@ -4,13 +4,28 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
-from tvm.relay.backend.contrib.imcflow.codeblock import CodeBlock, SimpleFor, UniqueVar
+from tvm.relay.backend.contrib.imcflow.codeblock import CodeBlock, TextBlock, SimpleFor, UniqueVar
 import pdb
 
 
+
 class ImceCodeBlock(CodeBlock):
+  def __init__(self, annotation: str = ""):
+    super().__init__()
+    self.annotation = annotation
+
+  def content(self) -> CodeBlock:
+    if self.annotation:
+      code = TextBlock("")
+      code += f"// generate: {self.annotation})"
+      code += self._content()
+      code += f"// endgenerate: {self.annotation}"
+      return code
+    else:
+      return self._content()
+
   @abstractmethod
-  def _content(self) -> Union[str, CodeBlock]:
+  def _content(self) -> CodeBlock:
     pass
 
 
@@ -23,9 +38,11 @@ class LoadLBBlock(ImceCodeBlock):
     self.repeat = repeat
     self.fifo_id = fifo_id
 
-  def _content(self) -> Union[str, CodeBlock]:
-    code = f"__builtin_IMCE_LOAD_LB({self.fifo_id});\n"
-    return SimpleFor(self.count, code * self.repeat)
+  def _content(self) -> CodeBlock:
+    code = TextBlock("")
+    for _ in range(self.repeat):
+      code += f"__builtin_IMCE_LOAD_LB({self.fifo_id});"
+    return SimpleFor(self.count, code)
 
 
 class AddBlock(ImceCodeBlock):
@@ -38,26 +55,26 @@ class AddBlock(ImceCodeBlock):
     self.in_edges = in_edges
     self.out_edge = out_edge
 
-  def _content(self) -> Union[str, CodeBlock]:
+  def _content(self) -> CodeBlock:
     num_blocks = 4
     src_mask = 15
 
-    var_o = UniqueVar(self.out_edge)
-    var_i0 = UniqueVar(self.in_edges[0])
-    var_i1 = UniqueVar(self.in_edges[1])
-
-    code = ""
-    pdb.set_trace()
+    code = TextBlock("")
     te_info0 = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edges[0].dst_id, "in") # a hack to get the tensor edge info
     te_info1 = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edges[1].dst_id, "in")
 
     for i in range(num_blocks):
-      if te_info0:
-        code += f"short16 {var_i0}_{i} = __builtin_IMCE_RECV({te_info0.fifo_id});\n"
-      if te_info1:
-        code += f"short16 {var_i1}_{i} = __builtin_IMCE_RECV({te_info1.fifo_id});\n"
+      # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
+      var_o = UniqueVar((self.out_edge, i))
+      var_i0 = UniqueVar((self.in_edges[0], i))
+      var_i1 = UniqueVar((self.in_edges[1], i))
 
-      code += f"short16 {var_o}_{i} = __builtin_IMCE_ADD({var_i0}_{i}, {var_i1}_{i}, {src_mask});\n"
+      if te_info0:
+        code += f"{var_i0} = __builtin_IMCE_RECV({te_info0.fifo_id});"
+      if te_info1:
+        code += f"{var_i1} = __builtin_IMCE_RECV({te_info1.fifo_id});"
+
+      code += f"{var_o} = __builtin_IMCE_ADD({var_i0}, {var_i1}, {src_mask});"
 
     return code
 
@@ -80,54 +97,51 @@ class ConvBlock(ImceCodeBlock):
   def add_post_op(self, code: CodeBlock):
     self.post_ops.append(code)
 
-  def _loop_body_content(self, recv_count: int) -> str:
+  def _loop_body_content(self, recv_count: int) -> CodeBlock:
     num_blocks = 4
     fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edge.dst_id, "in").fifo_id
 
-    var_creg = UniqueVar(self.out_edge)
     # hack to get the last tensor edge
-    out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
-    var_o = UniqueVar(out_edge)
+    last_out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
     # fifo_id_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").fifo_id
     # policy_addr_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").policy_addr
     fifo_id_o = -1
     policy_addr_o = -1
 
-    code = ""
+    code = TextBlock("")
     code += LoadLBBlock(recv_count, num_blocks, fifo_id_i)
     code += "__builtin_IMCE_STEP();\n"
-    code += f"{var_creg}_0 = __builtin_IMCE_GET_CREG((short)0);\n"
-    code += f"{var_creg}_1 = __builtin_IMCE_GET_CREG((short)1);\n"
-    code += f"{var_creg}_2 = __builtin_IMCE_GET_CREG((short)2);\n"
-    code += f"{var_creg}_3 = __builtin_IMCE_GET_CREG((short)3);\n"
+
+    for i in range(num_blocks):
+      var_creg = UniqueVar((self.out_edge, i))
+      code += f"{var_creg} = __builtin_IMCE_GET_CREG((short){i});"
 
     for op in self.post_ops:
       code += "\n"
-      code += str(op)
+      code += op
 
     code += "\n"
-    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_0, {fifo_id_o}, 0);\n"
-    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_1, {fifo_id_o}, 0);\n"
-    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_2, {fifo_id_o}, 0);\n"
-    code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}_3, {fifo_id_o}, 0);\n"
-    pdb.set_trace()
+    for i in range(num_blocks):
+      var_o = UniqueVar((last_out_edge, i))
+      code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}, {fifo_id_o}, 0);"
 
-    # code += SendBlock(1, self.policy_addr)
+    code += "\n"
+
     return code
 
-  def _inner_loop_content(self, loop_count: int, recv_count: int) -> str:
+  def _inner_loop_content(self, loop_count: int, recv_count: int) -> CodeBlock:
     return SimpleFor(loop_count, self._loop_body_content(recv_count), "inner_loop")
 
-  def _outer_loop_content(self, loop_count: int, loop_pattern: dict) -> str:
-    code = ""
+  def _outer_loop_content(self, loop_count: int, loop_pattern: dict) -> CodeBlock:
+    code = TextBlock("")
     for pat in loop_pattern:
       code += self._inner_loop_content(pat["count"], pat["pattern"])
 
     return SimpleFor(loop_count, code, "outer_loop")
 
-  def _content(self) -> Union[str, CodeBlock]:
+  def _content(self) -> CodeBlock:
     row_pattern = self.conv.extract_2d_pattern()
-    code = ""
+    code = TextBlock("")
     for row_pat in row_pattern:
       code += self._outer_loop_content(row_pat["count"], row_pat["pattern"])
 

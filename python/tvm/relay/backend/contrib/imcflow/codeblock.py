@@ -1,24 +1,32 @@
 from abc import *
 from typing import *
+from copy import deepcopy
 from tvm.contrib.imcflow import NodeID
 from textwrap import indent
-import pdb
+from contextlib import contextmanager
 from enum import Enum
+import pdb
 
 
 class UniqueVar:
   _var_map = {}
   _counter = 0
 
-  def __init__(self, obj):
+  def __init__(self, obj, dtype="short16"):
     """Generates a unique variable name for the given object or retrieves an existing one."""
     if obj not in UniqueVar._var_map:
-      UniqueVar._var_map[obj] = f"var{UniqueVar._counter}"
+      UniqueVar._var_map[obj] = (f"var{UniqueVar._counter}", dtype)
       UniqueVar._counter += 1
-    self.name = UniqueVar._var_map[obj]
+    self.name = UniqueVar._var_map[obj][0]
+    self.dtype = UniqueVar._var_map[obj][1]
 
   def __str__(self):
     return self.name
+
+  @staticmethod
+  def get_decls():
+    for value in UniqueVar._var_map.values():
+      yield f"{value[1]} {value[0]};"
 
 
 class CodePhase(Enum):
@@ -27,77 +35,113 @@ class CodePhase(Enum):
 
 
 class CodeBlock(metaclass=ABCMeta):
-  def __init__(self, annotation: str = ""):
-    self.annotation = annotation
+  def __init__(self):
+    self.next = None
 
-  def _content(self) -> str:
+  @abstractmethod
+  def content(self) -> str:
     pass
 
   def __str__(self) -> str:
-    _content = str(self._content())
-    if self.annotation and _content:
-      return (
-          f"// generate: {self.annotation}\n"
-          f"{_content}"
-          f"// endgenerate: {self.annotation}\n"
-      )
-    else:
-      return _content
+    if not self.next:
+      return str(self.content())
+    if not self.content():
+      return str(self.next)
+    return str(self.content()) + "\n" + str(self.next)
+
 
   def __add__(self, other):
-    return str(self) + str(other)
+    if isinstance(other, str):
+      other = TextBlock(other)
+    if isinstance(other, CodeBlock):
+      new_block = deepcopy(self)
+      ptr = new_block
+      while ptr.next is not None:
+        ptr = ptr.next
+      ptr.next = deepcopy(other)
+      return new_block
+    raise TypeError(f"unsupported operand type(s) for +: 'CodeBlock' and '{type(other)}'")
 
-  def __radd__(self, other):
-    return str(other) + str(self)
+  def __iadd__(self, other):
+    if isinstance(other, str):
+      other = TextBlock(other)
+    if isinstance(other, CodeBlock):
+      ptr = self
+      while ptr.next is not None:
+        ptr = ptr.next
+      ptr.next = other
+      return self
+    raise TypeError(f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
 
+class TextBlock(CodeBlock):
+  def __init__(self, text: str):
+    super().__init__()
+    self.text = text
+
+  def content(self) -> str:
+    return self.text
 
 class SimpleFor(CodeBlock):
+  scope_counter = 0
+
   def __init__(self, count: int, body: Union[str, CodeBlock], annotation: str = ""):
-    super().__init__(annotation)
-    self.count = count
+    super().__init__()
+    self.annotation = annotation
+    self.count = int(count)
     self.body = body
 
-  def __str__(self) -> str:
+  def content(self) -> str:
     if self.count == 0:
       return ""
     elif self.count == 1:
-      return f"{self.body}\n"
-    elif self.annotation:
-      return (
-          f"for (int i = 0; i < {self.count}; i++) {{ // generate: {self.annotation}\n"
-          f"{indent(self.body, '  ')}\n"
-          f"}} // endgenerate: {self.annotation}\n"
+      return f"{self.body}"
+
+    SimpleFor.scope_counter += 1
+
+    var_iter = f"i{SimpleFor.scope_counter}"
+    if self.annotation:
+      code = (
+          f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate: {self.annotation}\n"
+          f"{indent(str(self.body), '  ')}\n"
+          f"}} // endgenerate: {self.annotation}"
       )
     else:
-      return (
-          f"for (int i = 0; i < {self.count}; i++) {{\n"
-          f"{indent(self.body, '  ')}\n"
-          f"}}\n"
+      code = (
+          f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{\n"
+          f"{indent(str(self.body), '  ')}\n"
+          f"}}"
       )
+    SimpleFor.scope_counter -= 1
+    return code
 
 
 class CodeBlockStart(CodeBlock):
   def __init__(self, name: str, target: str):
+    super().__init__()
     assert target in ["inode", "imce"], \
         "target must be either 'inode' or 'imce'"
     self.target = target
     self.func_name = name
 
-  def __str__(self) -> str:
-    code = f"void {self.func_name}() {{\n"
+  def content(self) -> CodeBlock:
+    code = TextBlock("")
+    code += f"void {self.func_name}() {{"
     if self.target == "imce":
-      code += f"  int hid = __builtin_IMCE_GET_CORE_HID();\n"
-      code += f"  int wid = __builtin_IMCE_GET_CORE_WID();\n\n"
+      code += f"  int hid = __builtin_IMCE_GET_CORE_HID();"
+      code += f"  int wid = __builtin_IMCE_GET_CORE_WID();\n"
     else:
-      code += f"  int hid = __builtin_INODE_GET_CORE_HID();\n\n"
+      code += f"  int hid = __builtin_INODE_GET_CORE_HID();\n"
+    for decl in UniqueVar.get_decls():
+      code += f"  {decl}"
+
     return code
 
 
 class CodeBlockEnd(CodeBlock):
   def __init__(self):
-    pass
+    super().__init__()
 
-  def __str__(self) -> str:
+  def content(self) -> str:
     return "}\n"
 
 
@@ -128,9 +172,8 @@ class CodeBlocks:
   def append(self, hid, block, block_type: CodePhase = CodePhase.EXEC):
     self.blocks[hid][block_type].append(block)
 
-  def generate(self):
-    # TODO: code generation should handle duplicate variable names
-    code = str(self.start)
+  def generate_body(self):
+    code = ""
     first = True
     for node in self.nodes:
       condition = f"if" if first else f"else if"
@@ -143,6 +186,14 @@ class CodeBlocks:
         code += f"{indent(str(codeblock), '  ')}\n"
       code += "}\n"
       first = False
-    code += str(self.end)
-
     return code
+
+  def generate(self):
+    # generate body first to determine variables first
+    # then generate start, where variables are declared
+    body = self.generate_body()
+
+    start = str(self.start)
+    end = str(self.end)
+
+    return start + body + end
