@@ -49,7 +49,6 @@ class CodeBlock(metaclass=ABCMeta):
       return str(self.next)
     return str(self.content()) + "\n" + str(self.next)
 
-
   def __add__(self, other):
     if isinstance(other, str):
       other = TextBlock(other)
@@ -60,7 +59,8 @@ class CodeBlock(metaclass=ABCMeta):
         ptr = ptr.next
       ptr.next = deepcopy(other)
       return new_block
-    raise TypeError(f"unsupported operand type(s) for +: 'CodeBlock' and '{type(other)}'")
+    raise TypeError(
+        f"unsupported operand type(s) for +: 'CodeBlock' and '{type(other)}'")
 
   def __iadd__(self, other):
     if isinstance(other, str):
@@ -71,7 +71,9 @@ class CodeBlock(metaclass=ABCMeta):
         ptr = ptr.next
       ptr.next = other
       return self
-    raise TypeError(f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
+    raise TypeError(
+        f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
+
 
 class TextBlock(CodeBlock):
   def __init__(self, text: str):
@@ -80,6 +82,7 @@ class TextBlock(CodeBlock):
 
   def content(self) -> str:
     return self.text
+
 
 class SimpleFor(CodeBlock):
   scope = 0

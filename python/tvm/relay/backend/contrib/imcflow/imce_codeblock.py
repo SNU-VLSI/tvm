@@ -9,7 +9,6 @@ from tvm.relay.backend.contrib.imcflow.codeblock import CodeBlock, TextBlock, Si
 import pdb
 
 
-
 class ImceCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
     super().__init__()
@@ -61,8 +60,10 @@ class AddBlock(ImceCodeBlock):
     src_mask = 15
 
     code = TextBlock("")
-    te_info0 = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edges[0].dst_id, "in") # a hack to get the tensor edge info
-    te_info1 = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edges[1].dst_id, "in")
+    te_info0 = DevConfig().get_tensor_edge_info_with_id_dir(
+        self.in_edges[0].dst_id, "in")  # a hack to get the tensor edge info
+    te_info1 = DevConfig().get_tensor_edge_info_with_id_dir(
+        self.in_edges[1].dst_id, "in")
 
     for i in range(num_blocks):
       # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
@@ -78,6 +79,7 @@ class AddBlock(ImceCodeBlock):
       code += f"{var_o} = __builtin_IMCE_ADD({var_i0}, {var_i1}, {src_mask});"
 
     return code
+
 
 class ConvBlock(ImceCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
@@ -100,7 +102,8 @@ class ConvBlock(ImceCodeBlock):
 
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
     num_blocks = 4
-    fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(self.in_edge.dst_id, "in").fifo_id
+    fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(
+        self.in_edge.dst_id, "in").fifo_id
 
     # hack to get the last tensor edge
     last_out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
@@ -131,9 +134,7 @@ class ConvBlock(ImceCodeBlock):
     return code
 
   def _inner_loop_content(self, loop_count: int, recv_count: int) -> CodeBlock:
-    code = SimpleFor(loop_count, self._loop_body_content(recv_count), "inner_loop")
-
-    return code
+    return SimpleFor(loop_count, self._loop_body_content(recv_count), "inner_loop")
 
   def _outer_loop_content(self, loop_count: int, loop_pattern: dict) -> CodeBlock:
     code = TextBlock("")
