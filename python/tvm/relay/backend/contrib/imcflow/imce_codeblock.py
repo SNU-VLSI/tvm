@@ -144,7 +144,7 @@ class ConvBlock(ImceCodeBlock):
 
     for op in self.post_ops:
       code += "\n"
-      code += copy(op) # FIXME: this is copying the TensorEdge objects too!!! :(
+      code += copy(op)
 
     code += "\n"
     for i in range(num_blocks):
