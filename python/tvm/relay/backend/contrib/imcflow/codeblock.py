@@ -24,9 +24,13 @@ class UniqueVar:
       instance.dtype = dtype
       instance.static = False
 
+    assert cls._instances[obj].dtype == dtype, \
+        f"UniqueVar {obj} already exists with dtype {cls._instances[obj].dtype}"
+
     return cls._instances[obj]
 
   def set_static(self):
+    # FIXME: we don't know if set_static is always done prior to another variable use
     self.static = True
 
   def __str__(self):
