@@ -1072,12 +1072,8 @@ def constructTensorEdgeList(mod):
 
         IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
         # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-<<<<<<< HEAD
         # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
         IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
-=======
-        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "nn.imcflow_qconv", "imcflow_unpacking", "imcflow_packing"]
->>>>>>> origin/imcflow
 
         if not IsComposite and not IsSupportedOp:
           raise ValueError("Unsupported operator detected. please check.")
@@ -1146,7 +1142,6 @@ def constructTensorEdgeList(mod):
           if call.op == op.get("divide"):
             ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
             InputNode = 1 if ScaleNode == 0 else 0
-<<<<<<< HEAD
             # _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
             # _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
             _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
@@ -1155,25 +1150,6 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("imcflow_unpacking"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-=======
-            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
-            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
-          if call.op == op.get("nn.imcflow_qconv"):
-            # if src node is "imcflow_unpacking", append to tensoredgelist by flag self.IsSrcUnpacking
-            self.IsSrcUnpacking = True if isinstance(call.args[0], Call) and call.args[0].op.name == "imcflow_unpacking" else False
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-            self.IsSrcUnpacking = True if isinstance(call.args[1], Call) and call.args[1].op.name == "imcflow_unpacking" else False
-            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
-            self.IsSrcUnpacking = False
-          if call.op.name == "imcflow_unpacking":
-            _processInputNode(call.args[0], "packed_data", DstGraphNodeID, "unpacked_data", None)
-          if call.op.name == "imcflow_packing":
-            _processInputNode(call.args[0], "unpacked_data", DstGraphNodeID, "packed_data", None)
-          if call.op == "imcflow.fused_batch_norm":
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "scale", DstGraphNodeID, "scale", None)
-            _processInputNode(call.args[2], "bias", DstGraphNodeID, "bias", None)
->>>>>>> origin/imcflow
 
         #Pre DFS search: Traverse child nodes
         for a in call.args:
@@ -1543,14 +1519,8 @@ class MemoryAllocator:
             
           super().visit_call(call)
         
-<<<<<<< HEAD
           # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
-=======
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", \
-                                                                              "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "nn.imcflow_qconv", \
-                                                                              "imcflow.fused_batch_norm", "imcflow_packing", "imcflow_unpacking"]
->>>>>>> origin/imcflow
          
           if IsSupportedOp:
             edges = find_edge_from_list(call)
