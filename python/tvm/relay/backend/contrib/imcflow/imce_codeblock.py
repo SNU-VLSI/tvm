@@ -63,6 +63,7 @@ class RecvConstBlock(ImceCodeBlock):
 
     for i in range(recv_count):
       var = UniqueVar((self.in_edge, i))
+      var.set_static()
       code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id});"
     return code
 
@@ -93,9 +94,9 @@ class AddBlock(ImceCodeBlock):
       var_i0 = UniqueVar((self.in_edges[0], i))
       var_i1 = UniqueVar((self.in_edges[1], i))
 
-      if te_info0:
+      if te_info0 and not var_i0.static:
         code += f"{var_i0} = __builtin_IMCE_RECV({te_info0.fifo_id});"
-      if te_info1:
+      if te_info1 and not var_i1.static:
         code += f"{var_i1} = __builtin_IMCE_RECV({te_info1.fifo_id});"
 
       code += f"{var_o} = __builtin_IMCE_ADD({var_i0}, {var_i1}, {src_mask});"

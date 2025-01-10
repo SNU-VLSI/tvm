@@ -9,24 +9,33 @@ import pdb
 
 
 class UniqueVar:
-  _var_map = {}
+  _instances = {}
   _counter = 0
 
-  def __init__(self, obj, dtype="short16"):
-    """Generates a unique variable name for the given object or retrieves an existing one."""
-    if obj not in UniqueVar._var_map:
-      UniqueVar._var_map[obj] = (f"var{UniqueVar._counter}", dtype)
-      UniqueVar._counter += 1
-    self.name = UniqueVar._var_map[obj][0]
-    self.dtype = UniqueVar._var_map[obj][1]
+  def __new__(cls, obj, dtype="short16"):
+    """Ensure only one instance per unique obj and dtype combination."""
+    if obj not in cls._instances:
+      instance = super(UniqueVar, cls).__new__(cls)
+      cls._instances[obj] = instance
+      cls._counter += 1
+
+      # set the instance variables
+      instance.name = f"var{cls._counter}"
+      instance.dtype = dtype
+      instance.static = False
+
+    return cls._instances[obj]
+
+  def set_static(self):
+    self.static = True
 
   def __str__(self):
     return self.name
 
-  @staticmethod
-  def get_decls():
-    for value in UniqueVar._var_map.values():
-      yield f"{value[1]} {value[0]};"
+  @classmethod
+  def get_decls(cls):
+    for value in cls._instances.values():
+      yield f"{value.dtype} {value.name};"
 
 
 class CodePhase(Enum):
