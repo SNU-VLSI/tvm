@@ -889,6 +889,9 @@ class NodeMapper:
             self.MappingDict ={}
             self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
             self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
+            
+            self.undetermined_callnode_exists = False
+            self.undetermined_callnode = None
 
         def traverse_func(self, func):
             self.visit(func)
@@ -902,7 +905,6 @@ class NodeMapper:
 
           # check constraint and map imcflow node
           if self.MappingDict:
-              # last_child_mapping, _ = list(self.MappingDict.items())[-1][1]
               last_child_mapping = list(self.MappingDict.items())[-1][1]
           else:
               last_child_mapping = None
@@ -917,6 +919,8 @@ class NodeMapper:
           # check if this node is
           IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
           IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
+          IsPacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_packing"]
+          IsUnpacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_unpacking"]
           if IsConcat:
               if last_child_mapping is None:
                   raise ValueError("split or concatenate should have at least 1 child node")
@@ -931,11 +935,23 @@ class NodeMapper:
               else:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = last_child_mapping
+          elif IsPacking:
+              self.MappingDict[getNodeID(call)] = last_child_mapping
+          elif IsUnpacking:
+              # keep unpacking node and determine its NodeID in parent node
+              self.undetermined_callnode_exists = True
+              self.undetermined_callnode = getNodeID(call)
           else:
               self.MappingDict[getNodeID(call)] = NodeID.from_imce_coord(self.imce_index)
-              # self.MappingDict[getNodeID(call)] = f"imce_{self.imce_index}"
               self.imce_index -= 1
               # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
+
+          # handle undetermined child node(unpacking node)
+          if IsUnpacking is False and self.undetermined_callnode_exists is True:
+              DstHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call)])[0]
+              InodeID = NodeID.from_inode_coord(DstHWNodeID)
+              self.MappingDict[self.undetermined_callnode] = InodeID # assign the same NodeID with parent node
+              self.undetermined_callnode_exists = False
 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
@@ -971,6 +987,7 @@ def constructTensorEdgeList(mod):
         # self.MappingDict = ImcflowDeviceConfig().HWNodeMap
         self.TensorEdgeList = []
         self.InSubFunction = False
+        self.IsSrcUnpacking = False
         # self.SubFunctionMapping = None
         self.SubFunctionNodeID = None
         self.VarProperties = {}
@@ -1022,7 +1039,7 @@ def constructTensorEdgeList(mod):
         raise ValueError("Invalid input tensor id pair")
 
     def visit_function(self, fn):
-      # append to TensorEdgeList if fn is entrance node of subgraph function
+      # append to TensorEdgeList if fn is the entrance node of whole subgraph function
       if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
         InputGraphNodeID = self.getCustomID(fn.body)
         DstGraphNodeID = self.getCustomID(fn)
@@ -1055,8 +1072,12 @@ def constructTensorEdgeList(mod):
 
         IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
         # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+<<<<<<< HEAD
         # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
         IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
+=======
+        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "nn.imcflow_qconv", "imcflow_unpacking", "imcflow_packing"]
+>>>>>>> origin/imcflow
 
         if not IsComposite and not IsSupportedOp:
           raise ValueError("Unsupported operator detected. please check.")
@@ -1077,6 +1098,11 @@ def constructTensorEdgeList(mod):
                 InputGraphNodeID = (self.SubFunctionNodeID, self.getCustomID(SrcGraphNode))
                 self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
                 return True
+              if self.IsSrcUnpacking is True:
+                # append edge if (src: unpacking -> dst: qconv)
+                InputGraphNodeID = (self.SubFunctionNodeID, self.getCustomID(SrcGraphNode))
+                self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
+                self.IsSrcUnpacking = False                
 
         if IsComposite:
           self.InSubFunction = True
@@ -1120,6 +1146,7 @@ def constructTensorEdgeList(mod):
           if call.op == op.get("divide"):
             ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
             InputNode = 1 if ScaleNode == 0 else 0
+<<<<<<< HEAD
             # _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
             # _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
             _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
@@ -1128,6 +1155,25 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("imcflow_unpacking"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+=======
+            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
+          if call.op == op.get("nn.imcflow_qconv"):
+            # if src node is "imcflow_unpacking", append to tensoredgelist by flag self.IsSrcUnpacking
+            self.IsSrcUnpacking = True if isinstance(call.args[0], Call) and call.args[0].op.name == "imcflow_unpacking" else False
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            self.IsSrcUnpacking = True if isinstance(call.args[1], Call) and call.args[1].op.name == "imcflow_unpacking" else False
+            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
+            self.IsSrcUnpacking = False
+          if call.op.name == "imcflow_unpacking":
+            _processInputNode(call.args[0], "packed_data", DstGraphNodeID, "unpacked_data", None)
+          if call.op.name == "imcflow_packing":
+            _processInputNode(call.args[0], "unpacked_data", DstGraphNodeID, "packed_data", None)
+          if call.op == "imcflow.fused_batch_norm":
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "scale", DstGraphNodeID, "scale", None)
+            _processInputNode(call.args[2], "bias", DstGraphNodeID, "bias", None)
+>>>>>>> origin/imcflow
 
         #Pre DFS search: Traverse child nodes
         for a in call.args:
@@ -1180,20 +1226,34 @@ def constructNoCPathDict(mod):
         SrcGraphNode = CustomIDToNode()[getInnerNodeID(SrcTensorID.graph_node_id)]
         DstGraphNode = CustomIDToNode()[getInnerNodeID(DstTensorID.graph_node_id)]
         if isinstance(SrcGraphNode, (Var, Constant)):
+          if isinstance(DstGraphNode, Call) and DstGraphNode.op.name == "imcflow_unpacking":
+            # if dst node is unpacking, src and dst are the same (inode -> inode). Do not make NoCPath.
+            pass
+          else:
+            # else, map src node into inode
+            DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
+            # if "inode" not in DstHwNodeID:
+            if not DstHwNodeID.is_inode():
+              # DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
+              InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
+              # InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
+              # NocPaths[func_name_var.name_hint].append(
+              #   (InodeID, DstHwNodeID, SplitIdx)
+              # )
+              NocPaths[func_name_var.name_hint][tensor_edge] = (
+                (InodeID, DstHwNodeID, SplitIdx)
+              )
+              # HwMapping[getFlatNodeID(SrcTensorID.graph_node_id)] = InodeID
+              HwMapping[SrcTensorID.graph_node_id] = InodeID
+        elif isinstance(SrcGraphNode, Call) and SrcGraphNode.op.name == "imcflow_unpacking" and isinstance(DstTensorID.graph_node_id, tuple):
+          # if src is unpacking in subfunction, unpacking node was not mapped to HWnode by NodeMapper.
+          # so, map unpacking node into specific inode here.
           DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
-          # if "inode" not in DstHwNodeID:
-          if not DstHwNodeID.is_inode():
-            # DstIMCEIdx = int(re.match(r"imce_(\d+)", DstHwNodeID).group(1))
-            InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
-            # InodeID = f"inode_{DstIMCEIdx//IMCECOL}"
-            # NocPaths[func_name_var.name_hint].append(
-            #   (InodeID, DstHwNodeID, SplitIdx)
-            # )
-            NocPaths[func_name_var.name_hint][tensor_edge] = (
-              (InodeID, DstHwNodeID, SplitIdx)
-            )
-            # HwMapping[getFlatNodeID(SrcTensorID.graph_node_id)] = InodeID
-            HwMapping[SrcTensorID.graph_node_id] = InodeID
+          InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
+          NocPaths[func_name_var.name_hint][tensor_edge] = (
+            (InodeID, DstHwNodeID, SplitIdx)
+          )
+          HwMapping[SrcTensorID.graph_node_id] = InodeID
         elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" : # if the tensor edge is the final edge toward host (=if destination is function)
           SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
           InodeID = NodeID.from_inode_coord(NodeID.to_coord(SrcHwNodeID)[0])
@@ -1337,11 +1397,12 @@ class MemoryAllocator:
               idx = None
               shape = None
               for i, arg in enumerate(call.args):
+                #case1: dst node is inode
                 if isinstance(arg, Tuple):
+                    # if arg is Tuple, call is concat
                     idx = -1 # concat's arg_idx is not needed in get_size
                     for j, arg in enumerate(arg.fields):
                       src_id = getNodeID(arg)
-                      #src node
                       if isinstance(edge.src_id.graph_node_id, tuple):
                         #concat's arg_idx is not needed in get_size
                         if src_id in edge.src_id.graph_node_id:
@@ -1350,11 +1411,13 @@ class MemoryAllocator:
                         if src_id == edge.src_id.graph_node_id:
                           shape = call.type_args[idx].fields[j].shape
                 else:
+                  # Determine the source ID based on the type of `arg`
                   if isinstance(arg, TupleGetItem):
                       src_id = getNodeID(arg.tuple_value)
                   else: 
                       src_id = getNodeID(arg)
-                  #src node
+
+                  # Check if `src_id` matches the source node in `edge`
                   if isinstance(edge.src_id.graph_node_id, tuple):
                     if src_id in edge.src_id.graph_node_id:
                       idx = i
@@ -1364,26 +1427,33 @@ class MemoryAllocator:
                       idx = i
                       shape = call.type_args[idx].shape
                 
-                #dst node
+                #case2: src node is inode
                 dst_id = getNodeID(call)
                 if isinstance(edge.dst_id.graph_node_id, tuple): # Composite input params' TensorEdge.dst_id is always tuple
                   if dst_id in edge.dst_id.graph_node_id and isinstance(arg, Var):
                     idx = i
                     shape = call.type_args[idx].shape
-              if idx is None:
-                raise ValueError("No arg is matched to TensorEdge.")
+              # if idx is None:
+              #   raise ValueError("No arg is matched to TensorEdge.")
               return idx, shape #if idx is None, the edge is from outside of the Composite. It was already handled by Composite node.
 
             src_op = get_op_from_id(edge.src_id.graph_node_id)
             dst_op = get_op_from_id(edge.dst_id.graph_node_id)
+            
+            #####################if dst_op is unpacking, find its parent node with tensor edge list or anything!!!!!
+            
+            # if dst_op == "imcflow_unpacking": dst_op = find its parent(dst_op)         
 
             #find my arg from call to find corresponding shape by type_args.shape
             arg_idx, arg_shape = find_my_arg_from_call(edge, call)
             
             # calculate size for inode memory allocation
+            
+            if arg_idx is None:
+              print("arg_idx none")
             if arg_idx is not None:
               if src_op == "Op(split)":
-                # when first node of subgraph is split, memoryblock is already allocated by split node.
+                # when first node of subgraph is split, memoryblock is already allocated by (src: var -> dst: split) case.
                 pass
 
               # src = inode, dst = op
@@ -1421,14 +1491,46 @@ class MemoryAllocator:
                 raise ValueError("add cannot receive data from inode.")               
               elif dst_op == "Op(concatenate)":
                 raise ValueError("concat cannot receive data from inode.")               
+              elif dst_op == "Op(imcflow_unpacking)":
+                pass # do nothing because (src: unpacking -> dst: qconv) can handle the actual allocation.
+              elif dst_op == "Op(nn.imcflow_qconv)":
+                if arg_idx == 0: # input var
+                  size = arg_shape[2] * arg_shape[3] * 4
+                elif arg_idx == 1: # const(weight)
+                  size = 256
+                else:
+                  raise ValueError("nn.conv2d only has 2 arguments, but you got over 2.")
+              elif dst_op == "Op(imcflow.fused_batch_norm)":
+                if arg_idx == 0: # input var
+                  size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+                elif arg_idx <= 4: # const
+                  size = math.ceil(int(arg_shape[0]) / 16)
+                else:
+                  raise ValueError("nn.batchnorm only has 5 argument, but you got over 5.")            
+              elif dst_op == "Op(divide)":
+                if arg_idx == 1: # const
+                  size = 1 # TODO: check again!
+                else:
+                  raise ValueError("Const of divide is only defined.")            
+              elif dst_op == "Op(qnn.imcflow_min_max_quantize)":
+                if arg_idx == 1 or arg_idx==2: # const
+                  size = 1 # TODO: check again!
+                else:
+                  raise ValueError("Const of min_max_quantize is only defined.")            
 
               # src = op, dst = inode
-              elif str(src_op) == "Op(nn.conv2d)":
+              elif src_op == "Op(nn.conv2d)":
                 size = arg_shape[2] * arg_shape[3] * 4
-              elif str(src_op) == "Op(nn.batch_norm)":
+              elif src_op == "Op(nn.batch_norm)":
                 size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
-              elif str(src_op) == "Op(nn.relu)":
+              elif src_op == "Op(nn.relu)":
                 size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+              elif src_op == "Op(imcflow_packing)":
+                #TODO: how to calculate size?
+                # go to parent node and figure out which parent it has - e.g. conv2d, batchnorm, etc
+                # calculate wrt parent node
+                pass
+
               # rest case
               else:
                 raise ValueError("Operation not defined!")
@@ -1441,8 +1543,14 @@ class MemoryAllocator:
             
           super().visit_call(call)
         
+<<<<<<< HEAD
           # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
+=======
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", \
+                                                                              "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "nn.imcflow_qconv", \
+                                                                              "imcflow.fused_batch_norm", "imcflow_packing", "imcflow_unpacking"]
+>>>>>>> origin/imcflow
          
           if IsSupportedOp:
             edges = find_edge_from_list(call)
