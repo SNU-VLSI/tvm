@@ -106,9 +106,9 @@ class TensorID:
       return TensorID.Pool[(graph_node_id, tensor_type)]
 
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
-    assert tensor_type in {"idata", "odata", "weight",
-                           "bias", "scale", "idata0", "idata1",
-                           "quant_min", "quant_max", "quant_threshold"}, "Invalid tensor type"
+    assert tensor_type in {"data", "odata", "weight",
+                           "bias", "fused_scale", "fused_bias", "lhs", "rhs",
+                           "min", "max", "threshold"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
 
@@ -296,8 +296,8 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 
-  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
-  NO_COST_OPS = ["split", "concatenate"]
+  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "imcflow_packing", "imcflow_unpacking"]
+  NO_COST_OPS = ["split", "concatenate", "imcflow_packing", "imcflow_unpacking"]
   QAUNT_OPS = ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize"]
 
   def __new__(cls, *args, **kwargs):

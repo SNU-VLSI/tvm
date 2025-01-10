@@ -1055,7 +1055,8 @@ def constructTensorEdgeList(mod):
 
         IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
         # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
+        # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
+        IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
 
         if not IsComposite and not IsSupportedOp:
           raise ValueError("Unsupported operator detected. please check.")
@@ -1091,36 +1092,42 @@ def constructTensorEdgeList(mod):
                               self.getInputGraphNodeSplitIndex(arg))
         elif IsSupportedOp:
           if call.op == op.get("split"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("concatenate"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-          if call.op == op.get("nn.conv2d"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+          if call.op == op.get("nn.imcflow_qconv"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
           if call.op == op.get("nn.bias_add"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
-          if call.op == op.get("nn.batch_norm"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "scale", DstGraphNodeID, "scale", None)
-            _processInputNode(call.args[2], "bias", DstGraphNodeID, "bias", None)
+          if call.op == op.get("imcflow.fused_batch_norm"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "fused_scale", DstGraphNodeID, "fused_scale", None)
+            _processInputNode(call.args[2], "fused_bias", DstGraphNodeID, "fused_bias", None)
           if call.op == op.get("nn.relu"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("add"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata0", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "odata", DstGraphNodeID, "idata1", self.getInputGraphNodeSplitIndex(call.args[1]))
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
           if call.op == op.get("qnn.imcflow_min_max_quantize"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "quant_min", DstGraphNodeID, "quant_min", None)
-            _processInputNode(call.args[2], "quant_max", DstGraphNodeID, "quant_max", None)
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "min", DstGraphNodeID, "min", None)
+            _processInputNode(call.args[2], "max", DstGraphNodeID, "max", None)
           if call.op == op.get("qnn.imcflow_nu_quantize"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "quant_threshold", DstGraphNodeID, "quant_threshold", None)
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "threshold", DstGraphNodeID, "threshold", None)
           if call.op == op.get("divide"):
             ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
             InputNode = 1 if ScaleNode == 0 else 0
-            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "idata", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
-            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
+            # _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+            # _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
+            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
+          if call.op == op.get("imcflow_packing"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+          if call.op == op.get("imcflow_unpacking"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
 
         #Pre DFS search: Traverse child nodes
         for a in call.args:
@@ -1434,7 +1441,8 @@ class MemoryAllocator:
             
           super().visit_call(call)
         
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+          # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
+          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
          
           if IsSupportedOp:
             edges = find_edge_from_list(call)
