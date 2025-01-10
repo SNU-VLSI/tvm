@@ -20,6 +20,7 @@ from enum import Enum
 
 SMALL_DEBUG = 0
 
+
 class NodeID(Enum):
   inode_0 = 0
   imce_0 = 1
@@ -52,14 +53,14 @@ class NodeID(Enum):
     raise ValueError(f"No Node found for coordinate ({x}, {y})")
 
   @staticmethod
-  def from_inode_coord(x:int) -> 'NodeID':
+  def from_inode_coord(x: int) -> 'NodeID':
     return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x)
 
   @staticmethod
-  def from_imce_coord(x:int, y:Union[None|int]=None) -> 'NodeID':
+  def from_imce_coord(x: int, y: Union[None | int] = None) -> 'NodeID':
     if y is None:
       ImceHeight = x//ImcflowDeviceConfig.IMCE_W_NUM
-      ImceWidth = x%ImcflowDeviceConfig.IMCE_W_NUM
+      ImceWidth = x % ImcflowDeviceConfig.IMCE_W_NUM
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*ImceHeight + (ImceWidth+1))
     else:
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
@@ -104,21 +105,17 @@ class NodeID(Enum):
 
 
 class TensorID:
-  Pool = {}
+  _instances = {}
 
-  @staticmethod
-  def get(graph_node_id: Union[int, Tuple], tensor_type: str):
-    if (graph_node_id, tensor_type) not in TensorID.Pool:
-      return TensorID(graph_node_id, tensor_type)
-    else:
-      return TensorID.Pool[(graph_node_id, tensor_type)]
+  def __new__(cls, graph_node_id: Union[int, Tuple], tensor_type: str):
+    key = (graph_node_id, tensor_type)
+    if key not in cls._instances:
+      instance = super(TensorID, cls).__new__(cls)
+      cls._instances[(graph_node_id, tensor_type)] = instance
+      instance.graph_node_id = graph_node_id
+      instance.tensor_type = tensor_type
 
-  def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
-    # assert tensor_type in {"idata", "odata", "weight",
-    #                        "bias", "scale", "idata0", "idata1",
-    #                        "quant_min", "quant_max", "quant_threshold"}, "Invalid tensor type"
-    self.graph_node_id = graph_node_id
-    self.tensor_type = tensor_type
+    return cls._instances[key]
 
   def inner_gid_match(self, graph_node_id: Union[int, Tuple]):
     if isinstance(self.graph_node_id, int):
@@ -132,18 +129,20 @@ class TensorID:
   def __repr__(self):
     return self.__str__()
 
-  def __eq__(self, other):
-    return isinstance(other, TensorID) and self.graph_node_id == other.graph_node_id and self.tensor_type == other.tensor_type
-
-  def __hash__(self) -> int:
-    return hash((self.graph_node_id, self.tensor_type))
-
 
 class TensorEdge:
-  def __init__(self, src_id: TensorID, dst_id: TensorID, split_idx: Union[None, int] = None):
-    self.src_id = src_id
-    self.dst_id = dst_id
-    self.split_idx = split_idx
+  _instances = {}
+
+  def __new__(cls, src_id: TensorID, dst_id: TensorID, split_idx: Union[None, int] = None):
+    key = (src_id, dst_id, split_idx)
+    if key not in cls._instances:
+      instance = super(TensorEdge, cls).__new__(cls)
+      cls._instances[(src_id, dst_id, split_idx)] = instance
+      instance.src_id = src_id
+      instance.dst_id = dst_id
+      instance.split_idx = split_idx
+
+    return cls._instances[key]
 
   def src_inner_gid_match(self, graph_node_id: Union[int, Tuple]):
     return self.src_id.inner_gid_match(graph_node_id)

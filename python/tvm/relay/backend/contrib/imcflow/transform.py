@@ -978,8 +978,8 @@ def constructTensorEdgeList(mod):
       elif isinstance(SrcGraphNodeIDs, (int, tuple)):
         SrcGraphNodeID = SrcGraphNodeIDs
         self.TensorEdgeList.append(
-          TensorEdge(TensorID.get(SrcGraphNodeID, SrcTag),
-                     TensorID.get(DstGraphNodeID, DstTag),
+          TensorEdge(TensorID(SrcGraphNodeID, SrcTag),
+                     TensorID(DstGraphNodeID, DstTag),
                      SplitIdx)
         )
       else:

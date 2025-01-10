@@ -164,7 +164,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       return getNodeID(call)
 
   def get_tensor_id(self, call, tag):
-    return TensorID.get(self.get_graph_node_id(call), tag)
+    return TensorID(self.get_graph_node_id(call), tag)
 
   def get_input_edge(self, call, tag):
     for edge in self.edges:
