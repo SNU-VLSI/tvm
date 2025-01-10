@@ -1799,7 +1799,8 @@ class PackingInserter:
               parentNode = node if parentNode is None else parentNode
               if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name in ImcflowDeviceConfig.QAUNT_OPS:
                 Shape1D = 1
-                for shape in node.type_args[0].shape:
+                # for shape in node.type_args[0].shape:
+                for shape in node.checked_type.shape:
                   Shape1D = Shape1D * shape
                 node = imcflow_packing(parentNode, [Shape1D], "int8")
               elif isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == "concatenate":
