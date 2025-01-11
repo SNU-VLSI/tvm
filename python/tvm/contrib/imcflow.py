@@ -106,8 +106,12 @@ class TensorID:
       return TensorID.Pool[(graph_node_id, tensor_type)]
 
   def __init__(self, graph_node_id: Union[int, Tuple], tensor_type: str):
-    assert tensor_type in {"data", "odata", "weight",
+    if tensor_type not in {"data", "odata", "weight",
                            "bias", "fused_scale", "fused_bias", "lhs", "rhs",
+                           "min", "max", "threshold"}:
+                           print("Invalid tensor type")
+    assert tensor_type in {"data", "odata", "weight",
+                           "bias", "fused_scale", "fused_bias", "lhs", "rhs", "scale",
                            "min", "max", "threshold"}, "Invalid tensor type"
     self.graph_node_id = graph_node_id
     self.tensor_type = tensor_type
