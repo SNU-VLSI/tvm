@@ -200,7 +200,7 @@ class MemoryRegion:
       self.weight_allocated = True
       self.weight_offset = self._last_offset
       self._last_offset += block.size
-      
+
     block.set_offset(self.weight_offset)
     block.set_base_address(self.weight_offset + self.base_address)
     self.blocks[block.id] = block
@@ -331,6 +331,28 @@ class ImcflowDeviceConfig:
 
   def __init__(self):
     pass
+
+  def clear(self):
+    self.HWNodeMap = {}
+    self.TensorIDtoEdge = {}
+    self.TensorEdgetoInfo = {}
+    self.TensorEdgeList = []
+    self.TensorEdgeListDict = {}
+    self.PolicyTableDict = {}
+    self.InstEdgeInfoDict = {}
+    self.MemLayout = MemoryLayout(
+        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+        MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+    )
+    self.ActiveIMCEPerFunc = {}
+    self.NoCPaths = {}
 
   @ staticmethod
   def is_supported_kernel(KH, KW):

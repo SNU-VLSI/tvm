@@ -49,6 +49,7 @@ def printModel(result_dir, mod, param_dict, mod_name):
 
 def run_test(test_name, mod, param_dict):
   eval_mod, eval_param_dict = mod, param_dict
+  ImcflowDeviceConfig().clear()
 
   # origin
   printModel(test_name, eval_mod, eval_param_dict, "origin")
@@ -113,12 +114,12 @@ def run_test(test_name, mod, param_dict):
     print(key)
     for path in paths:
       print(path)
-  
+
   imcflow_transform.constructTensorIDToTensorEdgeDict()
   print("Tensor ID to Tensor Edge")
   for key, paths in ImcflowDeviceConfig().TensorIDtoEdge.items():
     print(f"{key} : {paths}")
-  
+
   imcflow_transform.constructNoCPathDict(eval_mod)
   print("NoC Paths")
   for key, paths in ImcflowDeviceConfig().NoCPaths.items():

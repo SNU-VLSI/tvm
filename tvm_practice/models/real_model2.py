@@ -22,7 +22,9 @@ from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 
 def getModel():
-  input_ = relay.var("input", shape=(1, 28, 56, 56))
+  # input_ = relay.var("input", shape=(1, 28, 56, 56))
+  # FIXME: smaller input size for testing purpose
+  input_ = relay.var("input", shape=(1, 28, 16, 16))
 
   y = relay.nn.conv2d(
       input_,
