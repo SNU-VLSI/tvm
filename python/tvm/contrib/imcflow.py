@@ -339,35 +339,13 @@ class ImcflowDeviceConfig:
   NO_COST_OPS = ["split", "concatenate", "imcflow_packing", "imcflow_unpacking"]
   QAUNT_OPS = ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize"]
 
-  def __new__(cls, *args, **kwargs):
+  def __new__(cls):
     if not hasattr(cls, "instance"):
       cls.instance = super(ImcflowDeviceConfig, cls).__new__(cls)
-      cls.instance.HWNodeMap = {}  # maps graph_node_id to hw_node_id
-      cls.instance.TensorIDtoEdge = {}  # maps tensor_id to tensor_edge
-      cls.instance.TensorEdgetoInfo = {}  # maps tensor_edge to tensor_edge_info
-      cls.instance.TensorEdgeList = []   # list of tensor edges
-      cls.instance.TensorEdgeListDict = {}  # maps func to list of tensor edges
-      cls.instance.PolicyTableDict = {}  # maps hw_node_id to policy table data block
-      cls.instance.InstEdgeInfoDict = {}  # maps hw_node_id to inst_edge_info
-      cls.instance.MemLayout = MemoryLayout(
-          MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-          MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-          MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-          MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-          MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-          MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-      )
-      cls.instance.ActiveIMCEPerFunc = {}
-      cls.instance.NoCPaths = {}
+      cls.instance._initialize()
     return cls.instance
 
-  def __init__(self):
-    pass
-
-  def clear(self):
+  def _initialize(self):
     self.HWNodeMap = {}
     self.TensorIDtoEdge = {}
     self.TensorEdgetoInfo = {}
@@ -388,6 +366,9 @@ class ImcflowDeviceConfig:
     )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
+
+  def clear(self):
+    self._initialize()
 
   @ staticmethod
   def is_supported_kernel(KH, KW):
