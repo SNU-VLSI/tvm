@@ -787,7 +787,7 @@ class AnnotGenerator:
           # check this node is for imcflow
           IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
           # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-          # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide"]
+          # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize", "divide"]
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
           IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
 
@@ -1310,6 +1310,25 @@ class MemoryAllocator:
 
           return is_inode, inode_tensorid
 
+        def find_edge_from_list(self, call):
+          # find edges that call node belongs, and find valid edge which has inode
+          tensor_edge_list = self.TensorEdgeList
+          graph_node_id = getNodeID(call)
+
+          def matches_node_id(node_id):
+            if isinstance(node_id, int):
+              return node_id == graph_node_id
+            elif isinstance(node_id, tuple):
+              return graph_node_id in node_id
+            return False
+
+          edges = []
+          for edge in tensor_edge_list:
+            if matches_node_id(edge.dst_id.graph_node_id) and self.is_inode_in_edge(edge)[0]:
+              edges.append(edge)
+
+          return edges
+
         def allocate(self, func):
           for edge, mem_block in self.DataBlockDict.items():
             if mem_block.size is None:
@@ -1327,25 +1346,6 @@ class MemoryAllocator:
           return
 
         def visit_function(self, fn):
-          def find_edge_from_list(call):
-            # find edges that call node belongs, and find valid edge which has inode
-            tensor_edge_list = self.TensorEdgeList
-            graph_node_id = getNodeID(call)
-
-            def matches_node_id(node_id):
-              if isinstance(node_id, int):
-                return node_id == graph_node_id
-              elif isinstance(node_id, tuple):
-                return graph_node_id in node_id
-              return False
-
-            edges = []
-            for edge in tensor_edge_list:
-              if matches_node_id(edge.dst_id.graph_node_id) and self.is_inode_in_edge(edge)[0]:
-                edges.append(edge)
-
-            return edges
-
           def get_size(edge, call):
             size = None
 
@@ -1401,7 +1401,7 @@ class MemoryAllocator:
           super().visit_function(fn)
 
           if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
-            edge = find_edge_from_list(fn)[0]
+            edge = self.find_edge_from_list(fn)[0]
             size = get_size(edge, fn)
             if size is not None:
               inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
@@ -1412,25 +1412,6 @@ class MemoryAllocator:
               raise ValueError("There should be at least one edge connected to function node.")
 
         def visit_call(self, call):
-          def find_edge_from_list(call):
-            # find edges that call node belongs, and find valid edge which has inode
-            tensor_edge_list = self.TensorEdgeList
-            graph_node_id = getNodeID(call)
-
-            def matches_node_id(node_id):
-              if isinstance(node_id, int):
-                return node_id == graph_node_id
-              elif isinstance(node_id, tuple):
-                return graph_node_id in node_id
-              return False
-
-            edges = []
-            for edge in tensor_edge_list:
-              if matches_node_id(edge.dst_id.graph_node_id) and self.is_inode_in_edge(edge)[0]:
-                edges.append(edge)
-
-            return edges
-
           def get_size(edge, call):
             size = None
 
@@ -1477,7 +1458,6 @@ class MemoryAllocator:
             src_op = get_op_from_id(edge.src_id.graph_node_id)
             dst_op = call.op
 
-
             #find which argument index this edge correspond to find corresponding shape by type_args.shape
             arg_idx, arg_shape = get_arg_idx(edge, call)
 
@@ -1492,7 +1472,7 @@ class MemoryAllocator:
             if arg_idx is not None:
               if IsSrcInode:
               # src = inode, dst = op
-                if src_op == op.get("split"):
+                if src_op == "Op(split)":
                   # when first node of subgraph is split, memoryblock is already allocated by (src: unpacking or var -> dst: split) case.
                   pass
                 elif dst_op == op.get("nn.relu"):
@@ -1515,8 +1495,8 @@ class MemoryAllocator:
                   raise ValueError("add cannot receive data from inode.")
                 elif dst_op == op.get("concatenate"):
                   raise ValueError("concat cannot receive data from inode.")
-                elif dst_op == op.get("imcflow_unpacking"):
-                  pass # do nothing because (src: unpacking -> dst: qconv) can handle the actual allocation.
+                # elif dst_op == op.get("imcflow_unpacking"):
+                #   pass # do nothing because (src: unpacking -> dst: qconv) can handle the actual allocation.
                 elif dst_op == op.get("nn.imcflow_qconv"):
                   if arg_idx == 0: # input var
                     size = arg_shape[2] * arg_shape[3] * 4
@@ -1545,30 +1525,8 @@ class MemoryAllocator:
                   raise ValueError("Undefined oeration!")
 
               elif IsDstInode:
-                pass
-              # # src = op, dst = inode
-
-              #   if src_op == "Op(nn.conv2d)":
-              #     size = arg_shape[2] * arg_shape[3] * 4
-              #   elif src_op == "Op(nn.batch_norm)":
-              #     size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
-              #   elif src_op == "Op(nn.relu)":
-              #     size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
-              #   elif src_op == "Op(imcflow_packing)":
-              #     #TODO: how to calculate size?
-              #     # go to parent node and figure out which parent it has - e.g. conv2d, batchnorm, etc
-              #     # calculate wrt parent node
-
-              #     print("asdasdf")
-
-              #     # if isinstance(call.args[0], Call):
-
-              #     # if isinstance(call.args[0], Func)
-              #     # if isinstance(call.args[0].op, Call)
-              #     # if isinstance(call.args[0].op, Call)
-              #     # if isinstance(call.args[0].op, Call)
-              #     # if isinstance(call.args[0].op, Call)
-
+                # src = const, var, dst = inode
+                pass # if const -> unpacking (inode),
               else:
                 raise ValueError("Wrong edge detected!")
 
@@ -1583,7 +1541,7 @@ class MemoryAllocator:
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
 
           if IsSupportedOp:
-            edges = find_edge_from_list(call)
+            edges = self.find_edge_from_list(call)
             for edge in edges:
               size = get_size(edge, call)
               if size is not None:
