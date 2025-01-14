@@ -1692,8 +1692,10 @@ bool ImcflowBatchNormRel(const Array<Type>& types, int num_inputs, const Attrs& 
   auto axis_size = data->shape[axis];
 
   // if we are using beta and gamma, they need to be of shape (dim,)
-  reporter->Assign(types[1], TensorType({axis_size}, data->dtype));
-  reporter->Assign(types[2], TensorType({axis_size}, data->dtype));
+  // reporter->Assign(types[1], TensorType({axis_size}, data->dtype));
+  // reporter->Assign(types[2], TensorType({axis_size}, data->dtype));
+  reporter->Assign(types[1], TensorType({axis_size}, types[1].as<TensorTypeNode>()->dtype));
+  reporter->Assign(types[2], TensorType({axis_size}, types[2].as<TensorTypeNode>()->dtype));
 
   // output is a tuple of the normed data (same shape as input), new running mean,
   // new running variance, saved mean and saved variance (the latter are all

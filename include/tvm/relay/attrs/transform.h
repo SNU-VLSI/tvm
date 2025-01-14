@@ -611,19 +611,18 @@ struct TriluAttrs : public tvm::AttrsNode<TriluAttrs> {
 
 struct ImcflowPackingAttrs : public tvm::AttrsNode<ImcflowPackingAttrs> {
   Array<Integer> newshape;
-  bool allowzero;
+  DataType dtype;
   TVM_DECLARE_ATTRS(ImcflowPackingAttrs, "relay.attrs.ImcflowPackingAttrs") {
     TVM_ATTR_FIELD(newshape).describe(
         "The new shape. Should be compatible with the original shape.");
-    TVM_ATTR_FIELD(allowzero).set_default(0).describe(
-        "Whether to honor the value of zero in newshape.");
+    TVM_ATTR_FIELD(dtype).describe("Target data type");
   }
 };
 
-struct ImcflowFakeTensorAttrs : public tvm::AttrsNode<ImcflowFakeTensorAttrs> {
+struct ImcflowUnPackingAttrs : public tvm::AttrsNode<ImcflowUnPackingAttrs> {
   Array<Integer> newshape;
   DataType dtype;
-  TVM_DECLARE_ATTRS(ImcflowFakeTensorAttrs, "relay.attrs.ImcflowFakeTensorAttrs") {
+  TVM_DECLARE_ATTRS(ImcflowUnPackingAttrs, "relay.attrs.ImcflowUnPackingAttrs") {
     TVM_ATTR_FIELD(newshape).describe(
         "The new shape. Should be compatible with the original shape.");
     TVM_ATTR_FIELD(dtype).describe("Target data type");

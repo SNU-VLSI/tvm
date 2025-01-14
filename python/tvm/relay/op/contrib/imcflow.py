@@ -422,12 +422,10 @@ def make_qnn_dense_pattern():
     return "imcflow.qnn.dense", pat
 
 def makeBNPattern(data):
-  mean = is_constant()
-  var = is_constant()
   gamma = is_constant()
   beta = is_constant()
 
-  return is_tuple_get_item(is_op("nn.batch_norm")(data, gamma, beta, mean, var), 0)
+  return is_tuple_get_item(is_op("imcflow.fused_batch_norm")(data, gamma, beta), 0)
 
 def makeAddPattern(data):
   return is_op("add")(data, wildcard())
@@ -438,11 +436,19 @@ def makeBiasAddPattern(data):
 def makeReluPattern(data):
   return is_op("nn.relu")(data)
 
-def make_conv_with_postop_pattern(conv_type, postops):
+def makeMinMaxQauntPattern(data):
+  return is_op("qnn.imcflow_min_max_quantize")(data, is_constant(), is_constant())
+
+def makeNUQauntPattern(data):
+  return is_op("qnn.imcflow_nu_quantize")(data, is_constant())
+
+def makeDivPattern(data):
+  return is_op("divide")(data, is_constant())
+
+def make_conv_with_postop_pattern(conv_type, postop):
     data1, weight = wildcard(), is_constant()
     out = is_op(conv_type)(data1, weight)
-    for postop in postops:
-      out = postop(out)
+    out = postop(out)
     return out
 
 @register_pattern_table("imcflow")
@@ -456,46 +462,21 @@ def pattern_table():
     """
     imcflow_patterns = list()
 
-    PostProcess = [(makeBNPattern, "bn"), (makeAddPattern, "add"), (makeBiasAddPattern, "bias_add"), (makeReluPattern, "relu")]
-    MaxNumPostOps = 6
+    def make_postop_pattern_start_with(conv_type):
+      data1, weight = wildcard(), is_constant()
+      data = is_op(conv_type)(data1, weight)
+      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data)
+      for i in range(1, 10):
+        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out)
 
-    for i in range(MaxNumPostOps, 0, -1):
-      for postops in itertools.permutations(PostProcess, i):
-        postop_names = [name for _, name in postops]
-        imcflow_patterns.append(
-            (
-                "imcflow.conv2d_" + "_".join(postop_names),
-                make_conv_with_postop_pattern("nn.conv2d", [postop for postop, _ in postops])
-            )
-        )
+      return out
 
-    # post_patterns = [
-    #   # 4
-    #   ("imcflow.conv2d_add_bias_add_bn_relu",[makeAddPattern, makeBiasAddPattern, makeBNPattern, makeReluPattern]),
-
-    #   # 3
-    #   ("imcflow.conv2d_bias_add_bn_relu",[makeBiasAddPattern, makeBNPattern, makeReluPattern]),
-    #   ("imcflow.conv2d_add_bias_add_bn",[makeAddPattern, makeBiasAddPattern, makeBNPattern]),
-    #   ("imcflow.conv2d_add_bias_add_relu",[makeAddPattern, makeBiasAddPattern, makeReluPattern]),
-
-    #   # 2
-    #   ("imcflow.conv2d_bias_add_relu",[makeBiasAddPattern, makeReluPattern]),
-    #   ("imcflow.conv2d_bias_add_bn",[makeBiasAddPattern, makeBNPattern]),
-    #   ("imcflow.conv2d_add_bias_add",[makeAddPattern, makeBiasAddPattern]),
-
-    #   # 1
-    #   ("imcflow.conv2d_add",[makeAddPattern]),
-    #   ("imcflow.conv2d_bias_add", [makeBiasAddPattern]),
-    #   ("imcflow.conv2d_bn", [makeBNPattern]),
-    # ]
-
-    # for name, patterns in post_patterns:
-    #   imcflow_patterns.append(
-    #       (
-    #           name,
-    #           make_conv_with_postop_pattern("nn.conv2d", patterns)
-    #       )
-    #   )
+    imcflow_patterns.append(
+      (
+          "imcflow.conv2d-with-postop",
+          make_postop_pattern_start_with("nn.imcflow_qconv")
+      )
+    )
 
     return imcflow_patterns
 
@@ -1384,7 +1365,8 @@ def is_valid_subgraph(body):
             self.valid = False
 
         def visit_call(self, call):
-            if hasattr(call.op, "name") and call.op.name == "nn.conv2d":
+            # if hasattr(call.op, "name") and call.op.name == "nn.conv2d":
+            if hasattr(call.op, "name") and call.op.name == "nn.imcflow_qconv":
               self.valid = True
             super().visit_call(call)
 

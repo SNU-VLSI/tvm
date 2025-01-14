@@ -109,6 +109,10 @@ class TensorID:
 
   def __new__(cls, graph_node_id: Union[int, Tuple], tensor_type: str):
     key = (graph_node_id, tensor_type)
+    if tensor_type not in {"data", "odata", "weight",
+                           "bias", "fused_scale", "fused_bias", "lhs", "rhs",
+                           "min", "max", "threshold"}:
+                           print("Invalid tensor type")
     if key not in cls._instances:
       instance = super(TensorID, cls).__new__(cls)
       cls._instances[(graph_node_id, tensor_type)] = instance
@@ -331,6 +335,10 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 
+  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "imcflow_packing", "imcflow_unpacking"]
+  NO_COST_OPS = ["split", "concatenate", "imcflow_packing", "imcflow_unpacking"]
+  QAUNT_OPS = ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize"]
+
   def __new__(cls, *args, **kwargs):
     if not hasattr(cls, "instance"):
       cls.instance = super(ImcflowDeviceConfig, cls).__new__(cls)
@@ -358,6 +366,28 @@ class ImcflowDeviceConfig:
 
   def __init__(self):
     pass
+
+  def clear(self):
+    self.HWNodeMap = {}
+    self.TensorIDtoEdge = {}
+    self.TensorEdgetoInfo = {}
+    self.TensorEdgeList = []
+    self.TensorEdgeListDict = {}
+    self.PolicyTableDict = {}
+    self.InstEdgeInfoDict = {}
+    self.MemLayout = MemoryLayout(
+        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+        MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+    )
+    self.ActiveIMCEPerFunc = {}
+    self.NoCPaths = {}
 
   @ staticmethod
   def is_supported_kernel(KH, KW):

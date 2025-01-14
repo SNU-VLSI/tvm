@@ -21,7 +21,10 @@
     "initializer_list": "cpp",
     "ranges": "cpp",
     "span": "cpp",
-    "valarray": "cpp"
+    "valarray": "cpp",
+    "cmath": "cpp",
+    "*.tcc": "cpp",
+    "*.def": "cpp"
   },
   "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"
 }
