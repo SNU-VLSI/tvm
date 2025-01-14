@@ -300,7 +300,7 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 
-  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quant", "divide", "imcflow_packing", "imcflow_unpacking"]
+  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.bias_add", "imcflow.fused_batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize", "divide", "imcflow_packing", "imcflow_unpacking"]
   NO_COST_OPS = ["split", "concatenate", "imcflow_packing", "imcflow_unpacking"]
   QAUNT_OPS = ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize"]
 
