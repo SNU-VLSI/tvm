@@ -68,15 +68,20 @@ class RecvConstBlock(ImceCodeBlock):
     return code
 
 
-class AddBlock(ImceCodeBlock):
+class VecBlock(ImceCodeBlock):
   num_in_edges = 2
 
   def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
     """ Code block for adding two tensors """
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
+    self.op_name = self._op_name()
     self.in_edges = in_edges
     self.out_edge = out_edge
+
+  @abstractmethod
+  def _op_name(self) -> str:
+    pass
 
   def _content(self) -> CodeBlock:
     num_blocks = 4
@@ -99,18 +104,59 @@ class AddBlock(ImceCodeBlock):
       if te_info1 and not var_i1.static:
         code += f"{var_i1} = __builtin_IMCE_RECV({te_info1.fifo_id});"
 
-      code += f"{var_o} = __builtin_IMCE_ADD({var_i0}, {var_i1}, {src_mask});"
+      code += f"{var_o} = __builtin_IMCE_{self.op_name}({var_i0}, {var_i1}, {src_mask});" # e.g. __builtin_IMCE_ADD(a, b, 15);
+
+    return code
+
+class AddBlock(VecBlock):
+  def _op_name(self) -> str:
+    return "ADD"
+
+class MultlBlock(VecBlock):
+  def _op_name(self) -> str:
+    return "MULTL"
+
+class MulthBlock(VecBlock):
+  def _op_name(self) -> str:
+    return "MULTH"
+
+class MinmaxQuantBlock(ImceCodeBlock):
+  num_in_edges = 3
+
+  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
+    """ Code block for min/max quantization """
+    super().__init__(annotation)
+    assert len(in_edges) == self.num_in_edges
+    for edge in in_edges:
+      if edge.dst_id.tensor_type == "data":
+        self.in_edge = edge
+    self.out_edge = out_edge
+
+  def _content(self) -> CodeBlock:
+    num_blocks = 4
+    src_mask = 15
+    o_split_idx = 0 # FIXME: get the o_split_idx from tuple
+
+    code = TextBlock("")
+
+    for i in range(num_blocks):
+      var_o = UniqueVar((self.out_edge, i))
+      var_i = UniqueVar((self.in_edge, i))
+
+      qreg_start_idx = i + 4 * o_split_idx
+      code += f"{var_o} = __builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
     return code
 
 
 class ConvBlock(ImceCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
+  num_in_edges = 2
 
   def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, shapes: dict, conv_attrs: Conv2DAttrs,
                annotation: str = ""):
     super().__init__(annotation)
-    assert len(in_edges) == 2
+    assert len(in_edges) == self.num_in_edges
     for edge in in_edges:
       if edge.dst_id.tensor_type == "data":
         self.in_edge = edge
@@ -217,7 +263,7 @@ class ConvBlock(ImceCodeBlock):
   __builtin_IMCE_MULTLQ(a, var29, 1, 2);
   __builtin_IMCE_MULTHQ(a, var29, 1, 2);
   __builtin_IMCE_NU_QUANT(a, var29, 1, 2);
-  __builtin_IMCE_MM_QUANT(a, var29, 1, 2);
+  __builtin_IMCE_MM_QUANT(a, 0, 15, 2);
   short16 var30 = __builtin_IMCE_GET_QREG(0);
   short16 var31 = __builtin_IMCE_GET_QREG(1);
   short16 var32 = __builtin_IMCE_GET_QREG(2);

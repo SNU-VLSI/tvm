@@ -34,6 +34,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     super().__init__()
     self.curr_composite_id = None
     self.curr_conv_block = None
+    # self.curr_conv_block_o_split_idx = None
     self.edges = []
     self.codeblocks = CodeBlocks(func_name, "imce")
 
@@ -57,6 +58,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     src_tid = self.get_tensor_id(arg, src_tag)
     dst_tid = self.get_tensor_id(call, dst_tag)
+    # split_idx =
     self.edges.append(TensorEdge(src_tid, dst_tid))
 
   def visit_call(self, call):
@@ -69,16 +71,25 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     if IsComposite:
       self.visit_composite_call(call)
-    elif call.op == op.get("nn.conv2d"):
+    elif call.op == op.get("nn.imcflow_qconv"):
       self.visit_conv_call(call)
     elif call.op == op.get("add"):
       self.visit_add_call(call)
+    # elif call.op == op.get("concatenate"):
+    #   pdb.set_trace()
     elif call.op == op.get("nn.bias_add"):
-      self.visit_bias_add_call(call)
-    elif call.op == op.get("nn.batch_norm"):
-      self.visit_batch_norm_call(call)
+      # self.visit_bias_add_call(call)
+      pass
+    elif call.op == op.get("imcflow.fused_batch_norm"):
+      # self.visit_batch_norm_call(call)
+      pass
     elif call.op == op.get("nn.relu"):
-      self.visit_relu_call(call)
+      # self.visit_relu_call(call)
+      pass
+    elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+      self.visit_min_max_quantize_call(call)
+    elif call.op == op.get("qnn.imcflow_nu_quantize"):
+      pass
     else:
       self.visit(call.op)
 
@@ -91,8 +102,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     out_edge = self.get_output_edge(call)
 
     w_tid = self.get_tensor_id(args["weight"], "weight")
-    node_id = self.curr_composite_id or getNodeID(call)
-    hid = DevConfig().get_hw_node(node_id)
+    hid = self.get_hid(call)
 
     # scan reg
     # TODO: add scan reg code block
@@ -113,7 +123,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_add_call(self, call):
     assert self.curr_composite_id, "Add must be inside a composite function"
-    hid = DevConfig().get_hw_node(self.curr_composite_id)
+    hid = self.get_hid(call)
 
     in_edges = self.get_input_edges(call)
     out_edge = self.get_output_edge(call)
@@ -122,10 +132,10 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_bias_add_call(self, call):
     assert self.curr_composite_id, "BiasAdd must be inside a composite function"
-    hid = DevConfig().get_hw_node(self.curr_composite_id)
+    hid = self.get_hid(call)
 
-    in_edge = self.get_input_edge(call, "bias")
-    block = RecvConstBlock(in_edge, "bias write")
+    bias_edge = self.get_tensor_edge_from_tag(call, "bias")
+    block = RecvConstBlock(bias_edge, "bias write")
     self.codeblocks.append(hid, block, CodePhase.INIT)
 
     in_edges = self.get_input_edges(call)
@@ -133,22 +143,46 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     block = AddBlock(in_edges, out_edge, "add_bias")
     self.curr_conv_block.add_post_op(block)
 
+  def visit_min_max_quantize_call(self, call):
+    assert self.curr_composite_id, "MinMaxQuantize must be inside a composite function"
+    hid = self.get_hid(call)
+
+    for tag in ("min", "max"):
+      edge = self.get_tensor_edge_from_tag(call, tag)
+      # TODO: inode code block needs to put appropriate address for min/max reg.
+      # TODO: two ways to set min/max reg. RecvConst vs. ADDI
+      block = RecvConstBlock(edge, f"{tag} write")
+      self.codeblocks.append(hid, block, CodePhase.INIT)
+
+    in_edges = self.get_input_edges(call)
+    out_edge = self.get_output_edge(call)
+    block = MinmaxQuantBlock(in_edges, out_edge, "min_max_quantize")
+    self.curr_conv_block.add_post_op(block)
 
   def visit_batch_norm_call(self, call):
     assert self.curr_composite_id, "BatchNorm must be inside a composite function"
-    # pdb.set_trace()
-    args = self.get_arg_dict(call)
-    shapes = self.get_arg_shape_dict(call)
-    scale_edge = self.get_tensor_edge_from_tag(call, "scale")
-    bias_edge = self.get_tensor_edge_from_tag(call, "bias")
+    hid = self.get_hid(call)
+    scale_edge = self.get_tensor_edge_from_tag(call, "fused_scale")
+    bias_edge = self.get_tensor_edge_from_tag(call, "fused_bias")
+
+    block = RecvConstBlock(scale_edge, "fused_scale write")
+    self.codeblocks.append(hid, block, CodePhase.INIT)
+    block = RecvConstBlock(bias_edge, "fused_bias write")
+    self.codeblocks.append(hid, block, CodePhase.INIT)
+
+    in_edges = self.get_input_edges(call)
+    out_edge = self.get_output_edge(call)
+    block = VecBlock(in_edges, out_edge, "batch_norm_scale")
+    self.curr_conv_block.add_post_op(block)
+    block = AddBlock(in_edges, out_edge, "batch_norm_bias")
+    self.curr_conv_block.add_post_op(block)
 
   def visit_relu_call(self, call):
     assert self.curr_composite_id, "Relu must be inside a composite function"
+    hid = self.get_hid(call)
     args = self.get_arg_dict(call)
     shapes = self.get_arg_shape_dict(call)
     edge = self.get_tensor_edge_from_tag(call, "odata")
-    # block = ReLUBlock("relu")
-    # self.post_process.append(block)
 
   def visit_composite_call(self, call):
     self.curr_composite_id = getNodeID(call)
@@ -156,6 +190,10 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit(a)
     super().visit(call.op.body)
     self.curr_composite_id = None
+
+  def get_hid(self, call):
+    node_id = self.curr_composite_id or getNodeID(call)
+    return DevConfig().get_hw_node(node_id)
 
   def get_graph_node_id(self, call):
     if self.curr_composite_id:
