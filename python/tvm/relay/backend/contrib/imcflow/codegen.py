@@ -34,12 +34,16 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     super().__init__()
     self.curr_composite_id = None
     self.curr_conv_block = None
-    # self.curr_conv_block_o_split_idx = None
+    self.last_tuple_idx = None
+    # FIXME: stores the tuple index when taking a field from tuple.
+    # We use it to determine the qreg_start_idx for MinMaxQuantBlock but may not work
+    # when there is more tuples in a composite call.
     self.edges = []
     self.codeblocks = CodeBlocks(func_name, "imce")
 
   def add_edges(self, call, arg, idx):
     if isinstance(arg, relay.Tuple):
+      # pdb.set_trace()
       for a in arg.fields:
         self.add_edges(call, a, idx)
       return
@@ -47,7 +51,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.add_edges(call, arg.tuple_value, idx)
       return
     elif isinstance(call.op, relay.Function):
-      dst_tag = call.op.params[idx].name_hint
+      self.add_edges(call, call.op.body, idx)
+      return
     else:
       dst_tag = call.op.arguments[idx].name
 
@@ -58,8 +63,12 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     src_tid = self.get_tensor_id(arg, src_tag)
     dst_tid = self.get_tensor_id(call, dst_tag)
-    # split_idx =
     self.edges.append(TensorEdge(src_tid, dst_tid))
+
+  def visit_tuple(self, tup):
+    for idx, x in enumerate(tup.fields):
+      self.last_tuple_idx = idx
+      self.visit(x)
 
   def visit_call(self, call):
     for idx, a in enumerate(call.args):
@@ -75,8 +84,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit_conv_call(call)
     elif call.op == op.get("add"):
       self.visit_add_call(call)
-    # elif call.op == op.get("concatenate"):
-    #   pdb.set_trace()
+    elif call.op == op.get("concatenate"):
+      self.visit_concat_call(call)
     elif call.op == op.get("nn.bias_add"):
       # self.visit_bias_add_call(call)
       pass
@@ -130,6 +139,16 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     block = AddBlock(in_edges, out_edge, "add")
     self.curr_conv_block.add_post_op(block)
 
+  def visit_concat_call(self, call):
+    assert self.curr_composite_id, "Concat must be inside a composite function"
+    hid = self.get_hid(call)
+    conv_block = self.get_conv_block_by_hid(hid)
+
+    in_edges = self.get_input_edges(call)
+    out_edge = self.get_output_edge(call)
+    block = ConcatBlock(in_edges, out_edge, "concat")
+    conv_block.add_post_op(block)
+
   def visit_bias_add_call(self, call):
     assert self.curr_composite_id, "BiasAdd must be inside a composite function"
     hid = self.get_hid(call)
@@ -154,9 +173,13 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       block = RecvConstBlock(edge, f"{tag} write")
       self.codeblocks.append(hid, block, CodePhase.INIT)
 
+    # set the qreg mask
+    block = SetQregMaskBlock()
+    self.codeblocks.append(hid, block, CodePhase.INIT)
+
     in_edges = self.get_input_edges(call)
     out_edge = self.get_output_edge(call)
-    block = MinmaxQuantBlock(in_edges, out_edge, "min_max_quantize")
+    block = MinmaxQuantBlock(in_edges, out_edge, self.last_tuple_idx, "min_max_quantize")
     self.curr_conv_block.add_post_op(block)
 
   def visit_batch_norm_call(self, call):
@@ -203,6 +226,11 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def get_tensor_id(self, call, tag):
     return TensorID(self.get_graph_node_id(call), tag)
+
+  def get_conv_block_by_hid(self, hid):
+    for block in self.codeblocks.blocks[hid][CodePhase.EXEC]:
+      if isinstance(block, ConvBlock):
+        return block
 
   def get_input_edge(self, call, tag):
     for edge in self.edges:

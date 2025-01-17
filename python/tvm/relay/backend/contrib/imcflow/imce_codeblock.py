@@ -46,6 +46,7 @@ class LoadLBBlock(ImceCodeBlock):
 
 class RecvConstBlock(ImceCodeBlock):
   """ Code block for receiving constant from given fifo id into a variable """
+  # FIXME: Add support for initializing QREGs to zero
 
   def __init__(self, in_edge: TensorEdge, annotation: str = ""):
     super().__init__(annotation)
@@ -123,7 +124,7 @@ class MulthBlock(VecBlock):
 class MinmaxQuantBlock(ImceCodeBlock):
   num_in_edges = 3
 
-  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
+  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, o_split_idx: int, annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
@@ -131,11 +132,11 @@ class MinmaxQuantBlock(ImceCodeBlock):
       if edge.dst_id.tensor_type == "data":
         self.in_edge = edge
     self.out_edge = out_edge
+    self.o_split_idx = o_split_idx
 
   def _content(self) -> CodeBlock:
     num_blocks = 4
     src_mask = 15
-    o_split_idx = 0 # FIXME: get the o_split_idx from tuple
 
     code = TextBlock("")
 
@@ -143,7 +144,31 @@ class MinmaxQuantBlock(ImceCodeBlock):
       var_o = UniqueVar((self.out_edge, i))
       var_i = UniqueVar((self.in_edge, i))
 
-      qreg_start_idx = i + 4 * o_split_idx
+      qreg_start_idx = i + 4 * self.o_split_idx
+      code += f"{var_o} = __builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
+
+    return code
+
+
+class ConcatBlock(ImceCodeBlock):
+  """ Code block for concatenating multiple tensors """
+  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
+    """ Code block for min/max quantization """
+    super().__init__(annotation)
+    self.in_edges = in_edges
+    self.out_edge = out_edge
+
+  def _content(self) -> CodeBlock:
+    num_blocks = 4
+    src_mask = 15
+
+    code = TextBlock("")
+
+    for i in range(num_blocks):
+      var_o = UniqueVar((self.out_edge, i))
+      var_i = UniqueVar((self.in_edge, i))
+
+      qreg_start_idx = i + 4 * self.o_split_idx
       code += f"{var_o} = __builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
     return code
