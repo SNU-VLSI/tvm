@@ -629,22 +629,6 @@ struct ImcflowUnPackingAttrs : public tvm::AttrsNode<ImcflowUnPackingAttrs> {
   }
 };
 
-struct ImcflowPackingTestAttrs : public tvm::AttrsNode<ImcflowPackingTestAttrs> {
-  Array<Integer> newshape;
-  TVM_DECLARE_ATTRS(ImcflowPackingTestAttrs, "relay.attrs.ImcflowPackingTestAttrs") {
-    TVM_ATTR_FIELD(newshape).describe(
-        "The new shape. Should be compatible with the original shape.");
-  }
-};
-
-struct ImcflowUnPackingTestAttrs : public tvm::AttrsNode<ImcflowUnPackingTestAttrs> {
-  Array<Integer> newshape;
-  TVM_DECLARE_ATTRS(ImcflowUnPackingTestAttrs, "relay.attrs.ImcflowUnPackingTestAttrs") {
-    TVM_ATTR_FIELD(newshape).describe(
-        "The new shape. Should be compatible with the original shape.");
-  }
-};
-
 }  // namespace relay
 }  // namespace tvm
 #endif  // TVM_RELAY_ATTRS_TRANSFORM_H_

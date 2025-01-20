@@ -950,7 +950,7 @@ def schedule_fused_batch_norm(outs):
     return _default_schedule(outs, False)
 
 # test_imcflow_packing
-def schedule_imcflow_packing_test(outs):
+def schedule_imcflow_packing(outs):
     """Schedule for fused_batch_norm
 
     Parameters
@@ -967,7 +967,7 @@ def schedule_imcflow_packing_test(outs):
     return _default_schedule(outs, False)
 
 # test_imcflow_unpacking
-def schedule_imcflow_unpacking_test(outs):
+def schedule_imcflow_unpacking(outs):
     """Schedule for fused_batch_norm
 
     Parameters
