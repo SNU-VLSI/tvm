@@ -2120,44 +2120,44 @@ def fused_batch_norm_strategy(attrs, inputs, out_type, target):
     return strategy
 
 # test_imcflow_packing
-def wrap_compute_imcflow_packing_test(topi_compute):
-    """wrap test_imcflow_packing topi compute"""
+def wrap_compute_imcflow_packing(topi_compute):
+    """wrap imcflow_packing topi compute"""
 
-    def _compute_imcflow_packing_test(attrs, inputs, out_type):
-        return [topi_compute(*inputs, attrs.newshape)]
+    def _compute_imcflow_packing(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.newshape, attrs.dtype)]
 
-    return _compute_imcflow_packing_test
+    return _compute_imcflow_packing
 
 
-@override_native_generic_func("imcflow_packing_test_strategy")
-def imcflow_packing_test_strategy(attrs, inputs, out_type, target):
-    """imcflow_packing_test generic strategy"""
+@override_native_generic_func("imcflow_packing_strategy")
+def imcflow_packing_strategy(attrs, inputs, out_type, target):
+    """imcflow_packing generic strategy"""
     strategy = _op.OpStrategy()
     strategy.add_implementation(
-        wrap_compute_imcflow_packing_test(topi.imcflow.imcflow_packing_test),
-        wrap_topi_schedule(topi.generic.schedule_imcflow_packing_test),
-        name="imcflow_packing_test.generic",
+        wrap_compute_imcflow_packing(topi.imcflow.imcflow_packing),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_packing),
+        name="imcflow_packing.generic",
     )
     return strategy
 
 # test_imcflow_unpacking
-def wrap_compute_imcflow_unpacking_test(topi_compute):
-    """wrap test_imcflow_unpacking topi compute"""
+def wrap_compute_imcflow_unpacking(topi_compute):
+    """wrap imcflow_unpacking topi compute"""
 
-    def _compute_imcflow_unpacking_test(attrs, inputs, out_type):
-        return [topi_compute(*inputs, attrs.newshape)]
+    def _compute_imcflow_unpacking(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.newshape, attrs.dtype)]
 
-    return _compute_imcflow_unpacking_test
+    return _compute_imcflow_unpacking
 
 
-@override_native_generic_func("imcflow_unpacking_test_strategy")
-def imcflow_unpacking_test_strategy(attrs, inputs, out_type, target):
-    """imcflow_unpacking_test generic strategy"""
+@override_native_generic_func("imcflow_unpacking_strategy")
+def imcflow_unpacking_strategy(attrs, inputs, out_type, target):
+    """imcflow_unpacking generic strategy"""
     strategy = _op.OpStrategy()
     strategy.add_implementation(
-        wrap_compute_imcflow_unpacking_test(topi.imcflow.imcflow_unpacking_test),
-        wrap_topi_schedule(topi.generic.schedule_imcflow_unpacking_test),
-        name="imcflow_unpacking_test.generic",
+        wrap_compute_imcflow_unpacking(topi.imcflow.imcflow_unpacking),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_unpacking),
+        name="imcflow_unpacking.generic",
     )
     return strategy
     

@@ -38,12 +38,15 @@ def fused_batch_norm(
     ----------
     data : tvm.te.Tensor
         Input to be batch-normalized.
+        dtype = "float32"
 
     fused_scale : tvm.te.Tensor
         constant fused_scale factor to be used in batch_norm inference.
+        dtype = "int16"
 
     fused_bias : tvm.te.Tensor
         constant fused_bias factor to be used in batch_norm inference.
+        dtype = "int16"
 
     axis : int, optional, default=1
         Specify along which shape axis the normalization should occur.
@@ -52,22 +55,27 @@ def fused_batch_norm(
     -------
     output : list of tvm.te.Tensor
         Normalized data with same shape as input
+        dtype = "float32"
 
     fused_scale : tvm.te.Tensor
         constant fused_scale factor to be used in batch_norm inference.
+        dtype = "float32"
 
     fused_bias : tvm.te.Tensor
         constant fused_bias factor to be used in batch_norm inference.
+        dtype = "float32"
     """
     if axis is None:
         axis = 1
 
     shape = [1] * len(data.shape)
     shape[axis] = data.shape[axis]
+    fused_scale_fp32 = topi.cast(fused_scale, "float32")
+    fused_bias_fp32 = topi.cast(fused_bias, "float32")
 
-    fused_scale_rs = topi.reshape(fused_scale, shape)
-    fused_bias_rs = topi.reshape(fused_bias, shape)
+    fused_scale_rs = topi.reshape(fused_scale_fp32, shape)
+    fused_bias_rs = topi.reshape(fused_bias_fp32, shape)
     out = data * fused_scale_rs + fused_bias_rs
 
     # placeholder reuse, we multiply by 1 and return them.
-    return [out, fused_scale, fused_bias]
+    return [out, fused_scale_fp32, fused_bias_fp32]

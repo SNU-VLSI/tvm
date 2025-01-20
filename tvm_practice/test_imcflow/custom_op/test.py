@@ -22,8 +22,9 @@ from tvm.contrib import graph_executor
 from tvm.relay.backend import Executor, Runtime
 from tvm.relay import pretty_print
 from tvm.relay.op.nn.nn import imcflow_batch_norm, imcflow_qconv2d
-from tvm.relay.op.transform import imcflow_packing_test
-from tvm.relay.op.transform import imcflow_unpacking_test
+from tvm.relay.op.nn.nn import imcflow_batch_norm
+from tvm.relay.op.transform import imcflow_packing
+from tvm.relay.op.transform import imcflow_unpacking
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
@@ -61,13 +62,13 @@ def test_batchnorm():
   IC = 64
   IH, IW = 32, 32
 
-  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
+  data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
   fused_scale = relay.var("fused_scale", shape=(IC,), dtype="int16")
   fused_bias = relay.var("fused_bias", shape=(IC,), dtype="int16")
   y = imcflow_batch_norm(data, fused_scale, fused_bias, 1)
   func = relay.Function([data, fused_scale, fused_bias], y[0])
   
-  input_data = np.ones((1, IC, IH, IW), dtype="int16")
+  input_data = np.ones((1, IC, IH, IW), dtype="float32")
   fused_scale_data = np.ones((IC,), dtype="int16")
   fused_bias_data = np.ones((IC,), dtype="int16")
 
@@ -86,7 +87,8 @@ def test_batchnorm():
   mod.run()
 
   res = mod.get_output(0).asnumpy()
-  ref_res = np.full((1, IC, IH, IW), 2, dtype="int16")
+  print(res)
+  ref_res = np.full((1, IC, IH, IW), 2, dtype="float32")
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
@@ -127,7 +129,7 @@ def test_imcflow_packing_1():
   input_data = np.array([[[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[-1.0]], [[-2.0]], [[-1.0]]]], dtype="float32")
   print(input_data)
   newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
-  y = imcflow_packing_test(data, newshape)
+  y = imcflow_packing(data, newshape, "int8")
   func = relay.Function([data], y)
 
   target = "llvm"
@@ -159,7 +161,7 @@ def test_imcflow_packing_2():
   input_data = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
   print(input_data)
   newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
-  y = imcflow_packing_test(data, newshape)
+  y = imcflow_packing(data, newshape, "int8")
   func = relay.Function([data], y)
 
   target = "llvm"
@@ -191,7 +193,7 @@ def test_imcflow_unpacking_1():
   input_data = np.array([33, 67, -17, 15], dtype="int8")
   print(input_data)
   newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
-  y = imcflow_unpacking_test(data, newshape)
+  y = imcflow_unpacking(data, newshape, "float32")
   func = relay.Function([data], y)
 
   target = "llvm"
@@ -206,7 +208,6 @@ def test_imcflow_unpacking_1():
   mod.run()
 
   res = mod.get_output(0).asnumpy()
-  """Todo"""
   ref_res = np.array([[[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[-1.0]], [[-2.0]], [[-1.0]]]], dtype="float32")
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
@@ -223,7 +224,7 @@ def test_imcflow_unpacking_2():
   input_data = np.array([33, 67, -17, 31], dtype="int8")
   print(input_data)
   newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
-  y = imcflow_unpacking_test(data, newshape)
+  y = imcflow_unpacking(data, newshape, "float32")
   func = relay.Function([data], y)
 
   target = "llvm"
@@ -290,5 +291,35 @@ def test_imcflow_qconv2d():
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
+def test_packing_unpacking():
+  IC = 2
+  IH, IW = 2, 2
+
+  data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
+  input_data = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
+  newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
+  y = imcflow_packing(data, newshape, "int8")
+  y = imcflow_unpacking(y, relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32"), "float32")
+  func = relay.Function([data], y)
+  mod = tvm.IRModule.from_expr(func)
+  mod = transform.InferType()(mod)
+  print(mod)
+
+  target = "llvm"
+  ctx = tvm.cpu(0)
+  graph, lib, params = relay.build(mod, target=target)
+  mod = graph_executor.create(graph, lib, device=ctx)
+  mod.set_input(data=input_data)
+  mod.run()
+
+  res = mod.get_output(0).asnumpy()
+  ref_res = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
+
+  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+
+  out = tvm.IRModule.from_expr(y)
+  out = relay.transform.InferType()(out)
+  print(out)
+  
 if __name__ == "__main__":
   tvm.testing.main()

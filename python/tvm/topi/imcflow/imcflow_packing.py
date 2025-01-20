@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Imcflow Unpacking"""
+"""Imcflow Packing"""
 import typing
 from functools import reduce
 
@@ -23,16 +23,19 @@ from tvm import topi
 from tvm import tir
 
 
-def imcflow_unpacking_test(
+def imcflow_packing(
     data: te.Tensor,
     newshape,
+    out_dtype = "int8",
 ):
     """Imcflow Packing.
 
     Parameters
     ----------
     data : tvm.te.Tensor
-        int8 data type tensor which is packed two int4 tensor
+        Input to be quantized and packed.
+        this data is already quantize to int4
+        but the data type is stored as fp32
     
     newshape : tuple of ints
         The new shape
@@ -40,26 +43,31 @@ def imcflow_unpacking_test(
     Returns
     -------
     output : tvm.te.Tensor
-        float32 data type tensor which is unpacked two int4 tensor
+        int8 data type tensor which is packed two int4 tensor
+        if the number of inout data is odd, pad 4 bit zeros
 
     """
 
-    """Todo. use te instead of numpy"""
-    """using topi.math / topi.broadcast functions
-    topi.right_shift, topi.left_shift, topi.bitwise_and, topi.add, topi.subtract, topi.multiply"""
-
     dims = data.shape
-    dims_unpacked = topi.utils.prod(newshape)
-    data_copyed = te.compute(dims_unpacked, lambda i: te.if_then_else(i % 2 == 0, data[i // 2], (data[i // 2] >> 4) ), name = "data_copyed")
+    data_int8 = topi.cast(data, out_dtype)
+    num_elements = topi.utils.prod(dims)
+    data_rs = topi.reshape(data_int8, (num_elements,))
 
-    sign = topi.broadcast.bitwise_and(data_copyed, tir.const(0x08, "int8"))
-    value = topi.broadcast.bitwise_and(data_copyed, tir.const(0x07, "int8"))
-    value = te.compute(dims_unpacked, lambda i: te.if_then_else(sign[i] == tir.const(0x08, "int8"), value[i] | tir.const(0x78, "int8"), value[i]), name = "value")
-    sign = topi.math.left_shift(sign, 4)
-    int8_data = topi.bitwise_or(sign, value)
+    packed_size = (num_elements + 1) // 2
 
-    out = topi.reshape(int8_data, newshape)
+    if newshape is None:
+        newshape = [packed_size,]
 
-    out = topi.cast(out, "float32")
+    
+    sign = topi.math.right_shift(data_rs, 4)
+    sign = topi.broadcast.bitwise_and(sign, tir.const(0x08, out_dtype))
+    value = topi.broadcast.bitwise_and(data_rs, tir.const(0x07, out_dtype))
+    int4_data = topi.bitwise_or(sign, value)
+
+    out = te.compute(
+        newshape,
+        lambda i: int4_data[i * 2] | (te.if_then_else(i * 2 + 1 < num_elements, int4_data[i * 2 + 1], tir.const(0, out_dtype)) << 4),
+        name = "imcflow_packing_output"
+    )
 
     return out
