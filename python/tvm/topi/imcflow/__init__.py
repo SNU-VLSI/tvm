@@ -22,3 +22,4 @@ from __future__ import absolute_import as _abs
 from .imcflow_packing_test import *
 from .fused_batch_norm import *
 from .imcflow_unpacking_test import *
+from .qconv import *

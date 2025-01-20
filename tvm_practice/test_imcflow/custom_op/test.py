@@ -6,6 +6,7 @@ import math
 import collections
 import os
 import argparse
+import torch
 
 from tvm.relay.backend import te_compiler
 import tvm
@@ -20,7 +21,7 @@ from tvm.contrib import graph_executor
 
 from tvm.relay.backend import Executor, Runtime
 from tvm.relay import pretty_print
-from tvm.relay.op.nn.nn import imcflow_batch_norm
+from tvm.relay.op.nn.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.op.transform import imcflow_packing_test
 from tvm.relay.op.transform import imcflow_unpacking_test
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
@@ -245,6 +246,49 @@ def test_imcflow_unpacking_2():
   out = tvm.IRModule.from_expr(y)
   out = relay.transform.InferType()(out)
   print(out)
+
+def test_imcflow_qconv2d():
+  input_ = relay.var("input", shape=(2, 32, 16, 16))
+  weight_ = relay.var("weight", shape=(32, 32, 3, 3))
+
+  y = imcflow_qconv2d(
+    input_,
+    weight_,
+    channels=32,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+  )
+
+  func = relay.Function([input_, weight_], y)
+  mod = tvm.IRModule.from_expr(func)
+  mod = transform.InferType()(mod)
+
+  print(mod)
+
+  target = "llvm"
+  ctx = tvm.cpu(0)
+
+  with tvm.transform.PassContext(opt_level=0):
+    graph, lib, params = relay.build(mod, target=target)
+  mod = graph_executor.create(graph, lib, device=ctx)
+
+
+  input_data = np.random.rand(2, 32, 16, 16).astype("float32")
+  weight_data = np.random.rand(32, 32, 3, 3).astype("float32")
+
+  mod.set_input(input=input_data)
+  mod.set_input(weight=weight_data)
+  mod.run()
+
+  res = mod.get_output(0).asnumpy()
+  ref_res = torch.functional.F.conv2d(
+    input=torch.tensor(input_data),
+    weight=torch.tensor(weight_data),
+    padding=(1, 1),
+    stride=(1, 1)
+  ).numpy()
+
+  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
 if __name__ == "__main__":
   tvm.testing.main()
