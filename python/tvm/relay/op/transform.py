@@ -2044,4 +2044,41 @@ def imcflow_unpacking(data, newshape, out_dtype="float32"):
                 except ValueError as err:
                     raise RuntimeError(f"Unrecognized shape type: {err}")
         newshape = tempshape
+
     return _make.imcflow_unpacking(data, list(newshape), out_dtype)
+
+def imcflow_packing_test(data, newshape):
+    if isinstance(newshape, Constant):
+        newshape = list(newshape.data.numpy())
+    if isinstance(newshape, int):
+        newshape = [newshape]
+    if isinstance(newshape, (tuple, list)):
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
+    return _make.imcflow_packing_test(data, list(newshape))
+
+def imcflow_unpacking_test(data, newshape):
+    if isinstance(newshape, Constant):
+        newshape = list(newshape.data.numpy())
+    if isinstance(newshape, int):
+        newshape = [newshape]
+    if isinstance(newshape, (tuple, list)):
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
+    return _make.imcflow_unpacking_test(data, list(newshape))

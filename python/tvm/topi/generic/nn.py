@@ -931,3 +931,54 @@ def schedule_lstm(outs):
         The default schedule for LSTM.
     """
     return _default_schedule(outs, False)
+
+# test_fused_batch_norm
+def schedule_fused_batch_norm(outs):
+    """Schedule for fused_batch_norm
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+          The computation graph description of sparse_transpose
+          in the format of an array of tensors.
+
+    Returns
+    -------
+    sch: Schedule
+        The computation schedule for the op.
+    """
+    return _default_schedule(outs, False)
+
+# test_imcflow_packing
+def schedule_imcflow_packing_test(outs):
+    """Schedule for fused_batch_norm
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+          The computation graph description of sparse_transpose
+          in the format of an array of tensors.
+
+    Returns
+    -------
+    sch: Schedule
+        The computation schedule for the op.
+    """
+    return _default_schedule(outs, False)
+
+# test_imcflow_unpacking
+def schedule_imcflow_unpacking_test(outs):
+    """Schedule for fused_batch_norm
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+          The computation graph description of sparse_transpose
+          in the format of an array of tensors.
+
+    Returns
+    -------
+    sch: Schedule
+        The computation schedule for the op.
+    """
+    return _default_schedule(outs, False)

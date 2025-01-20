@@ -66,6 +66,9 @@ from . import random
 from . import hexagon
 from . import adreno
 
+# test_fused_batch_norm
+from . import imcflow
+
 # error reporting
 from .utils import InvalidShapeError
 

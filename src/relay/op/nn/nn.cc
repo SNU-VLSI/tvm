@@ -1730,5 +1730,6 @@ RELAY_REGISTER_OP("imcflow.fused_batch_norm")
     .add_type_rel("ImcflowBatchNorm", ImcflowBatchNormRel)
     .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
 
+
 }  // namespace relay
 }  // namespace tvm

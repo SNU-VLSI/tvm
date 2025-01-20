@@ -2095,3 +2095,68 @@ def wrap_compute_layout_transform(topi_compute, schedule_rule="None"):
         return [topi_compute(inputs[0], attrs.src_layout, attrs.dst_layout, schedule_rule)]
 
     return _compute_layout_transform
+
+# test_fused_batch_norm
+def wrap_compute_fused_batch_norm(topi_compute):
+    """wrap fused_batch_norm topi compute"""
+
+    def _compute_fused_batch_norm(attrs, inputs, out_type):
+        return topi_compute(*inputs, attrs.axis)
+
+    return _compute_fused_batch_norm
+
+
+@override_native_generic_func("fused_batch_norm_strategy")
+def fused_batch_norm_strategy(attrs, inputs, out_type, target):
+    """fused_batch_norm generic strategy"""
+    logger.warning("fused_batch_norm is not optimized for this platform.")
+    strategy = _op.OpStrategy()
+    # Todo. implement imcflow_fused_batch_norm to topi folder
+    strategy.add_implementation(
+        wrap_compute_fused_batch_norm(topi.imcflow.fused_batch_norm),
+        wrap_topi_schedule(topi.generic.schedule_fused_batch_norm),
+        name="fused_batch_norm.generic",
+    )
+    return strategy
+
+# test_imcflow_packing
+def wrap_compute_imcflow_packing_test(topi_compute):
+    """wrap test_imcflow_packing topi compute"""
+
+    def _compute_imcflow_packing_test(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.newshape)]
+
+    return _compute_imcflow_packing_test
+
+
+@override_native_generic_func("imcflow_packing_test_strategy")
+def imcflow_packing_test_strategy(attrs, inputs, out_type, target):
+    """imcflow_packing_test generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_packing_test(topi.imcflow.imcflow_packing_test),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_packing_test),
+        name="imcflow_packing_test.generic",
+    )
+    return strategy
+
+# test_imcflow_unpacking
+def wrap_compute_imcflow_unpacking_test(topi_compute):
+    """wrap test_imcflow_unpacking topi compute"""
+
+    def _compute_imcflow_unpacking_test(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.newshape)]
+
+    return _compute_imcflow_unpacking_test
+
+
+@override_native_generic_func("imcflow_unpacking_test_strategy")
+def imcflow_unpacking_test_strategy(attrs, inputs, out_type, target):
+    """imcflow_unpacking_test generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_unpacking_test(topi.imcflow.imcflow_unpacking_test),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_unpacking_test),
+        name="imcflow_unpacking_test.generic",
+    )
+    return strategy
