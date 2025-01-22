@@ -3,6 +3,7 @@ import tvm
 from tvm import relay
 from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
+from tvm.relay.dataflow_pattern import *
 from tvm.contrib.imcflow import TensorID, TensorEdge
 from tvm.relay.backend.contrib.imcflow import util
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
@@ -15,22 +16,94 @@ from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 import pdb
 
 
+CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
+TuplePat = is_tuple(None)
+TupleGetItemPat = is_tuple_get_item(wildcard())
+VarPat = is_var()
+
 @util.create_imcflow_function_pass(opt_level=0)
 class CodegenSuite:
   """A pass that generates/compiles code for IMCFlow functions"""
 
   def transform_function(self, _, func):
     func_name = func.attrs.global_symbol
-    builder = ImceCodeBlockBuilder(func_name)
-    builder.visit(func)
+    annotator = InternalEdgeAnnotator()
+    annotator.visit(func)
+    # builder = ImceCodeBlockBuilder(func_name, annotator.edges)
+    # builder.visit(func)
+    pdb.set_trace()
     DeviceCodegen("imce", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
 
     # builder = InodeCodeBlockBuilder(func_name).visit(func)
     # DeviceCodegen("inode").handle_code_generation(builder.codeblocks)
 
+class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
+  def __init__(self):
+    super().__init__()
+    self.composite_call = None
+    self.stack = []
+    self.edges = []
+
+  def add_edge(self, dst_tid, arg):
+    # pass arg in below cases
+    if CompositePat.match(arg):
+      self.stack.append(arg)
+      self.add_edge(dst_tid, arg.op.body)
+      self.stack.pop()
+      return
+    elif TuplePat.match(arg):
+      for a in arg.fields:
+        self.add_edge(dst_tid, a)
+      return
+    elif TupleGetItemPat.match(arg):
+      self.add_edge(dst_tid, arg.tuple_value)
+      return
+    elif VarPat.match(arg) and self.composite_call:
+      for idx, p in enumerate(self.composite_call.op.params):
+        if p == arg:
+          a = self.composite_call.args[idx]
+          self.stack.append(None)
+          self.add_edge(dst_tid, a)
+          self.stack.pop()
+      return
+
+    src_composite = self.stack[-1] if self.stack else None
+    src_tag = dst_tid.tensor_type if isinstance(arg, relay.Constant) else "odata"
+    src_tid = self.get_tensor_id(arg, src_tag, src_composite)
+    # TODO: add split idx for split op
+    self.edges.append(TensorEdge(src_tid, dst_tid))
+
+  def visit_call(self, call):
+    if CompositePat.match(call):
+      self.visit_composite_call(call)
+    else:
+      self.visit_regular_call(call)
+
+  def visit_composite_call(self, call):
+    self.composite_call = call
+    self.stack.append(call)
+    self.visit(call.op)
+    for a in call.args:
+      self.visit(a)
+    self.composite_call = None
+    self.stack.pop()
+
+  def visit_regular_call(self, call):
+    for idx, a in enumerate(call.args):
+      dst_tag = call.op.arguments[idx].name
+      dst_tid = self.get_tensor_id(call, dst_tag, self.composite_call)
+      self.add_edge(dst_tid, a)
+      self.visit(a)
+
+  def get_tensor_id(self, call, tag, composite=None):
+    if composite:
+      return TensorID((getNodeID(composite), getNodeID(call)), tag)
+    else:
+      return TensorID(getNodeID(call), tag)
+
 
 class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
-  def __init__(self, func_name):
+  def __init__(self, func_name, edges):
     super().__init__()
     self.curr_composite_id = None
     self.curr_conv_block = None
@@ -38,32 +111,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # FIXME: stores the tuple index when taking a field from tuple.
     # We use it to determine the qreg_start_idx for MinMaxQuantBlock but may not work
     # when there is more tuples in a composite call.
-    self.edges = []
+    self.edges = edges
     self.codeblocks = CodeBlocks(func_name, "imce")
-
-  def add_edges(self, call, arg, idx):
-    if isinstance(arg, relay.Tuple):
-      # pdb.set_trace()
-      for a in arg.fields:
-        self.add_edges(call, a, idx)
-      return
-    elif isinstance(arg, relay.TupleGetItem):
-      self.add_edges(call, arg.tuple_value, idx)
-      return
-    elif isinstance(call.op, relay.Function):
-      self.add_edges(call, call.op.body, idx)
-      return
-    else:
-      dst_tag = call.op.arguments[idx].name
-
-    if isinstance(arg, relay.Constant):
-      src_tag = dst_tag
-    else:
-      src_tag = "odata"
-
-    src_tid = self.get_tensor_id(arg, src_tag)
-    dst_tid = self.get_tensor_id(call, dst_tag)
-    self.edges.append(TensorEdge(src_tid, dst_tid))
 
   def visit_tuple(self, tup):
     for idx, x in enumerate(tup.fields):
@@ -72,7 +121,6 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_call(self, call):
     for idx, a in enumerate(call.args):
-      self.add_edges(call, a, idx)
       self.visit(a)
 
     IsComposite = isinstance(call.op, relay.Function) and \
@@ -209,9 +257,9 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_composite_call(self, call):
     self.curr_composite_id = getNodeID(call)
+    self.visit(call.op.body)
     for idx, a in enumerate(call.args):
       self.visit(a)
-    super().visit(call.op.body)
     self.curr_composite_id = None
 
   def get_hid(self, call):
