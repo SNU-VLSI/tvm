@@ -2220,4 +2220,43 @@ def imcflow_qconv2d_strategy(attrs, inputs, out_type, target):
       name="imcflow_qconv2d.generic",
     )
 
+
+def wrap_compute_imcflow_min_max_quantize(topi_compute):
+    """wrap imcflow_min_max_quantize topi compute"""
+
+    def _compute_imcflow_min_max_quantize(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.axis, attrs.out_dtype, attrs.param_dtype)]
+
+    return _compute_imcflow_min_max_quantize
+
+
+@override_native_generic_func("imcflow_min_max_quantize_strategy")
+def imcflow_min_max_quantize_strategy(attrs, inputs, out_type, target):
+    """imcflow_min_max_quantize generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_min_max_quantize(topi.imcflow.imcflow_min_max_quantize),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_min_max_quantize),
+        name="imcflow_min_max_quantize.generic",
+    )
+    return strategy
+
+def wrap_compute_imcflow_nu_quantize(topi_compute):
+    """wrap imcflow_nu_quantize topi compute"""
+
+    def _compute_imcflow_nu_quantize(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.axis, attrs.out_dtype, attrs.param_dtype)]
+
+    return _compute_imcflow_nu_quantize
+
+
+@override_native_generic_func("imcflow_nu_quantize_strategy")
+def imcflow_nu_quantize_strategy(attrs, inputs, out_type, target):
+    """imcflow_nu_quantize generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_nu_quantize(topi.imcflow.imcflow_nu_quantize),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_nu_quantize),
+        name="imcflow_nu_quantize.generic",
+    )
     return strategy

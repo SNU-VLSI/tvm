@@ -23,3 +23,5 @@ from .imcflow_packing import *
 from .fused_batch_norm import *
 from .qconv import *
 from .imcflow_unpacking import *
+from .imcflow_min_max_quantize import *
+from .imcflow_nu_quantize import *

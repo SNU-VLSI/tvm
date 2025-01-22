@@ -216,13 +216,13 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   // AssignType(types[2], DataType::Int(16), axis_shape, reporter);    // zero point
   // reporter->Assign(types[1], TensorType({1}, DataType::Int(16)));
   // reporter->Assign(types[2], TensorType({1}, DataType::Int(16)));
-  reporter->Assign(types[1], TensorType({}, quantize_attrs->param_dtype));
-  reporter->Assign(types[2], TensorType({}, quantize_attrs->param_dtype));
+  reporter->Assign(types[1], TensorType({}, quantize_attrs->param_dtype)); // min
+  reporter->Assign(types[2], TensorType({}, quantize_attrs->param_dtype)); // max
 
   const Array<tvm::PrimExpr> oshape = data->shape;
   const DataType out_dtype = quantize_attrs->out_dtype;
   // assign output type
-  reporter->Assign(types[3], TensorType(oshape, out_dtype));
+  reporter->Assign(types[3], TensorType(oshape, out_dtype)); // output
   return true;
 }
 
@@ -254,7 +254,7 @@ scale and zero point.
     .add_argument("max", "Expr", "max")
     .set_support_level(11)
     .add_type_rel("ImcflowMinMaxQuantize", ImcflowMinMaxQuantizeRel)
-    .set_attr<TNonComputational>("TNonComputational", true);
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
 
 TVM_REGISTER_GLOBAL("relay.qnn.op._make.imcflow_min_max_quantize").set_body_typed(MakeImcflowMinMaxQuantize);
 
@@ -279,9 +279,9 @@ bool ImcflowNUQuantizeRel(const Array<Type>& types, int num_inputs, const Attrs&
 
   const auto* threshold = types[1].as<TensorTypeNode>();
   const IntImmNode* Size = threshold->shape[0].as<IntImmNode>();
-  ICHECK(Size->value == 16) << "Threshold should be of shape 16 but was " << Size->value;
+  ICHECK(Size->value == 15) << "Threshold should be of shape 15 but was " << Size->value;
   // reporter->Assign(types[1], TensorType({16}, DataType::Int(16)));
-  reporter->Assign(types[1], TensorType({16}, quantize_attrs->param_dtype));
+  reporter->Assign(types[1], TensorType({15}, quantize_attrs->param_dtype));
 
   const Array<tvm::PrimExpr> oshape = data->shape;
   const DataType out_dtype = quantize_attrs->out_dtype;
@@ -307,7 +307,7 @@ RELAY_REGISTER_OP("qnn.imcflow_nu_quantize")
     .add_argument("threshold", "Tensor", "threshold")
     .set_support_level(11)
     .add_type_rel("ImcflowNUQuantize", ImcflowNUQuantizeRel)
-    .set_attr<TNonComputational>("TNonComputational", true);
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
 
 TVM_REGISTER_GLOBAL("relay.qnn.op._make.imcflow_nu_quantize").set_body_typed(MakeImcflowNUQuantize);
 

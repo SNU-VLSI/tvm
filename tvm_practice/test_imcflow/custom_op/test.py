@@ -100,12 +100,38 @@ def test_min_max_quant():
   IC = 64
   IH, IW = 32, 32
 
-  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
+  data = relay.var("data", shape=(4, 2), dtype="float32")
   # min = relay.var("min", type_annotation=relay.TensorType([1], "int16"))
   # max = relay.var("max", type_annotation=relay.TensorType([1], "int16"))
   min = relay.var("min", shape=(), dtype="int16")
   max = relay.var("max", shape=(), dtype="int16")
-  y = imcflow_min_max_quantize(data, min, max, 1, "int4")
+  y = imcflow_min_max_quantize(data, min, max, 1, "float32", "int16")
+  func = relay.Function([data, min, max], y)
+  
+  target = "llvm"
+  ctx = tvm.cpu(0)
+
+  input_data = np.array([[1.2, 0.1], [0.7, 1.7], [-1.1, 5.1], [6.7, -4.6]], dtype="float32")
+  min_data = np.int16(-8)
+  max_data = np.int16(7)
+
+  params = {"min": min_data, "max": max_data}
+
+  mod = tvm.IRModule.from_expr(func)
+  mod = transform.InferType()(mod)
+  print(mod)
+  graph, lib, params = relay.build(mod, target=target, params=params)
+  mod = graph_executor.create(graph, lib, device=ctx)
+  mod.set_input(**params)
+  mod.set_input(data=input_data)
+  mod.run()
+
+  res = mod.get_output(0).asnumpy()
+  print(res)
+  ref_res = np.array([[9.0, 8.0], [8.0, 9.0], [7.0, 13.0], [14.0, 4.0]], dtype="float32")
+
+  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+
   out = tvm.IRModule.from_expr(y)
   out = relay.transform.InferType()(out)
   print(out)
@@ -114,9 +140,34 @@ def test_nu_quant():
   IC = 64
   IH, IW = 32, 32
 
-  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
-  threshold = relay.var("threshold", shape=(16,), dtype="int16")
-  y = imcflow_nu_quantize(data, threshold, 1, "int4")
+  data = relay.var("data", shape=(5, 2), dtype="float32")
+  threshold = relay.var("threshold", shape=(15,), dtype="int16")
+  y = imcflow_nu_quantize(data, threshold, 1, "float32", "int16")
+  func = relay.Function([data, threshold], y)
+  
+  target = "llvm"
+  ctx = tvm.cpu(0)
+
+  input_data = np.array([[11.2, 24.1], [1.7, 0.7], [-5.1, 5.1], [7.7, -2.6], [-13.1, 12.1]], dtype="float32")
+  threshold_data = np.array([-10, -7, -5, -1, 0, 2, 4, 5, 6, 10, 11, 16, 17, 18, 19], dtype="int16")
+
+  params = {"threshold": threshold_data}
+
+  mod = tvm.IRModule.from_expr(func)
+  mod = transform.InferType()(mod)
+  print(mod)
+  graph, lib, params = relay.build(mod, target=target, params=params)
+  mod = graph_executor.create(graph, lib, device=ctx)
+  mod.set_input(**params)
+  mod.set_input(data=input_data)
+  mod.run()
+
+  res = mod.get_output(0).asnumpy()
+  print(res)
+  ref_res = np.array([[10.0, 15.0], [5.0, 4.0], [2.0, 7.0], [9.0, 3.0], [0.0, 11.0]], dtype="float32")
+
+  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+
   out = tvm.IRModule.from_expr(y)
   out = relay.transform.InferType()(out)
   print(out)
@@ -127,7 +178,6 @@ def test_imcflow_packing_1():
 
   data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
   input_data = np.array([[[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[-1.0]], [[-2.0]], [[-1.0]]]], dtype="float32")
-  print(input_data)
   newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
   y = imcflow_packing(data, newshape, "int8")
   func = relay.Function([data], y)
@@ -159,7 +209,6 @@ def test_imcflow_packing_2():
 
   data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
   input_data = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
-  print(input_data)
   newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
   y = imcflow_packing(data, newshape, "int8")
   func = relay.Function([data], y)
@@ -191,7 +240,6 @@ def test_imcflow_unpacking_1():
 
   data = relay.var("data", shape=(4,), dtype="int8")
   input_data = np.array([33, 67, -17, 15], dtype="int8")
-  print(input_data)
   newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
   y = imcflow_unpacking(data, newshape, "float32")
   func = relay.Function([data], y)
@@ -222,7 +270,6 @@ def test_imcflow_unpacking_2():
 
   data = relay.var("data", shape=(4,), dtype="int8")
   input_data = np.array([33, 67, -17, 31], dtype="int8")
-  print(input_data)
   newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
   y = imcflow_unpacking(data, newshape, "float32")
   func = relay.Function([data], y)
@@ -321,5 +368,7 @@ def test_packing_unpacking():
   out = relay.transform.InferType()(out)
   print(out)
   
+
+
 if __name__ == "__main__":
   tvm.testing.main()

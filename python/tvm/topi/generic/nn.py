@@ -982,3 +982,35 @@ def schedule_imcflow_unpacking(outs):
         The computation schedule for the op.
     """
     return _default_schedule(outs, False)
+
+def schedule_imcflow_min_max_quantize(outs):
+    """Schedule for imcflow_min_max_quantize
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+          The computation graph description of sparse_transpose
+          in the format of an array of tensors.
+
+    Returns
+    -------
+    sch: Schedule
+        The computation schedule for the op.
+    """
+    return _default_schedule(outs, False)
+
+def schedule_imcflow_nu_quantize(outs):
+    """Schedule for imcflow_nu_quantize
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+          The computation graph description of sparse_transpose
+          in the format of an array of tensors.
+
+    Returns
+    -------
+    sch: Schedule
+        The computation schedule for the op.
+    """
+    return _default_schedule(outs, False)
