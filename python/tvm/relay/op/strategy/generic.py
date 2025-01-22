@@ -2220,6 +2220,8 @@ def imcflow_qconv2d_strategy(attrs, inputs, out_type, target):
       name="imcflow_qconv2d.generic",
     )
 
+    return strategy
+
 
 def wrap_compute_imcflow_min_max_quantize(topi_compute):
     """wrap imcflow_min_max_quantize topi compute"""
