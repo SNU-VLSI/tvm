@@ -44,7 +44,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     self.stack = []
     self.edges = []
 
-  def add_edge(self, dst_tid, arg):
+  def add_edge(self, dst_tid, arg, split_idx=None):
     # pass arg in below cases
     if CompositePat.match(arg):
       self.stack.append(arg)
@@ -56,7 +56,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
         self.add_edge(dst_tid, a)
       return
     elif TupleGetItemPat.match(arg):
-      self.add_edge(dst_tid, arg.tuple_value)
+      self.add_edge(dst_tid, arg.tuple_value, split_idx=arg.index)
       return
     elif VarPat.match(arg) and self.composite_call:
       for idx, p in enumerate(self.composite_call.op.params):
@@ -71,7 +71,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     src_tag = dst_tid.tensor_type if isinstance(arg, relay.Constant) else "odata"
     src_tid = self.get_tensor_id(arg, src_tag, src_composite)
     # TODO: add split idx for split op
-    self.edges.append(TensorEdge(src_tid, dst_tid))
+    self.edges.append(TensorEdge(src_tid, dst_tid, split_idx))
 
   def visit_call(self, call):
     if CompositePat.match(call):
