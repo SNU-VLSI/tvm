@@ -82,11 +82,11 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
   def visit_composite_call(self, call):
     self.composite_call = call
     self.stack.append(call)
-    self.visit(call.op)
-    for a in call.args:
-      self.visit(a)
+    self.visit(call.op.body)
     self.composite_call = None
     self.stack.pop()
+    for a in call.args:
+      self.visit(a)
 
   def visit_regular_call(self, call):
     for idx, a in enumerate(call.args):
@@ -258,9 +258,9 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   def visit_composite_call(self, call):
     self.curr_composite_id = getNodeID(call)
     self.visit(call.op.body)
+    self.curr_composite_id = None
     for idx, a in enumerate(call.args):
       self.visit(a)
-    self.curr_composite_id = None
 
   def get_hid(self, call):
     node_id = self.curr_composite_id or getNodeID(call)
