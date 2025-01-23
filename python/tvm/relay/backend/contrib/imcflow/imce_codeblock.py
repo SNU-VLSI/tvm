@@ -151,6 +151,7 @@ class MinmaxQuantBlock(ImceCodeBlock):
 
 
 class ConcatBlock(ImceCodeBlock):
+
   """ Code block for concatenating multiple tensors """
   def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
     """ Code block for min/max quantization """
@@ -159,17 +160,24 @@ class ConcatBlock(ImceCodeBlock):
     self.out_edge = out_edge
 
   def _content(self) -> CodeBlock:
-    num_blocks = 4
+    num_bitplanes = 4
     src_mask = 15
 
     code = TextBlock("")
+    pdb.set_trace()
 
-    for i in range(num_blocks):
+    external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
+    internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
+
+    for i in range(num_bitplanes):
       var_o = UniqueVar((self.out_edge, i))
-      var_i = UniqueVar((self.in_edge, i))
+      var_i = UniqueVar((internal_in_edge, i))
+      for ext_edge in external_in_edges:
+        var_e = UniqueVar((ext_edge, i))
+        fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
 
-      qreg_start_idx = i + 4 * self.o_split_idx
-      code += f"{var_o} = __builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
+        code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
+        code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
 
     return code
 
@@ -201,6 +209,8 @@ class ConvBlock(ImceCodeBlock):
 
     # hack to get the last tensor edge
     last_out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
+    # fifo_id_o = DevConfig().get_tensor_edge_info(last_out_edge).fifo_id
+    # policy_addr_o = DevConfig().get_tensor_edge_info(last_out_edge).policy_addr
     # fifo_id_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").fifo_id
     # policy_addr_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").policy_addr
     fifo_id_o = -1
