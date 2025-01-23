@@ -1725,10 +1725,11 @@ RELAY_REGISTER_OP("imcflow.fused_batch_norm")
     .add_argument("data", "Tensor", "Input to which batch_norm will be applied.")
     .add_argument("fused_scale", "Tensor", "The scale factor.")
     .add_argument("fused_bias", "Tensor", "The bias.")
-    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BatchNormInferCorrectLayout)
     .set_support_level(1)
     .add_type_rel("ImcflowBatchNorm", ImcflowBatchNormRel)
     .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+
+// .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BatchNormInferCorrectLayout)
 
 
 }  // namespace relay

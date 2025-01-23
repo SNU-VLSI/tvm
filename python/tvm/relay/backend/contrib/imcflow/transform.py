@@ -2042,6 +2042,61 @@ class PackingInserter:
       new_func = _PackingInserter().visit(func)
       return new_func
 
+def clearCompilerTag(mod):
+
+  class _Visitor(tvm.relay.ExprMutator):
+    def visit_function(self, fn):
+      fn = super().visit_function(fn)
+
+      NewAttrs = {}
+      for key in fn.attrs.keys():
+        NewAttrs[key] = fn.attrs.get_str(key)
+      if "Compiler" in NewAttrs.keys():
+        del NewAttrs["Compiler"]
+      #   del NewAttrs["Primitive"]
+      # NewAttrs["Primitive"] = 1
+      # if "Primitive" not in NewAttrs.keys():
+      #   NewAttrs["Primitive"] = 0
+      # else:
+      #   NewAttrs["Primitive"] = 0
+      if "Composite" in NewAttrs.keys():
+        NewAttrs["Primitive"] = 1
+      else:
+        if "Primitive" in NewAttrs.keys():
+          del NewAttrs["Primitive"]
+
+      return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs)) 
+    
+    def visit_call(self, call):
+      if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"]):
+        var_map = {}
+        for arg, param in zip(call.args, call.op.params):
+          var_map[param] = super().visit(arg)
+        new_body = relay.bind(super().visit(call.op.body), var_map)
+        return new_body
+      else:
+        return super().visit_call(call)
+
+  for func_name in mod.functions:
+    # NewAttrs = {}
+    # for key in mod[func_name].attrs.keys():
+    #   NewAttrs[key] = mod[func_name].attrs.get_str(key)
+    # if "Compiler" in NewAttrs.keys():
+    #   del NewAttrs["Compiler"]
+    
+    # mod[func_name] = FunctionWithFields(
+    #   mod[func_name], 
+    #   list(mod[func_name].params), 
+    #   mod[func_name].body, 
+    #   mod[func_name].ret_type, 
+    #   mod[func_name].type_params, 
+    #   tvm.ir.make_node("DictAttrs", **NewAttrs)
+    # )
+
+    mod[func_name] = _Visitor().visit(mod[func_name])
+
+  return mod
+
 # @relay.transform.function_pass(opt_level=0)
 # class IDAssigner:
 #     def transform_function(self, func, mod, ctx):
