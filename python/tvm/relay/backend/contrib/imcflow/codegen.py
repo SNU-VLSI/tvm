@@ -172,7 +172,11 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     in_edges = self.get_input_edges(call)
     out_edge = self.get_output_edge(call)
 
-    w_tid = self.get_tensor_id(args["weight"], "weight")
+    for edge in in_edges:
+      if edge.src_id.tensor_type == "weight":
+        w_edge = edge
+    w_info = DevConfig().get_tensor_edge_info(w_edge)
+    w_tid = w_edge.src_id
     hid = self.get_hid(call)
 
     # scan reg
@@ -184,7 +188,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # write weights using recv
     size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
     # TODO: change to write weight block
-    block = LoadLBBlock(size, 1, -1, "weight write")
+    block = LoadLBBlock(size, 1, w_info.fifo_id, "weight write")
     self.codeblocks.append(hid, block, CodePhase.INIT)
 
     block = ConvBlock(in_edges, out_edge, shapes, call.attrs, "conv exec")
