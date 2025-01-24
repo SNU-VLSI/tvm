@@ -72,7 +72,13 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
       return
 
     src_composite = self.stack[-1] if self.stack else None
-    src_tag = dst_tid.tensor_type if isinstance(arg, relay.Constant) else "odata"
+
+    # override src tag to const tag if dst tag is const tag
+    const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale"]
+    src_tag = "odata"
+    if dst_tid.tensor_type in const_tags:
+      src_tag = dst_tid.tensor_type
+
     src_tid = self.get_tensor_id(arg, src_tag, src_composite)
     # TODO: add split idx for split op
     self.edges.append(TensorEdge(src_tid, dst_tid, split_idx))
