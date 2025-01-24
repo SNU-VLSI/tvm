@@ -97,9 +97,9 @@ class VecBlock(ImceCodeBlock):
 
     for i in range(num_blocks):
       # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
-      var_o = UniqueVar((self.out_edge, i))
       var_i0 = UniqueVar((self.in_edges[0], i))
       var_i1 = UniqueVar((self.in_edges[1], i))
+      var_o = UniqueVar((self.out_edge, i))
 
       # te info is None for composite internal tensors
       if te_info0 and not var_i0.static:
@@ -147,8 +147,8 @@ class MinmaxQuantBlock(ImceCodeBlock):
     code = TextBlock("")
 
     for i in range(num_blocks):
-      var_o = UniqueVar((self.out_edge, i))
       var_i = UniqueVar((self.in_edge, i))
+      var_o = UniqueVar((self.out_edge, i))
 
       qreg_start_idx = i + 4 * self.o_split_idx
       code += f"{var_o} = __builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
@@ -177,8 +177,8 @@ class ConcatBlock(ImceCodeBlock):
     internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
 
     for i in range(num_bitplanes):
-      var_o = UniqueVar((self.out_edge, i))
       var_i = UniqueVar((internal_in_edge, i))
+      var_o = UniqueVar((self.out_edge, i))
       for ext_edge in external_in_edges:
         var_e = UniqueVar((ext_edge, i))
         fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
