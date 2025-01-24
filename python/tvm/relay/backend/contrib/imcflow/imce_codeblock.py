@@ -101,6 +101,7 @@ class VecBlock(ImceCodeBlock):
       var_i0 = UniqueVar((self.in_edges[0], i))
       var_i1 = UniqueVar((self.in_edges[1], i))
 
+      # te info is None for composite internal tensors
       if te_info0 and not var_i0.static:
         code += f"{var_i0} = __builtin_IMCE_RECV({te_info0.fifo_id});"
       if te_info1 and not var_i1.static:
@@ -156,11 +157,13 @@ class MinmaxQuantBlock(ImceCodeBlock):
 
 
 class ConcatBlock(ImceCodeBlock):
+  min_in_edges = 2
 
   """ Code block for concatenating multiple tensors """
   def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(annotation)
+    assert len(in_edges) >= self.min_in_edges, "At least two input edges are required"
     self.in_edges = in_edges
     self.out_edge = out_edge
 
