@@ -151,7 +151,9 @@ class MinmaxQuantBlock(ImceCodeBlock):
       var_o = UniqueVar((self.out_edge, i))
 
       qreg_start_idx = i + 4 * self.o_split_idx
-      code += f"{var_o} = __builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
+      # min max quantization does not require $rs2
+      code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
+      code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
 
     return code
 
