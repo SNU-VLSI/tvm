@@ -273,6 +273,12 @@ class RouterEntry:
   def __repr__(self):
     return self.__str__()
 
+  def __eq__(self, other):
+    is_equal = self.router_id == other.router_id and self.address == other.address
+    if is_equal:
+      assert self.data == other.data, f"Data mismatch: {self.data} != {other.data} in same router entry"
+    return is_equal
+
 
 class EdgeInfo:
   """ stores the list of router entries and memory block info for a data movement (edge). """
