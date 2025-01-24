@@ -186,6 +186,23 @@ class ConcatBlock(ImceCodeBlock):
     return code
 
 
+class SplitBlock(ImceCodeBlock):
+  num_in_edges = 1
+
+  """ Code block for splitting a tensor into multiple tensors """
+  def __init__(self, in_edge: TensorEdge, out_edges: List[TensorEdge], annotation: str = ""):
+    super().__init__(annotation)
+    self.in_edge = in_edge
+    first_policies = [DevConfig().get_tensor_edge_info(out_edge).policy_info[0] for out_edge in out_edges]
+    fifo_ids = [DevConfig().get_tensor_edge_info(out_edge).fifo_id for out_edge in out_edges]
+    assert all(policy == first_policies[0] for policy in first_policies), "All output edges must have the same first policy info"
+    assert all(fid == fifo_ids[0] for fid in fifo_ids), "All output edges must have the same fifo id"
+    self.out_edge = out_edges[0]
+
+  def _content(self) -> CodeBlock:
+    return TextBlock("")
+
+
 class ConvBlock(ImceCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
   num_in_edges = 2

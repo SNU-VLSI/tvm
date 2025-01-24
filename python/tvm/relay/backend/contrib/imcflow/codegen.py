@@ -140,6 +140,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit_divide_call(call)
     elif call.op == op.get("concatenate"):
       self.visit_concat_call(call)
+    elif call.op == op.get("split"):
+      self.visit_split_call(call)
     elif call.op == op.get("nn.bias_add"):
       # self.visit_bias_add_call(call)
       pass
@@ -212,6 +214,17 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     block = ConcatBlock(in_edges, out_edge, "concat")
     conv_block.add_post_op(block)
+
+  def visit_split_call(self, call):
+    hid = self.get_hid(call)
+    if hid.is_imce():
+      conv_block = self.get_conv_block_by_hid(hid)
+
+      in_edge = self.get_input_edge(call)
+      out_edges = self.get_output_edges(call)
+
+      block = SplitBlock(in_edge, out_edges, "split")
+      conv_block.add_post_op(block)
 
   def visit_min_max_quantize_call(self, call):
     assert self.curr_composite_id, "MinMaxQuantize must be inside a composite function"
