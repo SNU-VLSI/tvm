@@ -136,6 +136,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit_conv_call(call)
     elif call.op == op.get("add"):
       self.visit_add_call(call)
+    elif call.op == op.get("divide"):
+      self.visit_divide_call(call)
     elif call.op == op.get("concatenate"):
       self.visit_concat_call(call)
     elif call.op == op.get("nn.bias_add"):
@@ -189,6 +191,16 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     in_edges = self.get_input_edges(call)
     out_edge = self.get_output_edge(call)
     block = AddBlock(in_edges, out_edge, "add")
+    self.curr_conv_block.add_post_op(block)
+
+  def visit_divide_call(self, call):
+    # TODO: divide block should be replaced later
+    assert self.curr_composite_id, "Divide must be inside a composite function"
+    hid = self.get_hid(call)
+
+    in_edges = self.get_input_edges(call)
+    out_edge = self.get_output_edge(call)
+    block = DivBlock(in_edges, out_edge, "div")
     self.curr_conv_block.add_post_op(block)
 
   def visit_concat_call(self, call):

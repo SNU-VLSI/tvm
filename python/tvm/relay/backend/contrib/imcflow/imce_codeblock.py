@@ -114,6 +114,10 @@ class AddBlock(VecBlock):
   def _op_name(self) -> str:
     return "ADD"
 
+class DivBlock(VecBlock):
+  def _op_name(self) -> str:
+    return "DIV"
+
 class MultlBlock(VecBlock):
   def _op_name(self) -> str:
     return "MULTL"
