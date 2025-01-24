@@ -297,23 +297,21 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       if isinstance(block, ConvBlock):
         return block
 
-  def get_input_edge(self, call, tag):
-    for edge in self.edges:
-      if edge.dst_inner_gid_match(getNodeID(call)) and edge.dst_id.tensor_type == tag:
-        return edge
+  def get_input_edge(self, call):
+    edges = self.get_input_edges(call)
+    assert len(edges) == 1, "Input edge must be unique"
+    return edges[0]
 
   def get_input_edges(self, call):
-    in_edges = []
-    for edge in self.edges:
-      if edge.dst_inner_gid_match(getNodeID(call)):
-        in_edges.append(edge)
-
-    return in_edges
+    return [edge for edge in self.edges if edge.dst_inner_gid_match(getNodeID(call))]
 
   def get_output_edge(self, call):
-    for edge in self.edges:
-      if edge.src_inner_gid_match(getNodeID(call)):
-        return edge
+    edges = self.get_output_edges(call)
+    assert len(edges) == 1, "Output edge must be unique"
+    return edges[0]
+
+  def get_output_edges(self, call):
+    return [edge for edge in self.edges if edge.src_inner_gid_match(getNodeID(call))]
 
   def get_tensor_edge_from_tag(self, call, tag):
     tid = self.get_tensor_id(call, tag)
