@@ -24,7 +24,6 @@ class DeviceCodegen:
     """
     logging.info(f"Generating {self.target} code for function: {func_name}")
     code = codeblocks.generate()
-    pdb.set_trace()
     cpp_name = self.save_target_code_to_file(code, func_name)
     self.compile_target_code(cpp_name)
 

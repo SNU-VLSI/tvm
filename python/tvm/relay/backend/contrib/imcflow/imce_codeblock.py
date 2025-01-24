@@ -6,6 +6,7 @@ from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import CodeBlock, TextBlock, SimpleFor, UniqueVar
+import logging
 import pdb
 
 
@@ -164,7 +165,6 @@ class ConcatBlock(ImceCodeBlock):
     src_mask = 15
 
     code = TextBlock("")
-    pdb.set_trace()
 
     external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
     internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
@@ -206,15 +206,20 @@ class ConvBlock(ImceCodeBlock):
     num_blocks = 4
     fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(
         self.in_edge.dst_id, "in").fifo_id
+    if fifo_id_i != 0:
+      logging.warning(f"conv block data fifo_id_i is not 0, but {fifo_id_i}")
 
     # hack to get the last tensor edge
     last_out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
-    # fifo_id_o = DevConfig().get_tensor_edge_info(last_out_edge).fifo_id
-    # policy_addr_o = DevConfig().get_tensor_edge_info(last_out_edge).policy_addr
-    # fifo_id_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").fifo_id
-    # policy_addr_o = DevConfig().get_tensor_edge_info_with_id_dir(out_edge.src_id, "out").policy_addr
-    fifo_id_o = -1
-    policy_addr_o = -1
+    out_edge_info = DevConfig().get_tensor_edge_info(last_out_edge)
+
+    if out_edge_info:
+      fifo_id_o = out_edge_info.fifo_id
+      policy_addr_o = out_edge_info.policy_info[0].address
+    else:
+      logging.warning(f"Output edge info not found for {last_out_edge}")
+      fifo_id_o = -1
+      policy_addr_o = -1
 
     code = TextBlock("")
     code += LoadLBBlock(recv_count, num_blocks, fifo_id_i)

@@ -36,7 +36,6 @@ class CodegenSuite:
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
-    pdb.set_trace()
     DeviceCodegen("imce", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
 
     # builder = InodeCodeBlockBuilder(func_name).visit(func)
