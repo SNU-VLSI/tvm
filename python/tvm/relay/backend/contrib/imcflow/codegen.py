@@ -376,3 +376,36 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   #   for arg in call.args:
   #     if isinstance(arg, relay.Constant):
   #       return arg
+
+
+class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
+  def __init__(self, func_name, edges):
+    super().__init__()
+    self.edges = edges
+    self.codeblocks = CodeBlocks(func_name, "inode")
+    self.initialize()
+
+  def initialize(self):
+    for inode in NodeID.inodes():
+      # policy update
+      block = PolicyUpdateBlock(inode, "policy update")
+      self.codeblocks.append(inode, block, CodePhase.INIT)
+      # imem write
+      # imcu write
+
+    pass
+
+  def visit_call(self, call):
+    for idx, a in enumerate(call.args):
+      self.visit(a)
+
+    if IsSend:
+      pass
+    elif IsRecv:
+      pass
+    else:
+      self.visit(call.op)
+
+    # check call is in inode
+    if DevConfig().get_hw_node(getNodeID(call)).is_inode():
+      # Add Recv Block, Send Block
