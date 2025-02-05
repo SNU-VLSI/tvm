@@ -38,7 +38,7 @@ class CodegenSuite:
     builder.visit(func)
     DeviceCodegen("imce", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
 
-    # builder = InodeCodeBlockBuilder(func_name).visit(func)
+    builder = InodeCodeBlockBuilder(func_name, annotator.edges).visit(func)
     # DeviceCodegen("inode").handle_code_generation(builder.codeblocks)
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
@@ -384,6 +384,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.edges = edges
     self.codeblocks = CodeBlocks(func_name, "inode")
     self.initialize()
+    self.curr_composite_id = None
 
   def initialize(self):
     for inode in NodeID.inodes():
@@ -395,17 +396,87 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     pass
 
+  def get_graph_node_id(self, call):
+    if self.curr_composite_id:
+      return (self.curr_composite_id, getNodeID(call))
+    else:
+      return getNodeID(call)
+    
   def visit_call(self, call):
     for idx, a in enumerate(call.args):
       self.visit(a)
 
-    if IsSend:
-      pass
-    elif IsRecv:
-      pass
-    else:
-      self.visit(call.op)
+    IsComposite = isinstance(call.op, relay.Function) and \
+        "Composite" in call.op.attrs
+    IsInode =  call.op == op.get("imcflow_unpacking") or call.op == op.get("imcflow_packing")
 
-    # check call is in inode
-    if DevConfig().get_hw_node(getNodeID(call)).is_inode():
-      # Add Recv Block, Send Block
+    if IsComposite:
+      self.visit_composite_call(call)
+    elif IsInode:
+      IsSend = False
+      IsRecv = False
+
+      # check call is in inode      
+      if DevConfig().get_hw_node(self.get_graph_node_id(call)).is_inode():
+        # Add Recv Block, Send Block
+        # Determine Recv or Send
+        if call.op == op.get("imcflow_unpacking"):
+          IsSend = True
+        elif call.op == op.get("imcflow_packing"):
+          IsRecv = True
+        elif call.op == op.get("split"):
+          pass
+        else:       
+          raise ValueError("wrong operation!")
+
+      if IsSend:
+        self.visit_send_call(call)
+      elif IsRecv:
+        self.visit_recv_call(call)
+      else:
+        self.visit(call.op)
+    else:
+      pass
+
+  def visit_composite_call(self, call):
+    self.curr_composite_id = getNodeID(call)
+    self.visit(call.op.body)
+    self.curr_composite_id = None
+    for idx, a in enumerate(call.args):
+      self.visit(a)
+      
+  def visit_send_call(self, call):
+    # args = self.get_arg_dict(call)
+    # shapes = self.get_arg_shape_dict(call)
+    # shapes["output"] = infer_shape(call)
+
+    # in_edges = self.get_input_edges(call)
+    # out_edge = self.get_output_edge(call)
+
+    # for edge in in_edges:
+    #   if edge.src_id.tensor_type == "weight":
+    #     w_edge = edge
+    # w_info = DevConfig().get_tensor_edge_info(w_edge)
+    # w_tid = w_edge.src_id
+    # hid = self.get_hid(call)
+
+    # # scan reg
+    # # TODO: add scan reg code block
+
+    # # config reg
+    # # TODO: add config reg code block
+
+    # # write weights using recv
+    # size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
+    # # TODO: change to write weight block
+    # block = LoadLBBlock(size, 1, w_info.fifo_id, "weight write")
+    # self.codeblocks.append(hid, block, CodePhase.INIT)
+
+    # block = ConvBlock(in_edges, out_edge, shapes, call.attrs, "conv exec")
+    # # FIXME: this assumes that convblock is called first... we don't want that
+    # self.curr_conv_block = block
+    # self.codeblocks.append(hid, block, CodePhase.EXEC)
+    return
+
+  def visit_recv_call(self, call):
+    return

@@ -6,6 +6,20 @@ import pdb
 
 
 class InodeCodeBlock(CodeBlock):
+  def __init__(self, annotation: str = ""):
+    super().__init__()
+    self.annotation = annotation
+    
+  def content(self) -> CodeBlock:
+    if self.annotation:
+      code = TextBlock("")
+      code += f"// generate: {self.annotation}"
+      code += copy(self._content())
+      code += f"// endgenerate: {self.annotation}"
+      return code
+    else:
+      return self._content()  
+
   @abstractmethod
   def _content(self) -> Union[str, CodeBlock]:
     pass
