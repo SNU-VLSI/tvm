@@ -395,20 +395,15 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # imcu write
 
     pass
-
-  def get_graph_node_id(self, call):
-    if self.curr_composite_id:
-      return (self.curr_composite_id, getNodeID(call))
-    else:
-      return getNodeID(call)
-    
+      
   def visit_call(self, call):
     for idx, a in enumerate(call.args):
       self.visit(a)
 
     IsComposite = isinstance(call.op, relay.Function) and \
         "Composite" in call.op.attrs
-    IsInode =  call.op == op.get("imcflow_unpacking") or call.op == op.get("imcflow_packing")
+    IsInode =  call.op == op.get("imcflow_unpacking") or \
+      call.op == op.get("imcflow_packing")
 
     if IsComposite:
       self.visit_composite_call(call)
@@ -418,14 +413,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
       # check call is in inode      
       if DevConfig().get_hw_node(self.get_graph_node_id(call)).is_inode():
-        # Add Recv Block, Send Block
-        # Determine Recv or Send
+        # Determine Recv or Send and add Recv Block, send Block
         if call.op == op.get("imcflow_unpacking"):
           IsSend = True
         elif call.op == op.get("imcflow_packing"):
           IsRecv = True
-        elif call.op == op.get("split"):
-          pass
+        # elif call.op == op.get("split"):
+        #   IsSend = True
         else:       
           raise ValueError("wrong operation!")
 
@@ -446,37 +440,53 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit(a)
       
   def visit_send_call(self, call):
-    # args = self.get_arg_dict(call)
-    # shapes = self.get_arg_shape_dict(call)
-    # shapes["output"] = infer_shape(call)
+    out_edge = self.get_output_edges(call)[0]
+    out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
+    out_tid = out_edge.src_id
+    hid = self.get_hid(call)
+    block = DevConfig().MemLayout.get_data_block_by_id(out_tid)
 
-    # in_edges = self.get_input_edges(call)
-    # out_edge = self.get_output_edge(call)
+    dst_hw_node = DevConfig().get_hw_node(out_edge.dst_id.graph_node_id)
+    if dst_hw_node is not None and dst_hw_node.is_inode():
+      # The only available case that unpacking's dst hw node is inode is [unpacking -> split].
+      # [unpacking -> split -> qconv], then both unpacking and split are inode.
+      # In this case, no tensor edge exists in [unpacking -> split], so handle this case separately.
 
-    # for edge in in_edges:
-    #   if edge.src_id.tensor_type == "weight":
-    #     w_edge = edge
-    # w_info = DevConfig().get_tensor_edge_info(w_edge)
-    # w_tid = w_edge.src_id
-    # hid = self.get_hid(call)
+      # TODO: Need to add another blocks(control block, etc)
+      block = SendBlock(block, 0, "send idata") # FIFO ID for input of qconv is always 0. Refer to transform.py/PolicyTableGenerator.add_EdgeInfo
+      self.codeblocks.append(hid, block, CodePhase.EXEC)
+    else:    
+      # TODO: Need to add another blocks(control block, etc)
+      block = SendBlock(block, out_edge_info.fifo_id, "send")
+      self.codeblocks.append(hid, block, CodePhase.EXEC)
 
-    # # scan reg
-    # # TODO: add scan reg code block
-
-    # # config reg
-    # # TODO: add config reg code block
-
-    # # write weights using recv
-    # size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
-    # # TODO: change to write weight block
-    # block = LoadLBBlock(size, 1, w_info.fifo_id, "weight write")
-    # self.codeblocks.append(hid, block, CodePhase.INIT)
-
-    # block = ConvBlock(in_edges, out_edge, shapes, call.attrs, "conv exec")
-    # # FIXME: this assumes that convblock is called first... we don't want that
-    # self.curr_conv_block = block
-    # self.codeblocks.append(hid, block, CodePhase.EXEC)
     return
 
   def visit_recv_call(self, call):
+    in_edge = self.get_input_edges(call)[0]
+    in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
+    in_tid = in_edge.src_id
+    hid = self.get_hid(call)
+    block = DevConfig().MemLayout.get_data_block_by_id(in_tid)
+
+    # TODO: Need to add another blocks(control block, etc)
+    block = RecvBlock(block, in_edge_info.fifo_id, "recv")
+    self.codeblocks.append(hid, block, CodePhase.EXEC)
+
     return
+
+  def get_graph_node_id(self, call):
+    if self.curr_composite_id:
+      return (self.curr_composite_id, getNodeID(call))
+    else:
+      return getNodeID(call)
+
+  def get_input_edges(self, call):
+    return [edge for edge in self.edges if edge.dst_inner_gid_match(getNodeID(call))]
+
+  def get_output_edges(self, call):
+    return [edge for edge in self.edges if edge.src_inner_gid_match(getNodeID(call))]
+
+  def get_hid(self, call):
+    node_id = self.get_graph_node_id(call)
+    return DevConfig().get_hw_node(node_id)
