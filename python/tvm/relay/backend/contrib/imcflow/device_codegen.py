@@ -25,7 +25,7 @@ class DeviceCodegen:
     logging.info(f"Generating {self.target} code for function: {func_name}")
     code = codeblocks.generate()
     cpp_name = self.save_target_code_to_file(code, func_name)
-    self.compile_target_code(cpp_name)
+    # self.compile_target_code(cpp_name)
 
   def save_target_code_to_file(self, code, func_name):
     cpp_name = os.path.join(self.output_dir, f"{func_name}_{self.target}.cpp")

@@ -6,6 +6,20 @@ import pdb
 
 
 class InodeCodeBlock(CodeBlock):
+  def __init__(self, annotation: str = ""):
+    super().__init__()
+    self.annotation = annotation
+    
+  def content(self) -> CodeBlock:
+    if self.annotation:
+      code = TextBlock("")
+      code += f"// generate: {self.annotation}"
+      code += copy(self._content())
+      code += f"// endgenerate: {self.annotation}"
+      return code
+    else:
+      return self._content()  
+
   @abstractmethod
   def _content(self) -> Union[str, CodeBlock]:
     pass
@@ -59,7 +73,23 @@ class RecvBlock(InodeCodeBlock):
 
 
 class SendBlock(InodeCodeBlock):
-  pass
+  """ Code block for sending data from given fifo id """
+
+  def __init__(self, block: DataBlock, fifo_id: int, annotation: str = ""):
+    super().__init__(annotation)
+    self.block = block
+    self.fifo_id = fifo_id
+
+  def _content(self) -> Union[str, CodeBlock]:
+    assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
+    recv_count = self.block.size // 32
+
+    code = f"int send_data_base_address = {self.block.base_address};\n"
+    code += SimpleFor(recv_count,
+                      f"__builtin_INODE_SEND(send_data_base_address + i*32, 0, 0, {self.fifo_id});")
+
+    return code
+
 
 
 """

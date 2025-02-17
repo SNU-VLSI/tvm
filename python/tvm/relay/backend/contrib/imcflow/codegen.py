@@ -38,7 +38,7 @@ class CodegenSuite:
     builder.visit(func)
     DeviceCodegen("imce", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
 
-    # builder = InodeCodeBlockBuilder(func_name).visit(func)
+    builder = InodeCodeBlockBuilder(func_name, annotator.edges).visit(func)
     # DeviceCodegen("inode").handle_code_generation(builder.codeblocks)
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
@@ -384,6 +384,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.edges = edges
     self.codeblocks = CodeBlocks(func_name, "inode")
     self.initialize()
+    self.curr_composite_id = None
 
   def initialize(self):
     for inode in NodeID.inodes():
@@ -394,18 +395,98 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # imcu write
 
     pass
-
+      
   def visit_call(self, call):
     for idx, a in enumerate(call.args):
       self.visit(a)
 
-    if IsSend:
-      pass
-    elif IsRecv:
-      pass
-    else:
-      self.visit(call.op)
+    IsComposite = isinstance(call.op, relay.Function) and \
+        "Composite" in call.op.attrs
+    IsInode =  call.op == op.get("imcflow_unpacking") or \
+      call.op == op.get("imcflow_packing")
 
-    # check call is in inode
-    if DevConfig().get_hw_node(getNodeID(call)).is_inode():
-      # Add Recv Block, Send Block
+    if IsComposite:
+      self.visit_composite_call(call)
+    elif IsInode:
+      IsSend = False
+      IsRecv = False
+
+      # check call is in inode      
+      if DevConfig().get_hw_node(self.get_graph_node_id(call)).is_inode():
+        # Determine Recv or Send and add Recv Block, send Block
+        if call.op == op.get("imcflow_unpacking"):
+          IsSend = True
+        elif call.op == op.get("imcflow_packing"):
+          IsRecv = True
+        # elif call.op == op.get("split"):
+        #   IsSend = True
+        else:       
+          raise ValueError("wrong operation!")
+
+      if IsSend:
+        self.visit_send_call(call)
+      elif IsRecv:
+        self.visit_recv_call(call)
+      else:
+        self.visit(call.op)
+    else:
+      pass
+
+  def visit_composite_call(self, call):
+    self.curr_composite_id = getNodeID(call)
+    self.visit(call.op.body)
+    self.curr_composite_id = None
+    for idx, a in enumerate(call.args):
+      self.visit(a)
+      
+  def visit_send_call(self, call):
+    out_edge = self.get_output_edges(call)[0]
+    out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
+    out_tid = out_edge.src_id
+    hid = self.get_hid(call)
+    block = DevConfig().MemLayout.get_data_block_by_id(out_tid)
+
+    dst_hw_node = DevConfig().get_hw_node(out_edge.dst_id.graph_node_id)
+    if dst_hw_node is not None and dst_hw_node.is_inode():
+      # The only available case that unpacking's dst hw node is inode is [unpacking -> split].
+      # [unpacking -> split -> qconv], then both unpacking and split are inode.
+      # In this case, no tensor edge exists in [unpacking -> split], so handle this case separately.
+
+      # TODO: Need to add another blocks(control block, etc)
+      block = SendBlock(block, 0, "send idata") # FIFO ID for input of qconv is always 0. Refer to transform.py/PolicyTableGenerator.add_EdgeInfo
+      self.codeblocks.append(hid, block, CodePhase.EXEC)
+    else:    
+      # TODO: Need to add another blocks(control block, etc)
+      block = SendBlock(block, out_edge_info.fifo_id, "send")
+      self.codeblocks.append(hid, block, CodePhase.EXEC)
+
+    return
+
+  def visit_recv_call(self, call):
+    in_edge = self.get_input_edges(call)[0]
+    in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
+    in_tid = in_edge.src_id
+    hid = self.get_hid(call)
+    block = DevConfig().MemLayout.get_data_block_by_id(in_tid)
+
+    # TODO: Need to add another blocks(control block, etc)
+    block = RecvBlock(block, in_edge_info.fifo_id, "recv")
+    self.codeblocks.append(hid, block, CodePhase.EXEC)
+
+    return
+
+  def get_graph_node_id(self, call):
+    if self.curr_composite_id:
+      return (self.curr_composite_id, getNodeID(call))
+    else:
+      return getNodeID(call)
+
+  def get_input_edges(self, call):
+    return [edge for edge in self.edges if edge.dst_inner_gid_match(getNodeID(call))]
+
+  def get_output_edges(self, call):
+    return [edge for edge in self.edges if edge.src_inner_gid_match(getNodeID(call))]
+
+  def get_hid(self, call):
+    node_id = self.get_graph_node_id(call)
+    return DevConfig().get_hw_node(node_id)
