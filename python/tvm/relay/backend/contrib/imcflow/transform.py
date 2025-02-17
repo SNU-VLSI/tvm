@@ -20,6 +20,7 @@ from copy import deepcopy
 import re
 from dataclasses import dataclass
 from enum import Enum
+import json
 
 def getNodeID(node) -> int:
   id_dict = HashToCustomID()
@@ -79,6 +80,36 @@ def _get_type(parent_mod, node):
 
     print(f"out_type: {out_type}")
     return out_type
+
+def getInputNodesOfFunc(func):
+  InNodes = []
+
+  class _Visitor(tvm.relay.ExprVisitor):
+    def visit_var(self, var):
+      InNodes.append(var)
+      super().visit_var(var)
+
+    def visit_constant(self, const):
+      InNodes.append(const)
+      super().visit_constant(const)
+
+  _Visitor().visit(func)
+  return InNodes
+
+def getOutputNodesOfFunc(func):
+  IsComposite = isinstance(func.body.op, relay.Function) and "Composite" in func.body.op.attrs and re.match(r"imcflow\..*", func.body.op.attrs["Composite"])
+  if IsComposite:
+    output_node = func.body.op.body
+  else:
+    output_node = func.body
+
+  return output_node
+
+def getInputTensorIDs(func):
+  pass
+
+def getOutputTensorIDs(func):
+  pass
 
 def makeToQuantizedForm(mod):
   """
@@ -2202,3 +2233,196 @@ def constructCustomIDInFunc(mod):
 
   for func_name in mod.functions:
     if "imcflow" in func_name.name_hint: _Visitor(func_name.name_hint).visit(mod[func_name.name_hint])
+
+def getInstructionBlocks(func_name, func):
+    instruction_blocks = []
+
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.items():
+      if re.match(r"inode\d+_inst", key):
+        for block_name, block in memory_region.blocks.items():
+          if func_name in block_name:
+            instruction_blocks.append(block)
+
+    return instruction_blocks
+
+def getDataBlocks(func_name, func):
+    input_data_blocks = []
+    output_data_blocks = []
+
+    # get input/output node ID
+    input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(func)]
+    output_node_id = getNodeID(getOutputNodeOfFunc(func))
+
+    # get input data blocks
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.items():
+      if re.match(r"inode\d+_data", key):
+        for block_name, block in memory_region.blocks.items():
+          if any([input_node_id == getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids]):
+            input_data_blocks.append(block)
+    
+    # get output data blocks
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.items():
+      if re.match(r"inode\d+_data", key):
+        for block_name, block in memory_region.blocks.items():
+          if output_node_id == getInnerNodeID(block_name.graph_node_id):
+            output_data_blocks.append(block)
+
+    return input_data_blocks, output_data_blocks
+
+def generateInstructionTransferCode(instruction_blocks):
+    code = ""
+    bitwidth_per_transfer = 32
+    for block in instruction_blocks:
+      size = block.size
+      base_address = block.base_address
+      iteration_bound = math.ceil(size/bitwidth_per_transfer)
+      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
+      code += f"  (NPU_BASE_ADDR + {base_address} + i * {bitwidth_per_transfer//8}) = inst_{block.name}[i];\n"
+      code += f"}}\n"
+    return code
+
+def generateInputDataTransferCode(data_blocks):
+    code = ""
+    bitwidth_per_transfer = 32
+    for block in data_blocks:
+      size = block.size
+      base_address = block.base_address
+      iteration_bound = math.ceil(size/bitwidth_per_transfer)
+      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
+      code += f"  (NPU_BASE_ADDR + {base_address} + i * {bitwidth_per_transfer//8}) = data_{block.name}[i];\n"
+      code += f"}}\n"
+    return code
+
+def generateOutputDataTransferCode(data_blocks):
+    code = ""
+    bitwidth_per_transfer = 32
+    for block in data_blocks:
+      size = block.size
+      base_address = block.base_address
+      iteration_bound = math.ceil(size/bitwidth_per_transfer)
+      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
+      code += f"  data_{block.name}[i] = (NPU_BASE_ADDR + {base_address} + i * {bitwidth_per_transfer//8});\n"
+      code += f"}}\n"
+    return code
+
+def generateWaitForInterruptCode():
+    code = f"""
+    while(1) {{
+      if(npu_done == 1) {{
+        npu_done = 0;
+        break;
+      }}
+      sleep(1);
+    }}
+    """
+    return code
+
+def generateInvokeCode():
+    IDLE_CODE = 0
+    RUN_CODE = 1
+    PROGRAM_CODE = 2
+
+    INODE_PC_START_P1_ENUM_VAL = 0
+    INODE_PC_START_EXTERN_ENUM_VAL = 1
+    INODE_PC_START_P0_ENUM_VAL = 2
+
+    INODE_NUM = ImcflowDeviceConfig().INODE_NUM
+
+    STATE_REG_IDX = 0
+    PC_REG_IDX = 2
+
+    code = f"""
+    // Invoke with policy update mode
+    for(int i=0; i<{INODE_NUM}; i++) {{
+      (NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);
+    }}
+    for(int i=0; i<{INODE_NUM}; i++) {{
+      (NPU_BASE_ADDR + ({STATE_REG_IDX} + i)*4) = {PROGRAM_CODE};
+    }}
+    {generateWaitForInterruptCode()}
+
+    // Invoke with compute mode
+    for(int i=0; i<{INODE_NUM}; i++) {{
+      (NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);
+    }}
+    for(int i=0; i<{INODE_NUM}; i++) {{
+      (NPU_BASE_ADDR + ({STATE_REG_IDX} + i)*4) = {RUN_CODE};
+    }}
+    {generateWaitForInterruptCode()}
+    """
+    return code
+
+def makeKernelDef(func_name, instruction_blocks, data_blocks):
+    code = ""
+    code += f'extern "C" void {func_name}_kernel() {{\n'
+    code += f'  {generateInstructionTransferCode(instruction_blocks)}'
+    code += f'  {generateInputDataTransferCode(data_blocks[0])}'
+    code += f'  {generateInvokeCode()}'
+    code += f'  {generateOuputDataTransferCode(data_blocks[1])}'
+    code += f'}}\n'
+
+    return code
+
+def dtype_to_cpp(dtype: str) -> str:
+    mapping = {
+        "float32": "float",
+        "float": "float",
+        "int32": "int32_t",
+        "int8": "int8_t",
+        "uint8": "uint8_t",
+        "float64": "double",
+    }
+
+    return mapping.get(dtype, "float")
+
+def makeWrapper(func, func_name):
+  # parameter spec -> number of params and types
+  params = func.params
+  proto_list = []
+  cast_list = []
+  for i, param in enumerate(params):
+    # Use the existing var name; if absent, fall back to "arg{i}"
+    param_name = param.name_hint if param.name_hint else f"arg{i}"
+    # Default dtype is float32, override if checked_type is present and is a TensorType.
+    dtype = "float32"
+    if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
+      dtype = param.checked_type.dtype
+      cpp_type = dtype_to_cpp(dtype)
+      proto_list.append(f"DLTensor* {param_name}")
+      cast_list.append(f"static_cast<{cpp_type}*>({param_name}->data)")
+
+  args_proto_type = ", ".join(proto_list)
+  args_type_cast = ", ".join(cast_list)
+
+  code = ""
+  code += f'extern "C" void {func_name}_wrapper({args_proto_type}) {{'
+  code += f'  {func_name}_kernel('
+  code += f'    {args_type_cast}'
+  code += f'  );'
+  code += f'  return 0;\n'
+  code += f'}}\n'
+
+  return code
+
+def makeKernelStartCode(func_name, func):
+    instruction_blocks = getInstructionBlocks(func)
+    data_blocks = getDataBlocks(func_name, func)
+    kernel_def = makeKernelDef(func_name, instruction_blocks, data_blocks)
+    wrapper = makeWrapper(func, func_name)
+
+    code = kernel_def + wrapper + f"TVM_DLL_EXPORT_TYPED_FUNC({func_name}, {func_name}_wrapper);\n"
+
+    return code
+
+def generate_invoke_code_for_subgraphs(mod):
+    invoke_code_map = {}
+    for func_name_var in mod.functions:
+        func = mod[func_name_var.name_hint]
+        if func.attrs and func.attrs.get("Compiler") == "imcflow":
+            func_name = func_name_var.name_hint
+            code = makeKernelStartCode(func_name, func)
+            invoke_code_map[func_name] = code
+    with open("invoke_code_map.json", "w") as f:
+        json.dump(invoke_code_map, f, indent=4)
+    
+    return invoke_code_map
