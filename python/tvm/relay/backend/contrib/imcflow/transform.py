@@ -2234,10 +2234,136 @@ def constructCustomIDInFunc(mod):
   for func_name in mod.functions:
     if "imcflow" in func_name.name_hint: _Visitor(func_name.name_hint).visit(mod[func_name.name_hint])
 
+#TODO: DataBlock -> TVM name. consider difference between function parameter, constant, instruction
+class CodeWriter:
+    def __init__(self, indent_str="  "):
+        self.lines = []
+        self.indent_str = indent_str
+        self.indent_level = 0
+    
+    def getIndent(self):
+      return self.indent_level
+
+    def setIndent(self, indent_level):
+      self.indent_level = indent_level
+    
+    def applyIndent(self, indent_level):
+      for idx, line in enumerate(self.lines):
+        line_ = indent_level * self.indent_str + line.lsstrip()
+        self.lines[idx] = line_
+    
+    def nextIndent(self):
+      self.indent_level += 1
+      return self
+    
+    def prevIndent(self):
+      self.indent_level -= 1
+      return self
+
+    def write(self, line=""):
+        for line_ in line.split("\n"):
+          if len(line_) > 0:
+            self.lines.append(f"{self.indent_str * self.indent_level}{line_}")
+
+    def get_code(self):
+        return "\n".join(self.lines)
+
+    def __str__(self):
+        return self.get_code()
+    
+    def __add__(self, other):
+      if isinstance(other, CodeWriter):
+        self.lines.extend(other.lines)
+        return self
+      elif isinstance(other, str):
+        self.write(other)
+        return self
+
+def dtype_to_cpp(dtype: str) -> str:
+    mapping = {
+        "float32": "float",
+        "float": "float",
+        "int32": "int32_t",
+        "int16" : "int16_t",
+        "int8": "int8_t",
+        "uint8": "uint8_t",
+        "float64": "double",
+    }
+
+    # if dtype not in mapping: print(dtype)
+    return mapping.get(dtype, "unknown_type")
+
+def getConstantIdx(func, node_id):
+  node_id_to_constant_id = {}
+  class _Visitor(tvm.relay.ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.Cnt = 0
+
+    def visit_constant(self, const):
+      node_id_to_constant_id[getNodeID(const)] = self.Cnt
+      self.Cnt = self.Cnt + 1
+      super().visit_constant(const)
+  
+  _Visitor().visit(func)
+  return node_id_to_constant_id[node_id]
+
+def getCInputVarName(func, func_name, data_block):
+  node_map = CustomIDToNode()
+
+  if isinstance(data_block.id, TensorID):
+    graph_node_inner_id = getInnerNodeID(data_block.id.graph_node_id)
+    if isinstance(node_map[graph_node_inner_id], Var):
+      return node_map[graph_node_inner_id].name_hint
+    elif isinstance(node_map[graph_node_inner_id], Constant):
+      data_type = dtype_to_cpp(node_map[graph_node_inner_id].checked_type.dtype)
+      return f"(({data_type}*)({func_name}_consts[{getConstantIdx(func, graph_node_inner_id)}]->data))"
+    else:
+      print(data_block)
+      raise ValueError("Wrong data block type!")
+  elif isinstance(data_block.id, str):
+    return data_block.id
+  else:
+    print(data_block)
+    raise ValueError("Wrong data block type!")
+
+def makeBaseAddrName(block):
+  if isinstance(block.id, TensorID):
+    return f"{block.id.tensor_type.upper()}_{getInnerNodeID(block.id.graph_node_id)}_BASE_ADDR"
+  elif isinstance(block.id, str):
+    return f"{block.id.upper()}_BASE_ADDR"
+  else:
+    raise ValueError("Wrong data block type!")
+
+def generateHeader():
+  code = CodeWriter()
+  code += "#include <cstdint>\n"
+  code += "#include <cstdlib>\n"
+  code += "#include <cstring>\n"
+  code += "#include <thread>\n"
+  code += "#include <chrono>\n"
+  code += "#include <vector>\n"
+  code += "#include <tvm/runtime/c_runtime_api.h>\n"
+  code += "#include <tvm/runtime/packed_func.h>\n"
+  code += "#include <dlpack/dlpack.h>\n"
+  code += "using namespace tvm::runtime;\n"
+  # code += "using namespace tvm::runtime::contrib;\n"
+
+  return code
+
+def generateInstructionDef(func_name, func):
+    code = CodeWriter()
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
+      for block_name, block in memory_region.blocks.items():
+        if isinstance(block.id, str) and "inst" in block.id:
+          code += f"int32_t {block.id}[{math.ceil(block.size/4)}] = {{0,}};\n"
+    
+    return code
+
 def getInstructionBlocks(func_name, func):
     instruction_blocks = []
 
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.items():
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
       if re.match(r"inode\d+_inst", key):
         for block_name, block in memory_region.blocks.items():
           if func_name in block_name:
@@ -2251,70 +2377,107 @@ def getDataBlocks(func_name, func):
 
     # get input/output node ID
     input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(func)]
-    output_node_id = getNodeID(getOutputNodeOfFunc(func))
+    output_node_id = getNodeID(getOutputNodesOfFunc(func))
 
     # get input data blocks
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.items():
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
       if re.match(r"inode\d+_data", key):
         for block_name, block in memory_region.blocks.items():
-          if any([input_node_id == getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids]):
+          current_func_input_data = isinstance(block.id, TensorID) and any([input_node_id == getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids])
+          current_func_inst = isinstance(block.id, str) and func_name in block.id
+          if current_func_input_data or current_func_inst:
             input_data_blocks.append(block)
     
     # get output data blocks
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.items():
+    #TODO : odata ??
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
       if re.match(r"inode\d+_data", key):
         for block_name, block in memory_region.blocks.items():
-          if output_node_id == getInnerNodeID(block_name.graph_node_id):
+          if isinstance(block_name, TensorID) and output_node_id == getInnerNodeID(block_name.graph_node_id):
             output_data_blocks.append(block)
 
     return input_data_blocks, output_data_blocks
 
-def generateInstructionTransferCode(instruction_blocks):
-    code = ""
+def generateFpgaPointerDef():
+  code = CodeWriter()
+  code += "volatile uint32_t *NPU_BASE_ADDR = (uint32_t *)0x40000000;\n"
+  return code
+
+def generateInterruptRelatedCode():
+  code = CodeWriter()
+  code += "volatile uint32_t npu_done = 0;\n"
+
+  #TODO : interrupt sevice routine
+
+  return code
+
+def generateConstantArrayDecl(func_name, func):
+  return "tvm::runtime::Array<tvm::runtime::NDArray> " + func_name + "_consts;\n";
+
+def generateConstantArrayInit(func_name, func):
+  code = CodeWriter()
+  code += "#ifdef __cplusplus\n"
+  code += "int " + func_name + "_init_wrapper_(tvm::runtime::Array<tvm::runtime::NDArray> arr) {\n"
+  code += f"  {func_name}_consts = arr;\n"
+  code += "  return 0;\n"
+  code += "}\n"
+  code += "TVM_DLL_EXPORT_TYPED_FUNC(__init_" + func_name + ", " + func_name + "_init_wrapper_);\n\n"
+  code += "#endif\n"
+
+  return code
+
+def generateInstructionTransferCode(func, func_name, instruction_blocks, address_macros):
+    code = CodeWriter()
     bitwidth_per_transfer = 32
     for block in instruction_blocks:
       size = block.size
       base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      address_macros.update({base_address_name: base_address})
       iteration_bound = math.ceil(size/bitwidth_per_transfer)
       code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  (NPU_BASE_ADDR + {base_address} + i * {bitwidth_per_transfer//8}) = inst_{block.name}[i];\n"
+      code += f"  *(NPU_BASE_ADDR + {base_address_name} + i * {bitwidth_per_transfer//8}) = {getCInputVarName(func, func_name, block)}[i];\n"
       code += f"}}\n"
     return code
 
-def generateInputDataTransferCode(data_blocks):
-    code = ""
+def generateInputDataTransferCode(func, func_name, data_blocks, address_macros):
+    code = CodeWriter()
     bitwidth_per_transfer = 32
     for block in data_blocks:
       size = block.size
       base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      address_macros.update({base_address_name : base_address})
       iteration_bound = math.ceil(size/bitwidth_per_transfer)
       code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  (NPU_BASE_ADDR + {base_address} + i * {bitwidth_per_transfer//8}) = data_{block.name}[i];\n"
+      code += f"  *(NPU_BASE_ADDR + {base_address_name} + i * {bitwidth_per_transfer//9}) = {getCInputVarName(func, func_name, block)}[i];\n"
       code += f"}}\n"
     return code
 
-def generateOutputDataTransferCode(data_blocks):
-    code = ""
+def generateOutputDataTransferCode(data_blocks, address_macros):
+    code = CodeWriter()
     bitwidth_per_transfer = 32
-    for block in data_blocks:
+    for idx, block in enumerate(data_blocks):
       size = block.size
       base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      address_macros.update({base_address_name : base_address})
       iteration_bound = math.ceil(size/bitwidth_per_transfer)
       code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  data_{block.name}[i] = (NPU_BASE_ADDR + {base_address} + i * {bitwidth_per_transfer//8});\n"
+      code += f"  out{idx}[i] = *(NPU_BASE_ADDR + {base_address_name} + i * {bitwidth_per_transfer//8});\n"
       code += f"}}\n"
     return code
 
 def generateWaitForInterruptCode():
-    code = f"""
-    while(1) {{
-      if(npu_done == 1) {{
-        npu_done = 0;
-        break;
-      }}
-      sleep(1);
-    }}
-    """
+    code =  (
+              "while(1) {\n"
+              "  if(npu_done == 1) {\n"
+              "    npu_done = 0;\n"
+              "    break;\n"
+              "  }\n"
+              "  std::this_thread::sleep_for(std::chrono::milliseconds(1));\n"
+              "}\n"
+            )
     return code
 
 def generateInvokeCode():
@@ -2331,49 +2494,72 @@ def generateInvokeCode():
     STATE_REG_IDX = 0
     PC_REG_IDX = 2
 
-    code = f"""
-    // Invoke with policy update mode
-    for(int i=0; i<{INODE_NUM}; i++) {{
-      (NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);
-    }}
-    for(int i=0; i<{INODE_NUM}; i++) {{
-      (NPU_BASE_ADDR + ({STATE_REG_IDX} + i)*4) = {PROGRAM_CODE};
-    }}
-    {generateWaitForInterruptCode()}
-
-    // Invoke with compute mode
-    for(int i=0; i<{INODE_NUM}; i++) {{
-      (NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);
-    }}
-    for(int i=0; i<{INODE_NUM}; i++) {{
-      (NPU_BASE_ADDR + ({STATE_REG_IDX} + i)*4) = {RUN_CODE};
-    }}
-    {generateWaitForInterruptCode()}
-    """
+    code = (
+      "// Invoke with policy update mode\n"
+      f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
+      f"  *(NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
+      "}\n"
+      f"*(NPU_BASE_ADDR + {STATE_REG_IDX}) = {PROGRAM_CODE};\n"
+      f"{generateWaitForInterruptCode()}\n"
+      "// Invoke with compute mode\n"
+      f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
+      f"  *(NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
+      "}\n"
+      f"*(NPU_BASE_ADDR + {STATE_REG_IDX}) = {RUN_CODE};\n"
+      f"{generateWaitForInterruptCode()}\n"
+    )
     return code
 
-def makeKernelDef(func_name, instruction_blocks, data_blocks):
-    code = ""
-    code += f'extern "C" void {func_name}_kernel() {{\n'
-    code += f'  {generateInstructionTransferCode(instruction_blocks)}'
-    code += f'  {generateInputDataTransferCode(data_blocks[0])}'
-    code += f'  {generateInvokeCode()}'
-    code += f'  {generateOuputDataTransferCode(data_blocks[1])}'
-    code += f'}}\n'
+def generateBaseAddrMacros(base_address_macros):
+  code = CodeWriter()
+  for key, value in base_address_macros.items():
+    code += f"#define {key} {value}\n"
+  return code
+
+def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
+    base_address_macros = {}
+    proto_list = []
+    for i, param in enumerate(func.params):
+      param_name = param.name_hint if param.name_hint else f"arg{i}"
+      dtype = "float32"
+      if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
+        dtype = param.checked_type.dtype
+        cpp_type = dtype_to_cpp(dtype)
+        proto_list.append(f"{cpp_type}* {param_name}")
+  
+    output_node = getOutputNodesOfFunc(func)
+    output_node_type = output_node.checked_type
+    proto_list.append(f"{dtype_to_cpp(output_node_type.dtype)}* out0")
+    
+    args_proto_type = ", ".join(proto_list)
+
+    code = CodeWriter()
+
+    code += generateHeader()
+
+    code += generateFpgaPointerDef()
+    code += generateInterruptRelatedCode()
+
+    code += generateConstantArrayDecl(func_name, func)
+    code += generateInstructionDef(func_name, func)
+
+    code += f'extern "C" void {func_name}_kernel({args_proto_type});\n'
+    code += f'extern "C" void {func_name}_kernel({args_proto_type}) {{\n'
+
+    code.nextIndent()
+    code += f'{generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)}'
+    code += f'{generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)}'
+    code += f'{generateInvokeCode()}'
+    code += f'{generateOutputDataTransferCode(data_blocks[1], base_address_macros)}'
+
+    code.prevIndent()
+    code += '}\n'
+
+    code += generateConstantArrayInit(func_name, func)
+
+    code = generateBaseAddrMacros(base_address_macros) + code
 
     return code
-
-def dtype_to_cpp(dtype: str) -> str:
-    mapping = {
-        "float32": "float",
-        "float": "float",
-        "int32": "int32_t",
-        "int8": "int8_t",
-        "uint8": "uint8_t",
-        "float64": "double",
-    }
-
-    return mapping.get(dtype, "float")
 
 def makeWrapper(func, func_name):
   # parameter spec -> number of params and types
@@ -2391,28 +2577,32 @@ def makeWrapper(func, func_name):
       proto_list.append(f"DLTensor* {param_name}")
       cast_list.append(f"static_cast<{cpp_type}*>({param_name}->data)")
 
+  output_node = getOutputNodesOfFunc(func)
+  output_node_type = output_node.checked_type
+  proto_list.append(f"DLTensor* out0")
+  cast_list.append(f"static_cast<{dtype_to_cpp(output_node_type.dtype)}*>(out0->data)")
+
   args_proto_type = ", ".join(proto_list)
   args_type_cast = ", ".join(cast_list)
 
-  code = ""
-  code += f'extern "C" void {func_name}_wrapper({args_proto_type}) {{'
+  code = CodeWriter()
+  code += f'extern "C" void {func_name}_wrapper({args_proto_type}) {{\n'
   code += f'  {func_name}_kernel('
   code += f'    {args_type_cast}'
-  code += f'  );'
-  code += f'  return 0;\n'
-  code += f'}}\n'
+  code += f'  );\n'
+  code += '}\n'
 
   return code
 
 def makeKernelStartCode(func_name, func):
-    instruction_blocks = getInstructionBlocks(func)
+    instruction_blocks = getInstructionBlocks(func_name, func)
     data_blocks = getDataBlocks(func_name, func)
-    kernel_def = makeKernelDef(func_name, instruction_blocks, data_blocks)
+    kernel_def = makeKernelDef(func_name, func, instruction_blocks, data_blocks)
     wrapper = makeWrapper(func, func_name)
 
     code = kernel_def + wrapper + f"TVM_DLL_EXPORT_TYPED_FUNC({func_name}, {func_name}_wrapper);\n"
 
-    return code
+    return str(code)
 
 def generate_invoke_code_for_subgraphs(mod):
     invoke_code_map = {}
@@ -2422,7 +2612,9 @@ def generate_invoke_code_for_subgraphs(mod):
             func_name = func_name_var.name_hint
             code = makeKernelStartCode(func_name, func)
             invoke_code_map[func_name] = code
-    with open("invoke_code_map.json", "w") as f:
-        json.dump(invoke_code_map, f, indent=4)
+    
+    for fn, code in invoke_code_map.items():
+      with open(f"{fn}.cc", "w") as f:
+        f.write(code)
     
     return invoke_code_map

@@ -178,7 +178,7 @@ class DataBlock:
     self.offset = offset
 
   def set_base_address(self, address: int):
-    self.base_address = address
+    self.base_address = int(address)
 
   def __str__(self):
     return (f"DataBlock({self.id}, {self.size}, {self.base_address})")
@@ -220,7 +220,7 @@ class MemoryRegion:
     self.blocks[block.id] = block
 
   def set_base_address(self, address: int):
-    self.base_address = address
+    self.base_address = int(address)
 
   def __str__(self):
     if not self.blocks:
