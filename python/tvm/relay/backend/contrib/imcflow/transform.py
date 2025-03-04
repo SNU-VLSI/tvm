@@ -2346,6 +2346,13 @@ def generateHeader():
   code += "#include <tvm/runtime/c_runtime_api.h>\n"
   code += "#include <tvm/runtime/packed_func.h>\n"
   code += "#include <dlpack/dlpack.h>\n"
+  code += "#include <sys/types.h>\n"
+  code += "#include <sys/stat.h>\n"
+  code += "#include <fcntl.h>\n"
+  code += "#include <stdio.h>\n"
+  code += "#include <stdlib.h>\n"
+  code += "#include <sys/mman.h>\n"
+  code += "#include <unistd.h>\n"
   code += "using namespace tvm::runtime;\n"
   # code += "using namespace tvm::runtime::contrib;\n"
 
@@ -2400,14 +2407,38 @@ def getDataBlocks(func_name, func):
 
 def generateFpgaPointerDef():
   code = CodeWriter()
-  code += "volatile uint32_t *NPU_BASE_ADDR = (uint32_t *)0x40000000;\n"
+  # code += "volatile uint32_t *NPU_BASE_ADDR = (uint32_t *)0x40000000;\n"
+  code += "#define NPU_BASE_ADDR 0x40000000\n"
+  code += "#define NPU_ADDR_RANGE 0x1000\n"
+  code += 'int npu_fd = open("/dev/uio0", O_RDWR);\n'
+  code += "if (npu_fd < 0) {\n"
+  code += '  perror("open");\n'
+  code += "  exit(EXIT_FAILURE);\n"
+  code += "}\n"
+  code += "uint32_t info = 1; /* unmask interrupt pin*/\n"
+  code += "ssize_t nb = write(npu_fd, &info, sizeof(info));\n"
+  code += "if (nb != (ssize_t)sizeof(info)) {\n"
+  code += '  perror("interrupt unmasking failed");\n'
+  code += "  close(npu_fd);\n"
+  code += "  exit(EXIT_FAILURE);\n"
+  code += "}\n"
+  code += "size_t npu_len = (size_t) NPU_ADDR_RANGE;\n"
+  code += "uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);\n"
+  code += "if (npu_pointer == MAP_FAILED) {\n"
+  code += '  perror("npu_pointer mmap error");\n'
+  code += "  exit(1);\n"
+  code += "}\n"
+
   return code
 
 def generateInterruptRelatedCode():
   code = CodeWriter()
-  code += "volatile uint32_t npu_done = 0;\n"
-
-  #TODO : interrupt sevice routine
+  # code += "volatile uint32_t npu_done = 0;\n"
+  code += '#define WAIT_NPU_INTERRUPT \\\n'
+  code += 'nb = read(npu_fd, &info, sizeof(info));\\\n'
+  code += 'if (nb == (ssize_t)sizeof(info)) {\\\n'
+  code += '  printf("Interrupt #%u!\\n", info);\\\n'
+  code += '}\n'
 
   return code
 
@@ -2436,7 +2467,7 @@ def generateInstructionTransferCode(func, func_name, instruction_blocks, address
       address_macros.update({base_address_name: base_address})
       iteration_bound = math.ceil(size/bitwidth_per_transfer)
       code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  *(NPU_BASE_ADDR + {base_address_name} + i * {bitwidth_per_transfer//8}) = {getCInputVarName(func, func_name, block)}[i];\n"
+      code += f"  *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//8}) = {getCInputVarName(func, func_name, block)}[i];\n"
       code += f"}}\n"
     return code
 
@@ -2450,7 +2481,7 @@ def generateInputDataTransferCode(func, func_name, data_blocks, address_macros):
       address_macros.update({base_address_name : base_address})
       iteration_bound = math.ceil(size/bitwidth_per_transfer)
       code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  *(NPU_BASE_ADDR + {base_address_name} + i * {bitwidth_per_transfer//9}) = {getCInputVarName(func, func_name, block)}[i];\n"
+      code += f"  *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//9}) = {getCInputVarName(func, func_name, block)}[i];\n"
       code += f"}}\n"
     return code
 
@@ -2464,20 +2495,21 @@ def generateOutputDataTransferCode(data_blocks, address_macros):
       address_macros.update({base_address_name : base_address})
       iteration_bound = math.ceil(size/bitwidth_per_transfer)
       code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  out{idx}[i] = *(NPU_BASE_ADDR + {base_address_name} + i * {bitwidth_per_transfer//8});\n"
+      code += f"  out{idx}[i] = *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//8});\n"
       code += f"}}\n"
     return code
 
 def generateWaitForInterruptCode():
     code =  (
-              "while(1) {\n"
-              "  if(npu_done == 1) {\n"
-              "    npu_done = 0;\n"
-              "    break;\n"
-              "  }\n"
-              "  std::this_thread::sleep_for(std::chrono::milliseconds(1));\n"
-              "}\n"
+              "WAIT_NPU_INTERRUPT;\n"
             )
+              # "while(1) {\n"
+              # "  if(npu_done == 1) {\n"
+              # "    npu_done = 0;\n"
+              # "    break;\n"
+              # "  }\n"
+              # "  std::this_thread::sleep_for(std::chrono::milliseconds(1));\n"
+              # "}\n"
     return code
 
 def generateInvokeCode():
@@ -2497,15 +2529,15 @@ def generateInvokeCode():
     code = (
       "// Invoke with policy update mode\n"
       f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
+      f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
       "}\n"
-      f"*(NPU_BASE_ADDR + {STATE_REG_IDX}) = {PROGRAM_CODE};\n"
+      f"*(npu_pointer + {STATE_REG_IDX}) = {PROGRAM_CODE};\n"
       f"{generateWaitForInterruptCode()}\n"
       "// Invoke with compute mode\n"
       f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(NPU_BASE_ADDR + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
+      f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
       "}\n"
-      f"*(NPU_BASE_ADDR + {STATE_REG_IDX}) = {RUN_CODE};\n"
+      f"*(npu_pointer + {STATE_REG_IDX}) = {RUN_CODE};\n"
       f"{generateWaitForInterruptCode()}\n"
     )
     return code
@@ -2537,7 +2569,6 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
 
     code += generateHeader()
 
-    code += generateFpgaPointerDef()
     code += generateInterruptRelatedCode()
 
     code += generateConstantArrayDecl(func_name, func)
@@ -2547,6 +2578,7 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
     code += f'extern "C" void {func_name}_kernel({args_proto_type}) {{\n'
 
     code.nextIndent()
+    code += generateFpgaPointerDef()
     code += f'{generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)}'
     code += f'{generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)}'
     code += f'{generateInvokeCode()}'
