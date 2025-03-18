@@ -128,8 +128,8 @@ def run_test(test_name, mod, param_dict):
     for k, v in paths.items():
       print(k, v)
 
-  MemoryAllocator = imcflow_transform.MemoryAllocator()(eval_mod)
-  PolicyTableGenerator = imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
+  imcflow_transform.MemoryAllocator()(eval_mod)
+  imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
 
   # get the config
   config = DevConfig()

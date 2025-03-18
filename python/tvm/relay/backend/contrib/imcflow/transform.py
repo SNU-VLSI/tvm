@@ -963,11 +963,11 @@ class NodeMapper:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
           elif IsPacking:
-              # map to nearest inode of argument's hw node              
+              # map to nearest inode of argument's hw node
               SrcHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call.args[-1])])[0]
               InodeID = NodeID.from_inode_coord(SrcHWNodeID)
               self.MappingDict[getNodeID(call)] = InodeID
-              
+
           elif IsUnpacking:
               # keep unpacking node and determine its NodeID in parent node
               self.undetermined_callnode_exists = True
@@ -1317,7 +1317,7 @@ class MemoryAllocator:
 
         def traverse_func(self, func):
             self.visit(func)
-            self.allocate(func)
+            self.allocate()
             return self.DataBlockDict
 
         def is_inode_in_edge(self, edge):
@@ -1363,19 +1363,19 @@ class MemoryAllocator:
 
           return edges
 
-        def allocate(self, func):
+        def allocate(self):
           for edge, mem_block in self.DataBlockDict.items():
             if mem_block.size is None:
               raise ValueError("Memory size cannot be none.")
 
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
-            inode_num = hw_node_id.name[-1] # ex) inode_3 => 3
+            inode_name = hw_node_id.name # ex) inode_3
 
             if inode_tensorid.tensor_type == "weight":
-              ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate_allow_overlap(mem_block)
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(mem_block)
             else:
-              ImcflowDeviceConfig().MemLayout[f"inode{inode_num}_data"].allocate(mem_block)
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(mem_block)
 
           return
 
@@ -1595,7 +1595,7 @@ class MemoryAllocator:
                       raise ValueError("Undefined operation!")
                 else:
                   pass # if const -> unpacking (inode), just pass
-              
+
               else:
                 raise ValueError("Wrong edge detected!")
 
@@ -1874,6 +1874,7 @@ class PolicyTableGenerator:
                 handle_single_path(edge, mapping_info)
 
             self.Policytable = policy_tables
+            ImcflowDeviceConfig().PolicyTableDict = policy_tables
 
         def add_EdgeInfo(self):
             # def get_meminfo(edge):
@@ -1944,10 +1945,21 @@ class PolicyTableGenerator:
                       edgeinfo = InstEdgeInfo(router_entry_list, None)
                       ImcflowDeviceConfig().add_inst_edge_info(edge, edgeinfo)
 
+        def allocate(self):
+          # Allocate memory for policy tables
+          for node_id, policy_table in self.Policytable.items():
+            if len(policy_table) == 0:
+                continue
+            mem_size = len(policy_table) * 32
+            mem_block = DataBlock(f"{node_id.name}_policy", mem_size)
+            inode_id = node_id.master() if node_id.is_imce() else node_id
+            ImcflowDeviceConfig().MemLayout[f"{inode_id.name}_data"].allocate(mem_block)
+
         def traverse_func(self, func):
             # traverse input function by visit() to make PathDict and generate policy table for it
             self.generate_policy_table()
             self.add_EdgeInfo()
+            self.allocate()
             return self.Policytable
 
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
@@ -2240,22 +2252,22 @@ class CodeWriter:
         self.lines = []
         self.indent_str = indent_str
         self.indent_level = 0
-    
+
     def getIndent(self):
       return self.indent_level
 
     def setIndent(self, indent_level):
       self.indent_level = indent_level
-    
+
     def applyIndent(self, indent_level):
       for idx, line in enumerate(self.lines):
         line_ = indent_level * self.indent_str + line.lsstrip()
         self.lines[idx] = line_
-    
+
     def nextIndent(self):
       self.indent_level += 1
       return self
-    
+
     def prevIndent(self):
       self.indent_level -= 1
       return self
@@ -2270,7 +2282,7 @@ class CodeWriter:
 
     def __str__(self):
         return self.get_code()
-    
+
     def __add__(self, other):
       if isinstance(other, CodeWriter):
         self.lines.extend(other.lines)
@@ -2304,7 +2316,7 @@ def getConstantIdx(func, node_id):
       node_id_to_constant_id[getNodeID(const)] = self.Cnt
       self.Cnt = self.Cnt + 1
       super().visit_constant(const)
-  
+
   _Visitor().visit(func)
   return node_id_to_constant_id[node_id]
 
@@ -2364,7 +2376,7 @@ def generateInstructionDef(func_name, func):
       for block_name, block in memory_region.blocks.items():
         if isinstance(block.id, str) and "inst" in block.id:
           code += f"int32_t {block.id}[{math.ceil(block.size/4)}] = {{0,}};\n"
-    
+
     return code
 
 def getInstructionBlocks(func_name, func):
@@ -2394,7 +2406,7 @@ def getDataBlocks(func_name, func):
           current_func_inst = isinstance(block.id, str) and func_name in block.id
           if current_func_input_data or current_func_inst:
             input_data_blocks.append(block)
-    
+
     # get output data blocks
     #TODO : odata ??
     for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
@@ -2558,11 +2570,11 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
         dtype = param.checked_type.dtype
         cpp_type = dtype_to_cpp(dtype)
         proto_list.append(f"{cpp_type}* {param_name}")
-  
+
     output_node = getOutputNodesOfFunc(func)
     output_node_type = output_node.checked_type
     proto_list.append(f"{dtype_to_cpp(output_node_type.dtype)}* out0")
-    
+
     args_proto_type = ", ".join(proto_list)
 
     code = CodeWriter()
@@ -2644,9 +2656,9 @@ def generate_invoke_code_for_subgraphs(mod):
             func_name = func_name_var.name_hint
             code = makeKernelStartCode(func_name, func)
             invoke_code_map[func_name] = code
-    
+
     for fn, code in invoke_code_map.items():
       with open(f"{fn}.cc", "w") as f:
         f.write(code)
-    
+
     return invoke_code_map

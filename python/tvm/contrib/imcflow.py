@@ -361,14 +361,14 @@ class ImcflowDeviceConfig:
     self.InstEdgeInfoDict = {}
     self.MemLayout = MemoryLayout(
         MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-        MemoryRegion("inode0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}

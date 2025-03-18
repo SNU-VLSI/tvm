@@ -144,13 +144,13 @@ def run_test(test_name, mod, param_dict):
   for i in range(4):
     inode_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_inode{i}", 4)
     inode_inst.set_base_address(8 + i * 4)
-    DevConfig().MemLayout[f"inode{i}_inst"].allocate(inode_inst)
-  
+    DevConfig().MemLayout[f"inode_{i}_inst"].allocate(inode_inst)
+
   for i in range(DevConfig().IMCE_NUM):
     imce_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_imce{i}", 4)
     imce_inst.set_base_address(8 + 4 * 4 + i * 4)
     inode_idx = i % 4
-    DevConfig().MemLayout[f"inode{inode_idx}_data"].allocate(imce_inst)
+    DevConfig().MemLayout[f"inode_{inode_idx}_data"].allocate(imce_inst)
 
   code_map = imcflow_transform.generate_invoke_code_for_subgraphs(eval_mod)
   for func, code in code_map.items():

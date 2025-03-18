@@ -9,7 +9,7 @@ class InodeCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
     super().__init__()
     self.annotation = annotation
-    
+
   def content(self) -> CodeBlock:
     if self.annotation:
       code = TextBlock("")
@@ -18,7 +18,7 @@ class InodeCodeBlock(CodeBlock):
       code += f"// endgenerate: {self.annotation}"
       return code
     else:
-      return self._content()  
+      return self._content()
 
   @abstractmethod
   def _content(self) -> Union[str, CodeBlock]:
@@ -35,12 +35,18 @@ class PolicyUpdateBlock(InodeCodeBlock):
   def _content(self) -> Union[str, CodeBlock]:
     assert self.node_id.is_inode(), "PolicyUpdateCodeBlock can only be used for inode"
     same_row_node_ids = [self.node_id] + self.node_id.slaves()
-    code = "int policy_table_start_address;\n"
+    same_row_node_ids.sort(key=lambda id: id.to_coord(1))  # Sort by id.to_coord(1)
+
+    code = TextBlock("")
+    code += "int policy_table_start_address;\n"
     for id in same_row_node_ids:
-      db = DevConfig().PolicyTableDict[id]
-      code += f"\npolicy_table_start_address = {db.base_address};\n"
+      db = DevConfig().MemLayout.get_data_block_by_id(f"{id.name}_policy")
+      if db is None:
+        continue
+      code += f"\npolicy_table_start_address = {db.base_address};"
       for i in range(0, db.size, 32):
-        code += f"__builtin_INODE_PU(policy_table_start_address, {i}, {int(i / 32)}, {id.to_coord(1)});\n"
+        code += f"__builtin_INODE_PU(policy_table_start_address, {i}, {int(i / 32)}, {id.to_coord(1)});"
+    code += ""
 
     return code
 
@@ -64,8 +70,9 @@ class RecvBlock(InodeCodeBlock):
   def _content(self) -> Union[str, CodeBlock]:
     assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
     recv_count = self.block.size // 32
+    code = TextBlock("")
 
-    code = f"int recv_data_base_address = {self.block.base_address};\n"
+    code += f"int recv_data_base_address = {self.block.base_address};\n"
     code += SimpleFor(recv_count,
                       f"__builtin_INODE_RECV(recv_data_base_address + i*32, 0, 0, {self.fifo_id});")
 
@@ -83,10 +90,11 @@ class SendBlock(InodeCodeBlock):
   def _content(self) -> Union[str, CodeBlock]:
     assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
     recv_count = self.block.size // 32
+    code = TextBlock("")
 
-    code = f"int send_data_base_address = {self.block.base_address};\n"
+    code += f"int send_data_base_address = {self.block.base_address};\n"
     code += SimpleFor(recv_count,
-                      f"__builtin_INODE_SEND(send_data_base_address + i*32, 0, 0, {self.fifo_id});")
+                      lambda iter: f"__builtin_INODE_SEND(send_data_base_address + {iter}*32, 0, 0, {self.fifo_id});")
 
     return code
 

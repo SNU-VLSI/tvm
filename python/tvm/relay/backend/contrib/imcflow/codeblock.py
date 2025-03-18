@@ -121,18 +121,23 @@ class SimpleFor(CodeBlock):
       return self.body
 
     with self.manage_scope() as var_iter:
+      if callable(self.body):
+        formatted_body = self.body(var_iter)
+      else:
+        formatted_body = str(self.body)
+
       if self.annotation:
         code = TextBlock("")
         code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate: {self.annotation}"
         # FIXME: explicit str is NOT the right way
         # but currently is necessay for scope to work.
         # since before current content exits, the body's content should be evaluated
-        code += indent(str(self.body), '  ')
+        code += indent(formatted_body, '  ')
         code += f"}} // endgenerate: {self.annotation}"
       else:
         code = TextBlock("")
         code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{"
-        code += indent(str(self.body), '  ')
+        code += indent(formatted_body, '  ')
         code += f"}}"
     return code
 

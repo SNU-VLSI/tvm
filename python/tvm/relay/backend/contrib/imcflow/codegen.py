@@ -1,5 +1,6 @@
 import re
 import tvm
+import logging
 from tvm import relay
 from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
@@ -15,6 +16,7 @@ from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 import pdb
 
+logger = logging.getLogger("IMCFLOW")
 
 CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
@@ -38,8 +40,9 @@ class CodegenSuite:
     builder.visit(func)
     DeviceCodegen("imce", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
 
-    builder = InodeCodeBlockBuilder(func_name, annotator.edges).visit(func)
-    # DeviceCodegen("inode").handle_code_generation(builder.codeblocks)
+    builder = InodeCodeBlockBuilder(func_name, annotator.edges)
+    builder.visit(func)
+    DeviceCodegen("inode", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
   def __init__(self):
@@ -254,7 +257,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     in_edges = self.get_input_edges(call)
     out_edge = self.get_output_edge(call)
-    block = MinmaxQuantBlock(in_edges, out_edge, self.last_tuple_idx, "min_max_quantize")
+    # set o_split_idx to 0 when last_tupe_idx is None
+    block = MinmaxQuantBlock(in_edges, out_edge, self.last_tuple_idx or 0, "min_max_quantize")
     self.curr_conv_block.add_post_op(block)
 
   def visit_bias_add_call(self, call):
@@ -395,7 +399,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # imcu write
 
     pass
-      
+
   def visit_call(self, call):
     for idx, a in enumerate(call.args):
       self.visit(a)
@@ -411,7 +415,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       IsSend = False
       IsRecv = False
 
-      # check call is in inode      
+      # check call is in inode
       if DevConfig().get_hw_node(self.get_graph_node_id(call)).is_inode():
         # Determine Recv or Send and add Recv Block, send Block
         if call.op == op.get("imcflow_unpacking"):
@@ -420,7 +424,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           IsRecv = True
         # elif call.op == op.get("split"):
         #   IsSend = True
-        else:       
+        else:
           raise ValueError("wrong operation!")
 
       if IsSend:
@@ -438,7 +442,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.curr_composite_id = None
     for idx, a in enumerate(call.args):
       self.visit(a)
-      
+
   def visit_send_call(self, call):
     out_edge = self.get_output_edges(call)[0]
     out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
@@ -455,7 +459,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # TODO: Need to add another blocks(control block, etc)
       block = SendBlock(block, 0, "send idata") # FIFO ID for input of qconv is always 0. Refer to transform.py/PolicyTableGenerator.add_EdgeInfo
       self.codeblocks.append(hid, block, CodePhase.EXEC)
-    else:    
+    else:
       # TODO: Need to add another blocks(control block, etc)
       block = SendBlock(block, out_edge_info.fifo_id, "send")
       self.codeblocks.append(hid, block, CodePhase.EXEC)
@@ -467,10 +471,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
     in_tid = in_edge.src_id
     hid = self.get_hid(call)
-    block = DevConfig().MemLayout.get_data_block_by_id(in_tid)
+    db = DevConfig().MemLayout.get_data_block_by_id(in_tid)
+    if db is None:
+      logger.warning("DataBlock for %s is empty", in_tid)
+      return
 
     # TODO: Need to add another blocks(control block, etc)
-    block = RecvBlock(block, in_edge_info.fifo_id, "recv")
+    block = RecvBlock(db, in_edge_info.fifo_id, "recv")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
 
     return
