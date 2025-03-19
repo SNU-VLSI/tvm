@@ -134,10 +134,10 @@ def run_test(test_name, mod, param_dict):
   # get the config
   config = DevConfig()
 
-  print(f"mem_layout: {config.MemLayout}")
-  print(f"nodemap: {config.HWNodeMap}")
-  print(f"edgeinfo: {config.TensorEdgetoInfo}")
-  print(f"idtoedge: {config.TensorIDtoEdge}")
+  # print(f"mem_layout: {config.MemLayout}")
+  # print(f"nodemap: {config.HWNodeMap}")
+  # print(f"edgeinfo: {config.TensorEdgetoInfo}")
+  # print(f"idtoedge: {config.TensorIDtoEdge}")
 
   CodegenSuite = imcflow_codegen.CodegenSuite()
   CodegenSuite(eval_mod)
