@@ -41,6 +41,11 @@ class UniqueVar:
     for value in cls._instances.values():
       yield f"{value.dtype} {value.name};"
 
+  @classmethod
+  def reset(cls):
+    cls._instances = {}
+    cls._counter = 0
+
 
 class CodePhase(Enum):
   INIT = "INIT"
@@ -157,7 +162,8 @@ class CodeBlockStart(CodeBlock):
       code += f"  int hid = __builtin_IMCE_GET_CORE_HID();"
       code += f"  int wid = __builtin_IMCE_GET_CORE_WID();\n"
     else:
-      code += f"  int hid = __builtin_INODE_GET_CORE_HID();\n"
+      code += f"  int hid = __builtin_INODE_GET_CORE_HID();"
+      code += f"  int wid = 0;\n"
     for decl in UniqueVar.get_decls():
       code += f"  {decl}"
     code += "\n"
@@ -185,6 +191,9 @@ class CodeBlocks:
   """A class that manages and generates code blocks for each node."""
 
   def __init__(self, name, target="imce"):
+    # reset UniqueVar for each new instance of codeblocks
+    UniqueVar.reset()
+
     if target == "imce":
       self.nodes = NodeID.imces()
     elif target == "inode":

@@ -74,7 +74,7 @@ class RecvBlock(InodeCodeBlock):
 
     code += f"int recv_data_base_address = {self.block.base_address};\n"
     code += SimpleFor(recv_count,
-                      f"__builtin_INODE_RECV(recv_data_base_address + i*32, 0, 0, {self.fifo_id});")
+                      lambda iter: f"__builtin_INODE_RECV(recv_data_base_address + {iter}*32, 0, 0, {self.fifo_id});")
 
     return code
 

@@ -1,6 +1,5 @@
 import re
 import tvm
-import logging
 from tvm import relay
 from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
@@ -15,8 +14,6 @@ from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 import pdb
-
-logger = logging.getLogger("IMCFLOW")
 
 CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
@@ -448,7 +445,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
     out_tid = out_edge.src_id
     hid = self.get_hid(call)
-    block = DevConfig().MemLayout.get_data_block_by_id(out_tid)
+    db = DevConfig().MemLayout.get_data_block_by_id(out_tid)
 
     dst_hw_node = DevConfig().get_hw_node(out_edge.dst_id.graph_node_id)
     if dst_hw_node is not None and dst_hw_node.is_inode():
@@ -457,11 +454,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # In this case, no tensor edge exists in [unpacking -> split], so handle this case separately.
 
       # TODO: Need to add another blocks(control block, etc)
-      block = SendBlock(block, 0, "send idata") # FIFO ID for input of qconv is always 0. Refer to transform.py/PolicyTableGenerator.add_EdgeInfo
+      block = SendBlock(db, 0, "send idata") # FIFO ID for input of qconv is always 0. Refer to transform.py/PolicyTableGenerator.add_EdgeInfo
       self.codeblocks.append(hid, block, CodePhase.EXEC)
     else:
       # TODO: Need to add another blocks(control block, etc)
-      block = SendBlock(block, out_edge_info.fifo_id, "send")
+      block = SendBlock(db, out_edge_info.fifo_id, "send")
       self.codeblocks.append(hid, block, CodePhase.EXEC)
 
     return
@@ -469,12 +466,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def visit_recv_call(self, call):
     in_edge = self.get_input_edges(call)[0]
     in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
-    in_tid = in_edge.src_id
+    in_tid = in_edge.dst_id
     hid = self.get_hid(call)
     db = DevConfig().MemLayout.get_data_block_by_id(in_tid)
-    if db is None:
-      logger.warning("DataBlock for %s is empty", in_tid)
-      return
 
     # TODO: Need to add another blocks(control block, etc)
     block = RecvBlock(db, in_edge_info.fifo_id, "recv")
