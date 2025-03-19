@@ -38,8 +38,8 @@ class UniqueVar:
 
   @classmethod
   def get_decls(cls):
-    for value in cls._instances.values():
-      yield f"{value.dtype} {value.name};"
+    for obj, value in cls._instances.items():
+      yield f"{value.dtype} {value.name}; // {obj}"
 
   @classmethod
   def reset(cls):
