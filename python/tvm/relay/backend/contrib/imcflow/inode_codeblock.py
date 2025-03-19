@@ -1,5 +1,5 @@
 from tvm.relay.backend.contrib.imcflow.codeblock import *
-from tvm.contrib.imcflow import DataBlock
+from tvm.contrib.imcflow import DataBlock, InstEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from textwrap import indent
 import pdb
@@ -27,6 +27,7 @@ class InodeCodeBlock(CodeBlock):
 
 class PolicyUpdateBlock(InodeCodeBlock):
   """ Code block for updating policy table for given inode's hw node id  """
+
   def __init__(self, node_id: NodeID, annotation: str = ""):
     super().__init__(annotation)
     assert node_id.is_inode(), "PolicyUpdateBlock can only be used for inode"
@@ -38,26 +39,64 @@ class PolicyUpdateBlock(InodeCodeBlock):
     same_row_node_ids.sort(key=lambda id: id.to_coord(1))  # Sort by id.to_coord(1)
 
     code = TextBlock("")
-    code += "int policy_table_start_address;\n"
     for id in same_row_node_ids:
       db = DevConfig().MemLayout.get_data_block_by_id(f"{id.name}_policy")
       if db is None:
         continue
-      code += f"\npolicy_table_start_address = {db.base_address};"
+      var = UniqueVar("policy_table_start_address", dtype="int")
+      code += f"\n{var} = {db.base_address};"
       for i in range(0, db.size, 32):
-        code += f"__builtin_INODE_PU(policy_table_start_address, {i}, {int(i / 32)}, {id.to_coord(1)});"
+        code += f"__builtin_INODE_PU({var}, {i}, {int(i / 32)}, {id.to_coord(1)});"
     code += ""
 
     return code
 
 
 class WriteIMEMBlock(InodeCodeBlock):
-  pass
+  """ Code block for writing IMEM given InstEdgeInfo """
+
+  def __init__(self, edge_info: InstEdgeInfo, annotation: str = ""):
+    super().__init__(annotation)
+    self.edge_info = edge_info
+
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+
+    db = self.edge_info.data_block
+    policy_addr = self.edge_info.policy_info.address
+
+    var = UniqueVar("imem_start_address", dtype="int")
+    code += f"\n{var} = {db.base_address};"
+    code += SimpleFor(db.size // 32,
+                      lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr}, 0);")
+                      # rs1, imm, policy, fifo_id
+    code += ""
+
+    return code
 
 
 class WriteIMCUBlock(InodeCodeBlock):
-  pass
+  """ Code block for writing IMCU weights given the master inode's hid  """
 
+  def __init__(self, node_id: NodeID, annotation: str = ""):
+    super().__init__(annotation)
+    assert node_id.is_inode(), "WriteIMCUBlock can only be used for inode"
+    self.node_id = node_id
+
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+    region = DevConfig().MemLayout[f"{self.node_id}_data"]
+    for db in region.blocks:
+      if "weight" in db.id:
+        info = DevConfig().get_tensor_edge_info_with_id_dir(db.id, "out")
+        var = UniqueVar("imcu_start_address", dtype="int")
+        code += f"\n{var} = {db.base_address};"
+        code += SimpleFor(db.size // 32,
+                          lambda iter: f"__builtin_INODE_WR_IMCU({var} + {iter}*32, 0, {info.policy_info.address}, {info.fifo_id});")
+                          # rs1, imm, policy, fifo_id
+        code += ""
+
+    return code
 
 class RecvBlock(InodeCodeBlock):
   """ Code block for receiving data from given fifo id """
@@ -72,9 +111,9 @@ class RecvBlock(InodeCodeBlock):
     recv_count = self.block.size // 32
     code = TextBlock("")
 
-    code += f"int recv_data_base_address = {self.block.base_address};\n"
+    var = UniqueVar("recv_data_base_address", dtype="int")
     code += SimpleFor(recv_count,
-                      lambda iter: f"__builtin_INODE_RECV(recv_data_base_address + {iter}*32, 0, 0, {self.fifo_id});")
+                      lambda iter: f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {self.fifo_id});")
 
     return code
 
@@ -92,9 +131,9 @@ class SendBlock(InodeCodeBlock):
     recv_count = self.block.size // 32
     code = TextBlock("")
 
-    code += f"int send_data_base_address = {self.block.base_address};\n"
+    var = UniqueVar("send_data_base_address", dtype="int")
     code += SimpleFor(recv_count,
-                      lambda iter: f"__builtin_INODE_SEND(send_data_base_address + {iter}*32, 0, 0, {self.fifo_id});")
+                      lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, 0, {self.fifo_id});")
 
     return code
 

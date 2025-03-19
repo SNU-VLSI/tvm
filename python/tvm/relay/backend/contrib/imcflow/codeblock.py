@@ -157,6 +157,7 @@ class CodeBlockStart(CodeBlock):
 
   def content(self) -> CodeBlock:
     code = TextBlock("")
+    code += "#include \"common_decl.h\"\n"
     code += f"void {self.func_name}() {{"
     if self.target == "imce":
       code += f"  int hid = __builtin_IMCE_GET_CORE_HID();"

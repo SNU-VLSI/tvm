@@ -139,7 +139,7 @@ def run_test(test_name, mod, param_dict):
   # print(f"edgeinfo: {config.TensorEdgetoInfo}")
   # print(f"idtoedge: {config.TensorIDtoEdge}")
 
-  CodegenSuite = imcflow_codegen.CodegenSuite()
+  CodegenSuite = imcflow_codegen.CodegenSuite(f"{test_name}/build")
   CodegenSuite(eval_mod)
 
 def test_big():

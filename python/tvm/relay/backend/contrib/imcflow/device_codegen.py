@@ -7,11 +7,11 @@ from tvm.relay.backend.contrib.imcflow.codeblock import *
 import pdb
 
 class DeviceCodegen:
-  def __init__(self, target, output_dir="/tmp"):
+  def __init__(self, target, build_dir="/tmp"):
     assert target in ["inode", "imce"], f"Unknown target: {target}"
     self.target = target
-    self.output_dir = output_dir
-    self.compile_options = f"-O1 --target={target} -c -fPIC -mllvm=-force-hardware-loops -mllvm=-force-nested-hardware-loop"
+    self.build_dir = build_dir
+    self.compile_options = f"-O1 --target={target.upper()} -c -fPIC -mllvm=-force-hardware-loops -mllvm=-force-nested-hardware-loop"
     self.objcopy_options = "-O binary --only-section=.text"
     self.lld_options = "-e 0 -Ttext 0x0"
     self.ld_options = "-r -b binary"
@@ -25,10 +25,10 @@ class DeviceCodegen:
     logging.info(f"Generating {self.target} code for function: {func_name}")
     code = codeblocks.generate()
     cpp_name = self.save_target_code_to_file(code, func_name)
-    # self.compile_target_code(cpp_name)
+    self.compile_target_code(cpp_name)
 
   def save_target_code_to_file(self, code, func_name):
-    cpp_name = os.path.join(self.output_dir, f"{func_name}_{self.target}.cpp")
+    cpp_name = os.path.join(self.build_dir, f"{func_name}_{self.target}.cpp")
     with open(cpp_name, "w") as file:
       file.write(code)
     return cpp_name
@@ -39,6 +39,8 @@ class DeviceCodegen:
 
     base_name = cpp_name[:-4]
     nodes = NodeID.inodes() if self.target == "inode" else NodeID.imces()
+    if self.target == "inode":
+      return
     for node in nodes:
       file_name = f"{base_name}_{node.name}"
       obj_file = f"{file_name}.o"
@@ -73,3 +75,21 @@ class DeviceCodegen:
   def create_host_object(self, bin_file, host_obj_file):
     command = ["ld", *self.ld_options.split(), "-o", host_obj_file, bin_file]
     subprocess.run(command, check=True)
+
+  def get_object_size(self, obj_file):
+    command = ["llvm-size", obj_file]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stdout, stderr = process.communicate()
+
+    if process.returncode != 0:
+      print(f"Error executing llvm-size: {stderr}")
+      return None
+
+    try:
+      # Parse the output to extract the size
+      size_line = stdout.splitlines()[1]  # Get the second line
+      size = int(size_line.split()[0])  # Extract the first number
+      return size
+    except (IndexError, ValueError):
+      print(f"Error parsing llvm-size output: {stdout}")
+      return None

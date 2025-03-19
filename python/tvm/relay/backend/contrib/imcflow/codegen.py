@@ -1,4 +1,5 @@
 import re
+import os
 import tvm
 from tvm import relay
 from tvm.relay import op
@@ -24,6 +25,19 @@ VarPat = is_var()
 class CodegenSuite:
   """A pass that generates/compiles code for IMCFlow functions"""
 
+  def __init__(self, build_dir):
+    self.build_dir = build_dir
+    if not os.path.exists(build_dir):
+      os.makedirs(build_dir)
+
+    common_decl = f"""
+      typedef short short16 __attribute__((ext_vector_type(16)));
+      __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
+    """
+    with open(f"{build_dir}/common_decl.h", "w") as file:
+      file.write(common_decl)
+
+
   def transform_function(self, _, func):
     func_name = func.attrs.global_symbol
 
@@ -35,11 +49,11 @@ class CodegenSuite:
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
-    DeviceCodegen("imce", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
+    DeviceCodegen("imce", self.build_dir).handle_code_generation(func_name, builder.codeblocks)
 
     builder = InodeCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
-    DeviceCodegen("inode", output_dir="./").handle_code_generation(func_name, builder.codeblocks)
+    DeviceCodegen("inode", self.build_dir).handle_code_generation(func_name, builder.codeblocks)
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
   def __init__(self):

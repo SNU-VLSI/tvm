@@ -297,7 +297,7 @@ class EdgeInfo:
 class InstEdgeInfo(EdgeInfo):
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.policy_info)
-    return f"InstEdgeInfo([{policy_info_str}], {self.data_block}, {self.fifo_id})"
+    return f"InstEdgeInfo([{policy_info_str}], {self.data_block})"
 
   def __repr__(self):
     return self.__str__()
