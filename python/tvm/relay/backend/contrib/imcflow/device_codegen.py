@@ -1,7 +1,7 @@
 import os
 import subprocess
 import logging
-from tvm.contrib.imcflow import NodeID
+from tvm.contrib.imcflow import NodeID, DataBlock
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 import pdb
@@ -25,22 +25,24 @@ class DeviceCodegen:
     logging.info(f"Generating {self.target} code for function: {func_name}")
     code = codeblocks.generate()
     cpp_name = self.save_target_code_to_file(code, func_name)
-    self.compile_target_code(cpp_name)
+    obj_map = self.compile_target_code(cpp_name)
+    self.allocate_imem(obj_map)
 
-  def save_target_code_to_file(self, code, func_name):
+  def save_target_code_to_file(self, code: str, func_name: str):
     cpp_name = os.path.join(self.build_dir, f"{func_name}_{self.target}.cpp")
     with open(cpp_name, "w") as file:
       file.write(code)
     return cpp_name
 
-  def compile_target_code(self, cpp_name):
+  def compile_target_code(self, cpp_name: str):
+    obj_map = {}
     if not cpp_name.endswith(".cpp"):
       raise ValueError(f"Invalid cpp_name: {cpp_name}")
 
     base_name = cpp_name[:-4]
     nodes = NodeID.inodes() if self.target == "inode" else NodeID.imces()
     if self.target == "inode":
-      return
+      return obj_map
     for node in nodes:
       file_name = f"{base_name}_{node.name}"
       obj_file = f"{file_name}.o"
@@ -51,8 +53,11 @@ class DeviceCodegen:
       self.link_object_to_binary(obj_file, out_file)
       self.extract_text_section(out_file, bin_file)
       self.create_host_object(bin_file, host_obj_file)
+      obj_map[node] = obj_file
 
-  def compile_cpp_to_object(self, cpp_name, obj_file, node):
+    return obj_map
+
+  def compile_cpp_to_object(self, cpp_name: str, obj_file: str, node: NodeID):
     command = [
         "clang",
         *self.compile_options.split(),
@@ -63,20 +68,20 @@ class DeviceCodegen:
     ]
     subprocess.run(command, check=True)
 
-  def link_object_to_binary(self, obj_file, out_file):
+  def link_object_to_binary(self, obj_file: str, out_file: str):
     command = ["ld.lld", *self.lld_options.split(), "-o", out_file, obj_file]
     subprocess.run(command, check=True)
 
-  def extract_text_section(self, out_file, bin_file):
+  def extract_text_section(self, out_file: str, bin_file: str):
     command = ["llvm-objcopy", *self.objcopy_options.split(), out_file,
                bin_file]
     subprocess.run(command, check=True)
 
-  def create_host_object(self, bin_file, host_obj_file):
+  def create_host_object(self, bin_file: str , host_obj_file: str):
     command = ["ld", *self.ld_options.split(), "-o", host_obj_file, bin_file]
     subprocess.run(command, check=True)
 
-  def get_object_size(self, obj_file):
+  def get_object_size(self, obj_file: str):
     command = ["llvm-size", obj_file]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     stdout, stderr = process.communicate()
@@ -93,3 +98,14 @@ class DeviceCodegen:
     except (IndexError, ValueError):
       print(f"Error parsing llvm-size output: {stdout}")
       return None
+
+  def allocate_imem(self, obj_map: dict[NodeID, str]):
+    for node, obj_file in obj_map.items():
+      size = self.get_object_size(obj_file)
+      db = DataBlock(f"{node.name}_imem", size)
+      region = f"{node.master().name}_data"
+      if size is not None:
+        DevConfig().MemLayout[region].allocate(db)
+      else:
+        print(f"Failed to allocate imem for {obj_file}")
+    print(DevConfig().MemLayout)

@@ -191,7 +191,7 @@ class CtrlBlock(CodeBlock):
 class CodeBlocks:
   """A class that manages and generates code blocks for each node."""
 
-  def __init__(self, name, target="imce"):
+  def __init__(self, name: str, target: str = "imce"):
     # reset UniqueVar for each new instance of codeblocks
     UniqueVar.reset()
 
@@ -210,7 +210,7 @@ class CodeBlocks:
   def append(self, hid, block, block_type: CodePhase = CodePhase.EXEC):
     self.blocks[hid][block_type].append(block)
 
-  def generate_body(self):
+  def generate_body(self) -> str:
     code = ""
     first = True
     for node in self.nodes:
@@ -226,7 +226,7 @@ class CodeBlocks:
       first = False
     return code
 
-  def generate(self):
+  def generate(self) -> str:
     # generate body first to determine variables first
     # then generate start, where variables are declared
     body = self.generate_body()
