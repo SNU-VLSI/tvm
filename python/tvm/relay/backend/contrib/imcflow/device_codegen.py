@@ -41,8 +41,8 @@ class DeviceCodegen:
 
     base_name = cpp_name[:-4]
     nodes = NodeID.inodes() if self.target == "inode" else NodeID.imces()
-    if self.target == "inode":
-      return obj_map
+    # if self.target == "inode":
+    #   return obj_map
     for node in nodes:
       file_name = f"{base_name}_{node.name}"
       obj_file = f"{file_name}.o"
@@ -61,8 +61,11 @@ class DeviceCodegen:
     command = [
         "clang",
         *self.compile_options.split(),
-        f"-mllvm=-{self.target}_hid={node.to_coord(0)}",
-        f"-mllvm=-{self.target}_wid={node.to_coord(1)}",
+        # FIXME: -mmlvm should not be imce_hid/wid for inode
+        # f"-mllvm=-{self.target}_hid={node.to_coord(0)}",
+        # f"-mllvm=-{self.target}_wid={node.to_coord(1)}",
+        f"-mllvm=-imce_hid={node.to_coord(0)}",
+        f"-mllvm=-imce_wid={node.to_coord(1)}",
         "-o", obj_file,
         cpp_name
     ]
@@ -104,8 +107,11 @@ class DeviceCodegen:
       size = self.get_object_size(obj_file)
       if size is not None:
         db = DataBlock(f"{node.name}_imem", size)
-        self.allocate_db(db, f"{node.master().name}_data")
-        self.insert_db_to_inst_edge_info(db, node)
+        if self.target == "inode":
+          self.allocate_db(db, f"{node.name}_inst")
+        else:
+          self.allocate_db(db, f"{node.master().name}_data")
+          self.insert_db_to_inst_edge_info(db, node)
       else:
         print(f"Failed to allocate imem for {obj_file}")
     print(DevConfig().MemLayout)

@@ -68,8 +68,8 @@ class WriteIMEMBlock(InodeCodeBlock):
     var = UniqueVar("imem_start_address", dtype="int")
     code += f"{var} = {db.base_address};"
     code += SimpleFor(math.ceil(db.size / 32),
-                      lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr}, 0);")
-                      # rs1, imm, policy, fifo_id
+                      lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr});")
+                      # rs1, imm, policy
     code += ""
 
     return code
@@ -89,11 +89,12 @@ class WriteIMCUBlock(InodeCodeBlock):
     for db in region.blocks.values():
       if isinstance(db.id, TensorID) and "weight" == db.id.tensor_type:
         info = DevConfig().get_tensor_edge_info_with_id_dir(db.id, "out")
+        assert info.fifo_id == 1, f"IMCU fifo id should be set to 1 (although not used), but got {info.fifo_id} for {db.id}"
         var = UniqueVar("imcu_start_address", dtype="int")
         code += f"{var} = {db.base_address};"
         code += SimpleFor(math.ceil(db.size / 32),
-                          lambda iter: f"__builtin_INODE_WR_IMCU({var} + {iter}*32, 0, {info.policy_info[0].address}, {info.fifo_id});")
-                          # rs1, imm, policy, fifo_id
+                          lambda iter: f"__builtin_INODE_WR_IMCU({var} + {iter}*32, 0, {info.policy_info[0].address});")
+                          # rs1, imm, policy
         code += ""
 
     return code
