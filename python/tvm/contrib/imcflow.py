@@ -421,8 +421,10 @@ class ImcflowDeviceConfig:
     for tid in self.get_tensor_edges_from_graph_node_id(graph_node_id):
       yield self.get_tensor_edge(tid)
 
-  def add_inst_edge_info(self, graph_node_id: Union[int, Tuple], inst_edge_info: InstEdgeInfo):
-    self.InstEdgeInfoDict[graph_node_id] = inst_edge_info
+  def add_inst_edge_info(self, imce_id: NodeID, inst_edge_info: InstEdgeInfo):
+    assert imce_id.is_imce(), "Only imce nodes have inst edge info"
+    self.InstEdgeInfoDict[imce_id] = inst_edge_info
 
-  def get_inst_edge_info(self, graph_node_id: Union[int, Tuple]):
-    return self.InstEdgeInfoDict.get(graph_node_id, None)
+  def get_inst_edge_info(self, imce_id: NodeID):
+    assert imce_id.is_imce(), "Only imce nodes have inst edge info"
+    return self.InstEdgeInfoDict.get(imce_id, None)

@@ -122,14 +122,14 @@ class SimpleFor(CodeBlock):
   def content(self) -> CodeBlock:
     if self.count == 0:
       return TextBlock("")
-    elif self.count == 1:
-      return self.body
+
+    if self.count == 1:
+      formatted_body = self.body(0) if callable(self.body) else str(self.body)
+      return TextBlock(formatted_body)
+
 
     with self.manage_scope() as var_iter:
-      if callable(self.body):
-        formatted_body = self.body(var_iter)
-      else:
-        formatted_body = str(self.body)
+      formatted_body = self.body(var_iter) if callable(self.body) else str(self.body)
 
       if self.annotation:
         code = TextBlock("")

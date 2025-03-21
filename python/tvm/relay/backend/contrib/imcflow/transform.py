@@ -1269,8 +1269,7 @@ def constructNoCPathDict(mod):
             (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], HwMapping[getOuterNodeID(DstTensorID.graph_node_id)], SplitIdx)
           )
 
-      for ActiveIMCE in ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint]:
-        DstHwNodeID = ActiveIMCE
+      for DstHwNodeID in NodeID.imces():
         InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
         NocPaths[func_name_var.name_hint][DstHwNodeID] = (
           (InodeID, DstHwNodeID, None)

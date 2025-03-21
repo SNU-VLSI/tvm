@@ -402,14 +402,20 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.curr_composite_id = None
 
   def initialize(self):
+    # policy update
     for inode in NodeID.inodes():
-      # policy update
       block = PolicyUpdateBlock(inode, "policy update")
       self.codeblocks.append(inode, block, CodePhase.INIT)
-      # imem write
-      # imcu write
 
-    pass
+    # imem write
+    for imce, inst_edge in DevConfig().InstEdgeInfoDict.items():
+      block = WriteIMEMBlock(inst_edge, f"imem write: {imce.name}")
+      self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+
+    # imcu write
+    for node in NodeID.inodes():
+      block = WriteIMCUBlock(node, "imcu write")
+      self.codeblocks.append(node, block, CodePhase.INIT)
 
   def visit_call(self, call):
     for idx, a in enumerate(call.args):

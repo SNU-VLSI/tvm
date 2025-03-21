@@ -26,7 +26,7 @@ class DeviceCodegen:
     code = codeblocks.generate()
     cpp_name = self.save_target_code_to_file(code, func_name)
     obj_map = self.compile_target_code(cpp_name)
-    self.allocate_imem(obj_map)
+    self.update_device_config_with_obj_info(obj_map)
 
   def save_target_code_to_file(self, code: str, func_name: str):
     cpp_name = os.path.join(self.build_dir, f"{func_name}_{self.target}.cpp")
@@ -99,13 +99,20 @@ class DeviceCodegen:
       print(f"Error parsing llvm-size output: {stdout}")
       return None
 
-  def allocate_imem(self, obj_map: dict[NodeID, str]):
+  def update_device_config_with_obj_info(self, obj_map: dict[NodeID, str]):
     for node, obj_file in obj_map.items():
       size = self.get_object_size(obj_file)
-      db = DataBlock(f"{node.name}_imem", size)
-      region = f"{node.master().name}_data"
       if size is not None:
-        DevConfig().MemLayout[region].allocate(db)
+        db = DataBlock(f"{node.name}_imem", size)
+        self.allocate_db(db, f"{node.master().name}_data")
+        self.insert_db_to_inst_edge_info(db, node)
       else:
         print(f"Failed to allocate imem for {obj_file}")
     print(DevConfig().MemLayout)
+
+  def allocate_db(self, data_block: DataBlock, region: str):
+    DevConfig().MemLayout[region].allocate(data_block)
+
+  def insert_db_to_inst_edge_info(self, db: DataBlock, node: NodeID):
+    edge_info = DevConfig().get_inst_edge_info(node)
+    edge_info.set_data_block(db)
