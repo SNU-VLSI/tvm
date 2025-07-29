@@ -15,9 +15,14 @@ from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+# Add imports for reference TVM compilation
+from tvm.relay.backend import Executor, Runtime
+from tvm.contrib import graph_executor
+from tvm.relay.backend import te_compiler
+import os
 
-from models.real_model import getModel
-from models import real_model2
+from models import real_model, real_model2
+from models import small_model
 
 @torch.library.custom_op("imcflow::min_max_quant", mutates_args=())
 def min_max_quant(pic: torch.Tensor, min:int, max:int) -> torch.Tensor:
@@ -48,54 +53,158 @@ def printModel(result_dir, mod, param_dict, mod_name):
   with open(f"{result_dir}/{mod_name}.txt", "w") as f:
     f.write(pretty_print(mod))
 
-def run_test(test_name, mod, param_dict):
+def buildAndRun_ref(name, mod, data_dict, param_dict):
+  """Generate reference TVM results without IMCFLOW processing"""
+  print(f"=== Generating REFERENCE for {name} ===")
+
+  dev = tvm.cpu()
+  Executor_ = Executor("graph")
+  Runtime_ = Runtime("cpp")
+
+  # Build with standard TVM C backend (NO IMCFLOW)
+  with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
+    te_compiler.get().clear()
+    lib = tvm.relay.build(mod, target="c", params=param_dict, executor=Executor_, runtime=Runtime_)
+
+  lib.export_library(f"{name}_ref.so")
+  lib_loaded = tvm.runtime.load_module(f"{name}_ref.so")
+
+  gmod = graph_executor.GraphModule(lib_loaded["default"](dev))
+  gmod.set_input(**data_dict)
+  gmod.run()
+
+  result = gmod.get_output(0)
+  print(f"Reference result shape: {result.shape}")
+  print(f"Reference result sample: {result.numpy().flatten()[:10]}")
+  return result
+
+def run_test_ref(test_name, mod, param_dict):
+  """Generate reference TVM compilation results"""
+  print(f"\n{'='*60}")
+  print(f"GENERATING REFERENCE RESULTS FOR: {test_name}")
+  print(f"{'='*60}")
+
+  ref_dir = f"{test_name}_ref"
+  os.makedirs(ref_dir, exist_ok=True)
+
+  # Save original model
+  printModel(ref_dir, mod, param_dict, "origin")
+
+  # Create a new IRModule for reference (TVM IRModule doesn't have copy method)
+  ref_mod = tvm.IRModule({"main": mod["main"]})
+
+  # Check if model contains IMCFLOW operations - if so, skip reference generation
+  model_str = pretty_print(ref_mod)
+  if "imcflow" in model_str.lower():
+    print("⚠️  WARNING: Model contains IMCFLOW operations!")
+    print("Cannot generate standard TVM reference for model with IMCFLOW-specific operations.")
+    print("Skipping reference generation...")
+
+    # Create a placeholder file to indicate this
+    with open(f"{ref_dir}/SKIPPED_IMCFLOW_MODEL.txt", "w") as f:
+      f.write("Reference generation skipped.\n")
+      f.write("Model contains IMCFLOW-specific operations that cannot be compiled with standard TVM.\n")
+      f.write("To generate a reference, use a model without IMCFLOW operations.\n")
+
+    print(f"Created placeholder: {ref_dir}/SKIPPED_IMCFLOW_MODEL.txt")
+    return ref_mod
+
+  # Proceed with reference generation for clean models
+  ref_mod["main"] = bind_params_by_name(ref_mod["main"], param_dict)
+  ref_mod = transform.InferType()(ref_mod)
+  printModel(ref_dir, ref_mod, param_dict, "after_bind")
+
+  # Apply only standard TVM optimizations (no IMCFLOW)
+  with tvm.transform.PassContext(opt_level=3):
+    ref_mod = transform.FoldConstant()(ref_mod)
+    ref_mod = transform.SimplifyInference()(ref_mod)
+    ref_mod = transform.FoldScaleAxis()(ref_mod)
+    ref_mod = transform.SimplifyExpr()(ref_mod)
+    ref_mod = transform.FoldConstant()(ref_mod)
+
+  printModel(ref_dir, ref_mod, param_dict, "after_std_optimization")
+
+  # Generate standard TVM C code
+  with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
+    te_compiler.get().clear()
+    lib = tvm.relay.build(ref_mod, target="c", params=param_dict)
+
+    # Extract and save the generated C source code
+    try:
+      # Get the underlying library module and extract C source
+      underlying_lib = lib.get_lib()
+      c_source = underlying_lib.get_source("c")
+      with open(f"{ref_dir}/{test_name}_generated.c", "w") as f:
+        f.write(c_source)
+      print(f"Generated C source saved: {ref_dir}/{test_name}_generated.c")
+    except Exception as e:
+      print(f"Could not extract C source: {e}")
+
+  lib.export_library(f"{ref_dir}/{test_name}_reference.so")
+  print(f"Generated reference library: {ref_dir}/{test_name}_reference.so")
+
+  # Save final model state
+  printModel(ref_dir, ref_mod, param_dict, "final_ref_model")
+
+  print(f"Reference generation completed for {test_name}")
+  return ref_mod
+
+def run_test_evl(test_name, mod, param_dict):
+  """Generate IMCFLOW evaluation results (original function renamed)"""
+  print(f"\n{'='*60}")
+  print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
+  print(f"{'='*60}")
+
+  eval_dir = f"{test_name}_evl"
+  os.makedirs(eval_dir, exist_ok=True)
+
   eval_mod, eval_param_dict = mod, param_dict
   DevConfig().clear()
 
   # origin
-  printModel(test_name, eval_mod, eval_param_dict, "origin")
+  printModel(eval_dir, eval_mod, eval_param_dict, "origin")
 
   # bind param
   eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
   eval_mod = transform.InferType()(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_bind")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_bind")
 
   eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_merge")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_merge")
 
   SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(eval_mod["main"])
   eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
   eval_mod = transform.MergeCompilerRegions()(eval_mod)
   eval_mod = transform.PartitionGraph()(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_split_concat_partition")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_split_concat_partition")
 
   AnnotGenerator = imcflow_transform.AnnotGenerator()
   AnnotGenerator(eval_mod)
   # print(AnnotGenerator.RegionList)
   eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_annot")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_annot")
 
   eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_merge_region")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_merge_region")
 
   eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_clean_region")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_clean_region")
 
   eval_mod = transform.PartitionGraph()(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_partition_graph")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_partition_graph")
 
   eval_mod = imcflow.flattenSubgraphs(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_flatten")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_flatten")
 
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_prune_model")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
 
   eval_mod = imcflow_transform.PackingInserter()(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "after_packing")
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
 
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
-  printModel(test_name, eval_mod, eval_param_dict, "with_custom_id")
+  printModel(eval_dir, eval_mod, eval_param_dict, "with_custom_id")
 
   imcflow_transform.NodeMapper()(eval_mod)
   imcflow_transform.constructTensorEdgeList(eval_mod)
@@ -134,21 +243,34 @@ def run_test(test_name, mod, param_dict):
   # get the config
   config = DevConfig()
 
-  # print(f"mem_layout: {config.MemLayout}")
   # print(f"nodemap: {config.HWNodeMap}")
   # print(f"edgeinfo: {config.TensorEdgetoInfo}")
   # print(f"idtoedge: {config.TensorIDtoEdge}")
 
-  CodegenSuite = imcflow_codegen.CodegenSuite(f"{test_name}/build")
+  CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
   CodegenSuite(eval_mod)
 
-def test_big():
-  mod, param_dict = getModel()
-  run_test("big", mod, param_dict)
+  print(f"mem_layout: {config.MemLayout}")
+  print(f"Evaluation generation completed for {test_name}")
 
-def test_small():
+def test_big_ref():
+  """Generate only reference for big model"""
+  assert False, "Big model reference is not supported yet"
+
+def test_small_ref():
+  """Generate only reference for small model"""
+  mod, param_dict, _ = small_model.getTestModel()
+  run_test_ref("small", mod, param_dict)
+
+def test_big_evl():
+  """Generate only evaluation for big model"""
+  mod, param_dict = real_model.getModel()
+  run_test_evl("big", mod, param_dict)
+
+def test_small_evl():
+  """Generate only evaluation for small model"""
   mod, param_dict = real_model2.getModel()
-  run_test("small", mod, param_dict)
+  run_test_evl("small", mod, param_dict)
 
 if __name__ == "__main__":
   tvm.testing.main()
