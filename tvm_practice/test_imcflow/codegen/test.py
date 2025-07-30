@@ -26,31 +26,6 @@ import os
 from models import real_model, real_model2
 from models import small_model
 
-
-@torch.library.custom_op("imcflow::min_max_quant", mutates_args=())
-def min_max_quant(pic: torch.Tensor, min: int, max: int) -> torch.Tensor:
-  return pic.clone()
-
-
-@torch.library.custom_op("imcflow::linear_quant", mutates_args=())
-def linear_quant(x: torch.Tensor, scale: float, zero_point: int) -> torch.Tensor:
-  return x.clone()
-
-
-def make_min_max(input, input_types):
-  MinNDArray = tvm.runtime.ndarray.array(np.array(input[1], dtype=np.float32))
-  MaxNDArray = tvm.runtime.ndarray.array(np.array(input[2], dtype=np.float32))
-  return imcflow_min_max_quantize(input[0], tvm.relay.Constant(MinNDArray), tvm.relay.Constant(MaxNDArray), 1, "float32")
-
-
-def make_quantize(input, input_types):
-  scale = tvm.relay.Constant(tvm.runtime.ndarray.array(
-      np.array(input[1], dtype=np.float32)))
-  bias = tvm.relay.Constant(tvm.runtime.ndarray.array(
-      np.array(input[2], dtype=np.int32)))
-  return tvm.relay.qnn.op.quantize(input[0], scale, bias, 1, "float32")
-
-
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
       relay_mod=mod,
@@ -63,31 +38,57 @@ def printModel(result_dir, mod, param_dict, mod_name):
     f.write(pretty_print(mod))
 
 
-def buildAndRun_ref(name, mod, data_dict, param_dict):
-  """Generate reference TVM results without IMCFLOW processing"""
-  print(f"=== Generating REFERENCE for {name} ===")
+def generate_aot_c_code(test_name, mod, param_dict, ref_dir):
+  print("\n" + "="*40)
+  print("GENERATING AOT C CODE")
+  print("="*40)
+  try:
+    with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
+      te_compiler.get().clear()
 
-  dev = tvm.cpu()
-  Executor_ = Executor("graph")
-  Runtime_ = Runtime("cpp")
+      # Configure AOT executor with C interface for microcontroller deployment
+      executor = Executor("aot", {
+          "interface-api": "c",
+          "unpacked-api": True,
+          "workspace-byte-alignment": 8,
+          "link-params": False
+      })
 
-  # Build with standard TVM C backend (NO IMCFLOW)
-  with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
-    te_compiler.get().clear()
-    lib = tvm.relay.build(mod, target="c", params=param_dict,
-                          executor=Executor_, runtime=Runtime_)
+      # Configure CRT runtime for standalone deployment
+      # Note: system-lib=False to avoid function registry conflicts with C interface
+      runtime = Runtime("crt", {
+          "system-lib": False
+      })
 
-  lib.export_library(f"{name}_ref.so")
-  lib_loaded = tvm.runtime.load_module(f"{name}_ref.so")
+      print(f"Building with AOT configuration for {test_name}")
 
-  gmod = graph_executor.GraphModule(lib_loaded["default"](dev))
-  gmod.set_input(**data_dict)
-  gmod.run()
+      # Build with AOT configuration
+      aot_lib = tvm.relay.build(mod, target="c", params=param_dict,
+                                executor=executor, runtime=runtime)
 
-  result = gmod.get_output(0)
-  print(f"Reference result shape: {result.shape}")
-  print(f"Reference result sample: {result.numpy().flatten()[:10]}")
-  return result
+      print(f"Compiling with AOT configuration for {test_name}")
+
+      # Extract and save the AOT C source code
+      try:
+        aot_underlying_lib = aot_lib.get_lib()
+        aot_c_source = aot_underlying_lib.get_source("c")
+        with open(f"{ref_dir}/{test_name}_aot_generated.c", "w") as f:
+          f.write(aot_c_source)
+        print(f"✅ AOT C source saved: {ref_dir}/{test_name}_aot_generated.c")
+
+      except Exception as e:
+        print(f"❌ Could not extract AOT C source: {e}")
+
+      # Export AOT library
+      mlf_tar_path = f"{ref_dir}/{test_name}_aot.tar"
+      export_model_library_format(aot_lib, mlf_tar_path)
+      with tarfile.open(mlf_tar_path, "r") as tar:
+        tar.extractall(f"{ref_dir}/mlf_extracted")
+      print(f"✅ Generated AOT library: {mlf_tar_path}")
+
+  except Exception as e:
+    print(f"❌ AOT generation failed: {e}")
+    print("This might be due to model complexity or unsupported operations in AOT mode")
 
 
 def run_test_ref(test_name, mod, param_dict):
@@ -137,79 +138,7 @@ def run_test_ref(test_name, mod, param_dict):
 
   printModel(ref_dir, ref_mod, param_dict, "after_std_optimization")
 
-  # Generate standard TVM C code (Graph Executor)
-  print("\n" + "="*40)
-  print("GENERATING GRAPH EXECUTOR C CODE")
-  print("="*40)
-
-  with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
-    te_compiler.get().clear()
-    lib = tvm.relay.build(ref_mod, target="c", params=param_dict)
-
-    # Extract and save the generated C source code
-    try:
-      # Get the underlying library module and extract C source
-      underlying_lib = lib.get_lib()
-      c_source = underlying_lib.get_source("c")
-      with open(f"{ref_dir}/{test_name}_generated.c", "w") as f:
-        f.write(c_source)
-      print(
-          f"✅ Graph executor C source saved: {ref_dir}/{test_name}_generated.c")
-    except Exception as e:
-      print(f"❌ Could not extract graph executor C source: {e}")
-
-  lib.export_library(f"{ref_dir}/{test_name}_reference.so")
-  print(
-      f"✅ Generated graph executor library: {ref_dir}/{test_name}_reference.so")
-
-  # Generate AOT C code
-  print("\n" + "="*40)
-  print("GENERATING AOT C CODE")
-  print("="*40)
-
-  try:
-    with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
-      te_compiler.get().clear()
-
-      # Configure AOT executor with C interface for microcontroller deployment
-      executor = Executor("aot", {
-          "interface-api": "c",
-          "unpacked-api": True,
-          "workspace-byte-alignment": 8,
-          "link-params": False
-      })
-
-      # Configure CRT runtime for standalone deployment
-      # Note: system-lib=False to avoid function registry conflicts with C interface
-      runtime = Runtime("crt", {
-          "system-lib": False
-      })
-
-      # Build with AOT configuration
-      aot_lib = tvm.relay.build(ref_mod, target="c", params=param_dict,
-                                executor=executor, runtime=runtime)
-
-      # Extract and save the AOT C source code
-      try:
-        aot_underlying_lib = aot_lib.get_lib()
-        aot_c_source = aot_underlying_lib.get_source("c")
-        with open(f"{ref_dir}/{test_name}_aot_generated.c", "w") as f:
-          f.write(aot_c_source)
-        print(f"✅ AOT C source saved: {ref_dir}/{test_name}_aot_generated.c")
-
-      except Exception as e:
-        print(f"❌ Could not extract AOT C source: {e}")
-
-      # Export AOT library
-      mlf_tar_path = f"{ref_dir}/{test_name}_aot.tar"
-      export_model_library_format(aot_lib, mlf_tar_path)
-      with tarfile.open(mlf_tar_path, "r") as tar:
-        tar.extractall(f"{ref_dir}/mlf_extracted")
-      print(f"✅ Generated AOT library: {mlf_tar_path}")
-
-  except Exception as e:
-    print(f"❌ AOT generation failed: {e}")
-    print("This might be due to model complexity or unsupported operations in AOT mode")
+  generate_aot_c_code(test_name, ref_mod, param_dict, ref_dir)
 
   # Save final model state
   printModel(ref_dir, ref_mod, param_dict, "final_ref_model")
@@ -323,6 +252,8 @@ def run_test_evl(test_name, mod, param_dict):
 
   print(f"mem_layout: {config.MemLayout}")
   print(f"Evaluation generation completed for {test_name}")
+
+  generate_aot_c_code(test_name, eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():
