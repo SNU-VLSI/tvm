@@ -15,7 +15,7 @@
       "name": "(gdb) Attach",
       "type": "cppdbg",
       "request": "attach",
-      "program": "/root/anaconda3/envs/py3.10/bin/python",
+      "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
       "processId": "${command:pickProcess}"
     },
     {
@@ -24,7 +24,7 @@
       "request": "launch",
       "program": "${file}",
       "console": "integratedTerminal",
-      "python": "/root/anaconda3/envs/py3.10/bin/python",
+      "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
       "cwd": "${fileDirname}",
       "args": [
         "-k",
@@ -37,7 +37,7 @@
       "type": "cppdbg",
       "request": "launch",
       "cwd": "${workspaceFolder}/tvm_practice",
-      "program": "/root/anaconda3/envs/py3.10/bin/python",
+      "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
       "args": [
         "test.py",
         "-k small_model",
