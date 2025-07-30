@@ -1557,3 +1557,11 @@ reg.register_shape_func("nn.fast_softmax", False, elemwise_shape_func)
 reg.register_shape_func("nn.relu", False, elemwise_shape_func)
 reg.register_shape_func("nn.leaky_relu", False, elemwise_shape_func)
 reg.register_shape_func("nn.prelu", False, elemwise_shape_func)
+
+# test fused_batch_norm
+reg.register_strategy("imcflow.fused_batch_norm", strategy.fused_batch_norm_strategy)
+reg.register_strategy("nn.imcflow_qconv", strategy.imcflow_qconv2d_strategy)
+
+reg.register_strategy("qnn.imcflow_min_max_quantize", strategy.imcflow_min_max_quantize_strategy)
+
+reg.register_strategy("qnn.imcflow_nu_quantize", strategy.imcflow_nu_quantize_strategy)

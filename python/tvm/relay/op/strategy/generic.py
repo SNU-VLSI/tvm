@@ -2095,3 +2095,170 @@ def wrap_compute_layout_transform(topi_compute, schedule_rule="None"):
         return [topi_compute(inputs[0], attrs.src_layout, attrs.dst_layout, schedule_rule)]
 
     return _compute_layout_transform
+
+# test_fused_batch_norm
+def wrap_compute_fused_batch_norm(topi_compute):
+    """wrap fused_batch_norm topi compute"""
+
+    def _compute_fused_batch_norm(attrs, inputs, out_type):
+        return topi_compute(*inputs, attrs.axis)
+
+    return _compute_fused_batch_norm
+
+
+@override_native_generic_func("fused_batch_norm_strategy")
+def fused_batch_norm_strategy(attrs, inputs, out_type, target):
+    """fused_batch_norm generic strategy"""
+    logger.warning("fused_batch_norm is not optimized for this platform.")
+    strategy = _op.OpStrategy()
+    # Todo. implement imcflow_fused_batch_norm to topi folder
+    strategy.add_implementation(
+        wrap_compute_fused_batch_norm(topi.imcflow.fused_batch_norm),
+        wrap_topi_schedule(topi.generic.schedule_fused_batch_norm),
+        name="fused_batch_norm.generic",
+    )
+    return strategy
+
+# test_imcflow_packing
+def wrap_compute_imcflow_packing(topi_compute):
+    """wrap imcflow_packing topi compute"""
+
+    def _compute_imcflow_packing(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.newshape, attrs.dtype)]
+
+    return _compute_imcflow_packing
+
+
+@override_native_generic_func("imcflow_packing_strategy")
+def imcflow_packing_strategy(attrs, inputs, out_type, target):
+    """imcflow_packing generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_packing(topi.imcflow.imcflow_packing),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_packing),
+        name="imcflow_packing.generic",
+    )
+    return strategy
+
+# test_imcflow_unpacking
+def wrap_compute_imcflow_unpacking(topi_compute):
+    """wrap imcflow_unpacking topi compute"""
+
+    def _compute_imcflow_unpacking(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.newshape, attrs.dtype)]
+
+    return _compute_imcflow_unpacking
+
+
+@override_native_generic_func("imcflow_unpacking_strategy")
+def imcflow_unpacking_strategy(attrs, inputs, out_type, target):
+    """imcflow_unpacking generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_unpacking(topi.imcflow.imcflow_unpacking),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_unpacking),
+        name="imcflow_unpacking.generic",
+    )
+    return strategy
+    
+def wrap_compute_imcflow_qconv2d(
+    topi_compute,
+    *,
+    need_data_layout=False,
+    need_kernel_layout=False,
+    need_out_layout=False,
+    has_groups=False,
+    need_auto_scheduler_layout=False,
+    need_meta_schedule_layout=False,
+):
+    """Wrap conv2d topi compute"""
+
+    def _compute_conv2d(attrs, inputs, out_type):
+        padding = get_const_tuple(attrs.padding)
+        strides = get_const_tuple(attrs.strides)
+        dilation = get_const_tuple(attrs.dilation)
+        data_layout = attrs.get_str("data_layout")
+        kernel_layout = attrs.get_str("kernel_layout")
+        out_layout = attrs.get_str("out_layout")
+        out_dtype = attrs.out_dtype
+        out_dtype = inputs[0].dtype if out_dtype in ("same", "") else out_dtype
+        args = [inputs[0], inputs[1], strides, padding, dilation]
+        if has_groups:
+            args.append(attrs.groups)
+        if need_data_layout:
+            args.append(data_layout)
+        if need_kernel_layout:
+            args.append(kernel_layout)
+        if need_out_layout:
+            args.append(out_layout)
+        args.append(out_dtype)
+        if need_auto_scheduler_layout:
+            args.append(get_auto_scheduler_rewritten_layout(attrs))
+        elif need_meta_schedule_layout:
+            args.append("")
+            args.append(get_meta_schedule_original_shape(attrs))
+        return [topi_compute(*args)]
+
+    return _compute_conv2d
+
+@override_native_generic_func("imcflow_qconv2d_strategy")
+def imcflow_qconv2d_strategy(attrs, inputs, out_type, target):
+    """conv2d generic strategy"""
+    strategy = _op.OpStrategy()
+    data, kernel = inputs
+    dilation = get_const_tuple(attrs.dilation)
+    groups = attrs.groups
+    layout = attrs.data_layout
+    kernel_layout = attrs.kernel_layout
+    (dilation_h, dilation_w) = dilation
+    if dilation_h < 1 or dilation_w < 1:
+        raise ValueError("dilation should be positive value")
+    
+    strategy.add_implementation(
+      wrap_compute_imcflow_qconv2d(topi.imcflow.imcflow_qconv2d, need_data_layout=True, need_kernel_layout=True),
+      wrap_topi_schedule(topi.generic.schedule_conv2d_nchw),
+      name="imcflow_qconv2d.generic",
+    )
+
+    return strategy
+
+
+def wrap_compute_imcflow_min_max_quantize(topi_compute):
+    """wrap imcflow_min_max_quantize topi compute"""
+
+    def _compute_imcflow_min_max_quantize(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.axis, attrs.out_dtype, attrs.param_dtype)]
+
+    return _compute_imcflow_min_max_quantize
+
+
+@override_native_generic_func("imcflow_min_max_quantize_strategy")
+def imcflow_min_max_quantize_strategy(attrs, inputs, out_type, target):
+    """imcflow_min_max_quantize generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_min_max_quantize(topi.imcflow.imcflow_min_max_quantize),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_min_max_quantize),
+        name="imcflow_min_max_quantize.generic",
+    )
+    return strategy
+
+def wrap_compute_imcflow_nu_quantize(topi_compute):
+    """wrap imcflow_nu_quantize topi compute"""
+
+    def _compute_imcflow_nu_quantize(attrs, inputs, out_type):
+        return [topi_compute(*inputs, attrs.axis, attrs.out_dtype, attrs.param_dtype)]
+
+    return _compute_imcflow_nu_quantize
+
+
+@override_native_generic_func("imcflow_nu_quantize_strategy")
+def imcflow_nu_quantize_strategy(attrs, inputs, out_type, target):
+    """imcflow_nu_quantize generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_imcflow_nu_quantize(topi.imcflow.imcflow_nu_quantize),
+        wrap_topi_schedule(topi.generic.schedule_imcflow_nu_quantize),
+        name="imcflow_nu_quantize.generic",
+    )
+    return strategy

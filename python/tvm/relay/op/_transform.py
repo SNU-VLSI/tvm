@@ -1284,3 +1284,9 @@ def gather_shape_func(attrs, inputs, _):
     Shape func for gather operator.
     """
     return [_gather_shape(inputs[0], inputs[1], attrs.axis)]
+
+# imcflow_packing
+_reg.register_strategy("imcflow_packing", strategy.imcflow_packing_strategy)
+
+# imcflow_unpacking
+_reg.register_strategy("imcflow_unpacking", strategy.imcflow_unpacking_strategy)

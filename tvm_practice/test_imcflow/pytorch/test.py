@@ -14,6 +14,7 @@ from tvm.relay import transform
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig
+from copy import deepcopy
 
 from models.real_model import getModel
 from models import real_model2
@@ -35,6 +36,24 @@ def make_quantize(input, input_types):
   scale = tvm.relay.Constant(tvm.runtime.ndarray.array(np.array(input[1], dtype=np.float32)))
   bias = tvm.relay.Constant(tvm.runtime.ndarray.array(np.array(input[2], dtype=np.int32)))
   return tvm.relay.qnn.op.quantize(input[0], scale, bias, 1, "float32")
+
+def runModel(test_name, mod, param_dict):
+  input_data = np.random.rand(1, 32, 16, 16).astype(np.float32)
+  mod = deepcopy(mod)
+  mod = imcflow_transform.clearCompilerTag(mod)
+  printModel(test_name, mod, param_dict, "clear_compiler_tag")
+
+  tvm.relay.backend.te_compiler.get().clear()
+  device = tvm.cpu(0)
+  with tvm.transform.PassContext(opt_level=0):
+      ref_lib = tvm.relay.build(mod, target="llvm", params=param_dict)
+  ref_rt_mod = tvm.contrib.graph_executor.GraphModule(ref_lib["default"](device))
+
+  ref_rt_mod.set_input("input", input_data)
+  ref_rt_mod.run()
+  out = ref_rt_mod.get_output(0)
+  ref_result = out.numpy()
+  print(ref_result)
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
@@ -67,6 +86,8 @@ def run_test(test_name, mod, param_dict):
   eval_mod = transform.MergeCompilerRegions()(eval_mod)
   eval_mod = transform.PartitionGraph()(eval_mod)
   printModel(test_name, eval_mod, eval_param_dict, "after_split_concat_partition")
+
+  runModel(test_name, eval_mod, eval_param_dict)
 
   AnnotGenerator = imcflow_transform.AnnotGenerator()
   AnnotGenerator(eval_mod)
@@ -137,6 +158,37 @@ def test_big():
 def test_small():
   mod, param_dict = real_model2.getModel()
   run_test("small", mod, param_dict)
+
+def test_ref_graph():
+  param1 = tvm.relay.var("param1", shape=(1, 3, 16, 16))
+  param2 = tvm.relay.var("param2", shape=(1, 3, 16, 16))
+
+  f1 = tvm.relay.Function([param1, param2], param1+param2)
+  f1 = f1.with_attr("Primitive", 1)
+  # f2 = tvm.relay.Function([data1, data2], data1-data2)
+  # y = tvm.relay.Call(f1, [data1, data2]) + tvm.relay.Call(f2, [data1, data2])
+
+  data1 = tvm.relay.var("data1", shape=(1, 3, 16, 16))
+  data2 = tvm.relay.var("data2", shape=(1, 3, 16, 16))
+  y = tvm.relay.Call(f1, [data1, data2])
+  mod = tvm.IRModule.from_expr(y)
+
+  printModel("ref", mod, {}, "ref_func")
+
+  tvm.relay.backend.te_compiler.get().clear()
+  device = tvm.cpu(0)
+  with tvm.transform.PassContext(opt_level=0):
+      ref_lib = tvm.relay.build(mod, target="llvm", params={})
+  ref_rt_mod = tvm.contrib.graph_executor.GraphModule(ref_lib["default"](device))
+
+  data1 = np.random.rand(1, 3, 16, 16).astype(np.float32)
+  data2 = np.random.rand(1, 3, 16, 16).astype(np.float32)
+  ref_rt_mod.set_input("data1", data1)
+  ref_rt_mod.set_input("data2", data2)
+  ref_rt_mod.run()
+  out = ref_rt_mod.get_output(0)
+  ref_result = out.numpy()
+  print(ref_result)
 
 if __name__ == "__main__":
   tvm.testing.main()

@@ -2014,7 +2014,10 @@ def trilu(data, k, upper=True):
         k = const(k, dtype="int32")
     return _make.trilu(data, k, upper)
 
+
 def imcflow_packing(data, newshape, out_dtype="float32"):
+    if isinstance(newshape, Constant):
+        newshape = list(newshape.data.numpy())
     if isinstance(newshape, int):
         newshape = [newshape]
     if isinstance(newshape, (tuple, list)):
@@ -2031,6 +2034,8 @@ def imcflow_packing(data, newshape, out_dtype="float32"):
     return _make.imcflow_packing(data, list(newshape), out_dtype)
 
 def imcflow_unpacking(data, newshape, out_dtype="float32"):
+    if isinstance(newshape, Constant):
+        newshape = list(newshape.data.numpy())
     if isinstance(newshape, int):
         newshape = [newshape]
     if isinstance(newshape, (tuple, list)):
