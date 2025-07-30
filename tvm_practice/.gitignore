@@ -4,3 +4,4 @@ temp*
 *.bp
 tvm_env/
 *.txt
+test_codegen/

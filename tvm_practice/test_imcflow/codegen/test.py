@@ -1,6 +1,8 @@
 import pytest
 import torch
 import tvm
+from tvm.micro import export_model_library_format
+import tarfile
 import tvm.testing
 from typing import Sequence
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
@@ -24,34 +26,42 @@ import os
 from models import real_model, real_model2
 from models import small_model
 
+
 @torch.library.custom_op("imcflow::min_max_quant", mutates_args=())
-def min_max_quant(pic: torch.Tensor, min:int, max:int) -> torch.Tensor:
-    return pic.clone()
+def min_max_quant(pic: torch.Tensor, min: int, max: int) -> torch.Tensor:
+  return pic.clone()
+
 
 @torch.library.custom_op("imcflow::linear_quant", mutates_args=())
-def linear_quant(x:torch.Tensor, scale:float, zero_point:int) -> torch.Tensor:
+def linear_quant(x: torch.Tensor, scale: float, zero_point: int) -> torch.Tensor:
   return x.clone()
+
 
 def make_min_max(input, input_types):
   MinNDArray = tvm.runtime.ndarray.array(np.array(input[1], dtype=np.float32))
   MaxNDArray = tvm.runtime.ndarray.array(np.array(input[2], dtype=np.float32))
   return imcflow_min_max_quantize(input[0], tvm.relay.Constant(MinNDArray), tvm.relay.Constant(MaxNDArray), 1, "float32")
 
+
 def make_quantize(input, input_types):
-  scale = tvm.relay.Constant(tvm.runtime.ndarray.array(np.array(input[1], dtype=np.float32)))
-  bias = tvm.relay.Constant(tvm.runtime.ndarray.array(np.array(input[2], dtype=np.int32)))
+  scale = tvm.relay.Constant(tvm.runtime.ndarray.array(
+      np.array(input[1], dtype=np.float32)))
+  bias = tvm.relay.Constant(tvm.runtime.ndarray.array(
+      np.array(input[2], dtype=np.int32)))
   return tvm.relay.qnn.op.quantize(input[0], scale, bias, 1, "float32")
+
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
-    relay_mod = mod,
-    relay_param = param_dict,
-    plotter = DotPlotter(),
-    parser = DotVizParser(),
+      relay_mod=mod,
+      relay_param=param_dict,
+      plotter=DotPlotter(),
+      parser=DotVizParser(),
   ).render(f"{result_dir}/{mod_name}")
 
   with open(f"{result_dir}/{mod_name}.txt", "w") as f:
     f.write(pretty_print(mod))
+
 
 def buildAndRun_ref(name, mod, data_dict, param_dict):
   """Generate reference TVM results without IMCFLOW processing"""
@@ -64,7 +74,8 @@ def buildAndRun_ref(name, mod, data_dict, param_dict):
   # Build with standard TVM C backend (NO IMCFLOW)
   with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
     te_compiler.get().clear()
-    lib = tvm.relay.build(mod, target="c", params=param_dict, executor=Executor_, runtime=Runtime_)
+    lib = tvm.relay.build(mod, target="c", params=param_dict,
+                          executor=Executor_, runtime=Runtime_)
 
   lib.export_library(f"{name}_ref.so")
   lib_loaded = tvm.runtime.load_module(f"{name}_ref.so")
@@ -77,6 +88,7 @@ def buildAndRun_ref(name, mod, data_dict, param_dict):
   print(f"Reference result shape: {result.shape}")
   print(f"Reference result sample: {result.numpy().flatten()[:10]}")
   return result
+
 
 def run_test_ref(test_name, mod, param_dict):
   """Generate reference TVM compilation results"""
@@ -103,7 +115,8 @@ def run_test_ref(test_name, mod, param_dict):
     # Create a placeholder file to indicate this
     with open(f"{ref_dir}/SKIPPED_IMCFLOW_MODEL.txt", "w") as f:
       f.write("Reference generation skipped.\n")
-      f.write("Model contains IMCFLOW-specific operations that cannot be compiled with standard TVM.\n")
+      f.write(
+          "Model contains IMCFLOW-specific operations that cannot be compiled with standard TVM.\n")
       f.write("To generate a reference, use a model without IMCFLOW operations.\n")
 
     print(f"Created placeholder: {ref_dir}/SKIPPED_IMCFLOW_MODEL.txt")
@@ -124,7 +137,11 @@ def run_test_ref(test_name, mod, param_dict):
 
   printModel(ref_dir, ref_mod, param_dict, "after_std_optimization")
 
-  # Generate standard TVM C code
+  # Generate standard TVM C code (Graph Executor)
+  print("\n" + "="*40)
+  print("GENERATING GRAPH EXECUTOR C CODE")
+  print("="*40)
+
   with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
     te_compiler.get().clear()
     lib = tvm.relay.build(ref_mod, target="c", params=param_dict)
@@ -136,18 +153,70 @@ def run_test_ref(test_name, mod, param_dict):
       c_source = underlying_lib.get_source("c")
       with open(f"{ref_dir}/{test_name}_generated.c", "w") as f:
         f.write(c_source)
-      print(f"Generated C source saved: {ref_dir}/{test_name}_generated.c")
+      print(
+          f"✅ Graph executor C source saved: {ref_dir}/{test_name}_generated.c")
     except Exception as e:
-      print(f"Could not extract C source: {e}")
+      print(f"❌ Could not extract graph executor C source: {e}")
 
   lib.export_library(f"{ref_dir}/{test_name}_reference.so")
-  print(f"Generated reference library: {ref_dir}/{test_name}_reference.so")
+  print(
+      f"✅ Generated graph executor library: {ref_dir}/{test_name}_reference.so")
+
+  # Generate AOT C code
+  print("\n" + "="*40)
+  print("GENERATING AOT C CODE")
+  print("="*40)
+
+  try:
+    with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
+      te_compiler.get().clear()
+
+      # Configure AOT executor with C interface for microcontroller deployment
+      executor = Executor("aot", {
+          "interface-api": "c",
+          "unpacked-api": True,
+          "workspace-byte-alignment": 8,
+          "link-params": False
+      })
+
+      # Configure CRT runtime for standalone deployment
+      # Note: system-lib=False to avoid function registry conflicts with C interface
+      runtime = Runtime("crt", {
+          "system-lib": False
+      })
+
+      # Build with AOT configuration
+      aot_lib = tvm.relay.build(ref_mod, target="c", params=param_dict,
+                                executor=executor, runtime=runtime)
+
+      # Extract and save the AOT C source code
+      try:
+        aot_underlying_lib = aot_lib.get_lib()
+        aot_c_source = aot_underlying_lib.get_source("c")
+        with open(f"{ref_dir}/{test_name}_aot_generated.c", "w") as f:
+          f.write(aot_c_source)
+        print(f"✅ AOT C source saved: {ref_dir}/{test_name}_aot_generated.c")
+
+      except Exception as e:
+        print(f"❌ Could not extract AOT C source: {e}")
+
+      # Export AOT library
+      mlf_tar_path = f"{ref_dir}/{test_name}_aot.tar"
+      export_model_library_format(aot_lib, mlf_tar_path)
+      with tarfile.open(mlf_tar_path, "r") as tar:
+        tar.extractall(f"{ref_dir}/mlf_extracted")
+      print(f"✅ Generated AOT library: {mlf_tar_path}")
+
+  except Exception as e:
+    print(f"❌ AOT generation failed: {e}")
+    print("This might be due to model complexity or unsupported operations in AOT mode")
 
   # Save final model state
   printModel(ref_dir, ref_mod, param_dict, "final_ref_model")
 
   print(f"Reference generation completed for {test_name}")
   return ref_mod
+
 
 def run_test_evl(test_name, mod, param_dict):
   """Generate IMCFLOW evaluation results (original function renamed)"""
@@ -172,11 +241,13 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_merge")
 
-  SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(eval_mod["main"])
+  SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(
+      eval_mod["main"])
   eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
   eval_mod = transform.MergeCompilerRegions()(eval_mod)
   eval_mod = transform.PartitionGraph()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_split_concat_partition")
+  printModel(eval_dir, eval_mod, eval_param_dict,
+             "after_split_concat_partition")
 
   AnnotGenerator = imcflow_transform.AnnotGenerator()
   AnnotGenerator(eval_mod)
@@ -253,24 +324,29 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"mem_layout: {config.MemLayout}")
   print(f"Evaluation generation completed for {test_name}")
 
+
 def test_big_ref():
   """Generate only reference for big model"""
   assert False, "Big model reference is not supported yet"
+
 
 def test_small_ref():
   """Generate only reference for small model"""
   mod, param_dict, _ = small_model.getTestModel()
   run_test_ref("small", mod, param_dict)
 
+
 def test_big_evl():
   """Generate only evaluation for big model"""
   mod, param_dict = real_model.getModel()
   run_test_evl("big", mod, param_dict)
 
+
 def test_small_evl():
   """Generate only evaluation for small model"""
   mod, param_dict = real_model2.getModel()
   run_test_evl("small", mod, param_dict)
+
 
 if __name__ == "__main__":
   tvm.testing.main()
