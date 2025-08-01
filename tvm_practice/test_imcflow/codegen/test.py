@@ -1,14 +1,9 @@
-import pytest
-import torch
 import tvm
+import pathlib
 from tvm.micro import export_model_library_format
-import tarfile
+from tvm.micro.testing import get_target
+from tvm.contrib.utils import tempdir
 import tvm.testing
-from typing import Sequence
-from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
-import numpy as np
-import tvm.relay.op as _op
-import tvm.relay.expr as _expr
 from tvm.relay import pretty_print
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 from tvm.relay.build_module import bind_params_by_name
@@ -17,10 +12,7 @@ from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
-# Add imports for reference TVM compilation
 from tvm.relay.backend import Executor, Runtime
-from tvm.contrib import graph_executor
-from tvm.relay.backend import te_compiler
 import os
 
 from models import real_model, real_model2
@@ -37,13 +29,41 @@ def printModel(result_dir, mod, param_dict, mod_name):
   with open(f"{result_dir}/{mod_name}.txt", "w") as f:
     f.write(pretty_print(mod))
 
-def generate_graph_executor(test_name, mod, param_dict, ref_dir):
+def generate_graph_executor(test_name, relay_mod, param_dict, ref_dir):
+  TARGET = get_target("crt")
+  EXECUTOR = Executor("graph")
+  RUNTIME = Runtime("crt", {"system-lib": True})
   print("\n" + "="*40)
   print("GENERATING GRAPH EXECUTOR")
   print("="*40)
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-    mod = tvm.relay.build(mod, target="c", params=param_dict, executor=Executor("graph"), runtime=Runtime("cpp"))
-    mod.export_library(f"{ref_dir}/{test_name}.so")
+    module = tvm.relay.build(
+      relay_mod, target=TARGET, params=param_dict, executor=EXECUTOR, runtime=RUNTIME
+    )
+    # # export library
+    # module.export_library(f"{ref_dir}/{test_name}.so")
+    # # export for micro deployment
+    # export_model_library_format(module, f"{ref_dir}/{test_name}.tar")
+
+    ######################################################################
+    # Create a microTVM project
+    # -------------------------
+    #
+    # Now that we have the compiled model as an IRModule, we need to create a firmware project
+    # to use the compiled model with microTVM. To do this, we use Project API. We have defined
+    # CRT and Zephyr microTVM template projects which are used for x86 CPU and Zephyr boards
+    # respectively.
+    #
+    template_project_path = pathlib.Path(tvm.micro.get_microtvm_template_projects("crt"))
+    project_options = {}  # You can use options to provide platform-specific options through TVM.
+
+    current_dir = os.getcwd()
+    generated_project_dir = tempdir(custom_path=f"{current_dir}/{ref_dir}/micro", keep_for_debug=True) / "project"
+    # generated_project_dir = pathlib.Path(f"{current_dir}/{ref_dir}") / "project"
+    project = tvm.micro.generate_project(
+        template_project_path, module, generated_project_dir, project_options
+    )
+    project.build()
 
 
 def run_test_ref(test_name, mod, param_dict):
