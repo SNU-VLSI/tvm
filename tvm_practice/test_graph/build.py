@@ -66,7 +66,7 @@ def build(runtime="cpp", executor="graph", system_lib=False):
     print(f"Running {result_key}...")
 
     Executor_ = Executor(executor)
-    Runtime_  = Runtime(runtime, {"system-lib" : system_lib}) 
+    Runtime_  = Runtime(runtime, {"system-lib" : system_lib})
 
     # build
     # pretty_print(f)
@@ -84,8 +84,8 @@ def build(runtime="cpp", executor="graph", system_lib=False):
     # kwargs = {}
     # kwargs["options"] = ["-O2", "-std=c++17", "-I" + contrib_path, "-I/root/anaconda3/envs/py3.10/include"]
 
-    # lib_name = "lib.so"
-    lib_name = "lib.tar"
+    lib_name = "lib.so"
+    # lib_name = "lib.tar"
     os.makedirs(result_key, exist_ok=True)
     lib_path = os.path.join(result_key, lib_name)
     # lib.export_library(lib_path, fcompile=False, **kwargs, workspace_dir=output_dir)
