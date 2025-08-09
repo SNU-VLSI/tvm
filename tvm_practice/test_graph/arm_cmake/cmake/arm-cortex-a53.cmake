@@ -1,10 +1,10 @@
 # Toolchain for Cortex-A53 (AArch32) bare-metal cross compilation
 # Uses arm-none-eabi toolchain on host to target another ARM machine.
 
-set(CMAKE_SYSTEM_NAME Generic)
-set(CMAKE_SYSTEM_PROCESSOR "cortex-a53")
-set(CMAKE_C_COMPILER   "arm-none-eabi-gcc")
-set(CMAKE_CXX_COMPILER "arm-none-eabi-g++")
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR "aarch64")
+set(CMAKE_C_COMPILER   "aarch64-linux-gnu-gcc")
+set(CMAKE_CXX_COMPILER "aarch64-linux-gnu-g++")
 
 # Disable compiler tests for bare metal
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
@@ -13,9 +13,7 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 # Adjust float-abi if your newlib/libgcc is built for hard-float
 add_compile_options(
   -mcpu=cortex-a53
-  -mthumb
-  -mfloat-abi=softfp
-  -mfpu=neon-vfpv4
+  -march=armv8-a
 )
 
 # Optional: printf format specifiers (bare metal convenience)
