@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <dlpack/dlpack.h>
 #include <tvm/runtime/c_runtime_api.h>
@@ -35,8 +37,6 @@ static uint8_t g_workspace[TVM_WORKSPACE_SIZE_BYTES];
 static MemoryManagerInterface* g_memory_manager = NULL;
 
 size_t TVMPlatformFormatMessage(char* out_buf, size_t out_buf_size_bytes, const char* fmt, va_list args) {
-  // Implement to route messages to your UART/logger if desired.
-  // For minimal footprint, just return 0 (no output).
   (void)out_buf; (void)out_buf_size_bytes; (void)fmt; (void)args; return 0;
 }
 
@@ -68,6 +68,22 @@ tvm_crt_error_t TVMPlatformInitialize() {
   int status = PageMemoryManagerCreate(&g_memory_manager, g_workspace, sizeof(g_workspace), 8);
   if (status != 0) return kTvmErrorPlatformMemoryManagerInitialized;
   return kTvmErrorNoError;
+}
+
+// ---- File I/O helpers (for Linux userland use) ----
+static char* read_entire_text(const char* path, size_t* out_size) {
+  FILE* f = fopen(path, "rb"); if (!f) return NULL;
+  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  char* buf = (char*)malloc(sz + 1); if (!buf) { fclose(f); return NULL; }
+  size_t n = fread(buf, 1, sz, f); fclose(f); buf[n] = '\0';
+  if (out_size) *out_size = n; return buf;
+}
+static unsigned char* read_entire_bin(const char* path, size_t* out_size) {
+  FILE* f = fopen(path, "rb"); if (!f) return NULL;
+  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  unsigned char* buf = (unsigned char*)malloc(sz); if (!buf) { fclose(f); return NULL; }
+  size_t n = fread(buf, 1, sz, f); fclose(f);
+  if (out_size) *out_size = n; return buf;
 }
 
 // ---- Utilities ----
@@ -136,13 +152,33 @@ int tvm_m3_run_once(void) {
   TVMModuleHandle mod = (TVMModuleHandle)syslib;
   DLDevice dev = {kDLCPU, 0};
 
-  TVMGraphExecutor* exec = NULL;
-  if (TVMGraphExecutor_Create(tvm_graph_json, mod, &dev, &exec) != 0) return -2;
+  // Load graph JSON
+  const char* graph_env = getenv("TVM_GRAPH_JSON");
+  const char* params_env = getenv("TVM_PARAMS_BIN");
+  const char* graph_path = graph_env ? graph_env : "mlf/executor-config/graph/default.graph";
+  const char* params_path = params_env ? params_env : "mlf/parameters/default.params";
 
-  if (tvm_params_len > 0) {
+  size_t graph_len = 0; char* graph_json_buf = NULL;
+  if (tvm_graph_json[0] != '\0') {
+    graph_json_buf = (char*)tvm_graph_json;
+    graph_len = strlen(tvm_graph_json);
+  } else {
+    graph_json_buf = read_entire_text(graph_path, &graph_len);
+    if (!graph_json_buf) { fprintf(stderr, "failed to read graph: %s\n", graph_path); return -10; }
+  }
+
+  TVMGraphExecutor* exec = NULL;
+  if (TVMGraphExecutor_Create(graph_json_buf, mod, &dev, &exec) != 0) { fprintf(stderr, "Create failed\n"); return -2; }
+
+  // Load params
+  int have_embedded_params = (tvm_params_len > 0);
+  if (have_embedded_params) {
     if (TVMGraphExecutor_LoadParams(exec, (const char*)tvm_params, (uint32_t)tvm_params_len) != 0) return -3;
   } else {
-    return -4; // params not provided
+    size_t params_len = 0; unsigned char* params_buf = read_entire_bin(params_path, &params_len);
+    if (!params_buf || params_len == 0) { fprintf(stderr, "failed to read params: %s\n", params_path); return -11; }
+    if (TVMGraphExecutor_LoadParams(exec, (const char*)params_buf, (uint32_t)params_len) != 0) return -3;
+    free(params_buf);
   }
 
   // Prepare inputs
@@ -166,12 +202,21 @@ int tvm_m3_run_once(void) {
   if (run_graph_direct(exec) != 0) return -5;
 
   // Get output and compute checksum
-  int64_t oshape[4] = {1, 32, 56, 56};
-  DLTensor out = {0}; out.device = dev; out.ndim = 4; out.shape = oshape; out.dtype = (DLDataType){kDLFloat, 32, 1};
+  DLTensor out = {0}; out.device = dev; out.ndim = 4; out.shape = shape4; out.dtype = (DLDataType){kDLFloat, 32, 1};
   void* out_data = NULL; TVMPlatformMemoryAllocate(nbytes, dev, &out_data); out.data = out_data;
   if (TVMGraphExecutor_GetOutput(exec, 0, &out) != 0) return -6;
-  tvm_last_checksum = checksum_fnv1a_u32((const float*)out.data, numel);
 
+  // Print first 16 values and checksum (concise verification)
+  float* out_f = (float*)out.data;
+  size_t to_print = (numel < 16) ? numel : 16;
+  printf("first16:");
+  for (size_t i = 0; i < to_print; ++i) printf(" %g", out_f[i]);
+  printf("\n");
+  uint32_t csum = checksum_fnv1a_u32(out_f, numel);
+  printf("checksum=0x%08x\n", csum);
+
+  // Cleanup
+  if (graph_json_buf && graph_json_buf != tvm_graph_json) free(graph_json_buf);
   TVMPlatformMemoryFree(x1_data, dev);
   TVMPlatformMemoryFree(x2_data, dev);
   TVMPlatformMemoryFree(out_data, dev);
@@ -179,11 +224,14 @@ int tvm_m3_run_once(void) {
   return 0;
 }
 
-// Optional bare-metal entry for quick bring-up; replace with your firmware entry
+// Optional Linux entry: accept paths via env vars TVM_GRAPH_JSON / TVM_PARAMS_BIN
 int main(void) {
   int rc = tvm_m3_run_once();
-  (void)rc; // you can set a breakpoint here and inspect tvm_last_checksum
-  for (;;) {}
+  if (rc != 0) {
+    fprintf(stderr, "runner failed rc=%d\n", rc);
+    return 1;
+  }
+  return 0;
 }
 
 // ---- Minimal syscalls stubs for newlib (bare metal) ----
