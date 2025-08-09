@@ -43,7 +43,7 @@ def get_graph():
     return ir_module, input_shapes, param_names
 
 
-def build_m3(executor_name: str = "aot", system_lib: bool = True):
+def build_arm(executor_name: str = "aot", system_lib: bool = True):
     dtype = "float32"
     ir_module, input_shapes, param_names = get_graph()
 
@@ -74,7 +74,7 @@ def build_m3(executor_name: str = "aot", system_lib: bool = True):
 
     # Export microTVM Model Library Format (MLF) tarball to the current directory
     script_dir = os.path.dirname(os.path.realpath(__file__))
-    tar_name = f"lib_m3_{executor_name}" + ("_system-lib" if system_lib else "") + ".tar"
+    tar_name = f"lib_{executor_name}" + ("_system-lib" if system_lib else "") + ".tar"
     tar_path = os.path.join(script_dir, tar_name)
     export_model_library_format(built, tar_path)
     print(f"Exported MLF to: {tar_path}")
@@ -88,4 +88,4 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--system-lib", action="store_true", default=True)
     args = parser.parse_args()
 
-    build_m3(args.executor, args.system_lib)
+    build_arm(args.executor, args.system_lib)

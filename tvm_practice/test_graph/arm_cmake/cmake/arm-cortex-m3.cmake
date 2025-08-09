@@ -1,7 +1,10 @@
+# Toolchain for Cortex-M3 (AArch32) bare-metal cross compilation
+# Uses arm-none-eabi toolchain on host to target another ARM machine.
+
 set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR "cortex-m3")
 set(CMAKE_C_COMPILER "arm-none-eabi-gcc")
 set(CMAKE_CXX_COMPILER "arm-none-eabi-g++")
-set(CMAKE_SYSTEM_PROCESSOR "cortex-m3")
 
 # Disable compiler tests for bare metal
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
