@@ -1,4 +1,5 @@
 import tvm
+import numpy as np
 import pathlib
 from tvm.micro import export_model_library_format
 from tvm.micro.testing import get_target
@@ -13,6 +14,7 @@ from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
+from tvm.contrib.imcflow import DataBlock
 import os
 
 from models import real_model, real_model2
@@ -29,41 +31,27 @@ def printModel(result_dir, mod, param_dict, mod_name):
   with open(f"{result_dir}/{mod_name}.txt", "w") as f:
     f.write(pretty_print(mod))
 
-def generate_graph_executor(test_name, relay_mod, param_dict, ref_dir):
-  TARGET = get_target("crt")
-  EXECUTOR = Executor("graph")
-  RUNTIME = Runtime("crt", {"system-lib": True})
+def generate_graph_executor(ref_mod, param_dict, dir_name):
+  executor_cfg = Executor("graph")
+  runtime_cfg = Runtime("crt", {"system-lib": True})
   print("\n" + "="*40)
   print("GENERATING GRAPH EXECUTOR")
   print("="*40)
+
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
     module = tvm.relay.build(
-      relay_mod, target=TARGET, params=param_dict, executor=EXECUTOR, runtime=RUNTIME
+      ref_mod,
+      target="c",
+      params=param_dict,
+      executor=executor_cfg,
+      runtime=runtime_cfg,
     )
-    # # export library
-    # module.export_library(f"{ref_dir}/{test_name}.so")
-    # # export for micro deployment
-    # export_model_library_format(module, f"{ref_dir}/{test_name}.tar")
 
-    ######################################################################
-    # Create a microTVM project
-    # -------------------------
-    #
-    # Now that we have the compiled model as an IRModule, we need to create a firmware project
-    # to use the compiled model with microTVM. To do this, we use Project API. We have defined
-    # CRT and Zephyr microTVM template projects which are used for x86 CPU and Zephyr boards
-    # respectively.
-    #
-    template_project_path = pathlib.Path(tvm.micro.get_microtvm_template_projects("crt"))
-    project_options = {}  # You can use options to provide platform-specific options through TVM.
-
-    current_dir = os.getcwd()
-    generated_project_dir = tempdir(custom_path=f"{current_dir}/{ref_dir}/micro", keep_for_debug=True) / "project"
-    # generated_project_dir = pathlib.Path(f"{current_dir}/{ref_dir}") / "project"
-    project = tvm.micro.generate_project(
-        template_project_path, module, generated_project_dir, project_options
-    )
-    project.build()
+  script_dir = os.path.dirname(os.path.realpath(__file__))
+  tar_name = f"lib_graph_system-lib.tar"
+  tar_path = os.path.join(script_dir, dir_name, tar_name)
+  export_model_library_format(module, tar_path)
+  return module, tar_path
 
 
 def run_test_ref(test_name, mod, param_dict):
@@ -113,7 +101,7 @@ def run_test_ref(test_name, mod, param_dict):
 
   printModel(ref_dir, ref_mod, param_dict, "after_std_optimization")
 
-  generate_graph_executor(test_name, ref_mod, param_dict, ref_dir)
+  generate_graph_executor(ref_mod, param_dict, ref_dir)
 
   # Save final model state
   printModel(ref_dir, ref_mod, param_dict, "final_ref_model")
@@ -228,7 +216,20 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"mem_layout: {config.MemLayout}")
   print(f"Evaluation generation completed for {test_name}")
 
-  generate_graph_executor(test_name, eval_mod, eval_param_dict, eval_dir)
+  for i in range(4):
+    inode_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_inode{i}", 4)
+    inode_inst.set_base_address(8 + i * 4)
+    DevConfig().MemLayout[f"inode_{i}_inst"].allocate(inode_inst)
+
+  for i in range(DevConfig().IMCE_NUM):
+    imce_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_imce{i}", 4)
+    imce_inst.set_base_address(8 + 4 * 4 + i * 4)
+    inode_idx = i % 4
+    DevConfig().MemLayout[f"inode_{inode_idx}_data"].allocate(imce_inst)
+
+  code_map = imcflow_transform.generate_invoke_code_for_subgraphs(eval_mod)
+
+  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():
