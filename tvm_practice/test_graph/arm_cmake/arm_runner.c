@@ -1,8 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
+#ifdef TVM_ARM_LINUX
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#endif
 
 #include <dlpack/dlpack.h>
 #include <tvm/runtime/c_runtime_api.h>
@@ -11,19 +14,10 @@
 #include <tvm/runtime/crt/internal/graph_executor/graph_executor.h>
 #include <tvm/runtime/c_backend_api.h>
 
-// Prototypes for generated kernels (from MLF C sources)
-extern int32_t tvmgen_default_fused_layout_transform(TVMValue* args, int32_t* arg_type_ids, int32_t num_args, TVMValue* out_ret_value, int32_t* out_ret_tcode, void* resource_handle);
-extern int32_t tvmgen_default_fused_nn_contrib_conv2d_NCHWc_add_nn_relu(TVMValue* args, int32_t* arg_type_ids, int32_t num_args, TVMValue* out_ret_value, int32_t* out_ret_tcode, void* resource_handle);
-extern int32_t tvmgen_default_fused_nn_global_max_pool2d(TVMValue* args, int32_t* arg_type_ids, int32_t num_args, TVMValue* out_ret_value, int32_t* out_ret_tcode, void* resource_handle);
-extern int32_t tvmgen_default_fused_layout_transform_add_layout_transform(TVMValue* args, int32_t* arg_type_ids, int32_t num_args, TVMValue* out_ret_value, int32_t* out_ret_tcode, void* resource_handle);
-
 // System lib entry provided by the generated C
 extern const TVMModule* TVMSystemLibEntryPoint(void);
 
 // ---- User-provided (embed) graph JSON and params ----
-// Provide these symbols in your firmware by converting files to arrays (e.g., xxd -i):
-//   default.graph -> const char tvm_graph_json[];
-//   default.params -> const unsigned char tvm_params[]; const unsigned int tvm_params_len;
 __attribute__((weak)) const char tvm_graph_json[] = "";
 __attribute__((weak)) const unsigned char tvm_params[] = {0};
 __attribute__((weak)) const unsigned int tvm_params_len = 0;
@@ -97,59 +91,27 @@ static void fill_tensor_linear_chw_index(DLTensor* t) {
         data[c * H * W + h * W + w] = (float)(c * H * W + h * W + w);
 }
 
+static size_t bytes_per_element(DLDataType dtype) {
+  size_t bytes = (dtype.bits + 7) / 8; if (dtype.lanes > 1) bytes *= dtype.lanes; return bytes;
+}
+
+static size_t num_elements(const DLTensor* t) {
+  size_t n = 1; for (int i = 0; i < t->ndim; ++i) n *= (size_t)t->shape[i]; return n;
+}
+
 static uint32_t checksum_fnv1a_u32(const float* data, size_t n) {
   uint32_t c = 2166136261u; for (size_t i = 0; i < n; ++i) { union { float f; uint32_t u; } u; u.f = data[i]; c ^= u.u; c *= 16777619u; } return c;
 }
 
-static int run_graph_direct(TVMGraphExecutor* exec) {
-  // node 0: x1, 1: x2
-  uint32_t x1_eid = TVMGraphExecutor_GetEntryId(exec, 0, 0);
-  uint32_t x2_eid = TVMGraphExecutor_GetEntryId(exec, 1, 0);
-  DLTensor* x1 = &(exec->data_entry[x1_eid].dl_tensor);
-  DLTensor* x2 = &(exec->data_entry[x2_eid].dl_tensor);
-
-  // node 2
-  uint32_t out2_eid = TVMGraphExecutor_GetEntryId(exec, 2, 0);
-  DLTensor* out2 = &(exec->data_entry[out2_eid].dl_tensor);
-  TVMValue a2[2]; int32_t tc2[2] = {kTVMDLTensorHandle, kTVMDLTensorHandle};
-  a2[0].v_handle = (void*)x1; a2[1].v_handle = (void*)out2;
-  int r = tvmgen_default_fused_layout_transform(a2, tc2, 2, NULL, NULL, NULL); if (r) return r;
-
-  // nodes 3/4 (params), node 5
-  uint32_t w_eid = TVMGraphExecutor_GetEntryId(exec, 3, 0);
-  uint32_t b_eid = TVMGraphExecutor_GetEntryId(exec, 4, 0);
-  DLTensor* w = &(exec->data_entry[w_eid].dl_tensor);
-  DLTensor* b = &(exec->data_entry[b_eid].dl_tensor);
-  uint32_t out5_eid = TVMGraphExecutor_GetEntryId(exec, 5, 0);
-  DLTensor* out5 = &(exec->data_entry[out5_eid].dl_tensor);
-  TVMValue a5[4]; int32_t tc5[4] = {kTVMDLTensorHandle, kTVMDLTensorHandle, kTVMDLTensorHandle, kTVMDLTensorHandle};
-  a5[0].v_handle = (void*)out2; a5[1].v_handle = (void*)w; a5[2].v_handle = (void*)b; a5[3].v_handle = (void*)out5;
-  r = tvmgen_default_fused_nn_contrib_conv2d_NCHWc_add_nn_relu(a5, tc5, 4, NULL, NULL, NULL); if (r) return r;
-
-  // node 6
-  uint32_t out6_eid = TVMGraphExecutor_GetEntryId(exec, 6, 0);
-  DLTensor* out6 = &(exec->data_entry[out6_eid].dl_tensor);
-  TVMValue a6[2]; int32_t tc6[2] = {kTVMDLTensorHandle, kTVMDLTensorHandle};
-  a6[0].v_handle = (void*)out5; a6[1].v_handle = (void*)out6;
-  r = tvmgen_default_fused_nn_global_max_pool2d(a6, tc6, 2, NULL, NULL, NULL); if (r) return r;
-
-  // node 7
-  uint32_t out7_eid = TVMGraphExecutor_GetEntryId(exec, 7, 0);
-  DLTensor* out7 = &(exec->data_entry[out7_eid].dl_tensor);
-  TVMValue a7[3]; int32_t tc7[3] = {kTVMDLTensorHandle, kTVMDLTensorHandle, kTVMDLTensorHandle};
-  a7[0].v_handle = (void*)x2; a7[1].v_handle = (void*)out6; a7[2].v_handle = (void*)out7;
-  r = tvmgen_default_fused_layout_transform_add_layout_transform(a7, tc7, 3, NULL, NULL, NULL); if (r) return r;
-
-  return 0;
-}
-
-volatile uint32_t tvm_last_checksum = 0;
-
-int tvm_m3_run_once(void) {
+int tvm_run_once(void) {
   if (TVMPlatformInitialize() != kTvmErrorNoError) return -1;
 
   const TVMModule* syslib = TVMSystemLibEntryPoint();
-  TVMModuleHandle mod = (TVMModuleHandle)syslib;
+  TVMModuleHandle mod;
+  if (TVMModCreateFromCModule(syslib, &mod) != 0) {
+    fprintf(stderr, "Failed to create module handle\n");
+    return -1;
+  }
   DLDevice dev = {kDLCPU, 0};
 
   // Load graph JSON
@@ -181,52 +143,110 @@ int tvm_m3_run_once(void) {
     free(params_buf);
   }
 
-  // Prepare inputs
-  int64_t shape4[4] = {1, 32, 56, 56};
-  size_t numel = (size_t)shape4[0]*shape4[1]*shape4[2]*shape4[3];
-  size_t nbytes = numel * sizeof(float);
-  DLTensor x1 = {0}, x2 = {0};
-  x1.device = dev; x2.device = dev; x1.ndim = 4; x2.ndim = 4; x1.shape = shape4; x2.shape = shape4;
-  x1.dtype = (DLDataType){kDLFloat, 32, 1}; x2.dtype = (DLDataType){kDLFloat, 32, 1};
-  void* x1_data = NULL; void* x2_data = NULL;
-  TVMPlatformMemoryAllocate(nbytes, dev, &x1_data);
-  TVMPlatformMemoryAllocate(nbytes, dev, &x2_data);
-  x1.data = x1_data; x2.data = x2_data;
-  fill_tensor_linear_chw_index(&x1);
-  fill_tensor_linear_chw_index(&x2);
+  // Prepare inputs dynamically
+  int num_inputs = TVMGraphExecutor_GetNumInputs(exec);
+  printf("Graph has %d inputs\n", num_inputs);
 
-  TVMGraphExecutor_SetInput(exec, "x1", &x1);
-  TVMGraphExecutor_SetInput(exec, "x2", &x2);
+  // We'll store input data pointers to free them later
+  void* input_data_ptrs[2] = {NULL, NULL}; // Assuming max 2 inputs for this example
+
+  for (int i = 0; i < num_inputs && i < 2; ++i) {
+    // Get the node ID and entry ID for this input
+    uint32_t nid = exec->input_nodes[i];
+    uint32_t eid = TVMGraphExecutor_GetEntryId(exec, nid, 0);
+    DLTensor* input_tensor = &(exec->data_entry[eid].dl_tensor);
+
+    printf("Input %d (%s): ndim=%d, shape=[", i, exec->nodes[nid].name, input_tensor->ndim);
+    size_t total_elements = 1;
+    for (int d = 0; d < input_tensor->ndim; ++d) {
+      printf("%lld", input_tensor->shape[d]);
+      if (d < input_tensor->ndim - 1) printf(", ");
+      total_elements *= input_tensor->shape[d];
+    }
+    printf("], dtype bits=%d\n", input_tensor->dtype.bits);
+
+    // Allocate memory for this input
+    size_t nbytes = total_elements * bytes_per_element(input_tensor->dtype);
+    DLTensor user_input = {0};
+    user_input.device = dev;
+    user_input.ndim = input_tensor->ndim;
+    user_input.shape = input_tensor->shape; // Use the same shape pointer
+    user_input.dtype = input_tensor->dtype;
+
+    void* input_data = NULL;
+    TVMPlatformMemoryAllocate(nbytes, dev, &input_data);
+    user_input.data = input_data;
+    input_data_ptrs[i] = input_data;
+
+    // Fill with test data
+    fill_tensor_linear_chw_index(&user_input);
+
+    // Set the input
+    TVMGraphExecutor_SetInput(exec, exec->nodes[nid].name, &user_input);
+  }
 
   // Execute graph via direct calls
-  if (run_graph_direct(exec) != 0) return -5;
+  TVMGraphExecutor_Run(exec);
 
-  // Get output and compute checksum
-  DLTensor out = {0}; out.device = dev; out.ndim = 4; out.shape = shape4; out.dtype = (DLDataType){kDLFloat, 32, 1};
-  void* out_data = NULL; TVMPlatformMemoryAllocate(nbytes, dev, &out_data); out.data = out_data;
-  if (TVMGraphExecutor_GetOutput(exec, 0, &out) != 0) return -6;
+  // Get output dynamically
+  int num_outputs = TVMGraphExecutor_GetNumOutputs(exec);
+  printf("Graph has %d outputs\n", num_outputs);
 
-  // Print first 16 values and checksum (concise verification)
-  float* out_f = (float*)out.data;
-  size_t to_print = (numel < 16) ? numel : 16;
-  printf("first16:");
-  for (size_t i = 0; i < to_print; ++i) printf(" %g", out_f[i]);
-  printf("\n");
-  uint32_t csum = checksum_fnv1a_u32(out_f, numel);
-  printf("checksum=0x%08x\n", csum);
+  if (num_outputs > 0) {
+    // Get output shape from the graph
+    uint32_t out_nid = exec->outputs[0].node_id;
+    uint32_t out_index = exec->outputs[0].index;
+    uint32_t out_eid = TVMGraphExecutor_GetEntryId(exec, out_nid, out_index);
+    DLTensor* output_tensor = &(exec->data_entry[out_eid].dl_tensor);
+
+    printf("Output 0: ndim=%d, shape=[", output_tensor->ndim);
+    size_t total_out_elements = 1;
+    for (int d = 0; d < output_tensor->ndim; ++d) {
+      printf("%lld", output_tensor->shape[d]);
+      if (d < output_tensor->ndim - 1) printf(", ");
+      total_out_elements *= output_tensor->shape[d];
+    }
+    printf("], dtype bits=%d\n", output_tensor->dtype.bits);
+
+    // Allocate output tensor with correct shape
+    size_t out_nbytes = total_out_elements * bytes_per_element(output_tensor->dtype);
+    DLTensor out = {0};
+    out.device = dev;
+    out.ndim = output_tensor->ndim;
+    out.shape = output_tensor->shape; // Use the same shape pointer
+    out.dtype = output_tensor->dtype;
+
+    void* out_data = NULL;
+    TVMPlatformMemoryAllocate(out_nbytes, dev, &out_data);
+    out.data = out_data;
+
+    if (TVMGraphExecutor_GetOutput(exec, 0, &out) != 0) return -6;
+
+    // Print first 16 values and checksum (concise verification)
+    float* out_f = (float*)out.data;
+    size_t to_print = (total_out_elements < 16) ? total_out_elements : 16;
+    printf("first16:");
+    for (size_t i = 0; i < to_print; ++i) printf(" %f", out_f[i]);
+    printf("\n");
+    uint32_t csum = checksum_fnv1a_u32(out_f, total_out_elements);
+    printf("checksum=0x%08x\n", csum);
+
+    // Cleanup output
+    TVMPlatformMemoryFree(out_data, dev);
+  }
 
   // Cleanup
   if (graph_json_buf && graph_json_buf != tvm_graph_json) free(graph_json_buf);
-  TVMPlatformMemoryFree(x1_data, dev);
-  TVMPlatformMemoryFree(x2_data, dev);
-  TVMPlatformMemoryFree(out_data, dev);
+  for (int i = 0; i < num_inputs && i < 2; ++i) {
+    if (input_data_ptrs[i]) TVMPlatformMemoryFree(input_data_ptrs[i], dev);
+  }
   TVMGraphExecutor_Release(&exec);
   return 0;
 }
 
 // Optional Linux entry: accept paths via env vars TVM_GRAPH_JSON / TVM_PARAMS_BIN
 int main(void) {
-  int rc = tvm_m3_run_once();
+  int rc = tvm_run_once();
   if (rc != 0) {
     fprintf(stderr, "runner failed rc=%d\n", rc);
     return 1;
