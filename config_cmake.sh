@@ -58,3 +58,4 @@ echo "set(USE_IMCFLOW ON)" >> config.cmake
 
 # MICRO TVM
 echo "set(USE_MICRO ON)" >> config.cmake
+set(USE_MICRO_STANDALONE_RUNTIME ON)
