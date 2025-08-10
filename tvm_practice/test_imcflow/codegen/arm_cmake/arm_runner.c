@@ -35,6 +35,9 @@ size_t TVMPlatformFormatMessage(char* out_buf, size_t out_buf_size_bytes, const 
 }
 
 void __attribute__((noreturn)) TVMPlatformAbort(tvm_crt_error_t code) {
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "TVMPlatformAbort: code=%d\n", (int)code);
+#endif
   (void)code; while (1) {}
 }
 
@@ -104,14 +107,22 @@ static size_t num_elements(const DLTensor* t) {
 }
 
 static int run_graph_direct(TVMGraphExecutor* exec) {
-  // Fallback to executor's run for generality
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "runner: calling GraphExecutor_Run\n");
+#endif
   TVMGraphExecutor_Run(exec);
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "runner: GraphExecutor_Run finished\n");
+#endif
   return 0;
 }
 
 volatile uint32_t tvm_last_checksum = 0;
 
 int tvm_run_once(void) {
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "runner: init platform\n");
+#endif
   if (TVMPlatformInitialize() != kTvmErrorNoError) return -1;
   const TVMModule* syslib = TVMSystemLibEntryPoint(); TVMModuleHandle mod = (TVMModuleHandle)syslib; DLDevice dev = {kDLCPU, 0};
 
@@ -125,10 +136,14 @@ int tvm_run_once(void) {
     graph_json_buf = read_entire_text(graph_path, &graph_len);
     if (!graph_json_buf) { fprintf(stderr, "failed to read graph: %s\n", graph_path); return -10; }
   }
+  fprintf(stderr, "runner: graph loaded (%zu bytes)\n", graph_len);
 #endif
 
   TVMGraphExecutor* exec = NULL;
   if (TVMGraphExecutor_Create(graph_json_buf, mod, &dev, &exec) != 0) return -2;
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "runner: executor created\n");
+#endif
 
   // Load params
 #ifdef TVM_ARM_LINUX
@@ -136,6 +151,7 @@ int tvm_run_once(void) {
     size_t params_len = 0; unsigned char* params_buf = read_entire_bin(params_path, &params_len);
     if (!params_buf || params_len == 0) { fprintf(stderr, "failed to read params: %s\n", params_path); return -11; }
     if (TVMGraphExecutor_LoadParams(exec, (const char*)params_buf, (uint32_t)params_len) != 0) return -3; free(params_buf);
+    fprintf(stderr, "runner: params loaded (%zu bytes)\n", params_len);
   } else
 #endif
   {
@@ -150,16 +166,27 @@ int tvm_run_once(void) {
   DLTensor in = (DLTensor){0}; in.device = dev; in.ndim = in_exec->ndim; in.shape = in_exec->shape; in.dtype = in_exec->dtype;
   void* in_data = NULL; TVMPlatformMemoryAllocate(nbytes, dev, &in_data); in.data = in_data;
   fill_tensor_linear_chw_index(&in);
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "runner: input prepared (%zu bytes)\n", nbytes);
+#endif
 
   // Try common input names; default graph uses "input_1"
   TVMGraphExecutor_SetInput(exec, "input_1", &in);
-  TVMGraphExecutor_SetInput(exec, "input", &in);
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "runner: input set\n");
+#endif
 
   if (run_graph_direct(exec) != 0) return -5;
 
-  // Read output 0
-  DLTensor out = (DLTensor){0}; out.device = dev; out.ndim = in.ndim; out.shape = in.shape; out.dtype = in.dtype; void* out_data = NULL; TVMPlatformMemoryAllocate(nbytes, dev, &out_data); out.data = out_data;
+  // Read output 0 using executor-provided shape
+  uint32_t out_eid = TVMGraphExecutor_GetEntryId(exec, 15, 0);
+  DLTensor* out_exec = &(exec->data_entry[out_eid].dl_tensor);
+  size_t out_bytes = num_elements(out_exec) * bytes_per_element(out_exec->dtype);
+  DLTensor out = (DLTensor){0}; out.device = dev; out.ndim = out_exec->ndim; out.shape = out_exec->shape; out.dtype = out_exec->dtype; void* out_data = NULL; TVMPlatformMemoryAllocate(out_bytes, dev, &out_data); out.data = out_data;
   if (TVMGraphExecutor_GetOutput(exec, 0, &out) != 0) return -6; tvm_last_checksum = checksum_fnv1a_u32((const float*)out.data, num_elements(&out));
+#ifdef TVM_ARM_LINUX
+  fprintf(stderr, "runner: output captured\n");
+#endif
 
 #ifdef TVM_ARM_LINUX
   if (graph_json_buf && graph_json_buf != tvm_graph_json) free(graph_json_buf);

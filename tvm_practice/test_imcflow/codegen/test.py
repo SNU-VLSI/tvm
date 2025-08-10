@@ -38,7 +38,7 @@ def generate_graph_executor(ref_mod, param_dict, dir_name):
   print("GENERATING GRAPH EXECUTOR")
   print("="*40)
 
-  with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
+  with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
     module = tvm.relay.build(
       ref_mod,
       target="c",
