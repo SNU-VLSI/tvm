@@ -58,13 +58,17 @@ def _get_type(parent_mod, node):
 
     if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
       out_type = relay.transform.InferTypeLocal(node)
-    if isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
+    elif isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
       # out_type = node.op.body.checked_type
       out_type = relay.transform.InferTypeLocal(node.op.body)
-    if isinstance(node, relay.Call) and isinstance(node.op, relay.GlobalVar):
+    elif isinstance(node, relay.Call) and isinstance(node.op, relay.GlobalVar):
       out_type = _get_type(parent_mod, parent_mod[node.op.name_hint].body)
-    if isinstance(node, relay.Function):
+    elif isinstance(node, relay.Function):
       out_type = relay.transform.InferTypeLocal(node.body)
+    elif isinstance(node, relay.Var):
+      out_type = node.checked_type
+    else:
+      raise RuntimeError(f"can't infer type for node {node}")
 
     # infer_out = entry if isinstance(node, relay.Function) else entry.body
     # out_type = infer_out._checked_type_

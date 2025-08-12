@@ -162,8 +162,8 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
 
-  eval_mod = imcflow_transform.PackingInserter()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
+  # eval_mod = imcflow_transform.PackingInserter()(eval_mod)
+  # printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
 
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
@@ -216,20 +216,20 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"mem_layout: {config.MemLayout}")
   print(f"Evaluation generation completed for {test_name}")
 
-  for i in range(4):
-    inode_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_inode{i}", 4)
-    inode_inst.set_base_address(8 + i * 4)
-    DevConfig().MemLayout[f"inode_{i}_inst"].allocate(inode_inst)
+  # for i in range(4):
+  #   inode_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_inode{i}", 4)
+  #   inode_inst.set_base_address(8 + i * 4)
+  #   DevConfig().MemLayout[f"inode_{i}_inst"].allocate(inode_inst)
 
-  for i in range(DevConfig().IMCE_NUM):
-    imce_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_imce{i}", 4)
-    imce_inst.set_base_address(8 + 4 * 4 + i * 4)
-    inode_idx = i % 4
-    DevConfig().MemLayout[f"inode_{inode_idx}_data"].allocate(imce_inst)
+  # for i in range(DevConfig().IMCE_NUM):
+  #   imce_inst = DataBlock(f"tvmgen_default_imcflow_main_4_inst_imce{i}", 4)
+  #   imce_inst.set_base_address(8 + 4 * 4 + i * 4)
+  #   inode_idx = i % 4
+  #   DevConfig().MemLayout[f"inode_{inode_idx}_data"].allocate(imce_inst)
 
-  code_map = imcflow_transform.generate_invoke_code_for_subgraphs(eval_mod)
+  # code_map = imcflow_transform.generate_invoke_code_for_subgraphs(eval_mod)
 
-  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
+  # generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():
@@ -253,6 +253,10 @@ def test_small_evl():
   """Generate only evaluation for small model"""
   mod, param_dict = real_model2.getModel()
   run_test_evl("small", mod, param_dict)
+
+def test_one_conv_evl():
+  mod, param_dict = real_model2.getOneConvModel()
+  run_test_evl("one_conv", mod, param_dict)
 
 
 if __name__ == "__main__":

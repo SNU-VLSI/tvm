@@ -67,3 +67,27 @@ def getModel():
   out = tvm.IRModule.from_expr(y)
 
   return out, param_dict
+
+def getOneConvModel():
+  # input_ = relay.var("input", shape=(1, 28, 4, 4))
+  input_ = relay.var("input", shape=(1,28,4,4))
+  # y = relay.qnn.simulated_quantize(input_, relay.var("quant_scale", shape=(28,)), relay.var("quant_zp", shape=(28,), dtype="int32"), axis=1)
+  y = imcflow_qconv2d(
+    input_,
+    relay.var("weight", shape=(28,28,3,3)),
+    channels=28,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+  )
+
+  # y = imcflow_min_max_quantize(y, relay.const(0.0, "float32"), relay.const(1.0, "float32"), 1, "float32")
+
+  param_dict = {
+    # "quant_scale": np.random.rand(28).astype("float32"),
+    # "quant_zp": np.random.randint(0, 255, 28).astype("int"),
+    "weight": np.random.rand(28,28,3,3).astype("float32")
+  }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
