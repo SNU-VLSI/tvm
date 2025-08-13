@@ -7,7 +7,6 @@ set(CMAKE_CXX_STANDARD 17)
 
 # Input: path to the Model Library Format tar (produced by build_arm.py)
 # Defaults to the file emitted next to this CMakeLists.
-set(MLF_TAR "${CMAKE_CURRENT_LIST_DIR}/../small_ref/lib_graph_system-lib.tar" CACHE FILEPATH "Path to MLF tarball")
 if(NOT EXISTS "${MLF_TAR}")
   message(FATAL_ERROR "MLF_TAR not found: ${MLF_TAR}\nGenerate it with build_arm.py -e graph")
 endif()

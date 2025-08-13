@@ -38,7 +38,7 @@ def generate_graph_executor(ref_mod, param_dict, dir_name):
   print("GENERATING GRAPH EXECUTOR")
   print("="*40)
 
-  with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
+  with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
     module = tvm.relay.build(
       ref_mod,
       target="c",
@@ -162,8 +162,8 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
 
-  # eval_mod = imcflow_transform.PackingInserter()(eval_mod)
-  # printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
+  eval_mod = imcflow_transform.PackingInserter()(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
 
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
@@ -229,7 +229,7 @@ def run_test_evl(test_name, mod, param_dict):
 
   # code_map = imcflow_transform.generate_invoke_code_for_subgraphs(eval_mod)
 
-  # generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
+  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():
