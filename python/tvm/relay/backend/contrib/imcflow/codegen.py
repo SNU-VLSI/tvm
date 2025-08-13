@@ -55,6 +55,8 @@ class CodegenSuite:
     builder.visit(func)
     DeviceCodegen("inode", self.build_dir).handle_code_generation(func_name, builder.codeblocks)
 
+    return func
+
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
   def __init__(self):
     super().__init__()
