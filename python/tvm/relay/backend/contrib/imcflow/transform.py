@@ -2151,8 +2151,8 @@ def clearCompilerTag(mod):
         if "Primitive" in NewAttrs.keys():
           del NewAttrs["Primitive"]
 
-      return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs)) 
-    
+      return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs))
+
     def visit_call(self, call):
       if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"]):
         var_map = {}
@@ -2169,13 +2169,13 @@ def clearCompilerTag(mod):
     #   NewAttrs[key] = mod[func_name].attrs.get_str(key)
     # if "Compiler" in NewAttrs.keys():
     #   del NewAttrs["Compiler"]
-    
+
     # mod[func_name] = FunctionWithFields(
-    #   mod[func_name], 
-    #   list(mod[func_name].params), 
-    #   mod[func_name].body, 
-    #   mod[func_name].ret_type, 
-    #   mod[func_name].type_params, 
+    #   mod[func_name],
+    #   list(mod[func_name].params),
+    #   mod[func_name].body,
+    #   mod[func_name].ret_type,
+    #   mod[func_name].type_params,
     #   tvm.ir.make_node("DictAttrs", **NewAttrs)
     # )
 
@@ -2407,25 +2407,18 @@ def makeBaseAddrName(block):
 
 def generateHeader():
   code = CodeWriter()
-  code += "#include <cstdint>\n"
-  code += "#include <cstdlib>\n"
-  code += "#include <cstring>\n"
-  code += "#include <thread>\n"
-  code += "#include <chrono>\n"
-  code += "#include <vector>\n"
+  code += "#include <stdint.h>\n"
+  code += "#include <stdlib.h>\n"
+  code += "#include <string.h>\n"
   code += "#include <tvm/runtime/c_runtime_api.h>\n"
-  code += "#include <tvm/runtime/packed_func.h>\n"
+  code += "#include <tvm/runtime/c_backend_api.h>\n"
   code += "#include <dlpack/dlpack.h>\n"
   code += "#include <sys/types.h>\n"
   code += "#include <sys/stat.h>\n"
   code += "#include <fcntl.h>\n"
   code += "#include <stdio.h>\n"
-  code += "#include <stdlib.h>\n"
   code += "#include <sys/mman.h>\n"
   code += "#include <unistd.h>\n"
-  code += "using namespace tvm::runtime;\n"
-  # code += "using namespace tvm::runtime::contrib;\n"
-
   return code
 
 def generateInstructionDef(func_name, func):
@@ -2513,19 +2506,10 @@ def generateInterruptRelatedCode():
   return code
 
 def generateConstantArrayDecl(func_name, func):
-  return "tvm::runtime::Array<tvm::runtime::NDArray> " + func_name + "_consts;\n";
+  return ""
 
 def generateConstantArrayInit(func_name, func):
-  code = CodeWriter()
-  code += "#ifdef __cplusplus\n"
-  code += "int " + func_name + "_init_wrapper_(tvm::runtime::Array<tvm::runtime::NDArray> arr) {\n"
-  code += f"  {func_name}_consts = arr;\n"
-  code += "  return 0;\n"
-  code += "}\n"
-  code += "TVM_DLL_EXPORT_TYPED_FUNC(__init_" + func_name + ", " + func_name + "_init_wrapper_);\n\n"
-  code += "#endif\n"
-
-  return code
+  return CodeWriter()
 
 def generateInstructionTransferCode(func, func_name, instruction_blocks, address_macros):
     code = CodeWriter()
@@ -2641,23 +2625,40 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
 
     code += generateInterruptRelatedCode()
 
-    code += generateConstantArrayDecl(func_name, func)
     code += generateInstructionDef(func_name, func)
 
-    code += f'extern "C" void {func_name}_kernel({args_proto_type});\n'
-    code += f'extern "C" void {func_name}_kernel({args_proto_type}) {{\n'
-
+    # Kernel function prototype and definition (C)
+    code += f"void {func_name}_kernel({args_proto_type});\n"
+    code += f"void {func_name}_kernel({args_proto_type}) {{\n"
     code.nextIndent()
     code += generateFpgaPointerDef()
     code += f'{generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)}'
     code += f'{generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)}'
     code += f'{generateInvokeCode()}'
     code += f'{generateOutputDataTransferCode(data_blocks[1], base_address_macros)}'
-
     code.prevIndent()
     code += '}\n'
 
-    code += generateConstantArrayInit(func_name, func)
+    # PackedFunc wrapper for CRT
+    code += "#ifdef __cplusplus\n"
+    code += "extern \"C\"\n"
+    code += "#endif\n"
+    code += f"TVM_DLL int32_t {func_name}(void* args, int32_t* arg_type_ids, int32_t num_args, void* out_ret_value, int32_t* out_ret_tcode, void* resource_handle) {{\n"
+    code.nextIndent()
+    code += "(void)resource_handle;\n"
+    code += "if (num_args < 2) return -1;\n"
+    code += f"void* _in0 = (((TVMValue*)args)[0].v_handle);\n"
+    code += f"void* _out0 = (((TVMValue*)args)[1].v_handle);\n"
+    code += f"DLTensor* in0 = (DLTensor*)_in0;\n"
+    code += f"DLTensor* out0 = (DLTensor*)_out0;\n"
+    code += f"{func_name}_kernel((int8_t*)in0->data, (int8_t*)out0->data);\n"
+    code += "(void)out_ret_value;\n"
+    code += "if (out_ret_tcode) { *out_ret_tcode = kTVMArgInt; }\n"
+    code += "return 0;\n"
+    code.prevIndent()
+    code += "}\n"
+
+    # no explicit registration needed: system lib references the symbol directly
 
     code = generateBaseAddrMacros(base_address_macros) + code
 
@@ -2700,9 +2701,7 @@ def makeKernelStartCode(func_name, func):
     instruction_blocks = getInstructionBlocks(func_name, func)
     data_blocks = getDataBlocks(func_name, func)
     kernel_def = makeKernelDef(func_name, func, instruction_blocks, data_blocks)
-    wrapper = makeWrapper(func, func_name)
-
-    code = kernel_def + wrapper + f"TVM_DLL_EXPORT_TYPED_FUNC({func_name}, {func_name}_wrapper);\n"
+    code = kernel_def
 
     return str(code)
 

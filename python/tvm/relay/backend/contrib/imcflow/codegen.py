@@ -16,6 +16,9 @@ from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 import pdb
 
+# Ensure external codegen registration side-effects are loaded.
+from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
+
 CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())

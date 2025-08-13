@@ -43,6 +43,7 @@ endif()
 # Collect MLF sources/headers
 file(GLOB_RECURSE TVM_MODEL_SRCS
   "${MLF_DIR}/codegen/host/src/*.c"
+  "${MLF_DIR}/codegen/host/src/*.cc"
 )
 # Some MLFs include prebuilt objects under lib/
 file(GLOB_RECURSE TVM_MODEL_OBJS
@@ -85,8 +86,9 @@ endforeach()
 # Build model as a static library
 add_library(tvm_model STATIC)
 # Note: object files (if any) are added as sources; CMake will link them in.
+# Treat C++ sources as C++
+set_source_files_properties(${TVM_MODEL_SRCS} PROPERTIES LANGUAGE CXX)
 target_sources(tvm_model PRIVATE ${TVM_MODEL_SRCS} ${TVM_MODEL_OBJS})
-set_source_files_properties(${TVM_MODEL_SRCS} PROPERTIES LANGUAGE C)
 
 target_include_directories(tvm_model PRIVATE
   ${TVM_MODEL_INCLUDE}
@@ -158,7 +160,7 @@ if(TVM_BUILD_ARM_RUNNER AND CMAKE_CROSSCOMPILING)
   if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_link_options(tvm_arm_runner PRIVATE -Wl,--start-group)
   endif()
-  target_link_libraries(tvm_arm_runner PRIVATE tvm_arm tvm_model graph_executor_module graph_executor common memory m)
+  target_link_libraries(tvm_arm_runner PRIVATE tvm_arm tvm_model graph_executor_module graph_executor common memory m stdc++)
   if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_link_options(tvm_arm_runner PRIVATE -Wl,--end-group)
   endif()
