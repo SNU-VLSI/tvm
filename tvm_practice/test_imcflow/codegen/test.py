@@ -245,6 +245,10 @@ def test_one_conv_evl():
   mod, param_dict = real_model2.getOneConvModel()
   run_test_evl("one_conv", mod, param_dict)
 
+def test_one_relu_evl():
+  """Generate evaluation for relu model"""
+  mod, param_dict = real_model2.getOneReluModel()
+  run_test_evl("one_relu", mod, param_dict)
 
 if __name__ == "__main__":
   tvm.testing.main()

@@ -91,3 +91,20 @@ def getOneConvModel():
   out = tvm.IRModule.from_expr(y)
 
   return out, param_dict
+
+def getOneReluModel():
+  # input_ = relay.var("input", shape=(1, 28, 4, 4))
+  input_ = relay.var("input", shape=(1,28,4,4), dtype="int8")
+  y = relay.nn.pad(input_, pad_width=((0, 0),(0, 0),(1, 1),(1,1)), pad_value=0)
+  y = relay.nn.relu(y)
+
+  param_dict = {
+    # "quant_scale": np.random.rand(28).astype("float32"),
+    # "quant_zp": np.random.randint(0, 255, 28).astype("int"),
+    # "weight": np.random.rand(28,28,3,3).astype("float32")
+  }
+  
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
