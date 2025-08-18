@@ -302,6 +302,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     in_edges = self.get_input_edges(call)
     out_edge = self.get_output_edge(call)
+    # TODO: how to scale?
     block = VecBlock(in_edges, out_edge, "batch_norm_scale")
     self.curr_conv_block.add_post_op(block)
     block = AddBlock(in_edges, out_edge, "batch_norm_bias")
@@ -309,9 +310,11 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_relu_call(self, call):
     hid = self.get_hid(call)
-    args = self.get_arg_dict(call)
-    shapes = self.get_arg_shape_dict(call)
-    edge = self.get_tensor_edge_from_tag(call, "odata")
+    in_edges = self.get_input_edges(call)
+    out_edge = self.get_output_edge(call)
+    block = ReLUBlock(in_edges, out_edge, "relu")
+    self.codeblocks.append(hid, block, CodePhase.EXEC)
+    # self.curr_conv_block.add_post_op(block)
 
   def visit_composite_call(self, call):
     self.curr_composite_id = getNodeID(call)
