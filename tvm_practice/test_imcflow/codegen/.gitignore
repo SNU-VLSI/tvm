@@ -1,6 +1,4 @@
 *.pdf
 core*
-small_evl/
-small_ref/
-big/
-one_conv_evl/
+*_evl/
+*_ref/
