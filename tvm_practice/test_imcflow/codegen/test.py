@@ -206,9 +206,9 @@ def run_test_evl(test_name, mod, param_dict):
   # get the config
   config = DevConfig()
 
-  # print(f"nodemap: {config.HWNodeMap}")
-  # print(f"edgeinfo: {config.TensorEdgetoInfo}")
-  # print(f"idtoedge: {config.TensorIDtoEdge}")
+  print(f"nodemap: {config.HWNodeMap}")
+  print(f"edgeinfo: {config.TensorEdgetoInfo}")
+  print(f"idtoedge: {config.TensorIDtoEdge}")
 
   CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
   CodegenSuite(eval_mod)

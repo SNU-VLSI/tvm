@@ -172,12 +172,18 @@ class DataBlock:
     self.base_address = -1  # base address in the device memory
 
   def set_size(self, size: int):
-    self.size = size
+    if isinstance(size, float):
+      assert size % 1 == 0, "Size should be an integer"
+    self.size = int(size)
 
   def set_offset(self, offset: int):
-    self.offset = offset
+    if isinstance(offset, float):
+      assert offset % 1 == 0, "Offset should be an integer"
+    self.offset = int(offset)
 
   def set_base_address(self, address: int):
+    if isinstance(address, float):
+      assert address % 1 == 0, "Address should be an integer"
     self.base_address = int(address)
 
   def __str__(self):
