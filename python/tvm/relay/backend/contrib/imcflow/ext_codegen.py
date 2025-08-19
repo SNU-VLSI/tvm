@@ -106,7 +106,7 @@ class CodeWriter:
       elif isinstance(other, str):
         self.write(other)
         return self
-      
+
 def generateHeader():
   code = CodeWriter()
   code += "#include <stdint.h>\n"
@@ -121,7 +121,7 @@ def generateHeader():
   code += "#include <stdio.h>\n"
   code += "#include <sys/mman.h>\n"
   code += "#include <unistd.h>\n"
-  return code      
+  return code
 
 def generateInterruptRelatedCode():
   code = CodeWriter()
@@ -177,7 +177,7 @@ def makeBaseAddrName(block):
     return f"{block.id.upper()}_BASE_ADDR"
   else:
     raise ValueError("Wrong data block type!")
-  
+
 def getConstantIdx(func, node_id):
   node_id_to_constant_id = {}
   class _Visitor(tvm.relay.ExprVisitor):
@@ -336,6 +336,8 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
         cpp_type = dtype_to_cpp(dtype)
         proto_list.append(f"{cpp_type}* {param_name}")
 
+    input_nodes = [n for n in imcflow_transform.getInputNodesOfFunc(func)]
+    input_node_types = [n.checked_type for n in input_nodes]
     output_node = imcflow_transform.getOutputNodesOfFunc(func)
     output_node_type = output_node.checked_type
     proto_list.append(f"{dtype_to_cpp(output_node_type.dtype)}* out0")
@@ -372,11 +374,21 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
     code.nextIndent()
     code += "(void)resource_handle;\n"
     code += "if (num_args < 2) return -1;\n"
-    code += f"void* _in0 = (((TVMValue*)args)[0].v_handle);\n"
-    code += f"void* _out0 = (((TVMValue*)args)[1].v_handle);\n"
-    code += f"DLTensor* in0 = (DLTensor*)_in0;\n"
+
+    # get input and output data pointers
+    for idx in range(len(input_node_types)):
+      code += f"void* _in{idx} = (((TVMValue*)args)[{idx}].v_handle);\n"
+      code += f"DLTensor* in{idx} = (DLTensor*)_in{idx};\n"
+    code += f"void* _out0 = (((TVMValue*)args)[{len(input_node_types)}].v_handle);\n"
     code += f"DLTensor* out0 = (DLTensor*)_out0;\n"
-    code += f"{func_name}_kernel((int8_t*)in0->data, (int8_t*)out0->data);\n"
+
+    # call kernel function
+    args_list = []
+    for idx in range(len(input_node_types)):
+      args_list.append(f"({dtype_to_cpp(input_node_types[idx].dtype)}*)in{idx}->data")
+    args_list.append(f"({dtype_to_cpp(output_node_type.dtype)}*)out0->data")
+    code += f"{func_name}_kernel({', '.join(args_list)});\n"
+
     code += "(void)out_ret_value;\n"
     code += "if (out_ret_tcode) { *out_ret_tcode = kTVMArgInt; }\n"
     code += "return 0;\n"
