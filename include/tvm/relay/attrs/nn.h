@@ -1602,6 +1602,7 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
   Array<IndexExpr> dilation;
   int groups;
   IndexExpr channels;
+  IndexExpr in_channels;
   Array<IndexExpr> kernel_size;
   tvm::String data_layout;
   tvm::String kernel_layout;
@@ -1631,11 +1632,8 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
         "At groups=2, the operation becomes equivalent to having two convolution"
         "layers side by side, each seeing half the input channels, and producing"
         "half the output channels, and both subsequently concatenated.");
-    TVM_ATTR_FIELD(channels)
-        .describe(
-            "The number of output channels in the convolution."
-            " If it is not set, inferred by shape of the weight.")
-        .set_default(NullValue<IndexExpr>());
+    TVM_ATTR_FIELD(channels).set_default(0).describe( "The number of output channels in the convolution.");
+    TVM_ATTR_FIELD(in_channels).set_default(0).describe( "The number of input channels in the convolution.");
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")
         .set_default(NullValue<Array<IndexExpr>>());

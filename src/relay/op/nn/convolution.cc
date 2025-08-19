@@ -2018,7 +2018,7 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
 }
 
 inline Expr MakeImcflowQConv(Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
-                     Array<IndexExpr> dilation, int groups, IndexExpr channels,
+                     Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                      Array<IndexExpr> kernel_size, std::string data_layout,
                      std::string kernel_layout, std::string out_layout, DataType out_dtype,
                      std::string op_name) {
@@ -2028,6 +2028,7 @@ inline Expr MakeImcflowQConv(Expr data, Expr weight, Array<IndexExpr> strides, A
   attrs->dilation = std::move(dilation);
   attrs->groups = groups;
   attrs->channels = std::move(channels);
+  attrs->in_channels = std::move(in_channels);
   attrs->kernel_size = std::move(kernel_size);
   attrs->data_layout = std::move(data_layout);
   attrs->kernel_layout = std::move(kernel_layout);
@@ -2039,10 +2040,10 @@ inline Expr MakeImcflowQConv(Expr data, Expr weight, Array<IndexExpr> strides, A
 
 TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qconv")
     .set_body_typed([](Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
-                       Array<IndexExpr> dilation, int groups, IndexExpr channels,
+                       Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeImcflowQConv(data, weight, strides, padding, dilation, groups, channels,
+      return MakeImcflowQConv(data, weight, strides, padding, dilation, groups, channels, in_channels,
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.imcflow_qconv");
     });

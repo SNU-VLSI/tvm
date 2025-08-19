@@ -85,6 +85,7 @@ def getOneConvModel():
     input,
     relay.var("weight", shape=(oc_gnum,ic_gnum,256,8), dtype="int32"),
     channels=OC,
+    in_channels=IC,
     kernel_size=(KH, KW),
     padding=padding,
     strides=stride,
