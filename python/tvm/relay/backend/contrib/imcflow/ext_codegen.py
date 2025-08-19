@@ -131,8 +131,16 @@ def generateInterruptRelatedCode():
   code += 'if (nb == (ssize_t)sizeof(info)) {\\\n'
   code += '  printf("Interrupt #%u!\\n", info);\\\n'
   code += '}\\\n'
-  code += 'npu_pointer[0] = 1;\\\n'
+  code += 'int_ack_gen_pointer[0] = 1;\\\n'
   code += 'npu_pointer[7] = 1;\n'
+  code += '#define ENABLE_NPU_INTERRUPT \\\n'
+  code += "info = 1; /* unmask interrupt pin*/\\\n"
+  code += "nb = write(npu_fd, &info, sizeof(info));\\\n"
+  code += "if (nb != (ssize_t)sizeof(info)) {\\\n"
+  code += '  perror("interrupt unmasking failed");\\\n'
+  code += "  close(npu_fd);\\\n"
+  code += "  exit(EXIT_FAILURE);\\\n"
+  code += "}\n"
 
   return code
 
@@ -150,6 +158,8 @@ def generateFpgaPointerDef():
   # code += "volatile uint32_t *NPU_BASE_ADDR = (uint32_t *)0x40000000;\n"
   code += "#define NPU_BASE_ADDR 0x40000000\n"
   code += "#define NPU_ADDR_RANGE 0x1000\n"
+  code += "#define INT_ACK_GEN_ADDR 0xa0110000\n"
+  code += "#define INT_ACK_GEN_LEN 0x10000\n"
   code += 'int npu_fd = open("/dev/uio5", O_RDWR);\n'
   code += "if (npu_fd < 0) {\n"
   code += '  perror("open");\n'
@@ -162,10 +172,21 @@ def generateFpgaPointerDef():
   code += "  close(npu_fd);\n"
   code += "  exit(EXIT_FAILURE);\n"
   code += "}\n"
+  code += "int int_ack_gen_fd = open(\"/dev/uio4\", O_RDWR);\n"
+  code += "if (int_ack_gen_fd < 0) {\n"
+  code += '  perror("open int_ack_gen_fd");\n'
+  code += "  exit(EXIT_FAILURE);\n"
+  code += "}\n"
   code += "size_t npu_len = (size_t) NPU_ADDR_RANGE;\n"
   code += "uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);\n"
   code += "if (npu_pointer == MAP_FAILED) {\n"
   code += '  perror("npu_pointer mmap error");\n'
+  code += "  exit(1);\n"
+  code += "}\n"
+  code += "size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;\n"
+  code += "uint32_t *int_ack_gen_pointer = (uint32_t*) mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);\n"
+  code += "if (int_ack_gen_pointer == MAP_FAILED) {\n"
+  code += '  perror("int_ack_gen_pointer mmap error");\n'
   code += "  exit(1);\n"
   code += "}\n"
 
@@ -269,6 +290,12 @@ def generateWaitForInterruptCode():
               # "}\n"
     return code
 
+def generateEnableForInterruptCode():
+    code =  (
+              "ENABLE_NPU_INTERRUPT;\n"
+            )
+    return code
+
 def generateInvokeCode():
     IDLE_CODE = 0
     RUN_CODE = 1
@@ -288,12 +315,14 @@ def generateInvokeCode():
       f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
       f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
       "}\n"
+      f"{generateEnableForInterruptCode()}\n"
       f"*(npu_pointer + {STATE_REG_IDX}) = {PROGRAM_CODE};\n"
       f"{generateWaitForInterruptCode()}\n"
       "// Invoke with compute mode\n"
       f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
       f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
       "}\n"
+      f"{generateEnableForInterruptCode()}\n"
       f"*(npu_pointer + {STATE_REG_IDX}) = {RUN_CODE};\n"
       f"{generateWaitForInterruptCode()}\n"
     )
@@ -305,14 +334,15 @@ def generateBaseAddrMacros(base_address_macros):
     code += f"#define {key} {value}\n"
   return code
 
-def generateLoadBinaryCode():
+def generateLoadBinaryCode(func_name):
   code = CodeWriter()
   code += "// Load binary files into buffers\n"
   for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
     for block_name, block in memory_region.blocks.items():
-      if isinstance(block.id, str) and "inst" in block.id:
-        filename = re.sub(r'_inst_(\w+?)(\d+)', r'_\1_\1_\2', block.id)
-        filename = f"./build/{filename}.bin"
+      if isinstance(block.id, str) and "imem" in block.id:
+        node_name, node_number = block.id.split("_")[0], block.id.split("_")[1]
+        
+        filename = f"./build/{func_name}_{node_name}_{node_name}_{node_number}.bin"
 
         size = math.ceil(block.size / 4)
 
@@ -357,7 +387,7 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
     code.nextIndent()
     code += generateFpgaPointerDef()
     # Todo. load binary files to buffer
-    code += f'{generateLoadBinaryCode()}'
+    code += f'{generateLoadBinaryCode(func_name)}'
     code += f'{generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)}'
     code += f'{generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)}'
     code += f'{generateInvokeCode()}'
