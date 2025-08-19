@@ -7,6 +7,7 @@ from tvm.relay.frontend.common import infer_shape
 from tvm.relay.dataflow_pattern import *
 from tvm.contrib.imcflow import TensorID, TensorEdge
 from tvm.relay.backend.contrib.imcflow import util
+from tvm.relay.backend.contrib.imcflow import transform
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
@@ -58,7 +59,56 @@ class CodegenSuite:
     builder.visit(func)
     DeviceCodegen("inode", self.build_dir).handle_code_generation(func_name, builder.codeblocks)
 
+    PolicyTableCodegen(func_name, self.build_dir).generate(func_name)
+
     return func
+  
+class PolicyTableCodegen:
+  def __init__(self, func_name, build_dir="/tmp"):
+    super().__init__()
+    self.func_name = func_name
+    self.func_dir = os.path.join(build_dir, func_name)
+
+  def pack_to_bin(self, entry, endian):
+    bin_data = bytearray()
+    val = 0
+    for direction, value in entry.items():
+      if direction != 'Local':
+        addr = value["addr"] & 0b111111
+        enable = 1 if value["enable"] else 0
+        val = (val << 1) | enable
+        val = (val << 6) | addr
+      else:
+        if value["chunk_index"] == None:
+          # Local entry without chunk_index
+          chunk_index = 0b000000
+        else:
+          chunk_index = value["chunk_index"] & 0b111111
+        ksel = 0b000
+        addr = value["addr"] & 0b111111
+        enable = 1 if value["enable"] else 0
+        val = (enable << 6) | addr
+        val = (val << 3) | ksel
+        val = (val << 6) | chunk_index
+    val = val << 4
+    bin_data.extend(val.to_bytes(6, byteorder=endian, signed=False))
+    # pad to 32-byte boundary
+    padding = (-len(bin_data)) % 32
+    if padding:
+      bin_data.extend(b'\x00' * padding)
+    return bytes(bin_data)
+  
+  def generate(self, func_name):
+    for node_name, entries in transform.ImcflowDeviceConfig().PolicyTableDict.items():
+      policytable_path = os.path.join(self.func_dir, f"{node_name.name}_policy.bin")
+      with open(policytable_path, "wb") as file:
+        for entry in entries:
+          policytable_bin = self.pack_to_bin(entry, endian='big')
+          file.write(policytable_bin)
+    return
+  
+  
+
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
   def __init__(self):
