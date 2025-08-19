@@ -2473,7 +2473,7 @@ def generateFpgaPointerDef():
   # code += "volatile uint32_t *NPU_BASE_ADDR = (uint32_t *)0x40000000;\n"
   code += "#define NPU_BASE_ADDR 0x40000000\n"
   code += "#define NPU_ADDR_RANGE 0x1000\n"
-  code += 'int npu_fd = open("/dev/uio0", O_RDWR);\n'
+  code += 'int npu_fd = open("/dev/uio5", O_RDWR);\n'
   code += "if (npu_fd < 0) {\n"
   code += '  perror("open");\n'
   code += "  exit(EXIT_FAILURE);\n"
