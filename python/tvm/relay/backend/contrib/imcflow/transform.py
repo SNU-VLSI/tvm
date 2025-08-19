@@ -967,10 +967,12 @@ class NodeMapper:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
           elif IsPacking:
-              # map to nearest inode of argument's hw node
-              SrcHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call.args[-1])])[0]
-              InodeID = NodeID.from_inode_coord(SrcHWNodeID)
-              self.MappingDict[getNodeID(call)] = InodeID
+            # map to child
+            self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
+            # # map to nearest inode of argument's hw node
+            # SrcHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call.args[-1])])[0]
+            # InodeID = NodeID.from_inode_coord(SrcHWNodeID)
+            # self.MappingDict[getNodeID(call)] = InodeID
 
           elif IsUnpacking:
               # keep unpacking node and determine its NodeID in parent node
@@ -1075,12 +1077,12 @@ def constructTensorEdgeList(mod):
 
     def visit_function(self, fn):
       # append to TensorEdgeList if fn is the entrance node of whole subgraph function
-      # if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
-      #   InputGraphNodeID = self.getCustomID(fn.body)
-      #   DstGraphNodeID = self.getCustomID(fn)
-      #   SrcTag = "odata"
-      #   DstTag = "odata"
-      #   self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, None)
+      if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
+        InputGraphNodeID = self.getCustomID(fn.body)
+        DstGraphNodeID = self.getCustomID(fn)
+        SrcTag = "odata"
+        DstTag = "odata"
+        self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, None)
 
       if self.InSubFunction:
         self.VarProperties = {}
@@ -1260,14 +1262,14 @@ def constructNoCPathDict(mod):
             (InodeID, DstHwNodeID, SplitIdx)
           )
           HwMapping[SrcTensorID.graph_node_id] = InodeID
-        # elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" :
-        #   # if this tensoredge is the final edge directly connected to host (= if destination is function)
-        #   SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
-        #   InodeID = NodeID.from_inode_coord(NodeID.to_coord(SrcHwNodeID)[0])
-        #   NocPaths[func_name_var.name_hint][tensor_edge] = (
-        #     (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], InodeID, SplitIdx)
-        #   )
-        #   HwMapping[DstTensorID.graph_node_id] = InodeID
+        elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" :
+          # if this tensoredge is the final edge directly connected to host (= if destination is function)
+          SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
+          InodeID = NodeID.from_inode_coord(NodeID.to_coord(SrcHwNodeID)[0])
+          NocPaths[func_name_var.name_hint][tensor_edge] = (
+            (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], InodeID, SplitIdx)
+          )
+          HwMapping[DstTensorID.graph_node_id] = InodeID
         else:
           NocPaths[func_name_var.name_hint][tensor_edge] = (
             (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], HwMapping[getOuterNodeID(DstTensorID.graph_node_id)], SplitIdx)
@@ -1371,6 +1373,10 @@ class MemoryAllocator:
             if mem_block.size is None:
               raise ValueError("Memory size cannot be none.")
 
+            # add tensor edge info to ImcflowDeviceConfig, but as a placeholder for now.
+            # the policy info and fifo id will be set later in PolicyTableGenerator.
+            ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
             inode_name = hw_node_id.name # ex) inode_3
@@ -1382,72 +1388,58 @@ class MemoryAllocator:
 
           return
 
-        # def visit_function(self, fn):
-        #   def get_size(edge, call):
-        #     size = None
+        def visit_function(self, fn):
+          def get_size(call):
+            size = None
+            op_found = False
+            arg_node = call.body
+            arg_node_shape = call.body.type_args[0].shape
+            # traverse until we find the final operation
+            while op_found is False:
+              if isinstance(arg_node, Call):
+                arg_op = arg_node.op
+                if isinstance(arg_op, Function):
+                  # if arg is Composite node
+                  arg_node = arg_node.op.body
+                elif arg_op == op.get("qnn.imcflow_min_max_quantize"):
+                  arg_node = arg_node.args[0]
+                elif arg_op == op.get("concatenate"):
+                  arg_node = arg_node.args[0]
+                elif arg_op == op.get("nn.imcflow_qconv"):
+                  size = arg_node_shape[2] * arg_node_shape[3] * 4
+                  op_found = True
+                elif arg_op == op.get("imcflow.fused_batch_norm"):
+                  size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
+                  op_found = True
+                elif arg_op == op.get("nn.relu"):
+                  size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
+                  op_found = True
+                else:
+                  raise ValueError("Undefined operation!")
+              elif isinstance(arg_node, Tuple):
+                arg_node = arg_node.fields[0]
+              elif isinstance(arg_node, Function):
+                arg_node = arg_node.body
+              else:
+                raise ValueError("Undefined operation!")
 
-        #     def get_op_from_id(node_id):
-        #         if isinstance(node_id, int):
-        #             return self.name_dict[node_id]
-        #         elif isinstance(node_id, tuple):
-        #             return self.name_dict[node_id[1]]
-        #         else:
-        #           raise ValueError("CustomIDToName does not have this node id.")
+            if size is not None:
+              # imcflow word width = 256 bit
+              size = int(size) * 256 / 8 #unit: bytes
+            return size
 
-        #     if call.body.op == op.get("imcflow_packing"):
-        #       op_found = False
-        #       arg_node = call.body.args[0]
-        #       arg_node_shape = call.body.type_args[0].shape
-        #       # traverse until we find the final operation
-        #       while op_found is False:
-        #         if isinstance(arg_node, Call):
-        #           arg_op = arg_node.op
-        #           if isinstance(arg_op, Function):
-        #             # if arg is Composite node
-        #             arg_node = arg_node.op.body
-        #           elif arg_op == op.get("qnn.imcflow_min_max_quantize"):
-        #             arg_node = arg_node.args[0]
-        #           elif arg_op == op.get("concatenate"):
-        #             arg_node = arg_node.args[0]
-        #           elif arg_op == op.get("nn.imcflow_qconv"):
-        #             size = arg_node_shape[2] * arg_node_shape[3] * 4
-        #             op_found = True
-        #           elif arg_op == op.get("imcflow.fused_batch_norm"):
-        #             size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[2])/16)
-        #             op_found = True
-        #           elif arg_op == op.get("nn.relu"):
-        #             size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[2])/16)
-        #             op_found = True
-        #           else:
-        #             raise ValueError("Undefined operation!")
-        #         elif isinstance(arg_node, Tuple):
-        #           arg_node = arg_node.fields[0]
-        #         elif isinstance(arg_node, Function):
-        #           arg_node = arg_node.body
-        #         else:
-        #           raise ValueError("Undefined operation!")
+          super().visit_function(fn)
 
-        #     else:
-        #       raise ValueError("The last node of subgraph should be packing!")
-
-        #     if size is not None:
-        #       # imcflow word width = 256 bit
-        #       size = int(size) * 256 / 8 #unit: bytes
-
-        #     return size
-
-        #   super().visit_function(fn)
-
-        #   if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
-        #     edge = self.find_edge_from_list(fn)[0]
-        #     size = get_size(edge, fn)
-        #     if size is not None:
-        #       inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
-        #       datablock = DataBlock(inode_tensorid[1], None)
-        #       datablock.set_size(size)
-        #       self.DataBlockDict[edge] = datablock
-        #     else:
-        #       raise ValueError("There should be at least one edge connected to function node.")
+          if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
+            edge = self.find_edge_from_list(fn)[0]
+            size = get_size(fn)
+            if size is not None:
+              inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
+              datablock = DataBlock(inode_tensorid[1], None)
+              datablock.set_size(size)
+              self.DataBlockDict[edge] = datablock
+            else:
+              raise ValueError("There should be at least one edge connected to function node.")
 
         def visit_call(self, call):
           def get_size(edge, call):
@@ -1515,7 +1507,7 @@ class MemoryAllocator:
                   pass
                 elif dst_op == op.get("nn.relu"):
                   if arg_idx == 0: # input var
-                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16)
                   else:
                     raise ValueError("nn.relu only has 1 argument, but you got over 1.")
                 elif dst_op == op.get("nn.bias_add"):
@@ -1544,7 +1536,7 @@ class MemoryAllocator:
                     raise ValueError("qconv only has 2 arguments, but you got over 2.")
                 elif dst_op == op.get("imcflow.fused_batch_norm"):
                   if arg_idx == 0: # input var
-                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[2])/16)
+                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16)
                   elif arg_idx <= 4: # const
                     size = math.ceil(int(arg_shape[0]) / 16)
                   else:
@@ -1564,40 +1556,41 @@ class MemoryAllocator:
 
               elif IsDstInode:
                 # src = const, var, dst = inode
-                if dst_op == op.get("imcflow_packing"):
-                  op_found = False
-                  arg_node = call.args[0]
-                  arg_node_shape = call.type_args[0].shape
-                  # traverse until we find the actual operation to calculate output size
-                  while op_found is False:
-                    if isinstance(arg_node, Call):
-                      arg_op = arg_node.op
-                      if isinstance(arg_op, Function):
-                        # if arg is Composite node
-                        arg_node = arg_node.op.body
-                      elif arg_op == op.get("qnn.imcflow_min_max_quantize"):
-                        arg_node = arg_node.args[0]
-                      elif arg_op == op.get("concatenate"):
-                        arg_node = arg_node.args[0]
-                      elif arg_op == op.get("nn.imcflow_qconv"):
-                        size = arg_node_shape[2] * arg_node_shape[3] * 4
-                        op_found = True
-                      elif arg_op == op.get("imcflow.fused_batch_norm"):
-                        size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[2])/16)
-                        op_found = True
-                      elif arg_op == op.get("nn.relu"):
-                        size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[2])/16)
-                        op_found = True
-                      else:
-                        raise ValueError("Undefined operation!")
-                    elif isinstance(arg_node, Tuple):
-                      arg_node = arg_node.fields[0]
-                    elif isinstance(arg_node, Function):
-                      arg_node = arg_node.body
-                    else:
-                      raise ValueError("Undefined operation!")
-                else:
-                  pass # if const -> unpacking (inode), just pass
+                pass # if const -> unpacking(inode)
+                # if dst_op == op.get("imcflow_packing"):
+                #   op_found = False
+                #   arg_node = call.args[0]
+                #   arg_node_shape = call.type_args[0].shape
+                #   # traverse until we find the actual operation to calculate output size
+                #   while op_found is False:
+                #     if isinstance(arg_node, Call):
+                #       arg_op = arg_node.op
+                #       if isinstance(arg_op, Function):
+                #         # if arg is Composite node
+                #         arg_node = arg_node.op.body
+                #       elif arg_op == op.get("qnn.imcflow_min_max_quantize"):
+                #         arg_node = arg_node.args[0]
+                #       elif arg_op == op.get("concatenate"):
+                #         arg_node = arg_node.args[0]
+                #       elif arg_op == op.get("nn.imcflow_qconv"):
+                #         size = arg_node_shape[2] * arg_node_shape[3] * 4
+                #         op_found = True
+                #       elif arg_op == op.get("imcflow.fused_batch_norm"):
+                #         size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
+                #         op_found = True
+                #       elif arg_op == op.get("nn.relu"):
+                #         size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
+                #         op_found = True
+                #       else:
+                #         raise ValueError("Undefined operation!")
+                #     elif isinstance(arg_node, Tuple):
+                #       arg_node = arg_node.fields[0]
+                #     elif isinstance(arg_node, Function):
+                #       arg_node = arg_node.body
+                #     else:
+                #       raise ValueError("Undefined operation!")
+                # else:
+                #   pass # if const -> unpacking (inode), just pass
 
               else:
                 raise ValueError("Wrong edge detected!")
@@ -1889,7 +1882,7 @@ class PolicyTableGenerator:
             #     size = self.DataBlockDict[id]["size"]
             #     offset = self.DataBlockDict[id]["offset"]
             #     base_address = self.DataBlockDict[id]["base_address"]
-            #     meminfo = Datablock(id, size)
+            #     meminfo = DataBlock(id, size)
 
             #     meminfo.set_offset(offset)
             #     meminfo.set_base_address(base_address)
@@ -1915,6 +1908,8 @@ class PolicyTableGenerator:
                       # 0: conv input
                       # 1: const (including weight)
                       # 2~6: rest
+                      edgeinfo = ImcflowDeviceConfig().get_tensor_edge_info(edge)
+                      edgeinfo.set_policy_info(router_entry_list)
 
                       if edge.src_id.tensor_type == "odata":
                         # get src node name from CustomIDToName
@@ -1924,20 +1919,18 @@ class PolicyTableGenerator:
                           dst_node_name = ID_dict[edge.dst_id.graph_node_id]
 
                         if dst_node_name == "Op(nn.imcflow_qconv)":
-                        # if src is input of qconv, FIFO ID = 0
-                          edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
-                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
+                          # if src is input of qconv, FIFO ID = 0
+                          edgeinfo.set_fifo_id(0)
                         else:
-                        # if not, FIFO ID = 2~6
-                          edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
-                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
+                          # if not, FIFO ID = 2~6
+                          edgeinfo.set_fifo_id(fifo_id_cnt[dest_node])
 
                           fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
                           if fifo_id_cnt[dest_node] >= 8:
                             raise ValueError("FIFO ID cannot be over 7!")
 
                       elif edge.src_id.tensor_type in ["odata", "weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale"]:
-                      # if const, FIFO ID = 1
+                        # if const, FIFO ID = 1
                         edgeinfo = TensorEdgeInfo(router_entry_list, None, 1)
                         ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
                       else:
@@ -2378,291 +2371,11 @@ def getConstantIdx(func, node_id):
   _Visitor().visit(func)
   return node_id_to_constant_id[node_id]
 
-def getCInputVarName(func, func_name, data_block):
-  node_map = CustomIDToNode()
-
-  if isinstance(data_block.id, TensorID):
-    graph_node_inner_id = getInnerNodeID(data_block.id.graph_node_id)
-    if isinstance(node_map[graph_node_inner_id], Var):
-      return node_map[graph_node_inner_id].name_hint
-    elif isinstance(node_map[graph_node_inner_id], Constant):
-      data_type = dtype_to_cpp(node_map[graph_node_inner_id].checked_type.dtype)
-      return f"(({data_type}*)({func_name}_consts[{getConstantIdx(func, graph_node_inner_id)}]->data))"
-    else:
-      print(data_block)
-      raise ValueError("Wrong data block type!")
-  elif isinstance(data_block.id, str):
-    return data_block.id
-  else:
-    print(data_block)
-    raise ValueError("Wrong data block type!")
-
-def makeBaseAddrName(block):
-  if isinstance(block.id, TensorID):
-    return f"{block.id.tensor_type.upper()}_{getInnerNodeID(block.id.graph_node_id)}_BASE_ADDR"
-  elif isinstance(block.id, str):
-    return f"{block.id.upper()}_BASE_ADDR"
-  else:
-    raise ValueError("Wrong data block type!")
-
-def generateHeader():
-  code = CodeWriter()
-  code += "#include <stdint.h>\n"
-  code += "#include <stdlib.h>\n"
-  code += "#include <string.h>\n"
-  code += "#include <tvm/runtime/c_runtime_api.h>\n"
-  code += "#include <tvm/runtime/c_backend_api.h>\n"
-  code += "#include <dlpack/dlpack.h>\n"
-  code += "#include <sys/types.h>\n"
-  code += "#include <sys/stat.h>\n"
-  code += "#include <fcntl.h>\n"
-  code += "#include <stdio.h>\n"
-  code += "#include <sys/mman.h>\n"
-  code += "#include <unistd.h>\n"
-  return code
-
-def generateInstructionDef(func_name, func):
-    code = CodeWriter()
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-      for block_name, block in memory_region.blocks.items():
-        if isinstance(block.id, str) and "inst" in block.id:
-          code += f"int32_t {block.id}[{math.ceil(block.size/4)}] = {{0,}};\n"
-
-    return code
-
-def getInstructionBlocks(func_name, func):
-    instruction_blocks = []
-
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-      if re.match(r"inode\d+_inst", key):
-        for block_name, block in memory_region.blocks.items():
-          if func_name in block_name:
-            instruction_blocks.append(block)
-
-    return instruction_blocks
-
-def getDataBlocks(func_name, func):
-    input_data_blocks = []
-    output_data_blocks = []
-
-    # get input/output node ID
-    input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(func)]
-    output_node_id = getNodeID(getOutputNodesOfFunc(func))
-
-    # get input data blocks
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-      if re.match(r"inode\d+_data", key):
-        for block_name, block in memory_region.blocks.items():
-          current_func_input_data = isinstance(block.id, TensorID) and any([input_node_id == getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids])
-          current_func_inst = isinstance(block.id, str) and func_name in block.id
-          if current_func_input_data or current_func_inst:
-            input_data_blocks.append(block)
-
-    # get output data blocks
-    #TODO : odata ??
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-      if re.match(r"inode\d+_data", key):
-        for block_name, block in memory_region.blocks.items():
-          if isinstance(block_name, TensorID) and output_node_id == getInnerNodeID(block_name.graph_node_id):
-            output_data_blocks.append(block)
-
-    return input_data_blocks, output_data_blocks
-
-def generateFpgaPointerDef():
-  code = CodeWriter()
-  # code += "volatile uint32_t *NPU_BASE_ADDR = (uint32_t *)0x40000000;\n"
-  code += "#define NPU_BASE_ADDR 0x40000000\n"
-  code += "#define NPU_ADDR_RANGE 0x1000\n"
-  code += 'int npu_fd = open("/dev/uio5", O_RDWR);\n'
-  code += "if (npu_fd < 0) {\n"
-  code += '  perror("open");\n'
-  code += "  exit(EXIT_FAILURE);\n"
-  code += "}\n"
-  code += "uint32_t info = 1; /* unmask interrupt pin*/\n"
-  code += "ssize_t nb = write(npu_fd, &info, sizeof(info));\n"
-  code += "if (nb != (ssize_t)sizeof(info)) {\n"
-  code += '  perror("interrupt unmasking failed");\n'
-  code += "  close(npu_fd);\n"
-  code += "  exit(EXIT_FAILURE);\n"
-  code += "}\n"
-  code += "size_t npu_len = (size_t) NPU_ADDR_RANGE;\n"
-  code += "uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);\n"
-  code += "if (npu_pointer == MAP_FAILED) {\n"
-  code += '  perror("npu_pointer mmap error");\n'
-  code += "  exit(1);\n"
-  code += "}\n"
-
-  return code
-
-def generateInterruptRelatedCode():
-  code = CodeWriter()
-  # code += "volatile uint32_t npu_done = 0;\n"
-  code += '#define WAIT_NPU_INTERRUPT \\\n'
-  code += 'nb = read(npu_fd, &info, sizeof(info));\\\n'
-  code += 'if (nb == (ssize_t)sizeof(info)) {\\\n'
-  code += '  printf("Interrupt #%u!\\n", info);\\\n'
-  code += '}\n'
-
-  return code
-
 def generateConstantArrayDecl(func_name, func):
   return ""
 
 def generateConstantArrayInit(func_name, func):
   return CodeWriter()
-
-def generateInstructionTransferCode(func, func_name, instruction_blocks, address_macros):
-    code = CodeWriter()
-    bitwidth_per_transfer = 32
-    for block in instruction_blocks:
-      size = block.size
-      base_address = block.base_address
-      base_address_name = makeBaseAddrName(block)
-      address_macros.update({base_address_name: base_address})
-      iteration_bound = math.ceil(size/bitwidth_per_transfer)
-      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//8}) = {getCInputVarName(func, func_name, block)}[i];\n"
-      code += f"}}\n"
-    return code
-
-def generateInputDataTransferCode(func, func_name, data_blocks, address_macros):
-    code = CodeWriter()
-    bitwidth_per_transfer = 32
-    for block in data_blocks:
-      size = block.size
-      base_address = block.base_address
-      base_address_name = makeBaseAddrName(block)
-      address_macros.update({base_address_name : base_address})
-      iteration_bound = math.ceil(size/bitwidth_per_transfer)
-      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//9}) = {getCInputVarName(func, func_name, block)}[i];\n"
-      code += f"}}\n"
-    return code
-
-def generateOutputDataTransferCode(data_blocks, address_macros):
-    code = CodeWriter()
-    bitwidth_per_transfer = 32
-    for idx, block in enumerate(data_blocks):
-      size = block.size
-      base_address = block.base_address
-      base_address_name = makeBaseAddrName(block)
-      address_macros.update({base_address_name : base_address})
-      iteration_bound = math.ceil(size/bitwidth_per_transfer)
-      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  out{idx}[i] = *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//8});\n"
-      code += f"}}\n"
-    return code
-
-def generateWaitForInterruptCode():
-    code =  (
-              "WAIT_NPU_INTERRUPT;\n"
-            )
-              # "while(1) {\n"
-              # "  if(npu_done == 1) {\n"
-              # "    npu_done = 0;\n"
-              # "    break;\n"
-              # "  }\n"
-              # "  std::this_thread::sleep_for(std::chrono::milliseconds(1));\n"
-              # "}\n"
-    return code
-
-def generateInvokeCode():
-    IDLE_CODE = 0
-    RUN_CODE = 1
-    PROGRAM_CODE = 2
-
-    INODE_PC_START_P1_ENUM_VAL = 0
-    INODE_PC_START_EXTERN_ENUM_VAL = 1
-    INODE_PC_START_P0_ENUM_VAL = 2
-
-    INODE_NUM = ImcflowDeviceConfig().INODE_NUM
-
-    STATE_REG_IDX = 0
-    PC_REG_IDX = 2
-
-    code = (
-      "// Invoke with policy update mode\n"
-      f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
-      "}\n"
-      f"*(npu_pointer + {STATE_REG_IDX}) = {PROGRAM_CODE};\n"
-      f"{generateWaitForInterruptCode()}\n"
-      "// Invoke with compute mode\n"
-      f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
-      "}\n"
-      f"*(npu_pointer + {STATE_REG_IDX}) = {RUN_CODE};\n"
-      f"{generateWaitForInterruptCode()}\n"
-    )
-    return code
-
-def generateBaseAddrMacros(base_address_macros):
-  code = CodeWriter()
-  for key, value in base_address_macros.items():
-    code += f"#define {key} {value}\n"
-  return code
-
-def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
-    base_address_macros = {}
-    proto_list = []
-    for i, param in enumerate(func.params):
-      param_name = param.name_hint if param.name_hint else f"arg{i}"
-      dtype = "float32"
-      if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
-        dtype = param.checked_type.dtype
-        cpp_type = dtype_to_cpp(dtype)
-        proto_list.append(f"{cpp_type}* {param_name}")
-
-    output_node = getOutputNodesOfFunc(func)
-    output_node_type = output_node.checked_type
-    proto_list.append(f"{dtype_to_cpp(output_node_type.dtype)}* out0")
-
-    args_proto_type = ", ".join(proto_list)
-
-    code = CodeWriter()
-
-    code += generateHeader()
-
-    code += generateInterruptRelatedCode()
-
-    code += generateInstructionDef(func_name, func)
-
-    # Kernel function prototype and definition (C)
-    code += f"void {func_name}_kernel({args_proto_type});\n"
-    code += f"void {func_name}_kernel({args_proto_type}) {{\n"
-    code.nextIndent()
-    code += generateFpgaPointerDef()
-    code += f'{generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)}'
-    code += f'{generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)}'
-    code += f'{generateInvokeCode()}'
-    code += f'{generateOutputDataTransferCode(data_blocks[1], base_address_macros)}'
-    code.prevIndent()
-    code += '}\n'
-
-    # PackedFunc wrapper for CRT
-    code += "#ifdef __cplusplus\n"
-    code += "extern \"C\"\n"
-    code += "#endif\n"
-    code += f"TVM_DLL int32_t {func_name}(void* args, int32_t* arg_type_ids, int32_t num_args, void* out_ret_value, int32_t* out_ret_tcode, void* resource_handle) {{\n"
-    code.nextIndent()
-    code += "(void)resource_handle;\n"
-    code += "if (num_args < 2) return -1;\n"
-    code += f"void* _in0 = (((TVMValue*)args)[0].v_handle);\n"
-    code += f"void* _out0 = (((TVMValue*)args)[1].v_handle);\n"
-    code += f"DLTensor* in0 = (DLTensor*)_in0;\n"
-    code += f"DLTensor* out0 = (DLTensor*)_out0;\n"
-    code += f"{func_name}_kernel((int8_t*)in0->data, (int8_t*)out0->data);\n"
-    code += "(void)out_ret_value;\n"
-    code += "if (out_ret_tcode) { *out_ret_tcode = kTVMArgInt; }\n"
-    code += "return 0;\n"
-    code.prevIndent()
-    code += "}\n"
-
-    # no explicit registration needed: system lib references the symbol directly
-
-    code = generateBaseAddrMacros(base_address_macros) + code
-
-    return code
 
 def makeWrapper(func, func_name):
   # parameter spec -> number of params and types
@@ -2696,26 +2409,3 @@ def makeWrapper(func, func_name):
   code += '}\n'
 
   return code
-
-def makeKernelStartCode(func_name, func):
-    instruction_blocks = getInstructionBlocks(func_name, func)
-    data_blocks = getDataBlocks(func_name, func)
-    kernel_def = makeKernelDef(func_name, func, instruction_blocks, data_blocks)
-    code = kernel_def
-
-    return str(code)
-
-def generate_invoke_code_for_subgraphs(mod):
-    invoke_code_map = {}
-    for func_name_var in mod.functions:
-        func = mod[func_name_var.name_hint]
-        if func.attrs and func.attrs.get("Compiler") == "imcflow":
-            func_name = func_name_var.name_hint
-            code = makeKernelStartCode(func_name, func)
-            invoke_code_map[func_name] = code
-
-    for fn, code in invoke_code_map.items():
-      with open(f"{fn}.cc", "w") as f:
-        f.write(code)
-
-    return invoke_code_map

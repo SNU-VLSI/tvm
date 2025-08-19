@@ -71,6 +71,9 @@ class RecvConstBlock(ImceCodeBlock):
 
 
 class VecBlock(ImceCodeBlock):
+  """
+  VecBlock is base class for implementing R,I type vector operations.
+  """
   num_in_edges = 2
 
   def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
@@ -78,54 +81,85 @@ class VecBlock(ImceCodeBlock):
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
     self.op_name = self._op_name()
+    self.imm_value = self._get_imm_value()
     self.in_edges = in_edges
     self.out_edge = out_edge
+    self.post_op = None
+
+  @abstractmethod
+  def _get_imm_value(self) -> int:
+    pass
 
   @abstractmethod
   def _op_name(self) -> str:
     pass
 
   def _content(self) -> CodeBlock:
-    num_blocks = 4
-    src_mask = 15
 
     code = TextBlock("")
-    te_info0 = DevConfig().get_tensor_edge_info_with_id_dir(
-        self.in_edges[0].dst_id, "in")  # a hack to get the tensor edge info
-    te_info1 = DevConfig().get_tensor_edge_info_with_id_dir(
-        self.in_edges[1].dst_id, "in")
+    # a hack to get the tensor edge info for each input edge
+    te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") for edge in self.in_edges]
+    te_out_info = DevConfig().get_tensor_edge_info_with_id_dir(self.out_edge.src_id, "out")
 
+    num_blocks = 4 if self.post_op else 1
     for i in range(num_blocks):
       # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
-      var_i0 = UniqueVar((self.in_edges[0], i))
-      var_i1 = UniqueVar((self.in_edges[1], i))
+      var_ins = [UniqueVar((edge, i)) for edge in self.in_edges]
       var_o = UniqueVar((self.out_edge, i))
 
       # te info is None for composite internal tensors
-      if te_info0 and not var_i0.static:
-        code += f"{var_i0} = __builtin_IMCE_RECV({te_info0.fifo_id});"
-      if te_info1 and not var_i1.static:
-        code += f"{var_i1} = __builtin_IMCE_RECV({te_info1.fifo_id});"
+      for var_i, te_info in zip(var_ins, te_in_infos):
+        if te_info and not var_i.static:
+          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
 
-      code += f"{var_o} = __builtin_IMCE_{self.op_name}({var_i0}, {var_i1}, {src_mask});" # e.g. __builtin_IMCE_ADD(a, b, 15);
+      var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
+      code += f"{var_o} = __builtin_IMCE_{self.op_name}({var_in_str}, {self.imm_value});" # e.g. __builtin_IMCE_ADD(a, b, 15);
 
-    return code
+      if te_out_info:
+        code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
+
+    if self.post_op:
+      return code
+    else:
+      # FIXME: this can be problematic for >1 input edges
+      count = te_in_infos[0].data_block.size // 32
+      return SimpleFor(count, code, self.__class__.__name__)
 
 class AddBlock(VecBlock):
+  def _get_imm_value(self) -> int:
+    return 15 # src_mask
+
   def _op_name(self) -> str:
     return "ADD"
 
 class DivBlock(VecBlock):
+  def _get_imm_value(self) -> int:
+    return 15 # src_mask
+
   def _op_name(self) -> str:
     return "DIV"
 
 class MultlBlock(VecBlock):
+  def _get_imm_value(self) -> int:
+    return 15 # src_mask
+
   def _op_name(self) -> str:
     return "MULTL"
 
 class MulthBlock(VecBlock):
+  def _get_imm_value(self) -> int:
+    return 15 # src_mask
+
   def _op_name(self) -> str:
     return "MULTH"
+
+class ReLUBlock(VecBlock):
+  num_in_edges = 1
+  def _get_imm_value(self) -> int:
+    return 0 # immediate value for MAXI
+
+  def _op_name(self) -> str:
+    return "MAXI"
 
 class MinmaxQuantBlock(ImceCodeBlock):
   num_in_edges = 3
@@ -226,6 +260,7 @@ class ConvBlock(ImceCodeBlock):
     self.post_ops = []
 
   def add_post_op(self, code: CodeBlock):
+    code.post_op = True
     self.post_ops.append(code)
 
   def _loop_body_content(self, recv_count: int) -> CodeBlock:

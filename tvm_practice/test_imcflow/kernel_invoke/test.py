@@ -12,7 +12,7 @@ from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 from tvm.relay.build_module import bind_params_by_name
 from tvm.relay import transform
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
-from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
+from tvm.relay.backend.contrib.imcflow import ext_codegen as imcflow_codegen
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import DataBlock
@@ -152,7 +152,7 @@ def run_test(test_name, mod, param_dict):
     inode_idx = i % 4
     DevConfig().MemLayout[f"inode_{inode_idx}_data"].allocate(imce_inst)
 
-  code_map = imcflow_transform.generate_invoke_code_for_subgraphs(eval_mod)
+  code_map = imcflow_codegen.generate_invoke_code_for_subgraphs(eval_mod)
   for func, code in code_map.items():
     print(f"Function: {func}")
     print(code)
