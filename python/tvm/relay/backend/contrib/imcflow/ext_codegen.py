@@ -17,7 +17,7 @@ def getInstructionBlocks(func_name, func):
     for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
       if re.match(r"inode_\d+_inst", key):
         for block_name, block in memory_region.blocks.items():
-          if func_name in block_name:
+          if "imem" in block_name:
             instruction_blocks.append(block)
 
     return instruction_blocks
@@ -35,7 +35,7 @@ def getDataBlocks(func_name, func):
       if re.match(r"inode_\d+_data", key):
         for block_name, block in memory_region.blocks.items():
           current_func_input_data = isinstance(block.id, TensorID) and any([input_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids])
-          current_func_inst = isinstance(block.id, str) and func_name in block.id
+          current_func_inst = isinstance(block.id, str) and "imem" in block.id
           if current_func_input_data or current_func_inst:
             input_data_blocks.append(block)
 
@@ -135,11 +135,11 @@ def generateInterruptRelatedCode():
 
   return code
 
-def generateInstructionDef(func_name, func):
+def generateInstructionDef():
     code = CodeWriter()
     for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
       for block_name, block in memory_region.blocks.items():
-        if isinstance(block.id, str) and "inst" in block.id:
+        if isinstance(block.id, str) and "imem" in block.id:
           code += f"int32_t {block.id}[{math.ceil(block.size/4)}] = {{0,}};\n"
 
     return code
@@ -304,7 +304,7 @@ def generateBaseAddrMacros(base_address_macros):
     code += f"#define {key} {value}\n"
   return code
 
-def generateLoadBinaryCode(func, func_name):
+def generateLoadBinaryCode():
   code = CodeWriter()
   code += "// Load binary files into buffers\n"
   for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
@@ -319,7 +319,7 @@ def generateLoadBinaryCode(func, func_name):
             f'{{\n'
             f'FILE *fp = fopen("{filename}", "rb");\n'
             f'if (!fp) {{ perror("fopen failed"); exit(1); }}\n'
-            f'fread(&{block.id}[{math.ceil(block.size/4)}], sizeof(int32_t), {size}, fp);\n'
+            f'fread(&{block.id}, sizeof(int32_t), {size}, fp);\n'
             f'fclose(fp);\n'
             f'}}\n'
         )
@@ -348,7 +348,7 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
 
     code += generateInterruptRelatedCode()
 
-    code += generateInstructionDef(func_name, func)
+    code += generateInstructionDef()
 
     # Kernel function prototype and definition (C)
     code += f"void {func_name}_kernel({args_proto_type});\n"
@@ -356,7 +356,7 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
     code.nextIndent()
     code += generateFpgaPointerDef()
     # Todo. load binary files to buffer
-    code += f'{generateLoadBinaryCode(func, func_name)}'
+    code += f'{generateLoadBinaryCode()}'
     code += f'{generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)}'
     code += f'{generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)}'
     code += f'{generateInvokeCode()}'
@@ -398,31 +398,25 @@ def makeKernelStartCode(func_name, func):
 
     return str(code)
 
+def generate_invoke_code_for_subgraphs(mod):
+    invoke_code_map = {}
+    for func_name_var in mod.functions:
+        func = mod[func_name_var.name_hint]
+        if func.attrs and func.attrs.get("Compiler") == "imcflow":
+            func_name = func_name_var.name_hint
+            code = makeKernelStartCode(func_name, func)
+            invoke_code_map[func_name] = code
+
+    for fn, code in invoke_code_map.items():
+      with open(f"{fn}.cc", "w") as f:
+        f.write(code)
+
+    return invoke_code_map
+
 @tvm._ffi.register_func("relay.ext.imcflow")
 def imcflow_external_codegen(func: relay.Function):
   # Obtain the function name (global symbol) assigned by the partitioning pass
   func_name = func.attrs["global_symbol"] if hasattr(func, "attrs") and "global_symbol" in func.attrs else "imcflow_subgraph"
-
-  # Ensure instruction/data blocks required by the existing kernel generator are present.
-  # This mirrors the allocation used in tvm_practice/test_imcflow/codegen/test.py
-  # so that makeKernelStartCode can discover blocks via getInstructionBlocks/getDataBlocks.
-  try:
-    # Allocate inode instruction placeholders
-    for i in range(DevConfig().INODE_NUM):
-      inode_inst = DataBlock(f"{func_name}_inst_inode{i}", 76)
-      inode_inst.set_base_address(8 + i * 4)
-      DevConfig().MemLayout[f"inode_{i}_inst"].allocate(inode_inst)
-
-    # Allocate imce instruction placeholders (placed in corresponding inode data region)
-    for i in range(DevConfig().IMCE_NUM):
-      imce_inst = DataBlock(f"{func_name}_inst_imce{i}", 4)
-      imce_inst.set_base_address(8 + 4 * 4 + i * 4)
-      inode_idx = i % 4
-      DevConfig().MemLayout[f"inode_{inode_idx}_data"].allocate(imce_inst)
-  except Exception:
-    # If MemLayout not initialized here, continue; the generator can still produce code,
-    # though some transfer loops may be empty.
-    pass
 
   # Reuse existing kernel code generator
   code = makeKernelStartCode(func_name, func)
