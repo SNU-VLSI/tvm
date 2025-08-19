@@ -131,6 +131,7 @@ def generateInterruptRelatedCode():
   code += 'if (nb == (ssize_t)sizeof(info)) {\\\n'
   code += '  printf("Interrupt #%u!\\n", info);\\\n'
   code += '}\\\n'
+  code += 'npu_pointer[0] = 1;\\\n'
   code += 'npu_pointer[7] = 1;\n'
 
   return code
