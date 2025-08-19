@@ -293,6 +293,9 @@ class EdgeInfo:
     self.policy_info = policy_info
     self.data_block = data_block
 
+  def set_policy_info(self, policy_info: List[RouterEntry]):
+    self.policy_info = policy_info
+
   def append_policy_info(self, entry: RouterEntry):
     self.policy_info.append(entry)
 
@@ -310,7 +313,7 @@ class InstEdgeInfo(EdgeInfo):
 
 
 class TensorEdgeInfo(EdgeInfo):
-  def __init__(self, policy_info: List[RouterEntry], data_block: Union[DataBlock, None] = None, fifo_id: int = -1):
+  def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
 
@@ -318,7 +321,7 @@ class TensorEdgeInfo(EdgeInfo):
     self.fifo_id = fifo_id
 
   def __str__(self):
-    policy_info_str = ", ".join(str(entry) for entry in self.policy_info)
+    policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"
     return f"TensorEdgeInfo([{policy_info_str}], {self.data_block}, {self.fifo_id})"
 
   def __repr__(self):

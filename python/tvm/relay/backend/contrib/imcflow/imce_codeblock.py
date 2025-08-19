@@ -84,6 +84,7 @@ class VecBlock(ImceCodeBlock):
     self.imm_value = self._get_imm_value()
     self.in_edges = in_edges
     self.out_edge = out_edge
+    self.post_op = None
 
   @abstractmethod
   def _get_imm_value(self) -> int:
@@ -94,13 +95,13 @@ class VecBlock(ImceCodeBlock):
     pass
 
   def _content(self) -> CodeBlock:
-    num_blocks = 4
 
     code = TextBlock("")
     # a hack to get the tensor edge info for each input edge
     te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") for edge in self.in_edges]
     te_out_info = DevConfig().get_tensor_edge_info_with_id_dir(self.out_edge.src_id, "out")
 
+    num_blocks = 4 if self.post_op else 1
     for i in range(num_blocks):
       # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
       var_ins = [UniqueVar((edge, i)) for edge in self.in_edges]
@@ -117,7 +118,12 @@ class VecBlock(ImceCodeBlock):
       if te_out_info:
         code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
 
-    return code
+    if self.post_op:
+      return code
+    else:
+      # FIXME: this can be problematic for >1 input edges
+      count = te_in_infos[0].data_block.size // 32
+      return SimpleFor(count, code, self.__class__.__name__)
 
 class AddBlock(VecBlock):
   def _get_imm_value(self) -> int:
@@ -254,6 +260,7 @@ class ConvBlock(ImceCodeBlock):
     self.post_ops = []
 
   def add_post_op(self, code: CodeBlock):
+    code.post_op = True
     self.post_ops.append(code)
 
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
