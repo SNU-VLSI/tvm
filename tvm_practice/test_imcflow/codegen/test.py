@@ -162,8 +162,8 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
 
-  eval_mod = imcflow_transform.PackingInserter()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
+  # eval_mod = imcflow_transform.PackingInserter()(eval_mod)
+  # printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
 
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)

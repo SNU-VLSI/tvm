@@ -69,23 +69,32 @@ def getModel():
   return out, param_dict
 
 def getOneConvModel():
-  # input_ = relay.var("input", shape=(1, 28, 4, 4))
-  input_ = relay.var("input", shape=(1,28,4,4))
-  # y = relay.qnn.simulated_quantize(input_, relay.var("quant_scale", shape=(28,)), relay.var("quant_zp", shape=(28,), dtype="int32"), axis=1)
+  N, IC, IH, IW = 2, 32, 4, 4
+  OC, KH, KW = 128, 3, 3
+  padding = (0, 0)
+  stride = (1, 1)
+  OH, OW = (IH - KH + 2 * padding[0]) // stride[0] + 1, (IW - KW + 2 * padding[1]) // stride[1] + 1
+
+  atom_IC = math.floor(256/(KH*KW))
+  atom_OC = 64
+  ic_gnum = math.ceil(IC/atom_IC)
+  oc_gnum = math.ceil(OC/atom_OC)
+
+  input = relay.var("input", shape=(N,ic_gnum,IH,IW,4,8), dtype="int32")
   y = imcflow_qconv2d(
-    input_,
-    relay.var("weight", shape=(28,28,3,3)),
-    channels=28,
-    kernel_size=(3, 3),
-    padding=(1, 1),
+    input,
+    relay.var("weight", shape=(oc_gnum,ic_gnum,256,8), dtype="int32"),
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=padding,
+    strides=stride,
+    out_dtype="int16"
   )
 
-  # y = imcflow_min_max_quantize(y, relay.const(0.0, "float32"), relay.const(1.0, "float32"), 1, "float32")
-
+  weight_numpy = np.random.rand(oc_gnum,ic_gnum,256,8).astype("int32")
+  print(weight_numpy.dtype)
   param_dict = {
-    # "quant_scale": np.random.rand(28).astype("float32"),
-    # "quant_zp": np.random.randint(0, 255, 28).astype("int"),
-    "weight": np.random.rand(28,28,3,3).astype("float32")
+    "weight": weight_numpy
   }
 
   out = tvm.IRModule.from_expr(y)
