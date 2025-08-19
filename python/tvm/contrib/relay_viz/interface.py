@@ -239,6 +239,11 @@ class DefaultVizParser(VizParser):
         node_detail = addCustomID(node, node_detail)
         node_id = node_to_id[node]
 
+        try:
+          node_detail.append(f"checked_type: {node.checked_type}")
+        except:
+          pass
+
         # Body -> FunctionNode
         viz_node = VizNode(node_id, f"Func {name}", "\n".join(node_detail))
         viz_edges = [VizEdge(node_to_id[node.body], node_id)]
@@ -271,6 +276,10 @@ class DefaultVizParser(VizParser):
             op_name = str(type(node.op)).split(".")[-1].split("'")[0]
 
         node_detail = addCustomID(node, node_detail)
+        try:
+          node_detail.append(f"checked_type: {node.checked_type}")
+        except:
+          pass
 
         # Arguments -> CallNode
         viz_node = VizNode(node_id, f"Call {op_name}", "\n".join(node_detail))
