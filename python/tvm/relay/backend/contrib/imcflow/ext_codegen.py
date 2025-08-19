@@ -70,34 +70,22 @@ def dtype_to_cpp(dtype: str) -> str:
 
 
 class CodeWriter:
+  indent_level = 0
+
   def __init__(self, indent_str="  "):
     self.lines = []
     self.indent_str = indent_str
-    self.indent_level = 0
-
-  def getIndent(self):
-    return self.indent_level
-
-  def setIndent(self, indent_level):
-    self.indent_level = indent_level
-
-  def applyIndent(self, indent_level):
-    for idx, line in enumerate(self.lines):
-      line_ = indent_level * self.indent_str + line.lsstrip()
-      self.lines[idx] = line_
 
   def nextIndent(self):
-    self.indent_level += 1
-    return self
+    CodeWriter.indent_level += 1
 
   def prevIndent(self):
-    self.indent_level -= 1
-    return self
+    CodeWriter.indent_level -= 1
 
   def write(self, line=""):
     for line_ in line.split("\n"):
       if len(line_) > 0:
-        self.lines.append(f"{self.indent_str * self.indent_level}{line_}")
+        self.lines.append(f"{self.indent_str * CodeWriter.indent_level}{line_}")
 
   def get_code(self):
     return "\n".join(self.lines)
@@ -442,11 +430,11 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
   code.nextIndent()
   code += generateFpgaPointerDef()
   # Todo. load binary files to buffer
-  code += f'{generateLoadBinaryCode(func_name)}'
-  code += f'{generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)}'
-  code += f'{generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)}'
-  code += f'{generateInvokeCode()}'
-  code += f'{generateOutputDataTransferCode(data_blocks[1], base_address_macros)}'
+  code += generateLoadBinaryCode(func_name)
+  code += generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)
+  code += generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)
+  code += generateInvokeCode()
+  code += generateOutputDataTransferCode(data_blocks[1], base_address_macros)
   code.prevIndent()
   code += '}\n'
 

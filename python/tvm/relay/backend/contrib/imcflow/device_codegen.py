@@ -15,6 +15,7 @@ class DeviceCodegen:
     self.objcopy_options = "-O binary --only-section=.text"
     self.lld_options = "-e 0 -Ttext 0x0"
     self.ld_options = "-r -b binary"
+    self.func_dir = None
     logging.basicConfig(level=logging.INFO)
 
   def handle_code_generation(self, func_name, codeblocks: CodeBlocks):
@@ -22,14 +23,18 @@ class DeviceCodegen:
     The main entry point for DeviceCodegen.
     Handles code generation, saving to file, compilation, linking, and host object creation.
     """
-    logging.info(f"Generating {self.target} code for function: {func_name}")
+    self.func_dir = os.path.join(self.build_dir, func_name)
+    if not os.path.exists(self.func_dir):
+      os.makedirs(self.func_dir)
+    logging.info(f"Generating {self.target} code for function: {func_name} in {self.func_dir}")
+
     code = codeblocks.generate()
-    cpp_name = self.save_target_code_to_file(code, func_name)
+    cpp_name = self.save_target_code_to_file(code)
     obj_map = self.compile_target_code(cpp_name)
     self.update_device_config_with_obj_info(obj_map)
 
-  def save_target_code_to_file(self, code: str, func_name: str):
-    cpp_name = os.path.join(self.build_dir, f"{func_name}_{self.target}.cpp")
+  def save_target_code_to_file(self, code: str):
+    cpp_name = os.path.join(self.func_dir, f"{self.target}.cpp")
     with open(cpp_name, "w") as file:
       file.write(code)
     return cpp_name
@@ -39,16 +44,13 @@ class DeviceCodegen:
     if not cpp_name.endswith(".cpp"):
       raise ValueError(f"Invalid cpp_name: {cpp_name}")
 
-    base_name = cpp_name[:-4]
     nodes = NodeID.inodes() if self.target == "inode" else NodeID.imces()
-    # if self.target == "inode":
-    #   return obj_map
     for node in nodes:
-      file_name = f"{base_name}_{node.name}"
-      obj_file = f"{file_name}.o"
-      out_file = f"{file_name}.out"
-      bin_file = f"{file_name}.bin"
-      host_obj_file = f"{file_name}.host.o"
+      file_path = os.path.join(self.func_dir, f"{node.name}_imem")
+      obj_file = f"{file_path}.o"
+      out_file = f"{file_path}.out"
+      bin_file = f"{file_path}.bin"
+      host_obj_file = f"{file_path}.host.o"
       self.compile_cpp_to_object(cpp_name, obj_file, node)
       self.link_object_to_binary(obj_file, out_file)
       self.extract_text_section(out_file, bin_file)
