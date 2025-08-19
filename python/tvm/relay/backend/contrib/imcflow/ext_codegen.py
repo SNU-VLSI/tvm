@@ -152,15 +152,16 @@ def generateInterruptRelatedCode():
 
   return code
 
-
 def generateInstructionDef():
-  code = CodeWriter()
-  for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-    for block_name, block in memory_region.blocks.items():
-      if isinstance(block.id, str) and "imem" in block.id:
-        code += f"int32_t {block.id}[{math.ceil(block.size/4)}] = {{0,}};\n"
-
-  return code
+    code = CodeWriter()
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
+      for block_name, block in memory_region.blocks.items():
+        if isinstance(block.id, str) and "imem" in block.id:
+          size = math.ceil(block.size / 4)
+          if (size % 8) != 0:
+            size += 8 - (size % 8)
+          code += f"int32_t {block.id}[{size}] = {{0,}};\n"
+    return code
 
 
 def generateFpgaPointerDef():
@@ -252,50 +253,77 @@ def getCInputVarName(func, func_name, data_block):
 
 
 def generateInstructionTransferCode(func, func_name, instruction_blocks, address_macros):
-  code = CodeWriter()
-  code += "// Transfer instruction data into NPU memory\n"
-  bitwidth_per_transfer = 32
-  for block in instruction_blocks:
-    size = block.size
-    base_address = block.base_address
-    base_address_name = makeBaseAddrName(block)
-    address_macros.update({base_address_name: base_address})
-    iteration_bound = math.ceil(size/bitwidth_per_transfer)
-    code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-    code += f"  *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//8}) = {getCInputVarName(func, func_name, block)}[i];\n"
-    code += f"}}\n"
-  return code
-
+    code = CodeWriter()
+    code += "// Transfer instruction data into NPU memory\n"
+    bitwidth_per_transfer = 32
+    for block in instruction_blocks:
+      size = block.size
+      base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      address_macros.update({base_address_name: base_address})
+      iteration_bound = math.ceil(size/4)
+      if (iteration_bound % 8) != 0:
+        iteration_bound += 8 - (iteration_bound % 8)
+      iteration_bound = math.ceil(iteration_bound // 8)
+      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 0) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 0];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 1) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 1];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 2) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 2];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 3) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 3];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 4) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 4];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 5) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 5];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 6) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 6];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 7) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 7];\n"
+      code += f"}}\n"
+    return code
 
 def generateInputDataTransferCode(func, func_name, data_blocks, address_macros):
-  code = CodeWriter()
-  bitwidth_per_transfer = 32
-  for block in data_blocks:
-    size = block.size
-    base_address = block.base_address
-    base_address_name = makeBaseAddrName(block)
-    address_macros.update({base_address_name: base_address})
-    iteration_bound = math.ceil(size/bitwidth_per_transfer)
-    code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-    code += f"  *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//8}) = {getCInputVarName(func, func_name, block)}[i];\n"
-    code += f"}}\n"
-  return code
-
+    code = CodeWriter()
+    bitwidth_per_transfer = 32
+    for block in data_blocks:
+      size = block.size
+      base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      address_macros.update({base_address_name : base_address})
+      iteration_bound = math.ceil(size/4)
+      if (iteration_bound % 8) != 0:
+        iteration_bound += 8 - (iteration_bound % 8)
+      iteration_bound = math.ceil(iteration_bound // 8)
+      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 0) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 0];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 1) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 1];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 2) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 2];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 3) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 3];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 4) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 4];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 5) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 5];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 6) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 6];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 7) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 7];\n"
+      code += f"}}\n"
+    return code
 
 def generateOutputDataTransferCode(data_blocks, address_macros):
-  code = CodeWriter()
-  bitwidth_per_transfer = 32
-  for idx, block in enumerate(data_blocks):
-    size = block.size
-    base_address = block.base_address
-    base_address_name = makeBaseAddrName(block)
-    address_macros.update({base_address_name: base_address})
-    iteration_bound = math.ceil(size/bitwidth_per_transfer)
-    code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-    code += f"  out{idx}[i] = *(npu_pointer + {base_address_name} + i * {bitwidth_per_transfer//8});\n"
-    code += f"}}\n"
-  return code
-
+    code = CodeWriter()
+    bitwidth_per_transfer = 32
+    for idx, block in enumerate(data_blocks):
+      size = block.size
+      base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      address_macros.update({base_address_name : base_address})
+      iteration_bound = math.ceil(size/4)
+      if (iteration_bound % 8) != 0:
+        iteration_bound += 8 - (iteration_bound % 8)
+      iteration_bound = math.ceil(iteration_bound // 8)
+      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 0] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 0);\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 1] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 1);\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 2] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 2);\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 3] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 3);\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 4] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 4);\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 5] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 5);\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 6] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 6);\n"
+      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 7] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 7);\n"
+      code += f"}}\n"
+    return code
 
 def generateWaitForInterruptCode():
   code = (
@@ -335,14 +363,14 @@ def generateInvokeCode():
   code = (
       "// Invoke with policy update mode\n"
       f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
+      f"  *(npu_pointer + ({PC_REG_IDX} + i)) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
       "}\n"
       f"{generateEnableForInterruptCode()}\n"
       f"*(npu_pointer + {STATE_REG_IDX}) = {PROGRAM_CODE};\n"
       f"{generateWaitForInterruptCode()}\n"
       "// Invoke with compute mode\n"
       f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(npu_pointer + ({PC_REG_IDX} + i)*4) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
+      f"  *(npu_pointer + ({PC_REG_IDX} + i)) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
       "}\n"
       f"{generateEnableForInterruptCode()}\n"
       f"*(npu_pointer + {STATE_REG_IDX}) = {RUN_CODE};\n"
