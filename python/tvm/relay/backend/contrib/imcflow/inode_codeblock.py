@@ -113,6 +113,7 @@ class RecvBlock(InodeCodeBlock):
     code = TextBlock("")
 
     var = UniqueVar("recv_data_base_address", dtype="int")
+    code += f"{var} = {self.block.base_address};"
     code += SimpleFor(recv_count,
                       lambda iter: f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {self.fifo_id});")
 
@@ -133,6 +134,7 @@ class SendBlock(InodeCodeBlock):
     code = TextBlock("")
 
     var = UniqueVar("send_data_base_address", dtype="int")
+    code += f"{var} = {self.block.base_address};"
     code += SimpleFor(recv_count,
                       lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, 0, {self.fifo_id});")
 

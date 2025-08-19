@@ -1373,6 +1373,10 @@ class MemoryAllocator:
             if mem_block.size is None:
               raise ValueError("Memory size cannot be none.")
 
+            # add tensor edge info to ImcflowDeviceConfig, but as a placeholder for now.
+            # the policy info and fifo id will be set later in PolicyTableGenerator.
+            ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
             inode_name = hw_node_id.name # ex) inode_3
@@ -1878,7 +1882,7 @@ class PolicyTableGenerator:
             #     size = self.DataBlockDict[id]["size"]
             #     offset = self.DataBlockDict[id]["offset"]
             #     base_address = self.DataBlockDict[id]["base_address"]
-            #     meminfo = Datablock(id, size)
+            #     meminfo = DataBlock(id, size)
 
             #     meminfo.set_offset(offset)
             #     meminfo.set_base_address(base_address)
@@ -1904,6 +1908,8 @@ class PolicyTableGenerator:
                       # 0: conv input
                       # 1: const (including weight)
                       # 2~6: rest
+                      edgeinfo = ImcflowDeviceConfig().get_tensor_edge_info(edge)
+                      edgeinfo.set_policy_info(router_entry_list)
 
                       if edge.src_id.tensor_type == "odata":
                         # get src node name from CustomIDToName
@@ -1913,20 +1919,18 @@ class PolicyTableGenerator:
                           dst_node_name = ID_dict[edge.dst_id.graph_node_id]
 
                         if dst_node_name == "Op(nn.imcflow_qconv)":
-                        # if src is input of qconv, FIFO ID = 0
-                          edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
-                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
+                          # if src is input of qconv, FIFO ID = 0
+                          edgeinfo.set_fifo_id(0)
                         else:
-                        # if not, FIFO ID = 2~6
-                          edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
-                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
+                          # if not, FIFO ID = 2~6
+                          edgeinfo.set_fifo_id(fifo_id_cnt[dest_node])
 
                           fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
                           if fifo_id_cnt[dest_node] >= 8:
                             raise ValueError("FIFO ID cannot be over 7!")
 
                       elif edge.src_id.tensor_type in ["odata", "weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale"]:
-                      # if const, FIFO ID = 1
+                        # if const, FIFO ID = 1
                         edgeinfo = TensorEdgeInfo(router_entry_list, None, 1)
                         ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
                       else:
