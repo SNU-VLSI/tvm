@@ -12,15 +12,15 @@ import re
 import math
 
 
-def getInstructionBlocks(func_name, func):
-  instruction_blocks = []
+def getCompiledDataBlocks(func_name, func):
+  compiled_blocks = []
 
-  for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
+  for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
     for block_name, block in memory_region.blocks.items():
-      if isinstance(block.id, str) and "imem" in block.id:
-        instruction_blocks.append(block)
+      if isinstance(block_name, str):
+        compiled_blocks.append(block)
 
-  return instruction_blocks
+  return compiled_blocks
 
 
 def getDataBlocks(func_name, func):
@@ -39,8 +39,7 @@ def getDataBlocks(func_name, func):
       for block_name, block in memory_region.blocks.items():
         current_func_input_data = isinstance(block.id, TensorID) and any(
             [input_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids])
-        current_func_inst = isinstance(block.id, str) and "imem" in block.id
-        if current_func_input_data or current_func_inst:
+        if current_func_input_data:
           input_data_blocks.append(block)
 
   # get output data blocks
@@ -52,6 +51,12 @@ def getDataBlocks(func_name, func):
           output_data_blocks.append(block)
 
   return input_data_blocks, output_data_blocks
+
+
+def align_to_n_bytes(size, n_bytes):
+  if (size % n_bytes) != 0:
+    size = (size // n_bytes + 1) * n_bytes
+  return size
 
 
 def dtype_to_cpp(dtype: str) -> str:
@@ -85,7 +90,8 @@ class CodeWriter:
   def write(self, line=""):
     for line_ in line.split("\n"):
       if len(line_) > 0:
-        self.lines.append(f"{self.indent_str * CodeWriter.indent_level}{line_}")
+        self.lines.append(
+            f"{self.indent_str * CodeWriter.indent_level}{line_}")
 
   def get_code(self):
     return "\n".join(self.lines)
@@ -102,93 +108,14 @@ class CodeWriter:
       return self
 
 
-def generateHeader():
+def generateCompiledDataDef():
   code = CodeWriter()
-  code += "#include <stdint.h>\n"
-  code += "#include <stdlib.h>\n"
-  code += "#include <string.h>\n"
-  code += "#include <tvm/runtime/c_runtime_api.h>\n"
-  code += "#include <tvm/runtime/c_backend_api.h>\n"
-  code += "#include <dlpack/dlpack.h>\n"
-  code += "#include <sys/types.h>\n"
-  code += "#include <sys/stat.h>\n"
-  code += "#include <fcntl.h>\n"
-  code += "#include <stdio.h>\n"
-  code += "#include <sys/mman.h>\n"
-  code += "#include <unistd.h>\n"
-  return code
-
-
-def generateInterruptRelatedCode():
-  code = CodeWriter()
-  # code += "volatile uint32_t npu_done = 0;\n"
-  code += '#define WAIT_NPU_INTERRUPT \\\n'
-  code += 'nb = read(npu_fd, &info, sizeof(info));\\\n'
-  code += 'if (nb == (ssize_t)sizeof(info)) {\\\n'
-  code += '  printf("Interrupt #%u!\\n", info);\\\n'
-  code += '}\\\n'
-  code += 'int_ack_gen_pointer[0] = 1;\\\n'
-  code += 'npu_pointer[7] = 1;\n'
-  code += '#define ENABLE_NPU_INTERRUPT \\\n'
-  code += "info = 1; /* unmask interrupt pin*/\\\n"
-  code += "nb = write(npu_fd, &info, sizeof(info));\\\n"
-  code += "if (nb != (ssize_t)sizeof(info)) {\\\n"
-  code += '  perror("interrupt unmasking failed");\\\n'
-  code += "  close(npu_fd);\\\n"
-  code += "  exit(EXIT_FAILURE);\\\n"
-  code += "}\n"
-
-  return code
-
-def generateInstructionDef():
-    code = CodeWriter()
-    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-      for block_name, block in memory_region.blocks.items():
-        if isinstance(block.id, str) and "imem" in block.id:
-          size = math.ceil(block.size / 4)
-          if (size % 8) != 0:
-            size += 8 - (size % 8)
-          code += f"int32_t {block.id}[{size}] = {{0,}};\n"
-    return code
-
-
-def generateFpgaPointerDef():
-  code = CodeWriter()
-  # code += "volatile uint32_t *NPU_BASE_ADDR = (uint32_t *)0x40000000;\n"
-  code += "#define NPU_BASE_ADDR 0x40000000\n"
-  code += "#define NPU_ADDR_RANGE 0x1000\n"
-  code += "#define INT_ACK_GEN_ADDR 0xa0110000\n"
-  code += "#define INT_ACK_GEN_LEN 0x10000\n"
-  code += 'int npu_fd = open("/dev/uio5", O_RDWR);\n'
-  code += "if (npu_fd < 0) {\n"
-  code += '  perror("open");\n'
-  code += "  exit(EXIT_FAILURE);\n"
-  code += "}\n"
-  code += "uint32_t info = 1; /* unmask interrupt pin*/\n"
-  code += "ssize_t nb = write(npu_fd, &info, sizeof(info));\n"
-  code += "if (nb != (ssize_t)sizeof(info)) {\n"
-  code += '  perror("interrupt unmasking failed");\n'
-  code += "  close(npu_fd);\n"
-  code += "  exit(EXIT_FAILURE);\n"
-  code += "}\n"
-  code += "int int_ack_gen_fd = open(\"/dev/uio4\", O_RDWR);\n"
-  code += "if (int_ack_gen_fd < 0) {\n"
-  code += '  perror("open int_ack_gen_fd");\n'
-  code += "  exit(EXIT_FAILURE);\n"
-  code += "}\n"
-  code += "size_t npu_len = (size_t) NPU_ADDR_RANGE;\n"
-  code += "uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);\n"
-  code += "if (npu_pointer == MAP_FAILED) {\n"
-  code += '  perror("npu_pointer mmap error");\n'
-  code += "  exit(1);\n"
-  code += "}\n"
-  code += "size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;\n"
-  code += "uint32_t *int_ack_gen_pointer = (uint32_t*) mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);\n"
-  code += "if (int_ack_gen_pointer == MAP_FAILED) {\n"
-  code += '  perror("int_ack_gen_pointer mmap error");\n'
-  code += "  exit(1);\n"
-  code += "}\n"
-
+  for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
+    for block_name, block in memory_region.blocks.items():
+      if isinstance(block_name, str):
+        size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
+        numel = math.ceil(size / 4)
+        code += f"int32_t {block_name}[{numel}] = {{0,}};\n"
   return code
 
 
@@ -240,130 +167,33 @@ def getCInputVarName(func, func_name, data_block):
     raise ValueError("Wrong data block type!")
 
 
-def generateInstructionTransferCode(func, func_name, instruction_blocks, address_macros):
-    code = CodeWriter()
-    code += "// Transfer instruction data into NPU memory\n"
-    bitwidth_per_transfer = 32
-    for block in instruction_blocks:
-      size = block.size
-      base_address = block.base_address
-      base_address_name = makeBaseAddrName(block)
-      address_macros.update({base_address_name: base_address})
-      iteration_bound = math.ceil(size/4)
-      if (iteration_bound % 8) != 0:
-        iteration_bound += 8 - (iteration_bound % 8)
-      iteration_bound = math.ceil(iteration_bound // 8)
-      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 0) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 0];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 1) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 1];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 2) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 2];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 3) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 3];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 4) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 4];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 5) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 5];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 6) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 6];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 7) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 7];\n"
-      code += f"}}\n"
-    return code
-
-def generateInputDataTransferCode(func, func_name, data_blocks, address_macros):
-    code = CodeWriter()
-    bitwidth_per_transfer = 32
-    for block in data_blocks:
-      size = block.size
-      base_address = block.base_address
-      base_address_name = makeBaseAddrName(block)
-      address_macros.update({base_address_name : base_address})
-      iteration_bound = math.ceil(size/4)
-      if (iteration_bound % 8) != 0:
-        iteration_bound += 8 - (iteration_bound % 8)
-      iteration_bound = math.ceil(iteration_bound // 8)
-      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 0) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 0];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 1) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 1];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 2) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 2];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 3) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 3];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 4) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 4];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 5) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 5];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 6) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 6];\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 7) = {getCInputVarName(func, func_name, block)}[(i * {256 // bitwidth_per_transfer}) + 7];\n"
-      code += f"}}\n"
-    return code
-
-def generateOutputDataTransferCode(data_blocks, address_macros):
-    code = CodeWriter()
-    bitwidth_per_transfer = 32
-    for idx, block in enumerate(data_blocks):
-      size = block.size
-      base_address = block.base_address
-      base_address_name = makeBaseAddrName(block)
-      address_macros.update({base_address_name : base_address})
-      iteration_bound = math.ceil(size/4)
-      if (iteration_bound % 8) != 0:
-        iteration_bound += 8 - (iteration_bound % 8)
-      iteration_bound = math.ceil(iteration_bound // 8)
-      code += f"for(int i=0; i<{iteration_bound}; i++){{\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 0] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 0);\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 1] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 1);\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 2] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 2);\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 3] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 3);\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 4] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 4);\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 5] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 5);\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 6] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 6);\n"
-      code += f"  out{idx}[(i * {256 // bitwidth_per_transfer}) + 7] = *(npu_pointer + ({base_address_name} / 4) + (i * {256 // bitwidth_per_transfer}) + 7);\n"
-      code += f"}}\n"
-    return code
-
-def generateWaitForInterruptCode():
-  code = (
-      "WAIT_NPU_INTERRUPT;\n"
-  )
-  # "while(1) {\n"
-  # "  if(npu_done == 1) {\n"
-  # "    npu_done = 0;\n"
-  # "    break;\n"
-  # "  }\n"
-  # "  std::this_thread::sleep_for(std::chrono::milliseconds(1));\n"
-  # "}\n"
+def generateToNpuTransferCode(func, func_name, blocks, address_macros):
+  code = CodeWriter()
+  code += "// Transfer data into NPU memory\n"
+  for block in blocks:
+    size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
+    base_address = block.base_address
+    base_address_name = makeBaseAddrName(block)
+    address_macros.update({base_address_name: base_address})
+    numel = math.ceil(size/4)
+    code += f"for(int i=0; i<{numel}; i++){{\n"
+    code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {getCInputVarName(func, func_name, block)}[i];\n"
+    code += f"}}\n"
   return code
 
 
-def generateEnableForInterruptCode():
-  code = (
-      "ENABLE_NPU_INTERRUPT;\n"
-  )
-  return code
-
-
-def generateInvokeCode():
-  IDLE_CODE = 0
-  RUN_CODE = 1
-  PROGRAM_CODE = 2
-
-  INODE_PC_START_P1_ENUM_VAL = 0
-  INODE_PC_START_EXTERN_ENUM_VAL = 1
-  INODE_PC_START_P0_ENUM_VAL = 2
-
-  INODE_NUM = ImcflowDeviceConfig().INODE_NUM
-
-  STATE_REG_IDX = 0
-  PC_REG_IDX = 2
-
-  code = (
-      "// Invoke with policy update mode\n"
-      f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(npu_pointer + ({PC_REG_IDX} + i)) = ({INODE_PC_START_EXTERN_ENUM_VAL} << 30 + 0);\n"
-      "}\n"
-      f"{generateEnableForInterruptCode()}\n"
-      f"*(npu_pointer + {STATE_REG_IDX}) = {PROGRAM_CODE};\n"
-      f"{generateWaitForInterruptCode()}\n"
-      "// Invoke with compute mode\n"
-      f"for(int i=0; i<{INODE_NUM}; i++) {{\n"
-      f"  *(npu_pointer + ({PC_REG_IDX} + i)) = ({INODE_PC_START_P1_ENUM_VAL} << 30 + 0);\n"
-      "}\n"
-      f"{generateEnableForInterruptCode()}\n"
-      f"*(npu_pointer + {STATE_REG_IDX}) = {RUN_CODE};\n"
-      f"{generateWaitForInterruptCode()}\n"
-  )
+def generateFromNpuTransferCode(data_blocks, address_macros):
+  code = CodeWriter()
+  code += "// Transfer data from NPU memory\n"
+  for idx, block in enumerate(data_blocks):
+    size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
+    base_address = block.base_address
+    base_address_name = makeBaseAddrName(block)
+    address_macros.update({base_address_name: base_address})
+    numel = math.ceil(size/4)
+    code += f"for(int i=0; i<{numel}; i++){{\n"
+    code += f"  out{idx}[i] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
+    code += f"}}\n"
   return code
 
 
@@ -371,73 +201,30 @@ def generateBaseAddrMacros(base_address_macros):
   code = CodeWriter()
   for key, value in base_address_macros.items():
     code += f"#define {key} {value}\n"
+  code += "\n"
   return code
 
 
-def generateLoadBinaryCode(func_name):
+def generateLoadBinaryCode(func_name, compiled_blocks):
   code = CodeWriter()
   code += "// Load binary files into buffers\n"
-  for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-    for block_name, block in memory_region.blocks.items():
-      if isinstance(block.id, str) and "imem" in block.id:
-        node_name, node_number = block.id.split("_")[0], block.id.split("_")[1]
-
-        filename = f"./build/{func_name}_{node_name}_{node_name}_{node_number}.bin"
-
-        size = math.ceil(block.size / 4)
-
-        code += (
-            f'{{\n'
-            f'FILE *fp = fopen("{filename}", "rb");\n'
-            f'if (!fp) {{ perror("fopen failed"); exit(1); }}\n'
-            f'fread(&{block.id}, sizeof(int32_t), {size}, fp);\n'
-            f'fclose(fp);\n'
-            f'}}\n'
-        )
+  for block in compiled_blocks:
+    if isinstance(block.id, str):
+      filename = f"./build/{func_name}/{block.id}.bin"
+      size = math.ceil(block.size / 4)
+      code += (
+          f'{{\n'
+          f'FILE *fp = fopen("{filename}", "rb");\n'
+          f'if (!fp) {{ perror("fopen failed"); exit(1); }}\n'
+          f'fread(&{block.id}, sizeof(int32_t), {size}, fp);\n'
+          f'fclose(fp);\n'
+          f'}}\n'
+      )
   return code
 
 
-def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
-  base_address_macros = {}
-  proto_list = []
-  for i, param in enumerate(func.params):
-    param_name = param.name_hint if param.name_hint else f"arg{i}"
-    dtype = "float32"
-    if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
-      dtype = param.checked_type.dtype
-      cpp_type = dtype_to_cpp(dtype)
-      proto_list.append(f"{cpp_type}* {param_name}")
-
-  input_nodes = [n for n in imcflow_transform.getInputNodesOfFunc(func)]
-  input_node_types = [n.checked_type for n in input_nodes]
-  output_node = imcflow_transform.getOutputNodesOfFunc(func)
-  output_node_type = output_node.checked_type
-  proto_list.append(f"{dtype_to_cpp(output_node_type.dtype)}* out0")
-
-  args_proto_type = ", ".join(proto_list)
-
+def generatePackedFuncWrapper(func_name, input_node_types, output_node_type):
   code = CodeWriter()
-
-  code += generateHeader()
-
-  code += generateInterruptRelatedCode()
-
-  code += generateInstructionDef()
-
-  # Kernel function prototype and definition (C)
-  code += f"void {func_name}_kernel({args_proto_type});\n"
-  code += f"void {func_name}_kernel({args_proto_type}) {{\n"
-  code.nextIndent()
-  code += generateFpgaPointerDef()
-  # Todo. load binary files to buffer
-  code += generateLoadBinaryCode(func_name)
-  code += generateInstructionTransferCode(func, func_name, instruction_blocks, base_address_macros)
-  code += generateInputDataTransferCode(func, func_name, data_blocks[0], base_address_macros)
-  code += generateInvokeCode()
-  code += generateOutputDataTransferCode(data_blocks[1], base_address_macros)
-  code.prevIndent()
-  code += '}\n'
-
   # PackedFunc wrapper for CRT
   code += "#ifdef __cplusplus\n"
   code += "extern \"C\"\n"
@@ -467,21 +254,192 @@ def makeKernelDef(func_name, func, instruction_blocks, data_blocks):
   code += "return 0;\n"
   code.prevIndent()
   code += "}\n"
+  return code
 
-  # no explicit registration needed: system lib references the symbol directly
 
+def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
+  base_address_macros = {
+      "IMCFLOW_ADDR": 0xa0000000,
+      "IMCFLOW_LEN": 0x100000,
+      "INT_ACK_GEN_ADDR": 0xa0110000,
+      "INT_ACK_GEN_LEN": 0x10000,
+      "IMCFLOW_DEVICE": "\"/dev/uio5\"",
+      "INT_ACK_GEN_DEVICE": "\"/dev/uio4\"",
+      "SET_IDLE_CODE": 0,
+      "SET_RUN_CODE": 1,
+      "SET_PROGRAM_CODE": 2,
+      "STATE_REG_IDX": 0,
+      "PC_REG_IDX": 2,
+      "INODE_PC_START_P1_ENUM_VAL": 0,
+      "INODE_PC_START_EXTERN_ENUM_VAL": 1,
+      "INODE_PC_START_P0_ENUM_VAL": 2,
+      "INODE_NUM": ImcflowDeviceConfig().INODE_NUM,
+  }
+  proto_list = []
+  for i, param in enumerate(func.params):
+    param_name = param.name_hint if param.name_hint else f"arg{i}"
+    dtype = "float32"
+    if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
+      dtype = param.checked_type.dtype
+      cpp_type = dtype_to_cpp(dtype)
+      proto_list.append(f"{cpp_type}* {param_name}")
+
+  input_nodes = [n for n in imcflow_transform.getInputNodesOfFunc(func)]
+  input_node_types = [n.checked_type for n in input_nodes]
+  output_node = imcflow_transform.getOutputNodesOfFunc(func)
+  output_node_type = output_node.checked_type
+  proto_list.append(f"{dtype_to_cpp(output_node_type.dtype)}* out0")
+
+  args_proto_type = ", ".join(proto_list)
+
+  code = CodeWriter()
+  code += generateHeader()
+  code += generateInterruptUtilities()
+  code += generateCompiledDataDef()
+
+  # Kernel function prototype and definition (C)
+  code += f"void {func_name}_kernel({args_proto_type});\n"
+  code += f"void {func_name}_kernel({args_proto_type}) {{\n"
+  code.nextIndent()
+  code += generateDevicePointerSetup()
+  code += generateLoadBinaryCode(func_name, compiled_blocks)
+  code += generateToNpuTransferCode(func, func_name,
+                                    compiled_blocks, base_address_macros)
+  code += generateToNpuTransferCode(func, func_name,
+                                    data_blocks[0], base_address_macros)
+  code += generateInvokeCode()
+  code += generateFromNpuTransferCode(data_blocks[1], base_address_macros)
+  code += generateDevicePointerCleanup()
+  code.prevIndent()
+  code += '}\n'
+
+  code += generatePackedFuncWrapper(func_name,
+                                    input_node_types, output_node_type)
   code = generateBaseAddrMacros(base_address_macros) + code
 
   return code
 
 
 def makeKernelStartCode(func_name, func):
-  instruction_blocks = getInstructionBlocks(func_name, func)
+  compiled_blocks = getCompiledDataBlocks(func_name, func)
   data_blocks = getDataBlocks(func_name, func)
-  kernel_def = makeKernelDef(func_name, func, instruction_blocks, data_blocks)
+  kernel_def = makeKernelDef(func_name, func, compiled_blocks, data_blocks)
   code = kernel_def
 
   return str(code)
+
+
+def generateHeader():
+  return ("""
+#include <stdlib.h>
+#include <string.h>
+#include <tvm/runtime/c_runtime_api.h>
+#include <tvm/runtime/c_backend_api.h>
+#include <dlpack/dlpack.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <unistd.h>
+""")
+
+
+def generateInterruptUtilities():
+  return ("""
+void enable_imcflow_interrupt(int fd)
+{
+  uint32_t info = 1;
+  ssize_t nb = write(fd, &info, sizeof(info));
+  if (nb != (ssize_t)sizeof(info)) {
+    perror("write failed");
+    close(fd);
+    exit(1);
+  }
+}
+
+void wait_imcflow_interrupt(int fd)
+{
+  uint32_t info;
+  ssize_t nb = read(fd, &info, sizeof(info));
+}
+
+void generate_ack(uint32_t* int_ack_gen)
+{
+  int_ack_gen[0] = 0b1;
+}
+""")
+
+
+def generateDevicePointerSetup():
+  return ("""
+int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
+if (npu_fd < 0) {
+  perror("npu UIO cannot be opened");
+  exit(1);
+}
+
+int int_ack_gen_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
+if (int_ack_gen_fd < 0) {
+  perror("interrupt ack gen UIO cannot be opened");
+  close(npu_fd);
+  exit(1);
+}
+
+size_t npu_len = (size_t) IMCFLOW_LEN;
+uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);
+if (npu_pointer == MAP_FAILED) {
+  perror("npu_pointer mmap error");
+  close(npu_fd);
+  close(int_ack_gen_fd);
+  exit(1);
+}
+
+size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;
+uint32_t *int_ack_gen_pointer = (uint32_t*) mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);
+if (int_ack_gen_pointer == MAP_FAILED) {
+  perror("int_ack_gen_pointer mmap error");
+  munmap(npu_pointer, npu_len);
+  close(npu_fd);
+  close(int_ack_gen_fd);
+  exit(1);
+}
+""")
+
+
+def generateInvokeCode():
+  return ("""
+// Invoke with policy update mode
+for(int i=0; i<INODE_NUM; i++) {
+  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P0_ENUM_VAL << 30 + 0);
+}
+enable_imcflow_interrupt(npu_fd);
+*(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;
+wait_imcflow_interrupt(npu_fd);
+generate_ack(int_ack_gen_pointer);
+npu_pointer[7] = 1;
+
+// Invoke with compute mode
+for(int i=0; i<INODE_NUM; i++) {
+  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);
+}
+enable_imcflow_interrupt(npu_fd);
+*(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;
+wait_imcflow_interrupt(npu_fd);
+generate_ack(int_ack_gen_pointer);
+npu_pointer[7] = 1;
+""")
+
+
+def generateDevicePointerCleanup():
+  return ("""
+// Cleanup device pointer
+munmap(npu_pointer, npu_len);
+close(npu_fd);
+munmap(int_ack_gen_pointer, int_ack_gen_len);
+close(int_ack_gen_fd);
+""")
+
 
 
 def generate_invoke_code_for_subgraphs(mod):
