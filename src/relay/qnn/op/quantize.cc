@@ -195,33 +195,47 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
     return false;
   }
 
-  const auto input_dtype = data->dtype;
-  // ICHECK(input_dtype == DataType::Int(16))
-  //     << "Input type should be one of int16 but was " << input_dtype;
+  /*
+    from qconv : [N, OC/64, OH, OW, 4, 16]
+    from others : [N, OC/16, OH, OW, 16]
+  */
+  Array<IndexExpr> data_shape = data->shape;
+  const DataType input_dtype = data->dtype;
 
-  const auto* quantize_attrs = attrs.as<ImcflowMinMaxQuantizeAttrs>();
-  int axis = quantize_attrs->axis;
-  auto rank = static_cast<int>(data->shape.size());
-  axis = (axis < 0) ? ((rank > 0) ? data->shape.size() + axis : 0) : axis;
+  ICHECK(data_shape.size() == 5 || data_shape.size() == 6) << "Input data must have 5 or 6 dimensions";
+  int in_last_dim = data_shape.size()-1;
 
-  // PrimExpr axis_shape;
-  // if (rank > 0) {
-  //   axis_shape = data->shape[axis];
-  // } else {
-    // axis_shape = Integer(1);
-  // }
-  // axis_shape = Integer(1);
-  // Check and assign types for scale and zero points.
-  // AssignType(types[1], DataType::Int(16), axis_shape, reporter);  // scale
-  // AssignType(types[2], DataType::Int(16), axis_shape, reporter);    // zero point
-  // reporter->Assign(types[1], TensorType({1}, DataType::Int(16)));
-  // reporter->Assign(types[2], TensorType({1}, DataType::Int(16)));
+  ICHECK(data_shape[in_last_dim].as<IntImmNode>()->value == 16)
+      << "Input data must have 16 channels in the last dimension, but got "
+      << data_shape[in_last_dim].as<IntImmNode>()->value;
+  
+  if(data_shape.size() == 6) {
+    ICHECK(data_shape[in_last_dim-1].as<IntImmNode>()->value == 4)
+        << "Input data must have 4 channels in the second last dimension, but got "
+        << data_shape[in_last_dim-1].as<IntImmNode>()->value;
+  } 
+
+  ICHECK(input_dtype == DataType::Int(16))
+      << "Input type should be one of int16 but was " << input_dtype;
+
+  const ImcflowMinMaxQuantizeAttrs* quantize_attrs = attrs.as<ImcflowMinMaxQuantizeAttrs>();
+
+  ICHECK(quantize_attrs->param_dtype == DataType::Int(16)) 
+      << "Parameter type should be int16 but was " << quantize_attrs->param_dtype;
+
   reporter->Assign(types[1], TensorType({}, quantize_attrs->param_dtype)); // min
   reporter->Assign(types[2], TensorType({}, quantize_attrs->param_dtype)); // max
 
-  const Array<tvm::PrimExpr> oshape = data->shape;
-  const DataType out_dtype = quantize_attrs->out_dtype;
-  // assign output type
+  IndexExpr batch = data_shape[0];
+  IndexExpr oc_gnum = data_shape[1];
+  IndexExpr ih = data_shape[2];
+  IndexExpr iw = data_shape[3];
+
+  IndexExpr oc = (in_last_dim == 5) ? oc_gnum * 64 : oc_gnum * 16;
+  IndexExpr out_oc_gnum = ceildiv(oc,256);
+
+  Array<IndexExpr> oshape({batch, out_oc_gnum, ih, iw, 4, 8});
+  DataType out_dtype = quantize_attrs->out_dtype;
   reporter->Assign(types[3], TensorType(oshape, out_dtype)); // output
   return true;
 }
@@ -253,8 +267,7 @@ scale and zero point.
     .add_argument("min", "Expr", "min")
     .add_argument("max", "Expr", "max")
     .set_support_level(11)
-    .add_type_rel("ImcflowMinMaxQuantize", ImcflowMinMaxQuantizeRel)
-    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+    .add_type_rel("ImcflowMinMaxQuantize", ImcflowMinMaxQuantizeRel);
 
 TVM_REGISTER_GLOBAL("relay.qnn.op._make.imcflow_min_max_quantize").set_body_typed(MakeImcflowMinMaxQuantize);
 

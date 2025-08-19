@@ -102,6 +102,41 @@ def getOneConvModel():
 
   return out, param_dict
 
+def getOneConvQuantModel():
+  N, IC, IH, IW = 2, 32, 4, 4
+  OC, KH, KW = 128, 3, 3
+  padding = (0, 0)
+  stride = (1, 1)
+  OH, OW = (IH - KH + 2 * padding[0]) // stride[0] + 1, (IW - KW + 2 * padding[1]) // stride[1] + 1
+
+  atom_IC = math.floor(256/(KH*KW))
+  atom_OC = 64
+  ic_gnum = math.ceil(IC/atom_IC)
+  oc_gnum = math.ceil(OC/atom_OC)
+
+  input = relay.var("input", shape=(N,ic_gnum,IH,IW,4,8), dtype="int32")
+  y = imcflow_qconv2d(
+    input,
+    relay.var("weight", shape=(oc_gnum,ic_gnum,256,8), dtype="int32"),
+    channels=OC,
+    in_channels=IC,
+    kernel_size=(KH, KW),
+    padding=padding,
+    strides=stride,
+    out_dtype="int16"
+  )
+  y = imcflow_min_max_quantize(y, relay.const(0, "int16"), relay.const(1, "int16"), 1, "int16", "int16")
+
+  weight_numpy = np.random.rand(oc_gnum,ic_gnum,256,8).astype("int32")
+  print(weight_numpy.dtype)
+  param_dict = {
+    "weight": weight_numpy
+  }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
+
 def getOneReluModel():
   # input_ = relay.var("input", shape=(1, 28, 4, 4))
   input_ = relay.var("input", shape=(1,28,4,4), dtype="int16")

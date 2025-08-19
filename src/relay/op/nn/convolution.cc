@@ -2005,11 +2005,11 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
   IndexExpr kw = param->kernel_size[1];
   IndexExpr oc = param->channels;
 
-  Array<IndexExpr> oshape({0,0,0,0});
+  Array<IndexExpr> oshape({0,0,0,0,4,16});
   IndexExpr pad_h, pad_w;
   GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
   oshape.Set(0, batch);
-  oshape.Set(1, ceildiv(oc, 64)*64);
+  oshape.Set(1, ceildiv(oc, 64));
   oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
   oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
 
