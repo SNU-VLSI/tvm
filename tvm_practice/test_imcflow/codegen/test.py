@@ -209,6 +209,7 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"nodemap: {config.HWNodeMap}")
   print(f"edgeinfo: {config.TensorEdgetoInfo}")
   print(f"idtoedge: {config.TensorIDtoEdge}")
+  print(f"policy_table: {config.PolicyTableDict}")
 
   CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
   CodegenSuite(eval_mod)

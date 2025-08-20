@@ -62,52 +62,43 @@ class CodegenSuite:
     PolicyTableCodegen(func_name, self.build_dir).generate(func_name)
 
     return func
-  
+
 class PolicyTableCodegen:
+  """
+  Write out a binary file for policy tables for each node.
+  """
   def __init__(self, func_name, build_dir="/tmp"):
     super().__init__()
     self.func_name = func_name
     self.func_dir = os.path.join(build_dir, func_name)
 
   def pack_to_bin(self, entry, endian):
-    bin_data = bytearray()
+    assert set(entry.keys()) == {'Local', 'North', 'East', 'South', 'West'}, "Invalid policy table entry"
+
+    def get_bits(val, num_bits):
+      return (val & ((1 << num_bits) - 1)) if val is not None else 0
+
     val = 0
-    for direction, value in entry.items():
-      if direction != 'Local':
-        addr = value["addr"] & 0b111111
-        enable = 1 if value["enable"] else 0
-        val = (val << 1) | enable
-        val = (val << 6) | addr
-      else:
-        if value["chunk_index"] == None:
-          # Local entry without chunk_index
-          chunk_index = 0b000000
-        else:
-          chunk_index = value["chunk_index"] & 0b111111
-        ksel = 0b000
-        addr = value["addr"] & 0b111111
-        enable = 1 if value["enable"] else 0
-        val = (enable << 6) | addr
-        val = (val << 3) | ksel
-        val = (val << 6) | chunk_index
-    val = val << 4
-    bin_data.extend(val.to_bytes(6, byteorder=endian, signed=False))
-    # pad to 32-byte boundary
-    padding = (-len(bin_data)) % 32
-    if padding:
-      bin_data.extend(b'\x00' * padding)
+    for direction in ['Local', 'North', 'East', 'South', 'West']:
+      conf = entry[direction]
+      val = (val << 1) | (1 if conf["enable"] else 0)
+      val = (val << 6) | get_bits(conf["addr"], 6)
+      if direction == 'Local':
+        val = (val << 3) | 0b000
+        val = (val << 6) | get_bits(conf["chunk_index"], 6)
+
+    bin_data = bytearray()
+    bin_data.extend(val.to_bytes(32, byteorder=endian, signed=False))
     return bytes(bin_data)
-  
+
   def generate(self, func_name):
     for node_name, entries in transform.ImcflowDeviceConfig().PolicyTableDict.items():
       policytable_path = os.path.join(self.func_dir, f"{node_name.name}_policy.bin")
       with open(policytable_path, "wb") as file:
         for entry in entries:
-          policytable_bin = self.pack_to_bin(entry, endian='big')
+          policytable_bin = self.pack_to_bin(entry, endian='little')
           file.write(policytable_bin)
     return
-  
-  
 
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
