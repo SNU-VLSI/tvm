@@ -11,48 +11,6 @@ from tvm.relay.expr import (Var, Constant)
 import re
 import math
 
-
-#def getCompiledDataBlocks(func_name, func):
-#  compiled_blocks = []
-#
-#  for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
-#    for block_name, block in memory_region.blocks.items():
-#      if isinstance(block_name, str):
-#        compiled_blocks.append(block)
-#
-#  return compiled_blocks
-
-
-#def getDataBlocks(func_name, func):
-#  input_data_blocks = []
-#  output_data_blocks = []
-#
-#  # get input/output node ID
-#  input_node_ids = [imcflow_transform.getNodeID(
-#      n) for n in imcflow_transform.getInputNodesOfFunc(func)]
-#  output_node_id = imcflow_transform.getNodeID(
-#      imcflow_transform.getOutputNodesOfFunc(func))
-#
-#  # get input data blocks
-#  for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-#    if re.match(r"inode_\d+_data", key):
-#      for block_name, block in memory_region.blocks.items():
-#        current_func_input_data = isinstance(block.id, TensorID) and any(
-#            [input_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids])
-#        if current_func_input_data:
-#          input_data_blocks.append(block)
-#
-#  # get output data blocks
-#  # TODO : odata ??
-#  for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-#    if re.match(r"inode_\d+_data", key):
-#      for block_name, block in memory_region.blocks.items():
-#        if isinstance(block_name, TensorID) and output_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id):
-#          output_data_blocks.append(block)
-#
-#  return input_data_blocks, output_data_blocks
-
-
 def align_to_n_bytes(size, n_bytes):
   if (size % n_bytes) != 0:
     size = (size // n_bytes + 1) * n_bytes
