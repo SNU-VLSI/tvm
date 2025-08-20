@@ -61,6 +61,9 @@ class CodegenSuite:
 
     PolicyTableCodegen(func_name, self.build_dir).generate(func_name)
 
+    # generate DataBlockDict for imcflow_codegen
+    DevConfig().get_data_block_dict(func)
+
     return func
 
 class PolicyTableCodegen:

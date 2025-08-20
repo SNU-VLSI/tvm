@@ -17,6 +17,9 @@
 
 from typing import Tuple, List, Dict, Union
 from enum import Enum
+from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
+import re
+import math
 
 SMALL_DEBUG = 0
 
@@ -381,6 +384,7 @@ class ImcflowDeviceConfig:
     )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
+    self.DataBlocks = {}
 
   def clear(self):
     self._initialize()
@@ -437,3 +441,41 @@ class ImcflowDeviceConfig:
   def get_inst_edge_info(self, imce_id: NodeID):
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
     return self.InstEdgeInfoDict.get(imce_id, None)
+
+  def get_data_block_dict(self, func):
+    compiled_blocks = []
+    input_data_blocks = []
+    output_data_blocks = []
+
+    # get input/output node ID
+    input_node_ids = [imcflow_transform.getNodeID(
+        n) for n in imcflow_transform.getInputNodesOfFunc(func)]
+    output_node_id = imcflow_transform.getNodeID(
+        imcflow_transform.getOutputNodesOfFunc(func))
+    
+    # get compiled data blocks
+    for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
+      for block_name, block in memory_region.blocks.items():
+        if isinstance(block_name, str):
+          compiled_blocks.append(block)
+
+    # get input data blocks
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
+      if re.match(r"inode_\d+_data", key):
+        for block_name, block in memory_region.blocks.items():
+          current_func_input_data = isinstance(block.id, TensorID) and any(
+              [input_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids])
+          if current_func_input_data:
+            input_data_blocks.append(block)
+
+    # get output data blocks
+    # TODO : odata ??
+    for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
+      if re.match(r"inode_\d+_data", key):
+        for block_name, block in memory_region.blocks.items():
+          if isinstance(block_name, TensorID) and output_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id):
+            output_data_blocks.append(block)
+
+    self.DataBlocks["compiled"] = compiled_blocks
+    self.DataBlocks["input"] = input_data_blocks
+    self.DataBlocks["output"] = output_data_blocks
