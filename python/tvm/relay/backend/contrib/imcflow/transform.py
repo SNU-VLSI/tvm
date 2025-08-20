@@ -2409,3 +2409,9 @@ def makeWrapper(func, func_name):
   code += '}\n'
 
   return code
+
+def constructDataBlockDict(mod):
+  for func_name_var, func in mod.functions.items():
+    if func_name_var.name_hint == "main": continue
+    elif func.attrs["Compiler"]=="imcflow":
+      ImcflowDeviceConfig().get_data_block_dict(func)

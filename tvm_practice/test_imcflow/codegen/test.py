@@ -217,6 +217,9 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"mem_layout: {config.MemLayout}")
   print(f"Evaluation generation completed for {test_name}")
 
+  imcflow_transform.constructDataBlockDict(eval_mod)
+  print(f"data_blocks: {config.DataBlocks}")
+
   generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 

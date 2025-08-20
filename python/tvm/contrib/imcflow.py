@@ -450,8 +450,7 @@ class ImcflowDeviceConfig:
     # get input/output node ID
     input_node_ids = [imcflow_transform.getNodeID(
         n) for n in imcflow_transform.getInputNodesOfFunc(func)]
-    output_node_id = imcflow_transform.getNodeID(
-        imcflow_transform.getOutputNodesOfFunc(func))
+    output_node_id = imcflow_transform.getNodeID(func)
     
     # get compiled data blocks
     for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
