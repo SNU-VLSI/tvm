@@ -365,18 +365,13 @@ if (int_ack_gen_pointer == MAP_FAILED) {
 
 def generateInvokeCode():
   return ("""
-// Invoke with policy update mode
+// Set the inode pc to 0 and run.
 for(int i=0; i<INODE_NUM; i++) {
   *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);
 }
-*(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;
-
-// Invoke with compute mode
-for(int i=0; i<INODE_NUM; i++) {
-  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);
-}
 enable_imcflow_interrupt(npu_fd);
 *(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;
+
 wait_imcflow_interrupt(npu_fd);
 generate_ack(int_ack_gen_pointer);
 npu_pointer[7] = 1;
