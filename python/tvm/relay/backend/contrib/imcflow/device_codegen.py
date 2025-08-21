@@ -58,19 +58,20 @@ class DeviceCodegen:
       if self.target == "imce": # replace with padded binary (padded to 32-byte boundary)
         self.pad_bin_inplace(bin_file, inst_size=4, stride=32)
       self.create_host_object(bin_file, host_obj_file)
-      obj_map[node] = obj_file
+      obj_map[node] = host_obj_file
 
     return obj_map
 
   def compile_cpp_to_object(self, cpp_name: str, obj_file: str, node: NodeID):
+    # FIXME: change the INODE_hid/INODE_wid to lowercase in llvm for consistency
+    hid_str = "imce_hid" if self.target == "imce" else "INODE_hid"
+    wid_str = "imce_wid" if self.target == "imce" else "INODE_wid"
+
     command = [
         "clang",
         *self.compile_options.split(),
-        # FIXME: -mmlvm should not be imce_hid/wid for inode
-        # f"-mllvm=-{self.target}_hid={node.to_coord(0)}",
-        # f"-mllvm=-{self.target}_wid={node.to_coord(1)}",
-        f"-mllvm=-imce_hid={node.to_coord(0)}",
-        f"-mllvm=-imce_wid={node.to_coord(1)}",
+        f"-mllvm=-{hid_str}={node.to_coord(0)}",
+        f"-mllvm=-{wid_str}={node.to_coord(1)}",
         "-o", obj_file,
         cpp_name
     ]
@@ -111,7 +112,7 @@ class DeviceCodegen:
     command = ["ld", *self.ld_options.split(), "-o", host_obj_file, bin_file]
     subprocess.run(command, check=True)
 
-  def get_object_size(self, obj_file: str):
+  def get_object_size(self, obj_file: str, key: str = "text"):
     command = ["llvm-size", obj_file]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     stdout, stderr = process.communicate()
@@ -122,8 +123,14 @@ class DeviceCodegen:
 
     try:
       # Parse the output to extract the size
-      size_line = stdout.splitlines()[1]  # Get the second line
-      size = int(size_line.split()[0])  # Extract the first number
+      std_out_lines = stdout.splitlines()
+      keys = std_out_lines[0].split()   # Get the first line
+      sizes = std_out_lines[1].split()  # Get the second line
+      if key not in keys:
+        print(f"Key '{key}' not found in llvm-size output: {stdout}")
+        return None
+      index = keys.index(key)  # Find the index of the key
+      size = int(sizes[index])  # Get the corresponding size
       return size
     except (IndexError, ValueError):
       print(f"Error parsing llvm-size output: {stdout}")
@@ -131,7 +138,7 @@ class DeviceCodegen:
 
   def update_device_config_with_obj_info(self, obj_map: dict[NodeID, str]):
     for node, obj_file in obj_map.items():
-      size = self.get_object_size(obj_file)
+      size = self.get_object_size(obj_file, key="data")
       if size is not None:
         db = DataBlock(f"{node.name}_imem", size)
         if self.target == "inode":
