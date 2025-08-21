@@ -70,6 +70,7 @@ class PolicyTableCodegen:
   def __init__(self, func_name, build_dir="/tmp"):
     super().__init__()
     self.func_name = func_name
+    self.build_dir = build_dir
     self.func_dir = os.path.join(build_dir, func_name)
 
   def pack_to_bin(self, entry, endian):
@@ -93,11 +94,21 @@ class PolicyTableCodegen:
 
   def generate(self, func_name):
     for node_name, entries in transform.ImcflowDeviceConfig().PolicyTableDict.items():
-      policytable_path = os.path.join(self.func_dir, f"{node_name.name}_policy.bin")
-      with open(policytable_path, "wb") as file:
+      policytable_path = os.path.join(self.func_dir, f"{node_name.name}_policy")
+      policytable_bin_file = f"{policytable_path}.bin"
+      policytable_host_obj_file = f"{node_name.name}_policy.host.o"
+      with open(policytable_bin_file, "wb") as file:
         for entry in entries:
           policytable_bin = self.pack_to_bin(entry, endian='little')
           file.write(policytable_bin)
+      if ("inode" in node_name.name):
+        DevCodegen = DeviceCodegen("inode", self.build_dir)
+        DevCodegen.func_dir = self.func_dir
+        DevCodegen.create_host_object(f"{node_name.name}_policy.bin", policytable_host_obj_file)
+      if ("imce" in node_name.name):
+        DevCodegen = DeviceCodegen("inode", self.build_dir)
+        DevCodegen.func_dir = self.func_dir
+        DevCodegen.create_host_object(f"{node_name.name}_policy.bin", policytable_host_obj_file)
     return
 
 

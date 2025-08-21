@@ -7,6 +7,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 import pdb
 
+
 class DeviceCodegen:
   def __init__(self, target, build_dir="/tmp"):
     assert target in ["inode", "imce"], f"Unknown target: {target}"
@@ -27,7 +28,8 @@ class DeviceCodegen:
     self.func_dir = os.path.join(self.build_dir, func_name)
     if not os.path.exists(self.func_dir):
       os.makedirs(self.func_dir)
-    logging.info(f"Generating {self.target} code for function: {func_name} in {self.func_dir}")
+    logging.info(
+        f"Generating {self.target} code for function: {func_name} in {self.func_dir}")
 
     code = codeblock_manager.generate()
     cpp_name = self.save_target_code_to_file(code)
@@ -35,8 +37,8 @@ class DeviceCodegen:
     self.update_device_config_with_obj_info(obj_map)
 
   def save_target_code_to_file(self, code: str):
-    cpp_name = os.path.join(self.func_dir, f"{self.target}.cpp")
-    with open(cpp_name, "w") as file:
+    cpp_name = f"{self.target}.cpp"
+    with open(os.path.join(self.func_dir, cpp_name), "w") as file:
       file.write(code)
     return cpp_name
 
@@ -47,16 +49,27 @@ class DeviceCodegen:
 
     nodes = NodeID.inodes() if self.target == "inode" else NodeID.imces()
     for node in nodes:
-      file_path = os.path.join(self.func_dir, f"{node.name}_imem")
-      obj_file = f"{file_path}.o"
-      out_file = f"{file_path}.out"
-      bin_file = f"{file_path}.bin"
-      host_obj_file = f"{file_path}.host.o"
+      file_name = f"{node.name}_imem"
+      obj_file = f"{file_name}.o"
+      out_file = f"{file_name}.out"
+      bin_file = f"{file_name}.bin"
+      host_obj_file = f"{file_name}.host.o"
       self.compile_cpp_to_object(cpp_name, obj_file, node)
       self.link_object_to_binary(obj_file, out_file)
       self.extract_text_section(out_file, bin_file)
-      if self.target == "imce": # replace with padded binary (padded to 32-byte boundary)
-        self.pad_bin_inplace(bin_file, inst_size=4, stride=32)
+
+      # replace with padded binary (padded to 32-byte boundary)
+      if self.target == "inode":
+        self.pad_inode_bin_inplace(bin_file, stride=32)
+      # replace with padded binary (padded to 32-byte boundary)
+      if self.target == "imce":
+        self.pad_imce_bin_inplace(bin_file, inst_size=4, stride=32)
+
+      # flip byte-order of imce binary (big endian to little endian)
+      # FIXME: remove this after llvm generates correct little endian binary.
+      # currently we're using the imcflow_bigendian branch of the llvm_project
+      self.flip_byte_order(bin_file)
+
       self.create_host_object(bin_file, host_obj_file)
       obj_map[node] = host_obj_file
 
@@ -75,46 +88,94 @@ class DeviceCodegen:
         "-o", obj_file,
         cpp_name
     ]
-    subprocess.run(command, check=True)
+    subprocess.run(command, cwd=self.func_dir, check=True)
 
   def link_object_to_binary(self, obj_file: str, out_file: str):
     command = ["ld.lld", *self.lld_options.split(), "-o", out_file, obj_file]
-    subprocess.run(command, check=True)
+    subprocess.run(command, cwd=self.func_dir, check=True)
 
   def extract_text_section(self, out_file: str, bin_file: str):
     command = ["llvm-objcopy", *self.objcopy_options.split(), out_file,
                bin_file]
-    subprocess.run(command, check=True)
+    subprocess.run(command, cwd=self.func_dir, check=True)
 
-  @staticmethod
-  def pad_bin_inplace(bin_file: str, inst_size=4, stride=32):
-      """Pad each instruction to stride(32)-byte boundaries, overwriting input file"""
-      # Read all data first
-      with open(bin_file, 'rb') as infile:
-          data = infile.read()
+  def pad_inode_bin_inplace(self, bin_file: str, stride=32):
+    """Pad each instruction to stride(32)-byte boundaries, overwriting input file"""
+    # Read all data first
+    bin_path = os.path.join(self.func_dir, bin_file)
+    with open(bin_path, 'rb') as infile:
+      data = infile.read()
 
-      # Check if data length is multiple of 4
-      if len(data) % 4 != 0:
-          raise ValueError("Input file size must be multiple of 4 bytes")
+    # Check if data length is multiple of 4
+    if len(data) % 4 != 0:
+      raise ValueError("Input file size must be multiple of 4 bytes")
 
-      # Create padded data
-      padded_data = bytearray()
-      for i in range(0, len(data), inst_size):
-          instruction = data[i:i+inst_size]
-          padded_data.extend(instruction)
-          padded_data.extend(b'\x00' * (stride - inst_size))
+    # Create padded data
+    padded_data = bytearray()
+    for i in range(0, len(data) // stride):
+      instruction = data[i:i+stride]
+      padded_data.extend(instruction)
 
-      # Write back to same file
-      with open(bin_file, 'wb') as outfile:
-          outfile.write(padded_data)
+    # Add remaining data
+    padded_data.extend(data[len(data) // stride * stride:])
+    padded_data.extend(b'\x00' * (stride - (len(data) % stride)))
 
-  def create_host_object(self, bin_file: str , host_obj_file: str):
-    command = ["ld", *self.ld_options.split(), "-o", host_obj_file, bin_file]
-    subprocess.run(command, check=True)
+    # Write back to same file
+    with open(bin_path, 'wb') as outfile:
+      outfile.write(padded_data)
+
+  def pad_imce_bin_inplace(self, bin_file: str, inst_size=4, stride=32):
+    """Pad each instruction to stride(32)-byte boundaries, overwriting input file"""
+    # Read all data first
+    bin_path = os.path.join(self.func_dir, bin_file)
+    with open(bin_path, 'rb') as infile:
+      data = infile.read()
+
+    # Check if data length is multiple of 4
+    if len(data) % 4 != 0:
+      raise ValueError("Input file size must be multiple of 4 bytes")
+
+    # Create padded data
+    padded_data = bytearray()
+    for i in range(0, len(data), inst_size):
+      instruction = data[i:i+inst_size]
+      padded_data.extend(instruction)
+      padded_data.extend(b'\x00' * (stride - inst_size))
+
+    # Write back to same file
+    with open(bin_path, 'wb') as outfile:
+      outfile.write(padded_data)
+
+  def flip_byte_order(self, bin_file: str):
+    """Convert big endian binary to little endian by swapping byte order within each 4-byte word"""
+    bin_path = os.path.join(self.func_dir, bin_file)
+
+    # Read the binary file
+    with open(bin_path, 'rb') as f:
+      data = bytearray(f.read())
+
+    # Check if data length is multiple of 4 (32-bit instructions)
+    if len(data) % 4 != 0:
+      raise ValueError(f"Binary file {bin_file} size ({len(data)}) is not multiple of 4.")
+
+    # Convert big endian to little endian by swapping bytes within each 4-byte word
+    for i in range(0, len(data), 4):
+      if i + 3 < len(data):
+        data[i], data[i+1], data[i+2], data[i+3] = data[i+3], data[i+2], data[i+1], data[i]
+
+    # Write the converted data back to the file
+    with open(bin_path, 'wb') as f:
+      f.write(data)
+
+  def create_host_object(self, bin_file: str, host_obj_file: str):
+    command = ["aarch64-linux-gnu-ld", *
+               self.ld_options.split(), "-o", host_obj_file, bin_file]
+    subprocess.run(command, cwd=self.func_dir, check=True)
 
   def get_object_size(self, obj_file: str, key: str = "text"):
     command = ["llvm-size", obj_file]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, cwd=self.func_dir)
     stdout, stderr = process.communicate()
 
     if process.returncode != 0:

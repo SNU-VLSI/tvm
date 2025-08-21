@@ -11,6 +11,8 @@ if(NOT EXISTS "${MLF_TAR}")
   message(FATAL_ERROR "MLF_TAR not found: ${MLF_TAR}\nGenerate it with build_arm.py -e graph")
 endif()
 
+file(GLOB_RECURSE HOST_OBJ_FILES "${H_OBJ_PATH}/*.host.o")
+
 # Locate TVM root (defaults to 4 directories up from this file), allow overrides
 # and fall back to TVM_ROOT/TVM_HOME env vars if provided.
 if(NOT DEFINED TVM_ROOT)
@@ -88,7 +90,7 @@ add_library(tvm_model STATIC)
 # Note: object files (if any) are added as sources; CMake will link them in.
 # Treat C++ sources as C++
 set_source_files_properties(${TVM_MODEL_SRCS} PROPERTIES LANGUAGE CXX)
-target_sources(tvm_model PRIVATE ${TVM_MODEL_SRCS} ${TVM_MODEL_OBJS})
+target_sources(tvm_model PRIVATE ${TVM_MODEL_SRCS} ${TVM_MODEL_OBJS} ${HOST_OBJ_FILES})
 
 target_include_directories(tvm_model PRIVATE
   ${TVM_MODEL_INCLUDE}
