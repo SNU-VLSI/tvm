@@ -63,18 +63,6 @@ class CodeWriter:
       self.write(other)
       return self
 
-
-def generateCompiledDataDef():
-  code = CodeWriter()
-  for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
-    for block_name, block in memory_region.blocks.items():
-      if isinstance(block_name, str):
-        size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
-        numel = math.ceil(size / 4)
-        code += f"int32_t {block_name}[{numel}] = {{0,}};\n"
-  return code
-
-
 def makeBaseAddrName(block):
   if isinstance(block.id, TensorID):
     return f"{block.id.tensor_type.upper()}_{imcflow_transform.getInnerNodeID(block.id.graph_node_id)}_BASE_ADDR"
@@ -117,7 +105,8 @@ def getCInputVarName(func, func_name, data_block):
       print(data_block)
       raise ValueError("Wrong data block type!")
   elif isinstance(data_block.id, str):
-    return data_block.id
+    filename = f"_binary_{data_block.id}_bin_start"
+    return filename
   else:
     print(data_block)
     raise ValueError("Wrong data block type!")
@@ -160,26 +149,13 @@ def generateBaseAddrMacros(base_address_macros):
   code += "\n"
   return code
 
-
-def generateLoadBinaryCode(func_name, compiled_blocks):
-  code = CodeWriter()
-  code += "// Load binary files into buffers\n"
-  for block in compiled_blocks:
-    if isinstance(block.id, str):
-      filename = f"_binary_one_relu_evl_build_{func_name}_{block.id}_bin_start"
-      size = math.ceil(block.size / 4)
-      code += f"for(int i=0; i<{size}; i++){{\n"
-      code += f"  {block.id}[i] = {filename}[i];\n"
-      code += f"}}\n"
-  return code
-
 def generateExternLink(func_name, compiled_blocks):
   code = CodeWriter()
   code += 'extern "C" { \n'
   for block in compiled_blocks:
     if isinstance(block.id, str):
-      filename = f"_binary_one_relu_evl_build_{func_name}_{block.id}_bin_start"
-      code += f'  extern const int32_t {filename}[];\n'
+      filename = f"_binary_{block.id}_bin"
+      code += f'  extern const int32_t {filename}_start[];\n'
   code += '}\n'
   return code
 
@@ -257,13 +233,11 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
   code += generateHeader()
   code += generateExternLink(func_name, compiled_blocks)
   code += generateInterruptUtilities()
-  code += generateCompiledDataDef()
 
   # Kernel function prototype and definition (C)
   code += f"void {func_name}_kernel({args_proto_type}) {{\n"
   code.nextIndent()
   code += generateDevicePointerSetup()
-  code += generateLoadBinaryCode(func_name, compiled_blocks)
   code += generateToNpuTransferCode(func, func_name,
                                     compiled_blocks, base_address_macros)
   code += generateToNpuTransferCode(func, func_name,

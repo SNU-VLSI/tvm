@@ -11,7 +11,7 @@ if(NOT EXISTS "${MLF_TAR}")
   message(FATAL_ERROR "MLF_TAR not found: ${MLF_TAR}\nGenerate it with build_arm.py -e graph")
 endif()
 
-file(GLOB_RECURSE HOST_OBJ_FILES "${CMAKE_CURRENT_LIST_DIR}/../one_relu_evl/build/tvmgen_default_imcflow_main_0/*.host.o")
+file(GLOB_RECURSE HOST_OBJ_FILES "${H_OBJ_PATH}/*.host.o")
 
 # Locate TVM root (defaults to 4 directories up from this file), allow overrides
 # and fall back to TVM_ROOT/TVM_HOME env vars if provided.

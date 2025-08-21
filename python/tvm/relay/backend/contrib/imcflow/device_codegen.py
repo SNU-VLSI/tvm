@@ -55,10 +55,12 @@ class DeviceCodegen:
       self.compile_cpp_to_object(cpp_name, obj_file, node)
       self.link_object_to_binary(obj_file, out_file)
       self.extract_text_section(out_file, bin_file)
+      if self.target == "inode": # replace with padded binary (padded to 32-byte boundary)
+        self.pad_inode_bin_inplace(bin_file, stride=32)
       if self.target == "imce": # replace with padded binary (padded to 32-byte boundary)
-        self.pad_bin_inplace(bin_file, inst_size=4, stride=32)
-      self.create_host_object(bin_file, host_obj_file)
-      obj_map[node] = obj_file
+        self.pad_imce_bin_inplace(bin_file, inst_size=4, stride=32)
+      self.create_host_object(f"{node.name}_imem.bin", f"{node.name}_imem.host.o")
+      obj_map[node] = host_obj_file
 
     return obj_map
 
@@ -86,7 +88,31 @@ class DeviceCodegen:
     subprocess.run(command, check=True)
 
   @staticmethod
-  def pad_bin_inplace(bin_file: str, inst_size=4, stride=32):
+  def pad_inode_bin_inplace(bin_file: str, stride=32):
+      """Pad each instruction to stride(32)-byte boundaries, overwriting input file"""
+      # Read all data first
+      with open(bin_file, 'rb') as infile:
+          data = infile.read()
+
+      # Check if data length is multiple of 4
+      if len(data) % 4 != 0:
+          raise ValueError("Input file size must be multiple of 4 bytes")
+
+      # Create padded data
+      padded_data = bytearray()
+      for i in range(0, len(data) // stride):
+          instruction = data[i:i+stride]
+          padded_data.extend(instruction)
+
+      padded_data.extend(data[len(data) // stride * stride:])  # Add remaining data
+      padded_data.extend(b'\x00' * (stride - (len(data) % stride)))
+
+      # Write back to same file
+      with open(bin_file, 'wb') as outfile:
+          outfile.write(padded_data)
+
+  @staticmethod
+  def pad_imce_bin_inplace(bin_file: str, inst_size=4, stride=32):
       """Pad each instruction to stride(32)-byte boundaries, overwriting input file"""
       # Read all data first
       with open(bin_file, 'rb') as infile:
@@ -109,7 +135,7 @@ class DeviceCodegen:
 
   def create_host_object(self, bin_file: str , host_obj_file: str):
     command = ["aarch64-linux-gnu-ld", *self.ld_options.split(), "-o", host_obj_file, bin_file]
-    subprocess.run(command, check=True)
+    subprocess.run(command, cwd=self.func_dir, check=True)
 
   def get_object_size(self, obj_file: str):
     command = ["llvm-size", obj_file]
@@ -123,7 +149,7 @@ class DeviceCodegen:
     try:
       # Parse the output to extract the size
       size_line = stdout.splitlines()[1]  # Get the second line
-      size = int(size_line.split()[0])  # Extract the first number
+      size = int(size_line.split()[1])  # Extract the first number
       return size
     except (IndexError, ValueError):
       print(f"Error parsing llvm-size output: {stdout}")
