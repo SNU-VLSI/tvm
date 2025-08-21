@@ -1,6 +1,7 @@
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from textwrap import indent
 import math
 import pdb
 
@@ -44,9 +45,11 @@ class PolicyUpdateBlock(InodeCodeBlock):
       if db is None:
         continue
       var = UniqueVar("policy_table_start_address", dtype="int")
+      # var_2 = UniqueVar("policy_table_entry_reg", dtype="int")
       code += f"{var} = {db.base_address};"
       for i in range(0, db.size, 32):
-        code += f"__builtin_INODE_PU({var}, {i}, {int(i / 32)}, {id.to_coord(1)});"
+        # code += f"{var_2} = {i // 32};"
+        code += f"__builtin_INODE_PU({var}, {i}, {int(i // 32)}, {id.to_coord(1)});"
     code += ""
 
     return code
@@ -140,6 +143,56 @@ class SendBlock(InodeCodeBlock):
 
     return code
 
+class StandbyAndIntrtBlock(InodeCodeBlock):
+  def __init__(self, node_ids: List[NodeID], annotation: str = ""):
+    super().__init__(annotation)
+    self.node_ids = node_ids
+
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+    for node in self.node_ids:
+      # FIXME: the hardcoded flag value 1 should be replaced with value from sync manager
+      code += f"__builtin_INODE_STANDBY({node.value}, 1);"
+    code += f"__builtin_INODE_DONE();"
+    code += f"__builtin_INODE_INTRT(0);"
+    return code
+
+class SetFlagAndHaltBlock(InodeCodeBlock):
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+    # FIXME: the hardcoded flag value 1 should be replaced with value from sync manager
+    code += f"__builtin_INODE_SET_FLAG(1);"
+    return code
+
+
+class InodeCodeBlockManager(NodeCodeBlockManager):
+  """A class that manages and generates code blocks for inodes."""
+
+  def __init__(self, func_name: str):
+    super().__init__()
+    self.func_name = func_name
+
+  @property
+  def nodes(self) -> List[NodeID]:
+    return NodeID.inodes()
+
+  @property
+  def target(self) -> str:
+    return "inode"
+
+  def start_block(self) -> str:
+    code = (
+      "#include \"../common_decl.h\"\n"
+      f"void {self.func_name}() {{\n"
+      "  int hid = __builtin_INODE_GET_CORE_HID();\n"
+      "  int wid = 0;\n"
+      f"{indent(UniqueVar.get_decls_str(), '  ')}\n"
+    )
+    return code
+
+  def end_block(self) -> str:
+    return "}\n"
+
 
 
 """
@@ -160,7 +213,7 @@ class SendBlock(InodeCodeBlock):
   __builtin_INODE_HALT();
   __builtin_INODE_INTRT(1);
 
-  __builtin_INODE_PU(1, 1, 1, 1);
+  __builtin_INODE_PU(addr, imm, rs, slv_node_id);
 
   int a = __builtin_INODE_GET_CORE_HID();
   int b = __builtin_INODE_GET_CORE_WID();

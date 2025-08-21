@@ -182,7 +182,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # We use it to determine the qreg_start_idx for MinMaxQuantBlock but may not work
     # when there is more tuples in a composite call.
     self.edges = edges
-    self.codeblocks = CodeBlocks(func_name, "imce")
+    self.codeblocks = ImceCodeBlockManager(func_name)
 
   def visit_tuple(self, tup):
     for idx, x in enumerate(tup.fields):
@@ -444,9 +444,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name, edges):
     super().__init__()
     self.edges = edges
-    self.codeblocks = CodeBlocks(func_name, "inode")
+    self.codeblocks = InodeCodeBlockManager(func_name)
     self.initialize()
     self.curr_composite_id = None
+    self.finalize()
 
   def initialize(self):
     # policy update
@@ -463,6 +464,19 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for node in NodeID.inodes():
       block = WriteIMCUBlock(node, "imcu write")
       self.codeblocks.append(node, block, CodePhase.INIT)
+
+  def finalize(self):
+    # standby and intrt
+    # FIXME: hardcoded inode_3
+    inode_master = NodeID.inode_3
+    inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
+    block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
+    self.codeblocks.append(inode_master, block, CodePhase.END)
+
+    # set_flag
+    block = SetFlagAndHaltBlock()
+    for inode_slv in inode_slaves:
+      self.codeblocks.append(inode_slv, block, CodePhase.END)
 
   def visit_call(self, call):
     IsComposite = isinstance(call.op, relay.Function) and \
@@ -514,42 +528,6 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.curr_composite_id = None
     for idx, a in enumerate(call.args):
       self.visit(a)
-
-  # def visit_send_call(self, call):
-  #   out_edge = self.get_output_edges(call)[0]
-  #   out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
-  #   out_tid = out_edge.src_id
-  #   hid = self.get_hid(call)
-  #   db = DevConfig().MemLayout.get_data_block_by_id(out_tid)
-
-  #   dst_hw_node = DevConfig().get_hw_node(out_edge.dst_id.graph_node_id)
-  #   if dst_hw_node is not None and dst_hw_node.is_inode():
-  #     # The only available case that unpacking's dst hw node is inode is [unpacking -> split].
-  #     # [unpacking -> split -> qconv], then both unpacking and split are inode.
-  #     # In this case, no tensor edge exists in [unpacking -> split], so handle this case separately.
-
-  #     # TODO: Need to add another blocks(control block, etc)
-  #     block = SendBlock(db, 0, "send idata") # FIFO ID for input of qconv is always 0. Refer to transform.py/PolicyTableGenerator.add_EdgeInfo
-  #     self.codeblocks.append(hid, block, CodePhase.EXEC)
-  #   else:
-  #     # TODO: Need to add another blocks(control block, etc)
-  #     block = SendBlock(db, out_edge_info.fifo_id, "send")
-  #     self.codeblocks.append(hid, block, CodePhase.EXEC)
-
-  #   return
-
-  # def visit_recv_call(self, call):
-  #   in_edge = self.get_input_edges(call)[0]
-  #   in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
-  #   in_tid = in_edge.dst_id
-  #   hid = self.get_hid(call)
-  #   db = DevConfig().MemLayout.get_data_block_by_id(in_tid)
-
-  #   # TODO: Need to add another blocks(control block, etc)
-  #   block = RecvBlock(db, in_edge_info.fifo_id, "recv")
-  #   self.codeblocks.append(hid, block, CodePhase.EXEC)
-
-  #   return
 
   def get_graph_node_id(self, call):
     if self.curr_composite_id:

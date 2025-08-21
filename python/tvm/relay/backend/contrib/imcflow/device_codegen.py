@@ -19,7 +19,7 @@ class DeviceCodegen:
     self.func_dir = None
     logging.basicConfig(level=logging.INFO)
 
-  def handle_code_generation(self, func_name, codeblocks: CodeBlocks):
+  def handle_code_generation(self, func_name, codeblock_manager: NodeCodeBlockManager):
     """
     The main entry point for DeviceCodegen.
     Handles code generation, saving to file, compilation, linking, and host object creation.
@@ -29,7 +29,7 @@ class DeviceCodegen:
       os.makedirs(self.func_dir)
     logging.info(f"Generating {self.target} code for function: {func_name} in {self.func_dir}")
 
-    code = codeblocks.generate()
+    code = codeblock_manager.generate()
     cpp_name = self.save_target_code_to_file(code)
     obj_map = self.compile_target_code(cpp_name)
     self.update_device_config_with_obj_info(obj_map)
