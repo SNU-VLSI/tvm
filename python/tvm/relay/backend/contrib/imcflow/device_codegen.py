@@ -83,7 +83,7 @@ class DeviceCodegen:
     subprocess.run(command, check=True)
 
   def create_host_object(self, bin_file: str , host_obj_file: str):
-    command = ["ld", *self.ld_options.split(), "-o", host_obj_file, bin_file]
+    command = ["aarch64-linux-gnu-ld", *self.ld_options.split(), "-o", host_obj_file, bin_file]
     subprocess.run(command, check=True)
 
   def get_object_size(self, obj_file: str):

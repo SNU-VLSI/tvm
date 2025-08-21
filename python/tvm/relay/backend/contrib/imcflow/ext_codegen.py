@@ -166,16 +166,21 @@ def generateLoadBinaryCode(func_name, compiled_blocks):
   code += "// Load binary files into buffers\n"
   for block in compiled_blocks:
     if isinstance(block.id, str):
-      filename = f"./build/{func_name}/{block.id}.bin"
+      filename = f"_binary_one_relu_evl_build_{func_name}_{block.id}_bin_start"
       size = math.ceil(block.size / 4)
-      code += (
-          f'{{\n'
-          f'FILE *fp = fopen("{filename}", "rb");\n'
-          f'if (!fp) {{ perror("fopen failed"); exit(1); }}\n'
-          f'fread(&{block.id}, sizeof(int32_t), {size}, fp);\n'
-          f'fclose(fp);\n'
-          f'}}\n'
-      )
+      code += f"for(int i=0; i<{size}; i++){{\n"
+      code += f"  {block.id}[i] = {filename}[i];\n"
+      code += f"}}\n"
+  return code
+
+def generateExternLink(func_name, compiled_blocks):
+  code = CodeWriter()
+  code += 'extern "C" { \n'
+  for block in compiled_blocks:
+    if isinstance(block.id, str):
+      filename = f"_binary_one_relu_evl_build_{func_name}_{block.id}_bin_start"
+      code += f'  extern const int32_t {filename}[];\n'
+  code += '}\n'
   return code
 
 
@@ -250,11 +255,11 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
 
   code = CodeWriter()
   code += generateHeader()
+  code += generateExternLink(func_name, compiled_blocks)
   code += generateInterruptUtilities()
   code += generateCompiledDataDef()
 
   # Kernel function prototype and definition (C)
-  code += f"void {func_name}_kernel({args_proto_type});\n"
   code += f"void {func_name}_kernel({args_proto_type}) {{\n"
   code.nextIndent()
   code += generateDevicePointerSetup()
