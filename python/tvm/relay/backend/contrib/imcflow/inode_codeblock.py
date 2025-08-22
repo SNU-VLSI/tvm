@@ -70,6 +70,7 @@ class WriteIMEMBlock(InodeCodeBlock):
 
     var = UniqueVar("imem_start_address", dtype="int")
     code += f"{var} = {db.base_address};"
+    code += f"__builtin_INODE_SET_ADDR_CNT(0);"
     code += SimpleFor(math.ceil(db.size / 32),
                       lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr});")
                       # rs1, imm, policy
