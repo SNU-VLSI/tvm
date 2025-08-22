@@ -1736,7 +1736,7 @@ class PolicyTableGenerator:
                 dest_node = mapping_info[1]
                 dest_index = mapping_info[2]
                 if isinstance(edge, NodeID):
-                  source_node_data_type ="instruction"
+                  source_node_data_type = f"instruction_{edge.name}"
                 else:
                   source_node_data_type = edge.src_id.tensor_type
 
@@ -1809,7 +1809,7 @@ class PolicyTableGenerator:
                 dest_node = mapping_info[1]
                 # dest_index = mapping_info[2]
                 if isinstance(edge, NodeID):
-                  source_node_data_type ="instruction"
+                  source_node_data_type = f"instruction_{edge.name}"
                 else:
                   source_node_data_type = edge.src_id.tensor_type
 
