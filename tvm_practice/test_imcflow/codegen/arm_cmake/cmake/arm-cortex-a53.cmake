@@ -24,6 +24,31 @@ if(NOT CMAKE_CXX_COMPILER)
   endif()
 endif()
 
+# Detect and set the appropriate linker
+if(NOT CMAKE_C_LINKER)
+  if(CMAKE_C_COMPILER MATCHES "aarch64-xilinx-linux-gcc")
+    find_program(AARCH64_XILINX_LD aarch64-xilinx-linux-ld)
+    if(AARCH64_XILINX_LD)
+      set(CMAKE_C_LINKER ${AARCH64_XILINX_LD})
+    else()
+      message(FATAL_ERROR "No aarch64-xilinx-linux-ld found")
+    endif()
+  elseif(CMAKE_C_COMPILER MATCHES "aarch64-linux-gnu-gcc")
+    find_program(AARCH64_GNU_LD aarch64-linux-gnu-ld)
+    if(AARCH64_GNU_LD)
+      set(CMAKE_C_LINKER ${AARCH64_GNU_LD})
+    else()
+      message(FATAL_ERROR "No aarch64-linux-gnu-ld found")
+    endif()
+  else()
+    message(FATAL_ERROR "No matching linker for ${CMAKE_C_COMPILER}")
+  endif()
+endif()
+
+# Export linker information for use in CMakeLists.txt
+set(AARCH64_LINKER ${CMAKE_C_LINKER} CACHE STRING "AArch64 linker executable" FORCE)
+message(STATUS "Using AArch64 linker: ${AARCH64_LINKER}")
+
 # Disable compiler tests for bare metal
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
