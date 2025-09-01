@@ -1,0 +1,4 @@
+def @main(%input: Tensor[(1, 28, 4, 4), int4]) {
+  %0 = nn.pad(%input, 0, pad_width=[[0, 0], [0, 0], [1, 1], [1, 1]]);
+  nn.relu(%0)
+}

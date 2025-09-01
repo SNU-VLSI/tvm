@@ -68,6 +68,56 @@ def getModel():
 
   return out, param_dict
 
+def getModelV2():
+  input_ = relay.var("input", shape=(1, 28, 16, 16))
+
+  y = relay.nn.conv2d(
+      input_,
+      relay.var("weight1", shape=(28, 28, 3, 3)),
+      channels=28,
+      kernel_size=(3, 3),
+      padding=(1, 1),
+  )
+
+  y = relay.nn.bias_add(y, relay.var("bias1", shape=(28,)))
+  y = relay.nn.batch_norm(y, relay.var("gamma", shape=(28,), dtype="float32"), 
+                             relay.var("beta", shape=(28,), dtype="float32"), 
+                             relay.var("moving_mean", shape=(28,), dtype="float32"), 
+                             relay.var("moving_var", shape=(28,), dtype="float32"))[0]
+  y = relay.nn.relu(y)
+
+  y = relay.nn.conv2d(
+    y,
+    relay.var("weight2_0", shape=(64,28,3,3)),
+    channels=64,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+  )
+
+  y = relay.nn.batch_norm(y, relay.var("gamma2", shape=(64,), dtype="float32"),
+                             relay.var("beta2", shape=(64,), dtype="float32"),
+                             relay.var("moving_mean2", shape=(64,), dtype="float32"),
+                             relay.var("moving_var2", shape=(64,), dtype="float32"))[0]
+  y = relay.nn.relu(y)
+
+  param_dict = {
+    "weight1": np.random.rand(28, 28, 3, 3).astype("float32"),
+    "bias1"  : np.random.rand(28).astype("float32"),
+    "weight2_0": np.random.rand(64,28,3,3).astype("float32"),
+    "gamma": np.random.rand(28).astype("float32"),
+    "beta": np.random.rand(28).astype("float32"),
+    "moving_mean": np.random.rand(28).astype("float32"),
+    "moving_var": np.random.rand(28).astype("float32"),
+    "gamma2": np.random.rand(64).astype("float32"),
+    "beta2": np.random.rand(64).astype("float32"),
+    "moving_mean2": np.random.rand(64).astype("float32"),
+    "moving_var2": np.random.rand(64).astype("float32"),
+  }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
+
 def getOneConvModel():
   N, IC, IH, IW = 2, 32, 4, 4
   OC, KH, KW = 128, 3, 3
