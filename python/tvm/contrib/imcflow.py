@@ -17,7 +17,7 @@
 
 from typing import Tuple, List, Dict, Union
 from enum import Enum
-from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
+
 import re
 import math
 
@@ -443,6 +443,7 @@ class ImcflowDeviceConfig:
     return self.InstEdgeInfoDict.get(imce_id, None)
 
   def get_data_block_dict(self, func):
+    from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
     compiled_blocks, input_data_blocks, output_data_blocks = [], [], []
 
     # get input/output node ID

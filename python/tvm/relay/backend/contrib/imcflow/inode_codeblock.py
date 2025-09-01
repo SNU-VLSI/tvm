@@ -46,7 +46,7 @@ class PolicyUpdateBlock(InodeCodeBlock):
         continue
       var = UniqueVar("policy_table_start_address", dtype="int")
       # var_2 = UniqueVar("policy_table_entry_reg", dtype="int")
-      code += f"{var} = {db.base_address};"
+      code += f"{var} = {db.offset};"
       for i in range(0, db.size, 32):
         # code += f"{var_2} = {i // 32};"
         code += f"__builtin_INODE_PU({var}, {i}, {int(i // 32)}, {id.to_coord(1)});"
@@ -69,7 +69,7 @@ class WriteIMEMBlock(InodeCodeBlock):
     policy_addr = self.edge_info.policy_info[0].address # get first policy address
 
     var = UniqueVar("imem_start_address", dtype="int")
-    code += f"{var} = {db.base_address};"
+    code += f"{var} = {db.offset};"
     code += f"__builtin_INODE_SET_ADDR_CNT(0);"
     code += SimpleFor(math.ceil(db.size / 32),
                       lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr});")
@@ -117,7 +117,7 @@ class RecvBlock(InodeCodeBlock):
     code = TextBlock("")
 
     var = UniqueVar("recv_data_base_address", dtype="int")
-    code += f"{var} = {self.block.base_address};"
+    code += f"{var} = {self.block.offset};"
     code += SimpleFor(recv_count,
                       lambda iter: f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {self.fifo_id});")
 
@@ -138,7 +138,7 @@ class SendBlock(InodeCodeBlock):
     code = TextBlock("")
 
     var = UniqueVar("send_data_base_address", dtype="int")
-    code += f"{var} = {self.block.base_address};"
+    code += f"{var} = {self.block.offset};"
     code += SimpleFor(recv_count,
                       lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, 0, {self.fifo_id});")
 
@@ -156,6 +156,7 @@ class StandbyAndIntrtBlock(InodeCodeBlock):
       code += f"__builtin_INODE_STANDBY({node.value}, 1);"
     code += f"__builtin_INODE_DONE();"
     code += f"__builtin_INODE_INTRT(0);"
+    code += f"__builtin_INODE_HALT();"
     return code
 
 class SetFlagAndHaltBlock(InodeCodeBlock):
@@ -163,6 +164,7 @@ class SetFlagAndHaltBlock(InodeCodeBlock):
     code = TextBlock("")
     # FIXME: the hardcoded flag value 1 should be replaced with value from sync manager
     code += f"__builtin_INODE_SET_FLAG(1);"
+    code += f"__builtin_INODE_HALT();"
     return code
 
 

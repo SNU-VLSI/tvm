@@ -91,39 +91,40 @@ def getConstantIdx(func, node_id):
 
 def getCInputVarName(func, func_name, data_block):
   node_map = CustomIDToNode()
-
-  if isinstance(data_block.id, TensorID):
-    graph_node_inner_id = imcflow_transform.getInnerNodeID(
-        data_block.id.graph_node_id)
-    if isinstance(node_map[graph_node_inner_id], Var):
-      return node_map[graph_node_inner_id].name_hint
-    elif isinstance(node_map[graph_node_inner_id], Constant):
-      data_type = dtype_to_cpp(
-          node_map[graph_node_inner_id].checked_type.dtype)
-      return f"(({data_type}*)({func_name}_consts[{getConstantIdx(func, graph_node_inner_id)}]->data))"
-    else:
-      print(data_block)
-      raise ValueError("Wrong data block type!")
-  elif isinstance(data_block.id, str):
-    filename = f"_binary_{data_block.id}_bin_start"
-    return filename
+  assert isinstance(data_block.id, TensorID), "data_block.id must be TensorID to get C input var name"
+  graph_node_inner_id = imcflow_transform.getInnerNodeID(
+      data_block.id.graph_node_id)
+  node_type = node_map[graph_node_inner_id]
+  if isinstance(node_type, Var):
+    return node_type.name_hint
+  elif isinstance(node_type, Constant):
+    data_type = dtype_to_cpp(node_type.checked_type.dtype)
+    return f"(({data_type}*)({func_name}_consts[{getConstantIdx(func, graph_node_inner_id)}]->data))"
   else:
-    print(data_block)
-    raise ValueError("Wrong data block type!")
+    raise ValueError(f"Invalid node_type!: {node_type}")
 
+def getObjectFileName(data_block):
+  assert isinstance(data_block.id, str), "data_block.id must be string to get object file name"
+  return f"_binary_{data_block.id}_bin"
 
 def generateToNpuTransferCode(func, func_name, blocks, address_macros):
   code = CodeWriter()
   code += "// Transfer data into NPU memory\n"
   for block in blocks:
-    size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
     base_address = block.base_address
     base_address_name = makeBaseAddrName(block)
     address_macros.update({base_address_name: base_address})
-    numel = math.ceil(size/4)
-    code += f"for(int i=0; i<{numel}; i++){{\n"
-    code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {getCInputVarName(func, func_name, block)}[i];\n"
-    code += f"}}\n"
+    if isinstance(block.id, str):
+      var_prefix = getObjectFileName(block)
+      code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {var_prefix}_start[i];\n"
+      code += f"}}\n"
+    else:
+      size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
+      numel = math.ceil(size/4)
+      code += f"for(int i=0; i<{numel}; i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {getCInputVarName(func, func_name, block)}[i];\n"
+      code += f"}}\n"
   return code
 
 
@@ -156,6 +157,7 @@ def generateExternLink(func_name, compiled_blocks):
     if isinstance(block.id, str):
       filename = f"_binary_{block.id}_bin"
       code += f'  extern const int32_t {filename}_start[];\n'
+      code += f'  extern const int32_t {filename}_end[];\n'
   code += '}\n'
   return code
 
@@ -349,8 +351,15 @@ for(int i=0; i<INODE_NUM; i++) {
   *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);
 }
 enable_imcflow_interrupt(npu_fd);
+*(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;
+wait_imcflow_interrupt(npu_fd);
+generate_ack(int_ack_gen_pointer);
+npu_pointer[7] = 1;
+for(int i=0; i<INODE_NUM; i++) {
+  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);
+}
+enable_imcflow_interrupt(npu_fd);
 *(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;
-
 wait_imcflow_interrupt(npu_fd);
 generate_ack(int_ack_gen_pointer);
 npu_pointer[7] = 1;

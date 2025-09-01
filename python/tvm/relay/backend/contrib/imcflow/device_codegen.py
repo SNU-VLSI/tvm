@@ -112,7 +112,9 @@ class DeviceCodegen:
 
     # Create padded data
     padded_data = bytearray()
-    for i in range(0, len(data) // stride):
+    for i in range(0, len(data), stride):
+      if (len(data) - i) < stride:
+        break
       instruction = data[i:i+stride]
       padded_data.extend(instruction)
 
