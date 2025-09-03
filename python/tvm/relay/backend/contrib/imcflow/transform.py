@@ -14,6 +14,7 @@ from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking
 import numpy as np
+from tvm.relay.op.contrib import imcflow
 
 import math
 from copy import deepcopy
@@ -167,254 +168,443 @@ def makeToQuantizedForm(mod):
   mod['main'] = _OpConverter().visit(mod['main'])
   return mod
 
-
-@relay.transform.function_pass(opt_level=0)
-class ConvSplitToAtom:
+def get_imcflow_supported_regions(mod, include_first_conv=False):
     """
-    Depracted..! split will be done in pytorch level
-    """
-    def __init__(self, OldParamDict):
-      self.OldParamDict = OldParamDict
-      self.NewParamDict = {}
+    Traverse the graph and find regions of imcflow-supported operators.
+    A region is a list of consecutive nodes that are supported. This function
+    finds the maximal connected subgraphs of supported operators.
 
-    def transform_function(self, func, mod, ctx):
-      RemoveTargets = []
-      class _RedundantTupleRemover(tvm.relay.ExprMutator):
+    This function should be called with a module containing only the main function.
+
+    Parameters
+    ----------
+    mod : tvm.IRModule
+        The module to be processed.
+
+    Returns
+    -------
+    list[list[tvm.relay.expr.Call]]
+        A list of regions, where each region is a list of supported Call nodes.
+    """
+    # A set of imcflow-supported primitive operators.
+    # This list should be updated based on the actual capabilities of the imcflow backend.
+    _SUPPORTED_OPS = {
+        "nn.conv2d",
+        "qnn.conv2d",
+        "nn.dense",
+        "qnn.dense",
+        "nn.relu",
+        "nn.batch_norm",
+        "nn.bias_add",
+        "add",
+        "multiply",
+        "qnn.quantize",
+        "qnn.dequantize",
+        "qnn.requantize",
+        "reshape",
+        "nn.avg_pool2d",
+        "nn.global_avg_pool2d",
+        "nn.max_pool2d",
+        "clip",
+    }
+
+    def is_first_conv(call):
+        return isinstance(call.op, Op) and call.op.name == "nn.conv2d" and not meet_first_conv
+
+    def is_supported(call):
+        return isinstance(call.op, Op) and call.op.name in _SUPPORTED_OPS
+
+    class NodeCollector(ExprVisitor):
+        """Collects all call nodes in the expression."""
+
         def __init__(self):
-          super().__init__()
-
-        def visit_tuple_getitem(self, op):
-          TupleValue = op.tuple_value
-          if isinstance(TupleValue, relay.Tuple):
-            if len(TupleValue.fields) == 1:
-              return super().visit(TupleValue.fields[0])
-            else:
-              return super().visit_tuple_getitem(op)
-          else:
-            return super().visit_tuple_getitem(op)
-
-      class Spliter(tvm.relay.ExprMutator):
-        """Split large conv2d into smaller conv2d, split, concat, add, etc"""
-
-        def __init__(self, OldParamDict):
-          super().__init__()
-          self.OldParamDict = OldParamDict
-          self.NewParamDict = {k:v for k,v in OldParamDict.items()}
-          self.DeleteArgs = []
-          self.AddArgs = []
-          self.PostProcess = []
-          # self.IsSplitedPostNode = []
-
-        def removeParamVar(self, Var):
-          self.DeleteArgs.append(Var)
-          self.NewParamDict.pop(Var.name_hint)
-
-        def addParamVar(self, Var, Data):
-          self.NewParamDict[Var.name_hint] = Data
-          self.AddArgs.append(Var)
-
-        def split_and_optimize_conv2d(self, expr, mod, PostProcess):
-
-          def _get_type(node):
-              """A method to infer the type of a relay expression."""
-              mod = tvm.IRModule.from_expr(node)
-              mod = relay.transform.InferType()(mod)
-              entry = mod["main"]
-
-              infer_out = entry if isinstance(node, relay.Function) else entry.body
-              out_type = infer_out._checked_type_
-
-              if isinstance(out_type, TensorType):
-                  # Single tensor, get the shape directly
-                  shapes = [int(dim) for dim in out_type.shape]
-              elif isinstance(out_type, TupleType):
-                  # Tuple of tensors, get the shape of each tensor in the tuple
-                  shapes = [int(field) for field in out_type.fields]
-              else:
-                  raise RuntimeError(f"Unsupported output type {type(out_type)} in operator {node.op.name}")
-
-              return shapes
-
-          # Extract input and kernel shapes
-          _, IC, IH, IW = _get_type(expr.args[0])  # Input shape
-          OC, _, KH, KW = _get_type(expr.args[1])  # Kernel shape
-
-          if not ImcflowDeviceConfig.is_supported_kernel(KH, KW):
-            return expr
-
-          for PostNode in PostProcess:
-            assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm"), op.get("divide"),
-                                   op.get("qnn.imcflow_min_max_quantize"), op.get("qnn.imcflow_nu_quantize")], "Unsupported post process node"
-
-          groups = expr.attrs.groups
-          assert (groups == 1 or groups == IC), "Grouped convolutions are not supported"
-
-          IsDepthWise = (groups == IC)
-
-          # Set limits for in and out channels
-          in_ch_limit = math.floor(256 / (KH * KW)) if not IsDepthWise else 32
-          out_ch_limit = 64 if not IsDepthWise else 32
-
-          if (IC <= in_ch_limit) and (OC <= out_ch_limit):
-              return expr  # Return original if no splitting is needed
-
-          # Determine split counts
-          ic_split_num = math.ceil(IC / in_ch_limit)
-          oc_split_num = math.ceil(OC / out_ch_limit)
-          IsICSplited = ic_split_num > 1
-          IsOCSplited = oc_split_num > 1
-
-          # Split the input and weights
-          ic_sections = [i*in_ch_limit for i in range(1, ic_split_num)]
-          oc_sections = [i*out_ch_limit for i in range(1, oc_split_num)]
-
-          # input splitting
-          split_inputs = relay.op.transform.split(expr.args[0], indices_or_sections=ic_sections, axis=1) if IsICSplited else [expr.args[0]]
-
-          # Nested weight splits for each out channel slice
-          # split_conv_weights = []
-          # split_weights = relay.op.transform.split(expr.args[1], indices_or_sections=oc_sections, axis=0) if IsOCSplited else [expr.args[1]]
-          # for oc_id in range(oc_split_num):
-          #     weight_slice = relay.op.transform.split(split_weights[oc_id], indices_or_sections=ic_sections, axis=1) if (IsICSplited and (not IsDepthWise)) else [split_weights[oc_id]]
-          #     split_conv_weights.append(weight_slice)
-
-          # split weight and make New params
-          split_conv_weights = [[None for _ in range(ic_split_num if (not IsDepthWise) else 1)] for _ in range(oc_split_num)]
-          # self.DeleteArgs.append(expr.args[1])
-          # self.NewParamDict.pop(expr.args[1].name_hint)
-          self.removeParamVar(expr.args[1])
-          for oc_id in range(oc_split_num):
-            oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
-            for ic_id in range(ic_split_num if not IsDepthWise else 1):
-              if IsDepthWise:
-                ic_size = 1
-              else:
-                ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
-              SplitParam = relay.Var(f"{expr.args[1].name_hint}_oc{oc_id}_ic{ic_id}", relay.TensorType([oc_size, ic_size, KH, KW], dtype=expr.args[1].type_annotation.dtype))
-              split_conv_weights[oc_id][ic_id] = SplitParam
-
-              OldParam = self.OldParamDict[expr.args[1].name_hint]
-              NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size, ic_id*in_ch_limit:(ic_id*in_ch_limit)+ic_size, :, :]
-              self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
-              # self.NewParamDict[SplitParam.name_hint] = tvm.nd.array(NewData, device=OldParam.device)
-              # self.AddArgs.append(SplitParam)
-
-          # Create conv2d calls for each input-output channel slice
-          conv_nodes = {}
-          for oc_id in range(oc_split_num):
-              oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
-              for ic_id in range(ic_split_num if not IsDepthWise else 1):
-                  ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
-                  conv_nodes[(oc_id, ic_id)] = relay.nn.conv2d(
-                      split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
-                      split_conv_weights[oc_id][ic_id],
-                      channels=oc_size,
-                      kernel_size=(KH, KW),
-                      strides=expr.attrs.strides,
-                      padding=expr.attrs.padding,
-                      data_layout=expr.attrs.data_layout,
-                      kernel_layout=expr.attrs.kernel_layout,
-                      groups=1 if not IsDepthWise else oc_size
-                  )
-
-          # If input channels were split, sum the resulting conv2d outputs for each out channel slice
-          if IsICSplited and (not IsDepthWise):
-              add_nodes = {}
-              for oc_id in range(oc_split_num):
-                  add_nodes[oc_id] = conv_nodes[(oc_id, 0)]
-                  for ic_id in range(1, ic_split_num):
-                      add_nodes[oc_id] = relay.op.add(add_nodes[oc_id], conv_nodes[(oc_id, ic_id)])
-          else:
-              add_nodes = {oc_id: conv_nodes[(oc_id, 0)] for oc_id in range(oc_split_num)}
-
-          # If output channels were split
-          #  1. split post-process nodes
-          #  2. concatenate along the output axis
-          if IsOCSplited:
-              # split post-process nodes
-              post_nodes = {oc_id: None for oc_id in range(oc_split_num)}
-
-              for oc_id in range(oc_split_num):
-                post_nodes[oc_id] = add_nodes[oc_id]
-
-              # RemoveTargets.extend(PostProcess)
-              # self.IsSplitedPostNode.extend([True for _ in range(len(PostProcess))])
-              for PostNode in PostProcess[::-1]:
-                setattr(PostNode, "ShouldDelete", True)
-                if PostNode.op == op.get("nn.bias_add"):
-                  self.removeParamVar(PostNode.args[1])
-                elif PostNode.op == op.get("nn.batch_norm"):
-                  for i in range(1, 5):
-                    self.removeParamVar(PostNode.args[i])
-
-                for oc_id in range(oc_split_num):
-                  oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
-                  if PostNode.op == op.get("nn.bias_add"):
-                    ParamOldName = PostNode.args[1].name_hint
-                    ParamNewName = f"{ParamOldName}_oc{oc_id}"
-                    ParamNewType = relay.TensorType([oc_size], dtype=PostNode.args[1].type_annotation.dtype)
-                    SplitParam = relay.Var(ParamNewName, ParamNewType)
-                    OldParam = self.OldParamDict[ParamOldName]
-                    NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
-                    self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
-                    post_nodes[oc_id] = relay.nn.bias_add(post_nodes[oc_id], SplitParam, PostNode.attrs.axis)
-                  elif PostNode.op == op.get("nn.relu"):
-                    post_nodes[oc_id] = relay.nn.relu(post_nodes[oc_id])
-                  elif PostNode.op == op.get("nn.batch_norm"):
-                    NewParams = []
-                    for i in range(1, 5):
-                      ParamOldName = PostNode.args[i].name_hint
-                      ParamNewName = f"{ParamOldName}_oc{oc_id}"
-                      ParamNewType = relay.TensorType([oc_size], dtype=PostNode.args[i].type_annotation.dtype)
-                      SplitParam = relay.Var(ParamNewName, ParamNewType)
-                      OldParam = self.OldParamDict[ParamOldName]
-                      NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
-                      self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
-                      NewParams.append(SplitParam)
-                    # post_nodes[oc_id] = relay.TupleGetItem(relay.nn.batch_norm(post_nodes[oc_id], *NewParams), 0)
-                    post_nodes[oc_id] = relay.nn.batch_norm(post_nodes[oc_id], *NewParams)[0]
-
-              concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
-          else:
-              concat_node = add_nodes[0]
-              # self.IsSplitedPostNode.extend([True for _ in range(len(PostProcess))])
-
-          return concat_node
-
+            super().__init__()
+            self.call_nodes = []
 
         def visit_call(self, call):
-          if call.op == op.get("nn.conv2d"):
-            PostProcess = self.PostProcess[:]
-            self.PostProcess = []
-            NewCall = super().visit_call(call)
-            NewCall = self.split_and_optimize_conv2d(NewCall, mod, PostProcess)
-            return NewCall
-          elif call.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm")]:
-            self.PostProcess.append(call)
-            NewCall = super().visit_call(call)
-            if hasattr(call, "ShouldDelete"):
-              return relay.Tuple([NewCall.args[0]]) if call.op == op.get("nn.batch_norm") else NewCall.args[0]
+            super().visit_call(call)
+            self.call_nodes.append(call)
+
+    # 1. Collect all call nodes from the main function.
+    main_func = mod["main"]
+    collector = NodeCollector()
+    collector.visit(main_func)
+
+    # 2. Filter for supported nodes.
+    supported_calls = []
+    meet_first_conv = False
+    for call in collector.call_nodes:
+        if is_first_conv(call):
+            meet_first_conv = True
+            if not include_first_conv:
+                continue
+        if is_supported(call):
+            supported_calls.append(call)
+    supported_set = set(supported_calls)
+
+    if not supported_calls:
+        return []
+
+    # 3. Build the graph of supported nodes.
+    # Map each supported call node to a unique integer ID.
+    node_to_id = {node: i for i, node in enumerate(supported_calls)}
+    adj = [[] for _ in range(len(supported_calls))]
+
+    memo = {}
+    tuple_get_nodes = {}
+
+    def get_producer(expr):
+        """Trace back through expressions to find the producing supported call node."""
+        if expr in memo:
+            return memo[expr]
+
+        if expr in supported_set:
+            memo[expr] = expr
+            return expr
+
+        if isinstance(expr, TupleGetItem):
+            producer = get_producer(expr.tuple_value)
+            memo[expr] = producer
+            return producer
+
+        memo[expr] = None
+        return None
+
+    for i, call_node in enumerate(supported_calls):
+        for arg in call_node.args:
+            producer = get_producer(arg)
+            if producer:
+                # producer is already guaranteed to be in supported_set by get_producer
+                j = node_to_id[producer]
+                adj[i].append(j)
+                adj[j].append(i)
+
+                if isinstance(arg, TupleGetItem):
+                    # record related tuple get item node
+                    tuple_get_nodes[producer] = arg
+
+    # 4. Find connected components (these are the maximal regions).
+    regions = []
+    visited = set()
+    for i in range(len(supported_calls)):
+        node = supported_calls[i]
+        if node not in visited:
+            component = []
+            q = [node]
+            visited.add(node)
+            head = 0
+            while head < len(q):
+                u = q[head]
+                head += 1
+                component.append(u)
+                if u in tuple_get_nodes:
+                    component.append(tuple_get_nodes[u])
+                u_idx = node_to_id[u]
+                for v_idx in adj[u_idx]:
+                    v = supported_calls[v_idx]
+                    if v not in visited:
+                        visited.add(v)
+                        q.append(v)
+            regions.append(component)
+
+    return regions
+
+def partitionImcflowSubGraph(mod):
+  region_list = get_imcflow_supported_regions(mod)
+  mod = imcflow.ImcflowAnnotationPass(region_list)(mod)
+  mod = transform.MergeCompilerRegions()(mod)
+  mod = imcflow.ImcflowCleanRegionTag()(mod)
+  mod = transform.PartitionGraph()(mod)
+  # mod = clearPrimitiveTag(mod)
+  return mod
+
+def split_conv_to_atomic(mod, OldParamDict):
+    class Worker:
+      def __init__(self, OldParamDict):
+        self.OldParamDict = OldParamDict
+        self.NewParamDict = {}
+
+      def transform_function(self, func, mod):
+        class _RedundantTupleRemover(tvm.relay.ExprMutator):
+          def __init__(self):
+            super().__init__()
+
+          def visit_tuple_getitem(self, op):
+            TupleValue = op.tuple_value
+            if isinstance(TupleValue, relay.Tuple):
+              if len(TupleValue.fields) == 1:
+                return super().visit(TupleValue.fields[0])
+              else:
+                return super().visit_tuple_getitem(op)
             else:
-              return NewCall
-          else:
-            # self.IsSplitedPostNode.extend([False for _ in range(len(self.PostProcess))])
+              return super().visit_tuple_getitem(op)
+
+        class Spliter(tvm.relay.ExprMutator):
+          """Split large conv2d into smaller conv2d, split, concat, add, etc"""
+
+          def __init__(self, OldParamDict):
+            super().__init__()
+            self.OldParamDict = OldParamDict
+            self.NewParamDict = {k:v for k,v in OldParamDict.items()}
+            self.DeleteArgs = []
+            self.AddArgs = []
             self.PostProcess = []
-            return super().visit_call(call)
+            # self.IsSplitedPostNode = []
 
-      Spliter_ = Spliter(self.OldParamDict)
-      NewFunc = Spliter_.visit(func)
-      OldArgs = func.params
-      NewArgs = OldArgs[:]
-      for arg in Spliter_.DeleteArgs:
-        NewArgs.remove(arg)
-      for arg in Spliter_.AddArgs:
-        NewArgs.append(arg)
-      self.NewParamDict = Spliter_.NewParamDict
+          def removeSplitedArg(self, node):
+            if isinstance(node, relay.Var):
+              self.NewParamDict.pop(node.name_hint)
+            self.DeleteArgs.append(node)
 
-      NewFunc = relay.Function(NewArgs, NewFunc.body)
-      NewFunc = _RedundantTupleRemover().visit(NewFunc)
+          def addParamVar(self, Var, Data):
+            self.NewParamDict[Var.name_hint] = Data
+            self.AddArgs.append(Var)
 
-      return NewFunc
+          def split_and_optimize_conv2d(self, expr, mod, PostProcess):
+
+            def _get_type(node):
+                """A method to infer the type of a relay expression."""
+                mod = tvm.IRModule.from_expr(node)
+                mod = relay.transform.InferType()(mod)
+                entry = mod["main"]
+
+                infer_out = entry if isinstance(node, relay.Function) else entry.body
+                out_type = infer_out._checked_type_
+
+                if isinstance(out_type, TensorType):
+                    # Single tensor, get the shape directly
+                    shapes = [int(dim) for dim in out_type.shape]
+                elif isinstance(out_type, TupleType):
+                    # Tuple of tensors, get the shape of each tensor in the tuple
+                    shapes = [int(field) for field in out_type.fields]
+                else:
+                    raise RuntimeError(f"Unsupported output type {type(out_type)} in operator {node.op.name}")
+
+                return shapes
+
+            # Extract input and kernel shapes
+            _, IC, IH, IW = _get_type(expr.args[0])  # Input shape
+            OC, _, KH, KW = _get_type(expr.args[1])  # Kernel shape
+
+            if not ImcflowDeviceConfig.is_supported_kernel(KH, KW):
+              return expr
+
+            for PostNode in PostProcess:
+              assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm"), op.get("divide"),
+                                    op.get("qnn.imcflow_min_max_quantize"), op.get("qnn.imcflow_nu_quantize")], "Unsupported post process node"
+
+            groups = expr.attrs.groups
+            assert (groups == 1 or groups == IC), "Grouped convolutions are not supported"
+
+            IsDepthWise = (groups == IC)
+
+            # Set limits for in and out channels
+            in_ch_limit = math.floor(256 / (KH * KW)) if not IsDepthWise else 32
+            out_ch_limit = 64 if not IsDepthWise else 32
+
+            if (IC <= in_ch_limit) and (OC <= out_ch_limit):
+                return expr  # Return original if no splitting is needed
+
+            # Determine split counts
+            ic_split_num = math.ceil(IC / in_ch_limit)
+            oc_split_num = math.ceil(OC / out_ch_limit)
+            IsICSplited = ic_split_num > 1
+            IsOCSplited = oc_split_num > 1
+
+            # Split the input and weights
+            ic_sections = [i*in_ch_limit for i in range(1, ic_split_num)]
+            oc_sections = [i*out_ch_limit for i in range(1, oc_split_num)]
+
+            # input splitting
+            split_inputs = relay.op.transform.split(expr.args[0], indices_or_sections=ic_sections, axis=1) if IsICSplited else [expr.args[0]]
+
+            # split weight and make New params
+            split_conv_weights = [[None for _ in range(ic_split_num if (not IsDepthWise) else 1)] for _ in range(oc_split_num)]
+            if isinstance(expr.args[1], relay.Var):
+              self.removeSplitedArg(expr.args[1])
+            for oc_id in range(oc_split_num):
+              oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
+              for ic_id in range(ic_split_num if not IsDepthWise else 1):
+                if IsDepthWise:
+                  ic_size = 1
+                else:
+                  ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
+
+                if isinstance(expr.args[1], relay.Var):
+                  SplitParam = relay.Var(f"{expr.args[1].name_hint}_oc{oc_id}_ic{ic_id}", relay.TensorType([oc_size, ic_size, KH, KW], dtype=expr.args[1].type_annotation.dtype))
+                elif isinstance(expr.args[1], relay.Constant):
+                  nd_array = expr.args[1].data.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size, ic_id*in_ch_limit:(ic_id*in_ch_limit)+ic_size, :, :]
+                  SplitParam = relay.Constant(tvm.nd.array(nd_array))
+                else:
+                  raise RuntimeError("Unsupported weight node type for splitting")
+
+                split_conv_weights[oc_id][ic_id] = SplitParam
+
+                if isinstance(expr.args[1], relay.Var):
+                  OldParam = self.OldParamDict[expr.args[1].name_hint]
+                  if isinstance(OldParam, tvm.nd.NDArray):
+                    NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size, ic_id*in_ch_limit:(ic_id*in_ch_limit)+ic_size, :, :]
+                    self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
+                  else:
+                    NewData = OldParam[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size, ic_id*in_ch_limit:(ic_id*in_ch_limit)+ic_size, :, :]
+                    self.addParamVar(SplitParam, tvm.nd.array(NewData))
+
+            # Create conv2d calls for each input-output channel slice
+            conv_nodes = {}
+            for oc_id in range(oc_split_num):
+                oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
+                for ic_id in range(ic_split_num if not IsDepthWise else 1):
+                    ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
+                    conv_nodes[(oc_id, ic_id)] = relay.nn.conv2d(
+                        split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
+                        split_conv_weights[oc_id][ic_id],
+                        channels=oc_size,
+                        kernel_size=(KH, KW),
+                        strides=expr.attrs.strides,
+                        padding=expr.attrs.padding,
+                        data_layout=expr.attrs.data_layout,
+                        kernel_layout=expr.attrs.kernel_layout,
+                        groups=1 if not IsDepthWise else oc_size
+                    )
+
+            # If input channels were split, sum the resulting conv2d outputs for each out channel slice
+            if IsICSplited and (not IsDepthWise):
+                add_nodes = {}
+                for oc_id in range(oc_split_num):
+                    add_nodes[oc_id] = conv_nodes[(oc_id, 0)]
+                    for ic_id in range(1, ic_split_num):
+                        add_nodes[oc_id] = relay.op.add(add_nodes[oc_id], conv_nodes[(oc_id, ic_id)])
+            else:
+                add_nodes = {oc_id: conv_nodes[(oc_id, 0)] for oc_id in range(oc_split_num)}
+
+            # If output channels were split
+            #  1. split post-process nodes
+            #  2. concatenate along the output axis
+            if IsOCSplited:
+                # split post-process nodes
+                post_nodes = {oc_id: None for oc_id in range(oc_split_num)}
+
+                for oc_id in range(oc_split_num):
+                  post_nodes[oc_id] = add_nodes[oc_id]
+
+                # RemoveTargets.extend(PostProcess)
+                # self.IsSplitedPostNode.extend([True for _ in range(len(PostProcess))])
+                for PostNode in PostProcess[::-1]:
+                  setattr(PostNode, "ShouldDelete", True)
+                  if PostNode.op == op.get("nn.bias_add") and isinstance(PostNode.args[1], relay.Var):
+                    self.removeSplitedArg(PostNode.args[1])
+                  elif PostNode.op == op.get("nn.batch_norm"):
+                    for i in range(1, 5):
+                      if isinstance(PostNode.args[i], relay.Var):
+                        self.removeSplitedArg(PostNode.args[i])
+
+                  for oc_id in range(oc_split_num):
+                    oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
+                    if PostNode.op == op.get("nn.bias_add"):
+                      if isinstance(PostNode.args[1], relay.Var):
+                        ParamOldName = PostNode.args[1].name_hint
+                        ParamNewName = f"{ParamOldName}_oc{oc_id}"
+                        ParamNewType = relay.TensorType([oc_size], dtype=PostNode.args[1].type_annotation.dtype)
+                        SplitParam = relay.Var(ParamNewName, ParamNewType)
+                        OldParam = self.OldParamDict[ParamOldName]
+                        if isinstance(OldParam, tvm.nd.NDArray):
+                          NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                          self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
+                        else:
+                          NewData = OldParam[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                          self.addParamVar(SplitParam, tvm.nd.array(NewData))
+                      else:
+                        assert isinstance(PostNode.args[1], relay.Constant), "PostNode.args[0] must be a Var or Constant"
+                        nd_array = PostNode.args[1].data.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                        SplitParam = relay.Constant(tvm.nd.array(nd_array))
+                      post_nodes[oc_id] = relay.nn.bias_add(post_nodes[oc_id], SplitParam, PostNode.attrs.axis)
+                    elif PostNode.op == op.get("nn.relu"):
+                      post_nodes[oc_id] = relay.nn.relu(post_nodes[oc_id])
+                    elif PostNode.op == op.get("nn.batch_norm"):
+                      NewParams = []
+                      for i in range(1, 5):
+                        if isinstance(PostNode.args[i], relay.Var):
+                          ParamOldName = PostNode.args[i].name_hint
+                          ParamNewName = f"{ParamOldName}_oc{oc_id}"
+                          ParamNewType = relay.TensorType([oc_size], dtype=PostNode.args[i].type_annotation.dtype)
+                          SplitParam = relay.Var(ParamNewName, ParamNewType)
+                          OldParam = self.OldParamDict[ParamOldName]
+                          if isinstance(OldParam, tvm.nd.NDArray):
+                            NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                            self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
+                          else:
+                            NewData = OldParam[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                            self.addParamVar(SplitParam, tvm.nd.array(NewData))
+                        else:
+                          assert isinstance(PostNode.args[i], relay.Constant), "PostNode.args[i] must be a Var or Constant"
+                          nd_array = PostNode.args[i].data.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                          SplitParam = relay.Constant(tvm.nd.array(nd_array))
+                        NewParams.append(SplitParam)
+                      post_nodes[oc_id] = relay.nn.batch_norm(post_nodes[oc_id], *NewParams)[0]
+
+                concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
+            else:
+                concat_node = add_nodes[0]
+
+            return concat_node
+
+          def visit_call(self, call):
+            if call.op == op.get("nn.conv2d"):
+              PostProcess = self.PostProcess[:]
+              self.PostProcess = []
+              NewCall = super().visit_call(call)
+              NewCall = self.split_and_optimize_conv2d(NewCall, mod, PostProcess)
+              return NewCall
+            elif call.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm")]:
+              self.PostProcess.append(call)
+              NewCall = super().visit_call(call)
+              if hasattr(call, "ShouldDelete"):
+                return relay.Tuple([NewCall.args[0]]) if call.op == op.get("nn.batch_norm") else NewCall.args[0]
+              else:
+                return NewCall
+            else:
+              # self.IsSplitedPostNode.extend([False for _ in range(len(self.PostProcess))])
+              self.PostProcess = []
+              return super().visit_call(call)
+
+        Spliter_ = Spliter(self.OldParamDict)
+        NewFunc = Spliter_.visit(func)
+        OldArgs = func.params
+        NewArgs = OldArgs[:]
+        for arg in Spliter_.DeleteArgs:
+          NewArgs.remove(arg)
+        for arg in Spliter_.AddArgs:
+          NewArgs.append(arg)
+        self.NewParamDict = Spliter_.NewParamDict
+
+        NewFunc = relay.Function(NewArgs, NewFunc.body, attrs=func.attrs)
+        NewFunc = _RedundantTupleRemover().visit(NewFunc)
+
+        return NewFunc
+
+    worker = Worker(OldParamDict)
+    for global_var, func in mod.functions.items():
+      if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+        mod[global_var] = worker.transform_function(func, mod)
+
+    return mod, worker.NewParamDict
+
+def merge_composite_ops(mod):
+    for global_var, func in mod.functions.items():
+        if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+            attr_record = func.attrs
+            func_no_attr = relay.Function(func.params, func.body) # no global_symbols attr
+            target_mod = tvm.IRModule.from_expr(func_no_attr)
+            transformed = transform.MergeComposite(imcflow.pattern_table())(target_mod)
+            _, transformed_func = transformed.functions.items()[0]
+            transformed_func = relay.Function(transformed_func.params, transformed_func.body, 
+                                              ret_type=transformed_func.ret_type, attrs=attr_record)
+            mod[global_var] = transformed_func
+    return mod
+
+    # transformed = transform.MergeComposite(imcflow.pattern_table())(mod["tvmgen_default_imcflow_main_0"])
+    transformed = transform.MergeComposite(imcflow.pattern_table())(mod)
+    return transformed
 
 @relay.transform.function_pass(opt_level=0)
 class DenseToConv:
@@ -504,7 +694,22 @@ def getFirstInCalls(expr):
 def getFirstOutCall(func, expr):
   pass
 
-def getSplitConcatDepsRegions(func):
+def makeSplitConcatDepsRegions(mod):
+  for global_var, func in mod.functions.items():
+    if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+      SplitConcatRegions = getSplitConcatDepsRegionsImpl(func)
+      func_attr = func.attrs
+      target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
+      target_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(target_mod)
+      target_mod = transform.MergeCompilerRegions()(target_mod)
+      target_mod = convert_compiler_regions_to_composite(target_mod)
+      transformed_func = target_mod.functions.items()[0][1]
+      transformed_func = transformed_func.with_attr({k:v for k,v in func_attr.items()})
+      mod[global_var] = transformed_func
+  
+  return mod
+
+def getSplitConcatDepsRegionsImpl(func):
   """
   Traverse the graph and find post dominate nodes ended with call for all split nodes
   """
@@ -813,6 +1018,9 @@ class AnnotGenerator:
             obj = _CostVisitor(self.getCost)
             obj.visit(mod[call.op].body)
             return obj.Cost
+          
+          print(f"Warning: Unsupported node found in cost calculation: {call}")
+          raise NotImplementedError()
 
         def visit_call(self, call):
           # post DFS search
@@ -1154,6 +1362,12 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           if call.op == op.get("nn.imcflow_qconv"):
             # if src node is "imcflow_unpacking", append to tensoredgelist by flag self.IsSrcUnpacking
+            self.IsSrcUnpacking = True if isinstance(call.args[0], Call) and call.args[0].op.name == "imcflow_unpacking" else False
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+            self.IsSrcUnpacking = True if isinstance(call.args[1], Call) and call.args[1].op.name == "imcflow_unpacking" else False
+            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
+            self.IsSrcUnpacking = False
+          if call.op == op.get("nn.conv2d"):
             self.IsSrcUnpacking = True if isinstance(call.args[0], Call) and call.args[0].op.name == "imcflow_unpacking" else False
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             self.IsSrcUnpacking = True if isinstance(call.args[1], Call) and call.args[1].op.name == "imcflow_unpacking" else False
@@ -2121,8 +2335,7 @@ class PackingInserter:
       new_func = _PackingInserter().visit(func)
       return new_func
 
-def clearCompilerTag(mod):
-
+def clearPrimitiveTag(mod):
   class _Visitor(tvm.relay.ExprMutator):
     def visit_function(self, fn):
       fn = super().visit_function(fn)
@@ -2130,19 +2343,8 @@ def clearCompilerTag(mod):
       NewAttrs = {}
       for key in fn.attrs.keys():
         NewAttrs[key] = fn.attrs.get_str(key)
-      if "Compiler" in NewAttrs.keys():
-        del NewAttrs["Compiler"]
-      #   del NewAttrs["Primitive"]
-      # NewAttrs["Primitive"] = 1
-      # if "Primitive" not in NewAttrs.keys():
-      #   NewAttrs["Primitive"] = 0
-      # else:
-      #   NewAttrs["Primitive"] = 0
-      if "Composite" in NewAttrs.keys():
-        NewAttrs["Primitive"] = 1
-      else:
-        if "Primitive" in NewAttrs.keys():
-          del NewAttrs["Primitive"]
+      if "Primitive" in NewAttrs.keys():
+        del NewAttrs["Primitive"]
 
       return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs))
 
@@ -2409,3 +2611,110 @@ def makeWrapper(func, func_name):
   code += '}\n'
 
   return code
+
+def convert_compiler_regions_to_composite(mod):
+  """Convert compiler_begin/compiler_end regions to composite functions."""
+
+  class _CompositeConverter(tvm.relay.ExprMutator):
+    def __init__(self):
+      super().__init__()
+      self.composite_counter = 0
+      # State used during single region extraction
+      self._begin_to_param = None
+      self._params = None
+      self._inputs = None
+
+    def _infer_type(self, expr):
+      # Try to obtain checked_type if already available; otherwise try local inference
+      try:
+        if hasattr(expr, "checked_type") and expr.checked_type is not None:
+          return expr.checked_type
+      except Exception:
+        pass
+      try:
+        return relay.transform.InferTypeLocal(expr)
+      except Exception:
+        return None
+
+    def _extract_region(self, expr, compiler_name):
+      """Rewrite expr by cutting at compiler_begin for the given compiler.
+      Returns (region_body, params, inputs).
+      """
+      self._begin_to_param = {}
+      self._params = []
+      self._inputs = []
+
+      def rewrite(e):
+        if isinstance(e, Call):
+          # Strip nested compiler_end of the same compiler
+          if e.op == op.get("annotation.compiler_end") and e.attrs.compiler == compiler_name:
+            return rewrite(e.args[0])
+          # Cut at compiler_begin of the same compiler and create a param
+          if e.op == op.get("annotation.compiler_begin") and e.attrs.compiler == compiler_name:
+            begin_node = e
+            if begin_node in self._begin_to_param:
+              return self._begin_to_param[begin_node]
+            # Determine input type for param
+            input_expr = begin_node.args[0]
+            in_ty = self._infer_type(input_expr)
+            name_hint = f"input_{len(self._params)}"
+            param = relay.Var(name_hint, in_ty) if in_ty is not None else relay.Var(name_hint)
+            self._begin_to_param[begin_node] = param
+            self._params.append(param)
+            # Record the original input expression to use as call argument later
+            self._inputs.append(input_expr)
+            return param
+          # Generic call: rewrite arguments recursively
+          new_args = [rewrite(a) for a in e.args]
+          # Keep original op/attrs/type_args/span
+          return Call(e.op, new_args, e.attrs, e.type_args, e.span)
+        elif isinstance(e, Tuple):
+          return Tuple([rewrite(f) for f in e.fields])
+        elif isinstance(e, TupleGetItem):
+          return TupleGetItem(rewrite(e.tuple_value), e.index)
+        else:
+          # Var/Constant/others pass through
+          return e
+
+      body = rewrite(expr)
+      params = list(self._params)
+      inputs = list(self._inputs)
+      # Clear state to avoid leakage between regions
+      self._begin_to_param = None
+      self._params = None
+      self._inputs = None
+      return body, params, inputs
+
+    def visit_call(self, call):
+      # We handle compiler_end as the anchoring point of a region.
+      if call.op == op.get("annotation.compiler_end"):
+        compiler_name = call.attrs.compiler
+        # Extract region spanning from begins (as params) to this end
+        region_body, params, inputs = self._extract_region(call.args[0], compiler_name)
+
+        # Build composite function and call
+        composite_func = relay.Function(params, region_body)
+        composite_func = composite_func.with_attr("Composite", f"{compiler_name}.region_{self.composite_counter}")
+        self.composite_counter += 1
+
+        # Visit inputs so that upstream regions get converted too
+        visited_inputs = [self.visit(arg) for arg in inputs]
+        return relay.Call(composite_func, visited_inputs)
+
+      # Strip standalone compiler_begin by visiting through
+      if call.op == op.get("annotation.compiler_begin"):
+        return self.visit(call.args[0])
+
+      # Default: recursively transform children
+      new_args = [self.visit(a) for a in call.args]
+      return Call(call.op, new_args, call.attrs, call.type_args, call.span)
+
+  converter = _CompositeConverter()
+
+  for global_var, func in mod.functions.items():
+    if isinstance(func, relay.Function):
+      new_body = converter.visit(func.body)
+      new_func = relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
+      mod[global_var] = new_func
+
+  return mod

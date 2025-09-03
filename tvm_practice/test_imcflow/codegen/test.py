@@ -17,7 +17,7 @@ from tvm.relay.backend import Executor, Runtime
 from tvm.contrib.imcflow import DataBlock
 import os
 
-from models import real_model, real_model2
+from models import real_model, real_model2, test_models
 from models import small_model
 
 def printModel(result_dir, mod, param_dict, mod_name):
@@ -130,16 +130,22 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = transform.InferType()(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_bind")
 
-  eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
+  # first level imcflow graph partition
+  eval_mod = imcflow_transform.partitionImcflowSubGraph(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_L1_partition")
+
+  # split imcflow function conv to atomic ops
+  eval_mod, eval_param_dict = imcflow_transform.split_conv_to_atomic(eval_mod, eval_param_dict)
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_atom_split")
+
+  # merge composite OPs
+  eval_mod = imcflow_transform.merge_composite_ops(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_merge")
 
-  SplitConcatRegions = imcflow_transform.getSplitConcatDepsRegions(
-      eval_mod["main"])
-  eval_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(eval_mod)
-  eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  eval_mod = transform.PartitionGraph()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict,
-             "after_split_concat_partition")
+  # make split and concat super node
+  eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_split_concat_partition")
+  exit(1)
 
   AnnotGenerator = imcflow_transform.AnnotGenerator()
   AnnotGenerator(eval_mod)
@@ -216,7 +222,7 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"mem_layout: {config.MemLayout}")
   print(f"Evaluation generation completed for {test_name}")
 
-  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
+  # generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():
@@ -253,6 +259,16 @@ def test_one_relu_evl():
   """Generate evaluation for relu model"""
   mod, param_dict = real_model2.getOneReluModel()
   run_test_evl("one_relu", mod, param_dict)
+
+def test_model_v2():
+  """Generate evaluation for relu model"""
+  mod, param_dict = real_model2.getModelV2()
+  run_test_evl("model_v2", mod, param_dict)
+
+def test_model_1():
+  """Generate evaluation for model 1"""
+  mod, param_dict = test_models.get_model1()
+  run_test_evl("model_1", mod, param_dict)
 
 if __name__ == "__main__":
   tvm.testing.main()

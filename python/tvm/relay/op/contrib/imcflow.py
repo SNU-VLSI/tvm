@@ -425,7 +425,13 @@ def makeBNPattern(data):
   gamma = is_constant()
   beta = is_constant()
 
-  return is_tuple_get_item(is_op("imcflow.fused_batch_norm")(data, gamma, beta), 0)
+  moving_mean = is_constant()
+  moving_var  = is_constant()
+
+  imcflow_bn = is_op("imcflow.fused_batch_norm")(data, gamma, beta)
+  nn_bn      = is_op("nn.batch_norm")(data, gamma, beta, moving_mean, moving_var)
+
+  return is_tuple_get_item(imcflow_bn | nn_bn, 0)
 
 def makeAddPattern(data):
   return is_op("add")(data, wildcard())
@@ -460,7 +466,7 @@ def pattern_table():
     imcflow_patterns : List[imcflow_pattern]
         Created patterns.
     """
-    imcflow_patterns = list()
+    imcflow_patterns = []
 
     def make_postop_pattern_start_with(conv_type):
       data1, weight = wildcard(), is_constant()
@@ -471,11 +477,11 @@ def pattern_table():
 
       return out
 
-    imcflow_patterns.append(
-      (
-          "imcflow.conv2d-with-postop",
-          make_postop_pattern_start_with("nn.imcflow_qconv")
-      )
+    imcflow_patterns.extend(
+      [ 
+        ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
+        ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d"))
+      ]
     )
 
     return imcflow_patterns
