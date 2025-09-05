@@ -140,7 +140,21 @@ class SendBlock(InodeCodeBlock):
     var = UniqueVar("send_data_base_address", dtype="int")
     code += f"{var} = {self.block.offset};"
     code += SimpleFor(recv_count,
-                      lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, 0, {self.fifo_id});")
+                      lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, 1, {self.fifo_id});")
+
+    return code
+  
+class IMCEComputeBlock(InodeCodeBlock):
+  """ Code block for sending data from given fifo id """
+
+  def __init__(self, annotation: str = ""):
+    super().__init__(annotation)
+
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+
+    code += f"__builtin_INODE_IMCE_COMPUTE(0, 1);"
+    code += ""
 
     return code
 

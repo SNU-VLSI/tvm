@@ -466,6 +466,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       block = PolicyUpdateBlock(inode, "policy update")
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
+    # standby and intrt
     inode_master = NodeID.inode_3
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
     block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
@@ -522,6 +523,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
     tid = out_edge.src_id
     hid = self.get_hid(node)
+
+    block = IMCEComputeBlock(f"imce compute start")
+    self.codeblocks.append(hid, block, CodePhase.EXEC)
+
     db = DevConfig().MemLayout.get_data_block_by_id(tid)
 
     block = SendBlock(db, out_edge_info.fifo_id, "send")
