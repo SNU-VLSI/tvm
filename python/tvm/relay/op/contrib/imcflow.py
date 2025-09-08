@@ -1298,11 +1298,13 @@ class ImcflowAnnotationPass:
     Config : Dict[hash : Union[begin, end]]
     """
 
-    def __init__(self, RegionList):
+    def __init__(self, RegionList, prefix=""):
         self.RegionList = RegionList
+        self.prefix = prefix
 
     def transform_function(self, func, mod, ctx):
         RegionList = self.RegionList
+        prefix = self.prefix
 
         def getRegion(expr):
             # target = int(hash(expr))
@@ -1318,17 +1320,17 @@ class ImcflowAnnotationPass:
                   # visit the arguments
                   new_args = []
                   for arg in call.args:
-                    ann = compiler_begin(super().visit(arg), f"imcflow_region{RegionNum}")
+                    ann = compiler_begin(super().visit(arg), f"{prefix}imcflow_region{RegionNum}")
                     new_args.append(ann)
-                  new_call = compiler_end(relay.Call(call.op, new_args, call.attrs, call.type_args), f"imcflow_region{RegionNum}")
+                  new_call = compiler_end(relay.Call(call.op, new_args, call.attrs, call.type_args), f"{prefix}imcflow_region{RegionNum}")
                   return new_call
                 else:
                   return super().visit_call(call)
 
             def visit_tuple_getitem(self, op):
               if RegionNum := getRegion(op):
-                NewTupleValue = compiler_begin(super().visit(op.tuple_value), f"imcflow_region{RegionNum}")
-                NewNode = compiler_end(relay.TupleGetItem(NewTupleValue, op.index), f"imcflow_region{RegionNum}")
+                NewTupleValue = compiler_begin(super().visit(op.tuple_value), f"{prefix}imcflow_region{RegionNum}")
+                NewNode = compiler_end(relay.TupleGetItem(NewTupleValue, op.index), f"{prefix}imcflow_region{RegionNum}")
                 return NewNode
               else:
                 return super().visit_tuple_getitem(op)
@@ -1337,8 +1339,8 @@ class ImcflowAnnotationPass:
               if RegionNum := getRegion(op):
                 NewFields = []
                 for field in op.fields:
-                  NewFields.append(compiler_begin(super().visit(field), f"imcflow_region{RegionNum}"))
-                return compiler_end(relay.Tuple(NewFields), f"imcflow_region{RegionNum}")
+                  NewFields.append(compiler_begin(super().visit(field), f"{prefix}imcflow_region{RegionNum}"))
+                return compiler_end(relay.Tuple(NewFields), f"{prefix}imcflow_region{RegionNum}")
               else:
                 return super().visit_tuple(op)
 
@@ -1508,11 +1510,58 @@ def flattenSubgraphs(mod):
                       args.append(super().visit(arg))
                   return call.op(*args)
           return super().visit_call(call)
+
     for func_name in TopImcflowFuncs:
       mod[func_name] = SubgraphFlatter().visit(mod[func_name])
 
     # remove unused functions
     mod = transform.RemoveUnusedFunctions()(mod)
+
+    return mod
+
+def flattenImcflowTopFuncs(mod):
+    """
+    make only round functions in main functions.
+    flattern top level imcflow funcs
+    attach Compiler="imcflow" to round functions
+    """
+    # flatten the subgraphs for top level imcflow functions
+    class SubgraphFlatter(ExprMutator):
+      def visit_call(self, call):
+          if isinstance(call.op, GlobalVar) and "Compiler" in mod[call.op].attrs and mod[call.op].attrs["Compiler"] == "imcflow":
+              # "Inline" the subgraph back into new main function.
+              name = call.op.name_hint
+              func = mod[name]
+              var_map = {}
+              for arg, param in zip(call.args, func.params):
+                var_map[param] = super().visit(arg)
+              new_body = relay.bind(super().visit(func.body), var_map)
+              return new_body
+          elif isinstance(call.op, GlobalVar) and "Compiler" in mod[call.op].attrs and "round" in mod[call.op].attrs["Compiler"]:
+              # "Inline" the subgraph back into new main function.
+              name = call.op.name_hint
+              func = mod[name]
+              new_body = super().visit(func.body)
+              new_func = relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
+              mod[name] = new_func
+              return call
+          elif isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and "split_concat" in call.op.attrs["Composite"]:
+              func = call.op
+              var_map = {}
+              for arg, param in zip(call.args, func.params):
+                var_map[param] = super().visit(arg)
+              new_body = relay.bind(super().visit(func.body), var_map)
+              return new_body
+          else:
+            return super().visit_call(call)
+
+    # remove unused functions
+    mod["main"] = SubgraphFlatter().visit(mod["main"])
+    mod = transform.RemoveUnusedFunctions()(mod)
+    for gv, func in mod.functions.items():
+      if "Compiler" in func.attrs and "imcflow" in func.attrs["Compiler"]:
+        func = func.with_attr("Compiler", "imcflow")
+        mod.update_func(gv, func)
 
     return mod
 

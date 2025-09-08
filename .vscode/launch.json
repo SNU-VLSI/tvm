@@ -22,13 +22,13 @@
       "name": "Python: Current File",
       "type": "debugpy",
       "request": "launch",
-      "program": "${file}",
+      "program": "/root/project/tvm/tvm_practice/test_imcflow/codegen/test.py",
       "console": "integratedTerminal",
       "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
-      "cwd": "${fileDirname}",
+      "cwd": "/root/project/tvm/tvm_practice/test_imcflow/codegen",
       "args": [
         "-k",
-        "big",
+        "model_1",
         "-s"
       ]
     },

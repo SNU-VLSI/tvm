@@ -145,25 +145,13 @@ def run_test_evl(test_name, mod, param_dict):
   # make split and concat super node
   eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_split_concat_partition")
-  exit(1)
 
-  AnnotGenerator = imcflow_transform.AnnotGenerator()
-  AnnotGenerator(eval_mod)
-  # print(AnnotGenerator.RegionList)
-  eval_mod = imcflow.ImcflowAnnotationPass(AnnotGenerator.RegionList)(eval_mod)
+  eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_annot")
 
-  eval_mod = transform.MergeCompilerRegions()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_merge_region")
-
-  eval_mod = imcflow.ImcflowCleanRegionTag()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_clean_region")
-
-  eval_mod = transform.PartitionGraph()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_partition_graph")
-
-  eval_mod = imcflow.flattenSubgraphs(eval_mod)
+  eval_mod = imcflow.flattenImcflowTopFuncs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_flatten")
+  exit(1)
 
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
