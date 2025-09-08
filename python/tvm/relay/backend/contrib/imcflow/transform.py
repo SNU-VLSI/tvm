@@ -23,6 +23,20 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 
+
+from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
+from tvm.relay import pretty_print
+def printModel(result_dir, mod, param_dict, mod_name):
+  RelayVisualizer(
+      relay_mod=mod,
+      relay_param=param_dict,
+      plotter=DotPlotter(),
+      parser=DotVizParser(),
+  ).render(f"{result_dir}/{mod_name}")
+
+  with open(f"{result_dir}/{mod_name}.txt", "w") as f:
+    f.write(pretty_print(mod))
+
 def getNodeID(node) -> int:
   id_dict = HashToCustomID()
   if int(hash(node)) in id_dict:
@@ -315,6 +329,7 @@ def partitionImcflowSubGraph(mod):
   mod = transform.MergeCompilerRegions()(mod)
   mod = imcflow.ImcflowCleanRegionTag()(mod)
   mod = transform.PartitionGraph()(mod)
+  # mod = clearCompilerAttr(mod)
   # mod = clearPrimitiveTag(mod)
   return mod
 
@@ -584,14 +599,16 @@ def split_conv_to_atomic(mod, OldParamDict):
 
     worker = Worker(OldParamDict)
     for global_var, func in mod.functions.items():
-      if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+      # if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+      if isinstance(func, relay.Function) and "global_symbol" in func.attrs and "imcflow" in func.attrs["global_symbol"]:
         mod[global_var] = worker.transform_function(func, mod)
 
     return mod, worker.NewParamDict
 
 def merge_composite_ops(mod):
     for global_var, func in mod.functions.items():
-        if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+        # if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+        if isinstance(func, relay.Function) and "global_symbol" in func.attrs and "imcflow" in func.attrs["global_symbol"]:
             attr_record = func.attrs
             func_no_attr = relay.Function(func.params, func.body) # no global_symbols attr
             target_mod = tvm.IRModule.from_expr(func_no_attr)
@@ -696,17 +713,28 @@ def getFirstOutCall(func, expr):
 
 def makeSplitConcatDepsRegions(mod):
   for global_var, func in mod.functions.items():
-    if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+    # if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+    if isinstance(func, relay.Function) and "global_symbol" in func.attrs and "imcflow" in func.attrs["global_symbol"]:
       SplitConcatRegions = getSplitConcatDepsRegionsImpl(func)
       func_attr = func.attrs
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
-      target_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions)(target_mod)
+      target_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions, "split_concat_")(target_mod)
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = convert_compiler_regions_to_composite(target_mod)
       transformed_func = target_mod.functions.items()[0][1]
       transformed_func = transformed_func.with_attr({k:v for k,v in func_attr.items()})
       mod[global_var] = transformed_func
-  
+
+      # target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
+      # target_mod = transform.PartitionGraph()(target_mod)
+      # for new_gv, new_func in target_mod.functions.items():
+      #   if new_gv.name_hint == "main":
+      #     new_func = new_func.with_attr({k:v for k,v in func_attr.items()})
+      #     mod[global_var] = new_func
+      #   else:
+      #     sub_func_gv = relay.GlobalVar(f"{global_var.name_hint}_{new_gv.name_hint}")
+      #     mod[sub_func_gv] = new_func
+
   return mod
 
 def getSplitConcatDepsRegionsImpl(func):
@@ -937,12 +965,17 @@ def getOutputNodes(expr, recursive=False):
   _Visitor().visit(expr)
   return OutNodes
 
-@relay.transform.function_pass(opt_level=0)
 class AnnotGenerator:
     def __init__(self):
       self.RegionList = []
 
-    def transform_function(self, func, mod, ctx):
+    def createRegion(self, mod):
+      assert len(mod.functions.items()) == 1, "only one function is allowed in the module"
+      target_func = list(mod.functions.items())[0][1]
+      self.visit_function(target_func, mod)
+      return self.RegionList
+
+    def visit_function(self, func, mod):
       RegionList = []
 
       class _Annotator(tvm.relay.ExprVisitor):
@@ -982,15 +1015,27 @@ class AnnotGenerator:
               if Node in Region:
                 return Region
             return None
+        
+        def isComposite(self, call):
+          return isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow.*", call.op.attrs["Composite"])
+        
+        def isSupportedOp(self, call):
+          return isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
+        
+        def isSuperNode(self, call):
+          return isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"split_concat_imcflow.*", call.op.attrs["Composite"])
+        
+        def isNoCostCall(self, call):
+          return isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.NO_COST_OPS
 
         def getCost(self, call):
           if not isinstance(call, Call):
              return 0
 
-          IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
-          IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
-          IsNoCostCall = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.NO_COST_OPS
+          IsComposite = self.isComposite(call)
+          IsSupportedOp = self.isSupportedOp(call)
+          IsSuperNode = self.isSuperNode(call)
+          IsNoCostCall = self.isNoCostCall(call)
 
           class _CostVisitor(tvm.relay.ExprVisitor):
             def __init__(self, getCostFunc):
@@ -998,12 +1043,16 @@ class AnnotGenerator:
               self.Cost = 0
               self.getCost = getCostFunc
 
+            def isSuperNode(self, call):
+              return isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"split_concat_imcflow.*", call.op.attrs["Composite"])
+
             def visit(self, expr):
               self.Cost = self.Cost + self.getCost(expr)
               super().visit(expr)
 
             def visit_call(self, call):
-              if isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"]):
+              # if isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"]):
+              if self.isSuperNode(call):
                 self.visit(call.op)
               for a in call.args:
                 self.visit(a)
@@ -1016,7 +1065,7 @@ class AnnotGenerator:
 
           if IsSuperNode:
             obj = _CostVisitor(self.getCost)
-            obj.visit(mod[call.op].body)
+            obj.visit(call.op.body)
             return obj.Cost
           
           print(f"Warning: Unsupported node found in cost calculation: {call}")
@@ -1028,11 +1077,9 @@ class AnnotGenerator:
               self.visit(a)
 
           # check this node is for imcflow
-          IsComposite = isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"])
-          # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate"]
-          # IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ["nn.conv2d", "nn.bias_add", "nn.batch_norm", "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize", "divide"]
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
-          IsSuperNode = isinstance(call.op, relay.GlobalVar) and re.match(r"imcflow_.*", mod[call.op].attrs["Compiler"])
+          IsComposite = self.isComposite(call)
+          IsSupportedOp = self.isSupportedOp(call)
+          IsSuperNode = self.isSuperNode(call)
 
           if IsComposite or IsSupportedOp or IsSuperNode:
             # check possibility
@@ -1105,14 +1152,33 @@ class AnnotGenerator:
           # add node to region
           Region = self.addToRegion(Region, op)
           # Region = self.addToRegion(Region, -1)
-
+        
       # find all regions
-      if mod["main"] == func:
-        _Annotator().visit(func)
+      _Annotator().visit(func)
 
       self.RegionList = RegionList
 
-      return func
+def partitionRound(mod):
+  for global_var, func in mod.functions.items():
+    if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+      name = global_var.name_hint
+      func_attr = func.attrs
+      annotator = AnnotGenerator()
+      target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
+      RegionList = annotator.createRegion(target_mod)
+      target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
+      target_mod = transform.MergeCompilerRegions()(target_mod)
+      target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
+      target_mod = transform.PartitionGraph()(target_mod)
+
+      for new_gv, new_func in target_mod.functions.items():
+        if new_gv.name_hint == "main":
+          new_func = new_func.with_attr({k:v for k,v in func_attr.items()})
+          mod[global_var] = new_func
+        else:
+          mod[new_gv] = new_func
+
+  return mod
 
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
@@ -1209,11 +1275,15 @@ class NodeMapper:
       function_names = [item[0].name_hint for item in items]
 
       num_func = len(function_names)
-      for i in range(num_func):
-        if function_names[i]=="main": continue
-          # _Nodemapper().visit(mod["main"])
-        elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          self.MappingDict.update(_Nodemapper().traverse_func(mod[function_names[i]]))
+      # for i in range(num_func):
+      #   if function_names[i]=="main": continue
+      #   elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
+      #     self.MappingDict.update(_Nodemapper().traverse_func(mod[function_names[i]]))
+      
+      for global_var, func in mod.functions.items():
+        if global_var.name_hint == "main":continue
+        if "imcflow" in func.attrs["global_symbol"]:
+          self.MappingDict.update(_Nodemapper().traverse_func(func))
 
       ImcflowDeviceConfig().HWNodeMap = self.MappingDict
 
@@ -2359,21 +2429,24 @@ def clearPrimitiveTag(mod):
         return super().visit_call(call)
 
   for func_name in mod.functions:
-    # NewAttrs = {}
-    # for key in mod[func_name].attrs.keys():
-    #   NewAttrs[key] = mod[func_name].attrs.get_str(key)
-    # if "Compiler" in NewAttrs.keys():
-    #   del NewAttrs["Compiler"]
+    mod[func_name] = _Visitor().visit(mod[func_name])
 
-    # mod[func_name] = FunctionWithFields(
-    #   mod[func_name],
-    #   list(mod[func_name].params),
-    #   mod[func_name].body,
-    #   mod[func_name].ret_type,
-    #   mod[func_name].type_params,
-    #   tvm.ir.make_node("DictAttrs", **NewAttrs)
-    # )
+  return mod
 
+def clearCompilerAttr(mod):
+  class _Visitor(tvm.relay.ExprMutator):
+    def visit_function(self, fn):
+      fn = super().visit_function(fn)
+
+      NewAttrs = {}
+      for key in fn.attrs.keys():
+        NewAttrs[key] = fn.attrs.get_str(key)
+      if "Compiler" in NewAttrs.keys():
+        del NewAttrs["Compiler"]
+
+      return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs))
+
+  for func_name in mod.functions:
     mod[func_name] = _Visitor().visit(mod[func_name])
 
   return mod
@@ -2643,38 +2716,49 @@ def convert_compiler_regions_to_composite(mod):
       self._begin_to_param = {}
       self._params = []
       self._inputs = []
+      memo = {}
 
       def rewrite(e):
+        # Preserve DAG structure: reuse previously rewritten node
+        if e in memo:
+          return memo[e]
         if isinstance(e, Call):
           # Strip nested compiler_end of the same compiler
           if e.op == op.get("annotation.compiler_end") and e.attrs.compiler == compiler_name:
-            return rewrite(e.args[0])
-          # Cut at compiler_begin of the same compiler and create a param
+            res = rewrite(e.args[0])
+            memo[e] = res
+            return res
+          # Cut at compiler_begin of the same compiler and create or reuse a param
           if e.op == op.get("annotation.compiler_begin") and e.attrs.compiler == compiler_name:
             begin_node = e
             if begin_node in self._begin_to_param:
-              return self._begin_to_param[begin_node]
-            # Determine input type for param
+              res = self._begin_to_param[begin_node]
+              memo[e] = res
+              return res
             input_expr = begin_node.args[0]
             in_ty = self._infer_type(input_expr)
             name_hint = f"input_{len(self._params)}"
             param = relay.Var(name_hint, in_ty) if in_ty is not None else relay.Var(name_hint)
             self._begin_to_param[begin_node] = param
             self._params.append(param)
-            # Record the original input expression to use as call argument later
             self._inputs.append(input_expr)
+            memo[e] = param
             return param
-          # Generic call: rewrite arguments recursively
           new_args = [rewrite(a) for a in e.args]
-          # Keep original op/attrs/type_args/span
-          return Call(e.op, new_args, e.attrs, e.type_args, e.span)
-        elif isinstance(e, Tuple):
-          return Tuple([rewrite(f) for f in e.fields])
-        elif isinstance(e, TupleGetItem):
-          return TupleGetItem(rewrite(e.tuple_value), e.index)
-        else:
-          # Var/Constant/others pass through
-          return e
+          res = Call(e.op, new_args, e.attrs, e.type_args, e.span)
+          memo[e] = res
+          return res
+        if isinstance(e, Tuple):
+          res = Tuple([rewrite(f) for f in e.fields])
+          memo[e] = res
+          return res
+        if isinstance(e, TupleGetItem):
+          res = TupleGetItem(rewrite(e.tuple_value), e.index)
+          memo[e] = res
+          return res
+        # Var/Constant/others pass through
+        memo[e] = e
+        return e
 
       body = rewrite(expr)
       params = list(self._params)
