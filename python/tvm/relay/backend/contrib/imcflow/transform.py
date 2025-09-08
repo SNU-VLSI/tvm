@@ -116,57 +116,142 @@ def getInputTensorIDs(func):
 def getOutputTensorIDs(func):
   pass
 
-def makeToQuantizedForm(mod):
-  """
-  List of transformations:
-    1. convert Conv to ImcflowQConv2D
-    2. data type conversion to int form
-      conv2d input  : packed 1D int8
-      conv2d weight : packed 1D int8
-      bias, relu, etc -> int16 data type
-  """
-  param_map = {}
+# def makeToQuantizedForm_old(mod):
+#   """
+#   List of transformations:
+#     1. convert Conv to ImcflowQConv2D
+#     2. data type conversion to int form
+#       conv2d input  : packed 1D int8
+#       conv2d weight : packed 1D int8
+#       bias, relu, etc -> int16 data type
+#   """
+#   param_map = {}
 
-  class _OpConverter(tvm.relay.ExprMutator):
-    def __init__(self):
-      super().__init__()
+#   class _OpConverter(tvm.relay.ExprMutator):
+#     def __init__(self):
+#       super().__init__()
 
-    def visit_call(self, call):
-      if call.op == op.get("nn.conv2d"):
-        new_op = op.get("nn.imcflow_qconv")
-        args = [self.visit(arg) for arg in call.args]
-        type_args = []
-        type_args.append(relay.TensorType(call.type_args[0].shape, "int8"))
-        type_args.append(relay.TensorType(call.type_args[1].shape, "int8"))
-        return imcflow_qconv2d(args[0], args[1], strides=(1, 1), padding=(1, 1))
-        # return Call(new_op, args, call.attrs, type_args, call.span)
-      elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-        args = [self.visit(arg) for arg in call.args]
-        return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
-      else:
-        return super().visit_call(call)
+#     def visit_call(self, call):
+#       if call.op == op.get("nn.conv2d"):
+#         new_op = op.get("nn.imcflow_qconv")
+#         args = [self.visit(arg) for arg in call.args]
+#         type_args = []
+#         type_args.append(relay.TensorType(call.type_args[0].shape, "int8"))
+#         type_args.append(relay.TensorType(call.type_args[1].shape, "int8"))
+#         return imcflow_qconv2d(args[0], args[1], strides=(1, 1), padding=(1, 1))
+#         # return Call(new_op, args, call.attrs, type_args, call.span)
+#       elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+#         args = [self.visit(arg) for arg in call.args]
+#         return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
+#       else:
+#         return super().visit_call(call)
 
-    def visit_var(self, var):
-      new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
-      param_map[var.name_hint] = new_var
-      return new_var
+#     def visit_var(self, var):
+#       new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
+#       param_map[var.name_hint] = new_var
+#       return new_var
 
-    def visit_constant(self, const):
-      Data = const.data.numpy().astype(np.int8)
-      return relay.const(Data, "int8")
+#     def visit_constant(self, const):
+#       Data = const.data.numpy().astype(np.int8)
+#       return relay.const(Data, "int8")
 
-    def visit_function(self, func):
-      # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
-      # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
-      # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
-      # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
-      new_body = self.visit(func.body)
-      new_params = [param_map.get(p.name_hint, p) for p in func.params]
-      new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
-      return relay.Function(new_params, new_body, new_ret_type)
+#     def visit_function(self, func):
+#       # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
+#       # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
+#       # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
+#       # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#       new_body = self.visit(func.body)
+#       new_params = [param_map.get(p.name_hint, p) for p in func.params]
+#       new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#       return relay.Function(new_params, new_body, new_ret_type)
 
-  mod['main'] = _OpConverter().visit(mod['main'])
-  return mod
+#   mod['main'] = _OpConverter().visit(mod['main'])
+#   return mod
+
+@relay.transform.function_pass(opt_level=0)
+class makeToQuantizedForm:
+    """
+    List of transformations:
+      1. convert Conv to ImcflowQConv2D
+      2. data type conversion to int form
+        conv2d input  : packed 1D int8
+        conv2d weight : packed 1D int8
+        bias, relu, etc -> int16 data type
+    """       
+    def transform_function(self, func, mod, ctx):
+      param_map = {}
+      class _OpConverter(tvm.relay.ExprMutator):
+        def __init__(self):
+          super().__init__()
+          self.NewParamDict = {}
+
+        def visit_call(self, call):
+          if call.op == op.get("nn.conv2d"):
+            args = [self.visit(arg) for arg in call.args]
+
+            # TODO: add in_channels and channels to attribute of nn.conv2d and fix this
+            # TODO: Sanity check needed!!!!
+            in_channels = 0 # FIXME
+            channels = 0 # FIXME
+
+            # input layout [ceil(IC/256), N, H, W, IB, 8] int32
+            input_shape_orig = args[0].type_annotation.shape # N ic H W
+            input_shape_new = [math.ceil(in_channels//256), input_shape_orig[0], input_shape_orig[2], input_shape_orig[3], 4, 8] # IB = 4
+            input_new = relay.Var(args[0].name_hint, relay.TensorType(input_shape_new, "int32"))
+
+            # weight layout [ceil(OC/64), ceil(IC/ic), 256, 8] int32
+            weight_shape_orig = args[1].data.shape # OC/64, ic, KH, KW
+            weight_numpy_array = np.zeros((weight_shape_orig[0], math.ceil(in_channels//weight_shape_orig[1]), 256, 8), dtype=np.int32) #TODO: this should be replaced with real weight tensor!!!!
+            weight_new = relay.Constant(tvm.nd.array(weight_numpy_array))
+
+            # append new params to param_map
+            param_map[args[0].name_hint] = input_new
+
+            return imcflow_qconv2d(input_new, weight_new, in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
+
+          # TODO: Add batchnorm transform and insert quantize op      
+          # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+          #   args = [self.visit(arg) for arg in call.args]
+          #   return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
+
+          else:
+            return super().visit_call(call)
+
+        # def visit_var(self, var):
+        #   # new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
+        #   # param_map[var.name_hint] = new_var
+        #   # return new_var
+        #   return var
+
+        # def visit_constant(self, const):
+        #   Data = const.data.numpy().astype(np.int8)
+        #   return relay.const(Data, "int8")
+
+        def visit_function(self, func):
+          # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
+          # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
+          # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
+          # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
+          new_body = self.visit(func.body)
+          new_params = [param_map.get(p.name_hint, p) for p in func.params]
+          return relay.Function(new_params, new_body)
+        
+          # new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
+          # return relay.Function(new_params, new_body, new_ret_type)
+
+      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
+      items = mod.functions_items()
+      function_names = [item[0].name_hint for item in items]
+
+      num_func = len(function_names)
+      for i in range(num_func):
+        if function_names[i]=="main": 
+          continue
+        elif "Compiler" in mod[function_names[i]].attrs and mod[function_names[i]].attrs["Compiler"]=="imcflow":
+          print(f"Transforming imcflow function: {function_names[i]}")
+          mod[function_names[i]] = _OpConverter().visit(mod[function_names[i]])
+
+      return func #TODO: returning func is right???
 
 def get_imcflow_supported_regions(mod, include_first_conv=False):
     """
