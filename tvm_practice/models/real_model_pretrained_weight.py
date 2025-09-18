@@ -36,6 +36,7 @@ def getModel():
       input_,
       relay.var("conv1_weight", shape=(16, 3, 3, 3)),
       channels=16,
+      in_channels=3,
       kernel_size=(3, 3),
       padding=(1, 1),
   )
@@ -54,6 +55,7 @@ def getModel():
       y,
       relay.var("layer1_0_conv1_weight", shape=(16, 16, 3, 3)),
       channels=16,
+      in_channels=16,
       kernel_size=(3, 3),
       padding=(1, 1),
   )
@@ -71,6 +73,7 @@ def getModel():
       y,
       relay.var("layer1_0_conv2_weight", shape=(16, 16, 3, 3)),
       channels=16,
+      in_channels=16,
       kernel_size=(3, 3),
       padding=(1, 1),
   )
@@ -117,6 +120,7 @@ def getModelV2():
       input_,
       relay.var("weight1", shape=(28, 28, 3, 3)),
       channels=28,
+      in_channels=28,
       kernel_size=(3, 3),
       padding=(1, 1),
   )
@@ -132,6 +136,7 @@ def getModelV2():
     y,
     relay.var("weight2_0", shape=(64,28,3,3)),
     channels=64,
+    in_channels=28,
     kernel_size=(3, 3),
     padding=(1, 1),
   )

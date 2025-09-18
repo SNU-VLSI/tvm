@@ -120,6 +120,7 @@ struct Conv2DAttrs : public tvm::AttrsNode<Conv2DAttrs> {
   Array<IndexExpr> dilation;
   int groups;
   IndexExpr channels;
+  IndexExpr in_channels;
   Array<IndexExpr> kernel_size;
   tvm::String data_layout;
   tvm::String kernel_layout;
@@ -151,8 +152,11 @@ struct Conv2DAttrs : public tvm::AttrsNode<Conv2DAttrs> {
         "half the output channels, and both subsequently concatenated.");
     TVM_ATTR_FIELD(channels)
         .describe(
-            "The number of output channels in the convolution."
-            " If it is not set, inferred by shape of the weight.")
+            "The number of output channels in the convolution.")
+        .set_default(NullValue<IndexExpr>());
+    TVM_ATTR_FIELD(in_channels)
+        .describe(
+            "The number of input channels in the convolution.")
         .set_default(NullValue<IndexExpr>());
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")

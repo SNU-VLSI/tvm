@@ -559,6 +559,7 @@ def split_conv_to_atomic(mod, OldParamDict):
                         split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
                         split_conv_weights[oc_id][ic_id],
                         channels=oc_size,
+                        in_channels=IC, # in_channels should be the same as original conv2d for layout transform pass
                         kernel_size=(KH, KW),
                         strides=expr.attrs.strides,
                         padding=expr.attrs.padding,
