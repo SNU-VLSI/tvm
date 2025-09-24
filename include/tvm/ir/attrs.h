@@ -895,29 +895,10 @@ class AttrsNode : public BaseAttrsNode {
     const int kLinearSearchBound = 16;
     int hit_count = 0;
     
-    // First handle base class attributes
-    int base_hit_count = 0;
-    auto handle_base_attrs = [&](const char* key, runtime::TVMArgValue* val) -> bool {
-      if (!std::strcmp(key, "in_node")) {
-        ::tvm::detail::SetValue(&this->in_node, *val);
-        return true;
-      } else if (!std::strcmp(key, "out_node")) {
-        ::tvm::detail::SetValue(&this->out_node, *val);
-        return true;
-      }
-      return false;
-    };
-    
     // applies two strategies to lookup
     if (args.size() < kLinearSearchBound) {
       // linear search.
-      auto ffind = [&args, &handle_base_attrs, &base_hit_count](const char* key, runtime::TVMArgValue* val) {
-        // Check base class attributes first
-        if (handle_base_attrs(key, val)) {
-          base_hit_count++;
-          return true;
-        }
-        
+      auto ffind = [&args, this](const char* key, runtime::TVMArgValue* val) {
         for (int i = 0; i < args.size(); i += 2) {
           ICHECK_EQ(args.type_codes[i], kTVMStr);
           if (!std::strcmp(key, args.values[i].v_str)) {
@@ -928,6 +909,19 @@ class AttrsNode : public BaseAttrsNode {
         return false;
       };
       auto vis = ::tvm::detail::CreateInitVisitor(DerivedType::_type_key, ffind);
+      
+      // Manually handle base class fields before visiting derived class
+      runtime::TVMArgValue temp_val;
+      if (ffind("in_node", &temp_val)) {
+        ::tvm::detail::SetValue(&this->in_node, temp_val);
+        ++vis.hit_count_;
+      }
+      if (ffind("out_node", &temp_val)) {
+        ::tvm::detail::SetValue(&this->out_node, temp_val);
+        ++vis.hit_count_;
+      }
+      
+      // Then visit derived class attributes
       self()->_tvm_VisitAttrs(vis);
       hit_count = vis.hit_count_;
     } else {
@@ -937,13 +931,7 @@ class AttrsNode : public BaseAttrsNode {
         ICHECK_EQ(args.type_codes[i], kTVMStr);
         kwargs[args[i].operator std::string()] = args[i + 1];
       }
-      auto ffind = [&kwargs, &handle_base_attrs, &base_hit_count](const char* key, runtime::TVMArgValue* val) {
-        // Check base class attributes first
-        if (handle_base_attrs(key, val)) {
-          base_hit_count++;
-          return true;
-        }
-        
+      auto ffind = [&kwargs, this](const char* key, runtime::TVMArgValue* val) {
         auto it = kwargs.find(key);
         if (it != kwargs.end()) {
           *val = it->second;
@@ -952,11 +940,24 @@ class AttrsNode : public BaseAttrsNode {
         return false;
       };
       auto vis = ::tvm::detail::CreateInitVisitor(DerivedType::_type_key, ffind);
+      
+      // Manually handle base class fields before visiting derived class
+      runtime::TVMArgValue temp_val;
+      if (ffind("in_node", &temp_val)) {
+        ::tvm::detail::SetValue(&this->in_node, temp_val);
+        ++vis.hit_count_;
+      }
+      if (ffind("out_node", &temp_val)) {
+        ::tvm::detail::SetValue(&this->out_node, temp_val);
+        ++vis.hit_count_;
+      }
+      
+      // Then visit derived class attributes  
       self()->_tvm_VisitAttrs(vis);
       hit_count = vis.hit_count_;
     }
     // error handling, slow path
-    if ((hit_count + base_hit_count) * 2 != args.size() && !allow_unknown) {
+    if (hit_count * 2 != args.size() && !allow_unknown) {
       for (int i = 0; i < args.size(); i += 2) {
         std::string key_str = args[i].operator std::string();
         bool is_base_attr = (key_str == "in_node" || key_str == "out_node");
@@ -970,11 +971,6 @@ class AttrsNode : public BaseAttrsNode {
             os << DerivedType::_type_key << ": does not have field \'" << visitor.key_
                << "\', Possible fields:\n";
             os << "----------------\n";
-            // Add base class fields to documentation
-            os << "in_node : bool, default=false\n";
-            os << "    Flag indicating if this node is an input node.\n";
-            os << "out_node : bool, default=false\n";
-            os << "    Flag indicating if this node is an output node.\n";
             this->PrintDocString(os);
             throw AttrError(os.str());
           }

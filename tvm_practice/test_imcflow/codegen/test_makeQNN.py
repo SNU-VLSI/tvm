@@ -158,13 +158,8 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
   
-  # Example: Using the pass with a custom modification function
-  def mark_first_conv_as_input(call_node):
-      if isinstance(call_node.op, tvm.ir.Op) and call_node.op.name == "nn.conv2d":
-          return (True, False)  # in_node=True, out_node=False
-      return None  # No modification
-  
-  eval_mod = imcflow_transform.NodeAttributeModificationPass(mark_first_conv_as_input)(eval_mod)
+  # Use the new ImcflowBoundaryNodeMarker pass to automatically mark boundary nodes
+  eval_mod = imcflow_transform.ImcflowBoundaryNodeMarker()(eval_mod)
 
   printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out")
 

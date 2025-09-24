@@ -2918,71 +2918,152 @@ def modify_call_node_attrs(call_node, in_node=None, out_node=None):
   if call_node.attrs is not None:
     for key in call_node.attrs.keys():
       attr_value = call_node.attrs[key]
-      # Use get_str to ensure proper string conversion
+      # Skip copying in_node and out_node since we'll set them explicitly
+      if str(key) in ["in_node", "out_node"]:
+        continue
+        
       if isinstance(attr_value, tvm.ir.container.Array):
-        # Convert array to string representation: "[1, 2, 3]"
+        # Convert array to tuple for proper handling
         new_attr_dict[str(key)] = tuple(attr_value)
       else:
-        # new_attr_dict[key] = call_node.attrs.get_str(key)
         new_attr_dict[str(key)] = attr_value
   
-  # Set the new in_node and out_node values as strings (DictAttrs stores everything as strings)
+  # Set the new in_node and out_node values 
   if in_node is not None:
     new_attr_dict["in_node"] = in_node
   if out_node is not None:
     new_attr_dict["out_node"] = out_node
     
-  # # Always create DictAttrs since it's more flexible and supports arbitrary fields
-  attr_type = str(call_node.attrs).split("(")[0]
+  # Debug: print what we're passing to make_node
+  attr_type = str(call_node.attrs).split("(")[0]  
   new_attrs = tvm.ir.make_node(attr_type, **new_attr_dict)
       
-  # # Create new Call node with modified attributes using CallWithFields
-  # return relay.expr.CallWithFields(call_node, call_node.op, call_node.args, new_attrs)
-
   return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
 
 
 
 @relay.transform.function_pass(opt_level=0)
-class NodeAttributeModificationPass:
+class ImcflowBoundaryNodeMarker:
   """
-  A pass that can modify call node attributes to set in_node and out_node flags.
-  This is a base implementation that can be extended for specific graph traversal
-  and modification logic.
+  A pass that identifies boundary nodes between IMCFLOW and CPU execution domains.
+  
+  This pass traverses the graph to find Function nodes with "Compiler" attribute set to "imcflow",
+  then marks:
+  - The first Call node inside the function as in_node=True
+  - The last Call node inside the function as out_node=True
   """
   
-  def __init__(self, modification_func=None):
-    """
-    Parameters
-    ----------
-    modification_func : callable, optional
-        A function that takes a call node and returns (in_node, out_node) flags
-        or None to skip modification. If None, no modifications are made.
-    """
-    self.modification_func = modification_func
+  def __init__(self):
+    pass
     
   def transform_function(self, func, mod, ctx):
-    class _AttrModifier(relay.ExprMutator):
-      def __init__(self, modification_func):
-        super().__init__()
-        self.modification_func = modification_func
-        
+    """
+    Transform the function to mark boundary nodes.
+    
+    This iterates through all functions in the module and processes IMCFLOW functions.
+    """
+    
+    # Get all function items from the module
+    items = mod.functions_items()
+    function_names = [item[0].name_hint for item in items]
+    
+    # Process each IMCFLOW function
+    num_func = len(function_names)
+    for i in range(num_func):
+      if function_names[i] == "main":
+        continue
+      elif ("Compiler" in mod[function_names[i]].attrs and 
+            mod[function_names[i]].attrs["Compiler"] == "imcflow"):
+        print(f"Marking boundary nodes for IMCFLOW function: {function_names[i]}")
+        mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
+    
+    # Return the original function (main function typically)
+    return func
+  
+  def _mark_imcflow_function_boundaries(self, func):
+    """
+    Mark the first and last Call nodes in an IMCFLOW function.
+    The first call is the one that directly uses function parameters as input.
+    The last call is the one that directly produces the function's output.
+    """
+    
+    # Collect all Call nodes in the function
+    call_nodes = []
+    
+    class _CallCollector(relay.ExprVisitor):
       def visit_call(self, call):
-        # First visit the arguments recursively
+        call_nodes.append(call)
+        super().visit_call(call)
+    
+    collector = _CallCollector()
+    collector.visit(func.body)
+    
+    if not call_nodes:
+      return func
+    
+    # Find the first call node that uses function parameters
+    first_call = self._find_input_call(func, call_nodes)
+    
+    # Find the output call node - the one that directly produces the function's return
+    output_call = self._find_output_call(func.body)
+    
+    class _BoundaryMarker(relay.ExprMutator):
+      def visit_call(self, call):
         new_call = super().visit_call(call)
         
-        # Apply modification function if provided
-        if self.modification_func is not None:
-          result = self.modification_func(new_call)
-          if result is not None:
-            in_node, out_node = result
-            return modify_call_node_attrs(new_call, in_node=in_node, out_node=out_node)
+        # Mark first call that uses params as input node
+        if call == first_call:
+          return modify_call_node_attrs(new_call, in_node=True, out_node=None)
+        # Mark output call as output node
+        elif call == output_call:
+          return modify_call_node_attrs(new_call, in_node=None, out_node=True)
         
         return new_call
-        
-    if self.modification_func is not None:
-      modifier = _AttrModifier(self.modification_func)
-      new_body = modifier.visit(func.body)
-      return relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
+    
+    marker = _BoundaryMarker()
+    new_body = marker.visit(func.body)
+    return relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
+  
+  def _find_input_call(self, func, call_nodes):
+    """
+    Find the first Call node that directly uses function parameters as input.
+    """
+    # Create set of function parameter variables for quick lookup
+    param_vars = set(func.params)
+    
+    # Check each call node to see if it directly uses function parameters
+    for call in call_nodes:
+      # Check if any of the call's arguments are function parameters
+      for arg in call.args:
+        if isinstance(arg, relay.Var) and arg in param_vars:
+          return call
+
+    # Fallback: if no call directly uses parameters, return None
+    return None
+  
+  def _find_output_call(self, body):
+    """
+    Find the Call node that directly produces the function's output.
+    This traverses the body expression to find the root Call node.
+    """
+    # Handle different body types
+    if isinstance(body, relay.Call):
+      # If body is directly a Call, that's our output call
+      return body
+    elif isinstance(body, relay.TupleGetItem):
+      # If body is TupleGetItem, find the call that produces the tuple
+      return self._find_output_call(body.tuple_value)
+    elif isinstance(body, relay.Tuple):
+      # If body is a Tuple, we need to find the calls that produce each field
+      # For now, we'll just return the first Call we find in the fields
+      for field in body.fields:
+        output_call = self._find_output_call(field)
+        if output_call:
+          return output_call
+      return None
+    elif isinstance(body, relay.Let):
+      # If body is Let, the output is in the body of the Let
+      return self._find_output_call(body.body)
     else:
-      return func
+      # For other types (Var, Constant, etc.), there's no Call to mark
+      return None
