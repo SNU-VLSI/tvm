@@ -2888,3 +2888,101 @@ def convert_compiler_regions_to_composite(mod):
       mod[global_var] = new_func
 
   return mod
+
+
+def modify_call_node_attrs(call_node, in_node=None, out_node=None):
+  """
+  Modify the attributes of a Call node by setting in_node and/or out_node flags.
+  
+  Parameters
+  ----------
+  call_node : relay.Call
+      The call node to modify
+  in_node : bool, optional
+      Set the in_node flag. If None, the original value is preserved.
+  out_node : bool, optional  
+      Set the out_node flag. If None, the original value is preserved.
+      
+  Returns
+  -------
+  relay.Call
+      A new Call node with modified attributes
+  """
+  if not isinstance(call_node, relay.Call):
+    raise ValueError("Input must be a relay.Call node")
+    
+  # Create a dictionary to hold all attribute key-value pairs
+  new_attr_dict = {}
+  
+  # Copy existing attributes if they exist
+  if call_node.attrs is not None:
+    for key in call_node.attrs.keys():
+      attr_value = call_node.attrs[key]
+      # Use get_str to ensure proper string conversion
+      if isinstance(attr_value, tvm.ir.container.Array):
+        # Convert array to string representation: "[1, 2, 3]"
+        new_attr_dict[str(key)] = tuple(attr_value)
+      else:
+        # new_attr_dict[key] = call_node.attrs.get_str(key)
+        new_attr_dict[str(key)] = attr_value
+  
+  # Set the new in_node and out_node values as strings (DictAttrs stores everything as strings)
+  if in_node is not None:
+    new_attr_dict["in_node"] = in_node
+  if out_node is not None:
+    new_attr_dict["out_node"] = out_node
+    
+  # # Always create DictAttrs since it's more flexible and supports arbitrary fields
+  attr_type = str(call_node.attrs).split("(")[0]
+  new_attrs = tvm.ir.make_node(attr_type, **new_attr_dict)
+      
+  # # Create new Call node with modified attributes using CallWithFields
+  # return relay.expr.CallWithFields(call_node, call_node.op, call_node.args, new_attrs)
+
+  return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
+
+
+
+@relay.transform.function_pass(opt_level=0)
+class NodeAttributeModificationPass:
+  """
+  A pass that can modify call node attributes to set in_node and out_node flags.
+  This is a base implementation that can be extended for specific graph traversal
+  and modification logic.
+  """
+  
+  def __init__(self, modification_func=None):
+    """
+    Parameters
+    ----------
+    modification_func : callable, optional
+        A function that takes a call node and returns (in_node, out_node) flags
+        or None to skip modification. If None, no modifications are made.
+    """
+    self.modification_func = modification_func
+    
+  def transform_function(self, func, mod, ctx):
+    class _AttrModifier(relay.ExprMutator):
+      def __init__(self, modification_func):
+        super().__init__()
+        self.modification_func = modification_func
+        
+      def visit_call(self, call):
+        # First visit the arguments recursively
+        new_call = super().visit_call(call)
+        
+        # Apply modification function if provided
+        if self.modification_func is not None:
+          result = self.modification_func(new_call)
+          if result is not None:
+            in_node, out_node = result
+            return modify_call_node_attrs(new_call, in_node=in_node, out_node=out_node)
+        
+        return new_call
+        
+    if self.modification_func is not None:
+      modifier = _AttrModifier(self.modification_func)
+      new_body = modifier.visit(func.body)
+      return relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
+    else:
+      return func

@@ -140,10 +140,19 @@ class BaseAttrsNode : public Object {
  public:
   using TVMArgs = runtime::TVMArgs;
   using TVMRetValue = runtime::TVMRetValue;
+  
+  /*! \brief flag indicating if this node is an input node */
+  bool in_node{false};
+  /*! \brief flag indicating if this node is an output node */  
+  bool out_node{false};
+  
   /*! \brief virtual destructor */
   virtual ~BaseAttrsNode() {}
   // visit function
-  virtual void VisitAttrs(AttrVisitor* v) {}
+  virtual void VisitAttrs(AttrVisitor* v) {
+    v->Visit("in_node", &in_node);
+    v->Visit("out_node", &out_node);
+  }
   /*!
    * \brief Initialize the attributes by sequence of arguments
    * \param args The positional arguments in the form
@@ -870,11 +879,13 @@ template <typename DerivedType>
 class AttrsNode : public BaseAttrsNode {
  public:
   void VisitAttrs(AttrVisitor* v) {
+    BaseAttrsNode::VisitAttrs(v);  // Visit base class attributes first
     ::tvm::detail::AttrNormalVisitor vis(v);
     self()->_tvm_VisitAttrs(vis);
   }
 
   void VisitNonDefaultAttrs(AttrVisitor* v) {
+    BaseAttrsNode::VisitAttrs(v);  // Visit base class attributes first
     ::tvm::detail::AttrNonDefaultVisitor vis(v);
     self()->_tvm_VisitAttrs(vis);
   }
@@ -883,10 +894,30 @@ class AttrsNode : public BaseAttrsNode {
     ICHECK_EQ(args.size() % 2, 0);
     const int kLinearSearchBound = 16;
     int hit_count = 0;
+    
+    // First handle base class attributes
+    int base_hit_count = 0;
+    auto handle_base_attrs = [&](const char* key, runtime::TVMArgValue* val) -> bool {
+      if (!std::strcmp(key, "in_node")) {
+        ::tvm::detail::SetValue(&this->in_node, *val);
+        return true;
+      } else if (!std::strcmp(key, "out_node")) {
+        ::tvm::detail::SetValue(&this->out_node, *val);
+        return true;
+      }
+      return false;
+    };
+    
     // applies two strategies to lookup
     if (args.size() < kLinearSearchBound) {
       // linear search.
-      auto ffind = [&args](const char* key, runtime::TVMArgValue* val) {
+      auto ffind = [&args, &handle_base_attrs, &base_hit_count](const char* key, runtime::TVMArgValue* val) {
+        // Check base class attributes first
+        if (handle_base_attrs(key, val)) {
+          base_hit_count++;
+          return true;
+        }
+        
         for (int i = 0; i < args.size(); i += 2) {
           ICHECK_EQ(args.type_codes[i], kTVMStr);
           if (!std::strcmp(key, args.values[i].v_str)) {
@@ -906,7 +937,13 @@ class AttrsNode : public BaseAttrsNode {
         ICHECK_EQ(args.type_codes[i], kTVMStr);
         kwargs[args[i].operator std::string()] = args[i + 1];
       }
-      auto ffind = [&kwargs](const char* key, runtime::TVMArgValue* val) {
+      auto ffind = [&kwargs, &handle_base_attrs, &base_hit_count](const char* key, runtime::TVMArgValue* val) {
+        // Check base class attributes first
+        if (handle_base_attrs(key, val)) {
+          base_hit_count++;
+          return true;
+        }
+        
         auto it = kwargs.find(key);
         if (it != kwargs.end()) {
           *val = it->second;
@@ -919,18 +956,28 @@ class AttrsNode : public BaseAttrsNode {
       hit_count = vis.hit_count_;
     }
     // error handling, slow path
-    if (hit_count * 2 != args.size() && !allow_unknown) {
+    if ((hit_count + base_hit_count) * 2 != args.size() && !allow_unknown) {
       for (int i = 0; i < args.size(); i += 2) {
-        ::tvm::detail::AttrExistVisitor visitor;
-        visitor.key_ = args[i].operator std::string();
-        self()->_tvm_VisitAttrs(visitor);
-        if (!visitor.exist_) {
-          std::ostringstream os;
-          os << DerivedType::_type_key << ": does not have field \'" << visitor.key_
-             << "\', Possible fields:\n";
-          os << "----------------\n";
-          this->PrintDocString(os);
-          throw AttrError(os.str());
+        std::string key_str = args[i].operator std::string();
+        bool is_base_attr = (key_str == "in_node" || key_str == "out_node");
+        
+        if (!is_base_attr) {
+          ::tvm::detail::AttrExistVisitor visitor;
+          visitor.key_ = key_str;
+          self()->_tvm_VisitAttrs(visitor);
+          if (!visitor.exist_) {
+            std::ostringstream os;
+            os << DerivedType::_type_key << ": does not have field \'" << visitor.key_
+               << "\', Possible fields:\n";
+            os << "----------------\n";
+            // Add base class fields to documentation
+            os << "in_node : bool, default=false\n";
+            os << "    Flag indicating if this node is an input node.\n";
+            os << "out_node : bool, default=false\n";
+            os << "    Flag indicating if this node is an output node.\n";
+            this->PrintDocString(os);
+            throw AttrError(os.str());
+          }
         }
       }
     }
@@ -950,6 +997,24 @@ class AttrsNode : public BaseAttrsNode {
 
   Array<AttrFieldInfo> ListFieldInfo() const final {
     ::tvm::detail::AttrDocVisitor visitor;
+    
+    // Add base class field info first
+    auto make_field_info = [](const char* name, const char* type_info, const char* description) {
+      ObjectPtr<AttrFieldInfoNode> info = make_object<AttrFieldInfoNode>();
+      info->name = name;
+      info->type_info = type_info;
+      info->description = description;
+      return AttrFieldInfo(info);
+    };
+    
+    visitor.fields_.push_back(make_field_info(
+        "in_node", "bool, default=false", 
+        "Flag indicating if this node is an input node."));
+    visitor.fields_.push_back(make_field_info(
+        "out_node", "bool, default=false", 
+        "Flag indicating if this node is an output node."));
+    
+    // Then add derived class fields
     self()->_tvm_VisitAttrs(visitor);
     return visitor.fields_;
   }
