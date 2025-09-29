@@ -28,6 +28,7 @@ def get_model1():
       input_,
       relay.var("weight1", shape=(65, 32, 3, 3)),
       channels=65,
+      in_channels=32,
       kernel_size=(3, 3),
       padding=(1, 1),
   )
@@ -36,6 +37,7 @@ def get_model1():
       y,
       relay.var("weight2", shape=(65, 65, 3, 3)),
       channels=65,
+      in_channels=65,
       kernel_size=(3, 3),
       padding=(1, 1),
   )

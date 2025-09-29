@@ -149,7 +149,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.conv1d")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv1DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv1DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.conv1d");
     });
@@ -378,10 +378,10 @@ bool Conv2DRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
 
 TVM_REGISTER_GLOBAL("relay.op.nn._make.conv2d")
     .set_body_typed([](Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
-                       Array<IndexExpr> dilation, int groups, IndexExpr channels,
+                       Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels, in_channels,
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.conv2d");
     });
@@ -579,7 +579,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.conv3d")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv3DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv3DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.conv3d");
     });
@@ -1614,7 +1614,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.contrib_conv2d_NCHWc")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.contrib_conv2d_NCHWc");
     });
@@ -1642,7 +1642,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.contrib_depthwise_conv2d_NCHWc")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.contrib_depthwise_conv2d_NCHWc");
     });

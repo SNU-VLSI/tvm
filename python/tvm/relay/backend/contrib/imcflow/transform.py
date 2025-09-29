@@ -130,57 +130,142 @@ def getInputTensorIDs(func):
 def getOutputTensorIDs(func):
   pass
 
-def makeToQuantizedForm(mod):
-  """
-  List of transformations:
-    1. convert Conv to ImcflowQConv2D
-    2. data type conversion to int form
-      conv2d input  : packed 1D int8
-      conv2d weight : packed 1D int8
-      bias, relu, etc -> int16 data type
-  """
-  param_map = {}
+# def makeToQuantizedForm_old(mod):
+#   """
+#   List of transformations:
+#     1. convert Conv to ImcflowQConv2D
+#     2. data type conversion to int form
+#       conv2d input  : packed 1D int8
+#       conv2d weight : packed 1D int8
+#       bias, relu, etc -> int16 data type
+#   """
+#   param_map = {}
 
-  class _OpConverter(tvm.relay.ExprMutator):
-    def __init__(self):
-      super().__init__()
+#   class _OpConverter(tvm.relay.ExprMutator):
+#     def __init__(self):
+#       super().__init__()
 
-    def visit_call(self, call):
-      if call.op == op.get("nn.conv2d"):
-        new_op = op.get("nn.imcflow_qconv")
-        args = [self.visit(arg) for arg in call.args]
-        type_args = []
-        type_args.append(relay.TensorType(call.type_args[0].shape, "int8"))
-        type_args.append(relay.TensorType(call.type_args[1].shape, "int8"))
-        return imcflow_qconv2d(args[0], args[1], strides=(1, 1), padding=(1, 1))
-        # return Call(new_op, args, call.attrs, type_args, call.span)
-      elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-        args = [self.visit(arg) for arg in call.args]
-        return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
-      else:
-        return super().visit_call(call)
+#     def visit_call(self, call):
+#       if call.op == op.get("nn.conv2d"):
+#         new_op = op.get("nn.imcflow_qconv")
+#         args = [self.visit(arg) for arg in call.args]
+#         type_args = []
+#         type_args.append(relay.TensorType(call.type_args[0].shape, "int8"))
+#         type_args.append(relay.TensorType(call.type_args[1].shape, "int8"))
+#         return imcflow_qconv2d(args[0], args[1], strides=(1, 1), padding=(1, 1))
+#         # return Call(new_op, args, call.attrs, type_args, call.span)
+#       elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+#         args = [self.visit(arg) for arg in call.args]
+#         return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
+#       else:
+#         return super().visit_call(call)
 
-    def visit_var(self, var):
-      new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
-      param_map[var.name_hint] = new_var
-      return new_var
+#     def visit_var(self, var):
+#       new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
+#       param_map[var.name_hint] = new_var
+#       return new_var
 
-    def visit_constant(self, const):
-      Data = const.data.numpy().astype(np.int8)
-      return relay.const(Data, "int8")
+#     def visit_constant(self, const):
+#       Data = const.data.numpy().astype(np.int8)
+#       return relay.const(Data, "int8")
 
-    def visit_function(self, func):
-      # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
-      # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
-      # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
-      # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
-      new_body = self.visit(func.body)
-      new_params = [param_map.get(p.name_hint, p) for p in func.params]
-      new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
-      return relay.Function(new_params, new_body, new_ret_type)
+#     def visit_function(self, func):
+#       # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
+#       # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
+#       # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
+#       # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#       new_body = self.visit(func.body)
+#       new_params = [param_map.get(p.name_hint, p) for p in func.params]
+#       new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#       return relay.Function(new_params, new_body, new_ret_type)
 
-  mod['main'] = _OpConverter().visit(mod['main'])
-  return mod
+#   mod['main'] = _OpConverter().visit(mod['main'])
+#   return mod
+
+@relay.transform.function_pass(opt_level=0)
+class makeToQuantizedForm:
+    """
+    List of transformations:
+      1. convert Conv to ImcflowQConv2D
+      2. data type conversion to int form
+        conv2d input  : packed 1D int8
+        conv2d weight : packed 1D int8
+        bias, relu, etc -> int16 data type
+    """       
+    def transform_function(self, func, mod, ctx):
+      param_map = {}
+      class _OpConverter(tvm.relay.ExprMutator):
+        def __init__(self):
+          super().__init__()
+          self.NewParamDict = {}
+
+        def visit_call(self, call):
+          if call.op == op.get("nn.conv2d"):
+            args = [self.visit(arg) for arg in call.args]
+
+            # TODO: add in_channels and channels to attribute of nn.conv2d and fix this
+            # TODO: Sanity check needed!!!!
+            in_channels = 0 # FIXME
+            channels = 0 # FIXME
+
+            # input layout [ceil(IC/256), N, H, W, IB, 8] int32
+            input_shape_orig = args[0].type_annotation.shape # N ic H W
+            input_shape_new = [math.ceil(in_channels//256), input_shape_orig[0], input_shape_orig[2], input_shape_orig[3], 4, 8] # IB = 4
+            input_new = relay.Var(args[0].name_hint, relay.TensorType(input_shape_new, "int32"))
+
+            # weight layout [ceil(OC/64), ceil(IC/ic), 256, 8] int32
+            weight_shape_orig = args[1].data.shape # OC/64, ic, KH, KW
+            weight_numpy_array = np.zeros((weight_shape_orig[0], math.ceil(in_channels//weight_shape_orig[1]), 256, 8), dtype=np.int32) #TODO: this should be replaced with real weight tensor!!!!
+            weight_new = relay.Constant(tvm.nd.array(weight_numpy_array))
+
+            # append new params to param_map
+            param_map[args[0].name_hint] = input_new
+
+            return imcflow_qconv2d(input_new, weight_new, in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
+
+          # TODO: Add batchnorm transform and insert quantize op      
+          # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+          #   args = [self.visit(arg) for arg in call.args]
+          #   return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
+
+          else:
+            return super().visit_call(call)
+
+        # def visit_var(self, var):
+        #   # new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
+        #   # param_map[var.name_hint] = new_var
+        #   # return new_var
+        #   return var
+
+        # def visit_constant(self, const):
+        #   Data = const.data.numpy().astype(np.int8)
+        #   return relay.const(Data, "int8")
+
+        def visit_function(self, func):
+          # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
+          # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
+          # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
+          # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
+          new_body = self.visit(func.body)
+          new_params = [param_map.get(p.name_hint, p) for p in func.params]
+          return relay.Function(new_params, new_body)
+        
+          # new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
+          # return relay.Function(new_params, new_body, new_ret_type)
+
+      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
+      items = mod.functions_items()
+      function_names = [item[0].name_hint for item in items]
+
+      num_func = len(function_names)
+      for i in range(num_func):
+        if function_names[i]=="main": 
+          continue
+        elif "Compiler" in mod[function_names[i]].attrs and mod[function_names[i]].attrs["Compiler"]=="imcflow":
+          print(f"Transforming imcflow function: {function_names[i]}")
+          mod[function_names[i]] = _OpConverter().visit(mod[function_names[i]])
+
+      return func #TODO: returning func is right???
 
 def get_imcflow_supported_regions(mod, include_first_conv=False):
     """
@@ -474,6 +559,7 @@ def split_conv_to_atomic(mod, OldParamDict):
                         split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
                         split_conv_weights[oc_id][ic_id],
                         channels=oc_size,
+                        in_channels=IC, # in_channels should be the same as original conv2d for layout transform pass
                         kernel_size=(KH, KW),
                         strides=expr.attrs.strides,
                         padding=expr.attrs.padding,
@@ -2854,3 +2940,182 @@ def convert_compiler_regions_to_composite(mod):
       mod[global_var] = new_func
 
   return mod
+
+
+def modify_call_node_attrs(call_node, in_node=None, out_node=None):
+  """
+  Modify the attributes of a Call node by setting in_node and/or out_node flags.
+  
+  Parameters
+  ----------
+  call_node : relay.Call
+      The call node to modify
+  in_node : bool, optional
+      Set the in_node flag. If None, the original value is preserved.
+  out_node : bool, optional  
+      Set the out_node flag. If None, the original value is preserved.
+      
+  Returns
+  -------
+  relay.Call
+      A new Call node with modified attributes
+  """
+  if not isinstance(call_node, relay.Call):
+    raise ValueError("Input must be a relay.Call node")
+    
+  # Create a dictionary to hold all attribute key-value pairs
+  new_attr_dict = {}
+  
+  # Copy existing attributes if they exist
+  if call_node.attrs is not None:
+    for key in call_node.attrs.keys():
+      attr_value = call_node.attrs[key]
+      # Skip copying in_node and out_node since we'll set them explicitly
+      if str(key) in ["in_node", "out_node"]:
+        continue
+        
+      if isinstance(attr_value, tvm.ir.container.Array):
+        # Convert array to tuple for proper handling
+        new_attr_dict[str(key)] = tuple(attr_value)
+      else:
+        new_attr_dict[str(key)] = attr_value
+  
+  # Set the new in_node and out_node values 
+  if in_node is not None:
+    new_attr_dict["in_node"] = in_node
+  if out_node is not None:
+    new_attr_dict["out_node"] = out_node
+    
+  # Debug: print what we're passing to make_node
+  attr_type = str(call_node.attrs).split("(")[0]  
+  new_attrs = tvm.ir.make_node(attr_type, **new_attr_dict)
+      
+  return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
+
+
+
+@relay.transform.function_pass(opt_level=0)
+class ImcflowBoundaryNodeMarker:
+  """
+  A pass that identifies boundary nodes between IMCFLOW and CPU execution domains.
+  
+  This pass traverses the graph to find Function nodes with "Compiler" attribute set to "imcflow",
+  then marks:
+  - The first Call node inside the function as in_node=True
+  - The last Call node inside the function as out_node=True
+  """
+  
+  def __init__(self):
+    pass
+    
+  def transform_function(self, func, mod, ctx):
+    """
+    Transform the function to mark boundary nodes.
+    
+    This iterates through all functions in the module and processes IMCFLOW functions.
+    """
+    
+    # Get all function items from the module
+    items = mod.functions_items()
+    function_names = [item[0].name_hint for item in items]
+    
+    # Process each IMCFLOW function
+    num_func = len(function_names)
+    for i in range(num_func):
+      if function_names[i] == "main":
+        continue
+      elif ("Compiler" in mod[function_names[i]].attrs and 
+            mod[function_names[i]].attrs["Compiler"] == "imcflow"):
+        print(f"Marking boundary nodes for IMCFLOW function: {function_names[i]}")
+        mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
+    
+    # Return the original function (main function typically)
+    return func
+  
+  def _mark_imcflow_function_boundaries(self, func):
+    """
+    Mark the first and last Call nodes in an IMCFLOW function.
+    The first call is the one that directly uses function parameters as input.
+    The last call is the one that directly produces the function's output.
+    """
+    
+    # Collect all Call nodes in the function
+    call_nodes = []
+    
+    class _CallCollector(relay.ExprVisitor):
+      def visit_call(self, call):
+        call_nodes.append(call)
+        super().visit_call(call)
+    
+    collector = _CallCollector()
+    collector.visit(func.body)
+    
+    if not call_nodes:
+      return func
+    
+    # Find the first call node that uses function parameters
+    first_call = self._find_input_call(func, call_nodes)
+    
+    # Find the output call node - the one that directly produces the function's return
+    output_call = self._find_output_call(func.body)
+    
+    class _BoundaryMarker(relay.ExprMutator):
+      def visit_call(self, call):
+        new_call = super().visit_call(call)
+        
+        # Mark first call that uses params as input node
+        if call == first_call:
+          return modify_call_node_attrs(new_call, in_node=True, out_node=None)
+        # Mark output call as output node
+        elif call == output_call:
+          return modify_call_node_attrs(new_call, in_node=None, out_node=True)
+        
+        return new_call
+    
+    marker = _BoundaryMarker()
+    new_body = marker.visit(func.body)
+    return relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
+  
+  def _find_input_call(self, func, call_nodes):
+    """
+    Find the first Call node that directly uses function parameters as input.
+    """
+    # Create set of function parameter variables for quick lookup
+    param_vars = set(func.params)
+    
+    # Check each call node to see if it directly uses function parameters
+    for call in call_nodes:
+      # Check if any of the call's arguments are function parameters
+      for arg in call.args:
+        if isinstance(arg, relay.Var) and arg in param_vars:
+          return call
+
+    # Fallback: if no call directly uses parameters, return None
+    return None
+  
+  def _find_output_call(self, body):
+    """
+    Find the Call node that directly produces the function's output.
+    This traverses the body expression to find the root Call node.
+    """
+    # Handle different body types
+    if isinstance(body, relay.Call):
+      # If body is directly a Call, that's our output call
+      return body
+    elif isinstance(body, relay.TupleGetItem):
+      # If body is TupleGetItem, find the call that produces the tuple
+      return self._find_output_call(body.tuple_value)
+    elif isinstance(body, relay.Tuple):
+      # If body is a Tuple, we need to find the calls that produce each field
+      # For now, we'll just return the first Call we find in the fields
+      for field in body.fields:
+        output_call = self._find_output_call(field)
+        if output_call:
+          return output_call
+      return None
+    elif isinstance(body, relay.Let):
+      # If body is Let, the output is in the body of the Let
+      return self._find_output_call(body.body)
+    else:
+      # For other types (Var, Constant, etc.), there's no Call to mark
+      return None

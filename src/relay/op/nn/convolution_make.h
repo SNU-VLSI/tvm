@@ -34,9 +34,21 @@
 namespace tvm {
 namespace relay {
 
+// Template helper for setting in_channels conditionally
+template <typename T>
+inline void SetInChannelsIfExists(T* attrs, IndexExpr in_channels) {
+  // Default: do nothing (for types without in_channels field)
+}
+
+// Specialization for Conv2DAttrs which has in_channels field
+template <>
+inline void SetInChannelsIfExists<Conv2DAttrs>(Conv2DAttrs* attrs, IndexExpr in_channels) {
+  attrs->in_channels = std::move(in_channels);
+}
+
 template <typename T>
 inline Expr MakeConv(Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
-                     Array<IndexExpr> dilation, int groups, IndexExpr channels,
+                     Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                      Array<IndexExpr> kernel_size, std::string data_layout,
                      std::string kernel_layout, std::string out_layout, DataType out_dtype,
                      std::string op_name) {
@@ -46,6 +58,10 @@ inline Expr MakeConv(Expr data, Expr weight, Array<IndexExpr> strides, Array<Ind
   attrs->dilation = std::move(dilation);
   attrs->groups = groups;
   attrs->channels = std::move(channels);
+  
+  // Set in_channels only if the type supports it
+  SetInChannelsIfExists(attrs.get(), std::move(in_channels));
+  
   attrs->kernel_size = std::move(kernel_size);
   attrs->data_layout = std::move(data_layout);
   attrs->kernel_layout = std::move(kernel_layout);
