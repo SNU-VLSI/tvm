@@ -1180,6 +1180,58 @@ def partitionRound(mod):
 
   return mod
 
+def quantizeWeight(weight:tvm.relay.Constant, scale):
+  """
+  do 4bit quantization. but numpy's smallest data type is int8.
+  so sign extend to int8 and use only 16 values from -8 to 7.
+  """
+  data = weight.data.numpy()
+  quantized = np.round(data / scale).astype(np.int8)
+  quantized = np.clip(quantized, -8, 7)
+  quantized = tvm.nd.array(quantized)
+  return quantized
+
+def gatherQuantScaleFactors(min_max_quant_node):
+  """
+  gather conv2d weight scale and nn.bn's scale and bias.
+  traverse nodes until meet min_max_quant node.
+  From gathered scale and bias, calculate min and max values.
+  """
+  return None
+
+def calMinMaxParam(node):
+  """
+  calculate min and max values from scale and bias for this node
+  """
+  return None
+
+def insertMinMaxQuant(input:tvm.relay.Expr):
+  """
+  quantize input activation to 4bit.
+  input relay expr is not constant, so just change dtype to int4.
+  no need to construct numpy array
+  """
+
+def quantizeConv2d(conv, weight_scale):
+  """
+  convert nn.conv2d to imcflow.qconv2d with quantized weight
+  1. quantize weight. int4 type but int8 sign extension
+  2. insert min_max_quant before conv2d input if already int4 type.
+  3. change conv2d to qconv2d
+  """
+  pass
+
+def quantizeBatchNorm(bn, scale, bias):
+  """
+  convert nn.batch_norm to imcflow.qbatch_norm with quantized scale and bias
+  1. quantize scale and bias. int16 type. 
+  2. change batch_norm to qbatch_norm
+  """
+  pass
+
+def quantizeImcflowFuncs(mod, scale_factor_dict):
+  pass
+
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
     def __init__(self):
