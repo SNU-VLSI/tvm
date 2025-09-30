@@ -19,6 +19,7 @@ from tvm.contrib.imcflow import DataBlock
 
 from models.real_model import getModel
 from models import real_model2
+from models import resnet8_cifar
 
 @torch.library.custom_op("imcflow::min_max_quant", mutates_args=())
 def min_max_quant(pic: torch.Tensor, min:int, max:int) -> torch.Tensor:
@@ -164,6 +165,10 @@ def test_big():
 def test_small():
   mod, param_dict = real_model2.getModel()
   run_test("small", mod, param_dict)
+
+def test_resnet8():
+  mod, param_dict = resnet8_cifar.getModel()
+  run_test("resnet8", mod, param_dict)
 
 if __name__ == "__main__":
   tvm.testing.main()

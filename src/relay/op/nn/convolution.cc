@@ -1951,14 +1951,14 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
   const auto* param = attrs.as<ImcflowQConv2DAttrs>();
   ICHECK(param != nullptr);
 
-  DataType out_dtype = param->out_dtype;
-  if (out_dtype.bits() == 0 || out_dtype != DataType::Int(16)) {
-    reporter->GetDiagCtx().Emit(
-        Diagnostic::Error(reporter->GetSpan())
-        << "qconv2d output type must be int16."
-        << " The provided type is: " << out_dtype);
-    return false;
-  }
+  DataType out_dtype = DataType::Int(16);
+  // if (out_dtype.bits() == 0 || out_dtype != DataType::Int(16)) {
+  //   reporter->GetDiagCtx().Emit(
+  //       Diagnostic::Error(reporter->GetSpan())
+  //       << "qconv2d output type must be int16."
+  //       << " The provided type is: " << out_dtype);
+  //   return false;
+  // }
 
   if (param->meta_schedule_original_shape.size() != 0) {
     reporter->GetDiagCtx().Emit(
@@ -1980,40 +1980,71 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
   DataType weight_dtype = weight->dtype;
 
   // input type check
-  ICHECK_EQ(data_shape.size(), 6);
-  ICHECK_EQ(data_shape[4].as<IntImmNode>()->value, 4);
-  ICHECK_EQ(data_shape[5].as<IntImmNode>()->value, 8);
-  ICHECK_EQ(data_dtype, DataType::Int(32));
+  IndexExpr batch, ic, ih, iw;
+  if(param->in_node) {
+    ICHECK_EQ(data_shape.size(), 6);
+    ICHECK_EQ(data_shape[4].as<IntImmNode>()->value, 4);
+    ICHECK_EQ(data_shape[5].as<IntImmNode>()->value, 8);
+    ICHECK_EQ(data_dtype, DataType::UInt(32));
+    batch = data_shape[1];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+    ic    = param->in_channels;
+    ICHECK(ic.as<IntImmNode>()->value > 0) << "in_channels must be specified when in_node is true";
+  } else {
+    ICHECK(data_shape.size() == 4) << "data should be 4D tensor when in_node is false";
+    batch = data_shape[0];
+    ic    = data_shape[1];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+  }
 
   // weight type check
-  ICHECK_EQ(weight_shape.size(), 4);
-  ICHECK_EQ(weight_shape[2].as<IntImmNode>()->value, 256);
-  ICHECK_EQ(weight_shape[3].as<IntImmNode>()->value, 8);
-  ICHECK_EQ(weight_dtype, DataType::Int(32));
+  IndexExpr oc, kh, kw, ic_weight;
+  if(param->const_packed_node) {
+    ICHECK_EQ(weight_shape.size(), 4);
+    ICHECK_EQ(weight_shape[2].as<IntImmNode>()->value, 256);
+    ICHECK_EQ(weight_shape[3].as<IntImmNode>()->value, 8);
+    ICHECK_EQ(weight_dtype, DataType::UInt(32));
+    oc = param->channels;
+    ic_weight = param->in_channels;
+    kh = param->kernel_size[0];
+    kw = param->kernel_size[1];
+  } else {
+    ICHECK_EQ(weight_shape.size(), 4);
+    // ICHECK_EQ(weight_dtype, DataType::Int(4)) << "weight should be int4 tensor when const_packed_node is false";
+    oc = weight_shape[0];
+    ic_weight = weight_shape[1];
+    kh = weight_shape[2];
+    kw = weight_shape[3];
+  }
 
   // consistency check
-  ICHECK_EQ(data_shape[1].as<IntImmNode>()->value, weight_shape[1].as<IntImmNode>()->value)
+  ICHECK_EQ(ic.as<IntImmNode>()->value, ic_weight.as<IntImmNode>()->value)
       << "The input channels of data and weight should be equal, but got "
       << data_shape[1] << " and " << weight_shape[0];
+  
+  // assign output shape
+  if(param->out_node) {
+    Array<IndexExpr> oshape({0,0,0,0,64});
+    IndexExpr pad_h, pad_w;
+    GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
+    oshape.Set(0, batch);
+    oshape.Set(1, ceildiv(oc, 64));
+    oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
+    oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
+    reporter->Assign(types[2], TensorType(oshape, out_dtype));
+  } else {
+    Array<IndexExpr> oshape({0,0,0,0});
+    IndexExpr pad_h, pad_w;
+    GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
+    oshape.Set(0, batch);
+    oshape.Set(1, oc);
+    oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
+    oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
+    reporter->Assign(types[2], TensorType(oshape, out_dtype));
+  }
 
-  IndexExpr batch = data_shape[0];
-  IndexExpr ic_group_num = data_shape[1];
-  IndexExpr ih = data_shape[2];
-  IndexExpr iw = data_shape[3];
-
-  IndexExpr kh = param->kernel_size[0];
-  IndexExpr kw = param->kernel_size[1];
-  IndexExpr oc = param->channels;
-
-  Array<IndexExpr> oshape({0,0,0,0,4,16});
-  IndexExpr pad_h, pad_w;
-  GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
-  oshape.Set(0, batch);
-  oshape.Set(1, ceildiv(oc, 64));
-  oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
-  oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
-
-  reporter->Assign(types[2], TensorType(oshape, out_dtype));
   return true;
 }
 

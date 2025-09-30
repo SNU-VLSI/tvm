@@ -268,147 +268,173 @@ class makeToQuantizedForm:
       return func #TODO: returning func is right???
 
 def get_imcflow_supported_regions(mod, include_first_conv=False):
-    """
-    Traverse the graph and find regions of imcflow-supported operators.
-    A region is a list of consecutive nodes that are supported. This function
-    finds the maximal connected subgraphs of supported operators.
+  """
+  Traverse the graph and find regions of imcflow-supported operators.
+  A region is a list of consecutive nodes that are supported. This function
+  finds the maximal connected subgraphs of supported operators.
 
-    This function should be called with a module containing only the main function.
+  This function should be called with a module containing only the main function.
 
-    Parameters
-    ----------
-    mod : tvm.IRModule
-        The module to be processed.
+  Parameters
+  ----------
+  mod : tvm.IRModule
+    The module to be processed.
 
-    Returns
-    -------
-    list[list[tvm.relay.expr.Call]]
-        A list of regions, where each region is a list of supported Call nodes.
-    """
-    # A set of imcflow-supported primitive operators.
-    # This list should be updated based on the actual capabilities of the imcflow backend.
-    _SUPPORTED_OPS = {
-        "nn.conv2d",
-        "qnn.conv2d",
-        "nn.dense",
-        "qnn.dense",
-        "nn.relu",
-        "nn.batch_norm",
-        "nn.bias_add",
-        "add",
-        "multiply",
-        "qnn.quantize",
-        "qnn.dequantize",
-        "qnn.requantize",
-        "reshape",
-        "nn.avg_pool2d",
-        "nn.global_avg_pool2d",
-        "nn.max_pool2d",
-        "clip",
-    }
+  Returns
+  -------
+  list[list[tvm.relay.expr.Call]]
+    A list of regions, where each region is a list of supported Call nodes.
+  """
+  # A set of imcflow-supported primitive operators.
+  # This list should be updated based on the actual capabilities of the imcflow backend.
+  _SUPPORTED_OPS = {
+    "nn.imcflow_qconv",
+    "qnn.imcflow_min_max_quantize",
+    "imcflow.fused_batch_norm",
+    "nn.relu",
+    "nn.bias_add",
+    "add",
+    "multiply",
+  }
 
-    def is_first_conv(call):
-        return isinstance(call.op, Op) and call.op.name == "nn.conv2d" and not meet_first_conv
+  def is_first_conv(call):
+    return isinstance(call.op, Op) and call.op.name == "nn.conv2d" and not meet_first_conv
 
-    def is_supported(call):
-        return isinstance(call.op, Op) and call.op.name in _SUPPORTED_OPS
+  def is_supported(call):
+    return isinstance(call.op, Op) and call.op.name in _SUPPORTED_OPS
 
-    class NodeCollector(ExprVisitor):
-        """Collects all call nodes in the expression."""
+  class NodeCollector(ExprVisitor):
+    """Collects all call nodes in the expression."""
 
-        def __init__(self):
-            super().__init__()
-            self.call_nodes = []
+    def __init__(self):
+      super().__init__()
+      self.call_nodes = []
 
-        def visit_call(self, call):
-            super().visit_call(call)
-            self.call_nodes.append(call)
+    def visit_call(self, call):
+      super().visit_call(call)
+      self.call_nodes.append(call)
 
-    # 1. Collect all call nodes from the main function.
-    main_func = mod["main"]
-    collector = NodeCollector()
-    collector.visit(main_func)
+  # 1. Run type inference to ensure checked_type is available, then collect call nodes.
+  # typed_mod = relay.transform.InferType()(mod)
+  typed_mod = mod
+  main_func = typed_mod["main"]
+  collector = NodeCollector()
+  collector.visit(main_func)
 
-    # 2. Filter for supported nodes.
-    supported_calls = []
-    meet_first_conv = False
-    for call in collector.call_nodes:
-        if is_first_conv(call):
-            meet_first_conv = True
-            if not include_first_conv:
-                continue
-        if is_supported(call):
-            supported_calls.append(call)
-    supported_set = set(supported_calls)
+  # Helper to determine if a dtype string is integer type
+  def _is_int_dtype(dt: str) -> bool:
+    return isinstance(dt, str) and (dt.startswith("int") or dt.startswith("uint"))
 
-    if not supported_calls:
-        return []
+  # Fetch dtype for an expression if it is a TensorType; otherwise None
+  def _expr_tensor_dtype(e):
+    try:
+      ty = e.checked_type
+    except Exception:
+      return None
+    if isinstance(ty, relay.ty.TensorType):
+      return ty.dtype
+    return None
 
-    # 3. Build the graph of supported nodes.
-    # Map each supported call node to a unique integer ID.
-    node_to_id = {node: i for i, node in enumerate(supported_calls)}
-    adj = [[] for _ in range(len(supported_calls))]
+  # Check that all tensor inputs to a call are integer-typed
+  def _inputs_are_int(call: Call) -> bool:
+    for arg in call.args:
+      # For tuples, check each field if tensor
+      if isinstance(arg.checked_type, relay.ty.TupleType):
+        # Tuple inputs are rare for these ops, but handle gracefully
+        for field_ty in arg.checked_type.fields:
+          if isinstance(field_ty, relay.ty.TensorType):
+            if not _is_int_dtype(field_ty.dtype):
+              return False
+        continue
+      dt = _expr_tensor_dtype(arg)
+      if dt is None:
+        # Non-tensor inputs (e.g., attrs) or unknown types are ignored
+        continue
+      if not _is_int_dtype(dt):
+        return False
+    return True
 
-    memo = {}
-    tuple_get_nodes = {}
+  # 2. Filter for supported nodes.
+  supported_calls = []
+  meet_first_conv = False
+  for call in collector.call_nodes:
+    if is_first_conv(call):
+      meet_first_conv = True
+      if not include_first_conv:
+        continue
+    if is_supported(call) and _inputs_are_int(call):
+      supported_calls.append(call)
+  supported_set = set(supported_calls)
 
-    def get_producer(expr):
-        """Trace back through expressions to find the producing supported call node."""
-        if expr in memo:
-            return memo[expr]
+  if not supported_calls:
+    return []
 
-        if expr in supported_set:
-            memo[expr] = expr
-            return expr
+  # 3. Build the graph of supported nodes.
+  # Map each supported call node to a unique integer ID.
+  node_to_id = {node: i for i, node in enumerate(supported_calls)}
+  adj = [[] for _ in range(len(supported_calls))]
 
-        if isinstance(expr, TupleGetItem):
-            producer = get_producer(expr.tuple_value)
-            memo[expr] = producer
-            return producer
+  memo = {}
+  tuple_get_nodes = {}
 
-        memo[expr] = None
-        return None
+  def get_producer(expr):
+    """Trace back through expressions to find the producing supported call node."""
+    if expr in memo:
+      return memo[expr]
 
-    for i, call_node in enumerate(supported_calls):
-        for arg in call_node.args:
-            producer = get_producer(arg)
-            if producer:
-                # producer is already guaranteed to be in supported_set by get_producer
-                j = node_to_id[producer]
-                adj[i].append(j)
-                adj[j].append(i)
+    if expr in supported_set:
+      memo[expr] = expr
+      return expr
 
-                if isinstance(arg, TupleGetItem):
-                    # record related tuple get item node
-                    tuple_get_nodes[producer] = arg
+    if isinstance(expr, TupleGetItem):
+      producer = get_producer(expr.tuple_value)
+      memo[expr] = producer
+      return producer
 
-    # 4. Find connected components (these are the maximal regions).
-    regions = []
-    visited = set()
-    for i in range(len(supported_calls)):
-        node = supported_calls[i]
-        if node not in visited:
-            component = []
-            q = [node]
-            visited.add(node)
-            head = 0
-            while head < len(q):
-                u = q[head]
-                head += 1
-                component.append(u)
-                if u in tuple_get_nodes:
-                    component.append(tuple_get_nodes[u])
-                u_idx = node_to_id[u]
-                for v_idx in adj[u_idx]:
-                    v = supported_calls[v_idx]
-                    if v not in visited:
-                        visited.add(v)
-                        q.append(v)
-            regions.append(component)
+    memo[expr] = None
+    return None
 
-    return regions
+  for i, call_node in enumerate(supported_calls):
+    for arg in call_node.args:
+      producer = get_producer(arg)
+      if producer:
+        # producer is already guaranteed to be in supported_set by get_producer
+        j = node_to_id[producer]
+        adj[i].append(j)
+        adj[j].append(i)
+
+        if isinstance(arg, TupleGetItem):
+          # record related tuple get item node
+          tuple_get_nodes[producer] = arg
+
+  # 4. Find connected components (these are the maximal regions).
+  regions = []
+  visited = set()
+  for i in range(len(supported_calls)):
+    node = supported_calls[i]
+    if node not in visited:
+      component = []
+      q = [node]
+      visited.add(node)
+      head = 0
+      while head < len(q):
+        u = q[head]
+        head += 1
+        component.append(u)
+        if u in tuple_get_nodes:
+          component.append(tuple_get_nodes[u])
+        u_idx = node_to_id[u]
+        for v_idx in adj[u_idx]:
+          v = supported_calls[v_idx]
+          if v not in visited:
+            visited.add(v)
+            q.append(v)
+      regions.append(component)
+
+  return regions
 
 def partitionImcflowSubGraph(mod):
+  mod = relay.transform.InferType()(mod)
   region_list = get_imcflow_supported_regions(mod)
   mod = imcflow.ImcflowAnnotationPass(region_list)(mod)
   mod = transform.MergeCompilerRegions()(mod)
@@ -485,12 +511,14 @@ def split_conv_to_atomic(mod, OldParamDict):
             # Extract input and kernel shapes
             _, IC, IH, IW = _get_type(expr.args[0])  # Input shape
             OC, _, KH, KW = _get_type(expr.args[1])  # Kernel shape
+            padding = expr.attrs.padding
+            strides = expr.attrs.strides
 
             if not ImcflowDeviceConfig.is_supported_kernel(KH, KW):
               return expr
 
             for PostNode in PostProcess:
-              assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm"), op.get("divide"),
+              assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("imcflow.fused_batch_norm"), op.get("divide"),
                                     op.get("qnn.imcflow_min_max_quantize"), op.get("qnn.imcflow_nu_quantize")], "Unsupported post process node"
 
             groups = expr.attrs.groups
@@ -555,18 +583,29 @@ def split_conv_to_atomic(mod, OldParamDict):
                 oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
                 for ic_id in range(ic_split_num if not IsDepthWise else 1):
                     ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
-                    conv_nodes[(oc_id, ic_id)] = relay.nn.conv2d(
-                        split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
-                        split_conv_weights[oc_id][ic_id],
-                        channels=oc_size,
-                        in_channels=IC, # in_channels should be the same as original conv2d for layout transform pass
-                        kernel_size=(KH, KW),
-                        strides=expr.attrs.strides,
-                        padding=expr.attrs.padding,
-                        data_layout=expr.attrs.data_layout,
-                        kernel_layout=expr.attrs.kernel_layout,
-                        groups=1 if not IsDepthWise else oc_size
+                    conv_nodes[(oc_id, ic_id)] = imcflow_qconv2d(
+                      split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
+                      split_conv_weights[oc_id][ic_id],
+                      in_channels=ic_size if not IsDepthWise else 1,
+                      channels=oc_size,
+                      kernel_size=(KH, KW),
+                      padding=padding,
+                      strides=strides,
+                      groups=1 if not IsDepthWise else oc_size,
+                      out_dtype="int16"
                     )
+                    # conv_nodes[(oc_id, ic_id)] = relay.nn.conv2d(
+                    #     split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
+                    #     split_conv_weights[oc_id][ic_id],
+                    #     channels=oc_size,
+                    #     in_channels=IC, # in_channels should be the same as original conv2d for layout transform pass
+                    #     kernel_size=(KH, KW),
+                    #     strides=expr.attrs.strides,
+                    #     padding=expr.attrs.padding,
+                    #     data_layout=expr.attrs.data_layout,
+                    #     kernel_layout=expr.attrs.kernel_layout,
+                    #     groups=1 if not IsDepthWise else oc_size
+                    # )
 
             # If input channels were split, sum the resulting conv2d outputs for each out channel slice
             if IsICSplited and (not IsDepthWise):
@@ -596,6 +635,10 @@ def split_conv_to_atomic(mod, OldParamDict):
                     self.removeSplitedArg(PostNode.args[1])
                   elif PostNode.op == op.get("nn.batch_norm"):
                     for i in range(1, 5):
+                      if isinstance(PostNode.args[i], relay.Var):
+                        self.removeSplitedArg(PostNode.args[i])
+                  elif PostNode.op == op.get("imcflow.fused_batch_norm"):
+                    for i in range(1, 3):
                       if isinstance(PostNode.args[i], relay.Var):
                         self.removeSplitedArg(PostNode.args[i])
 
@@ -642,6 +685,27 @@ def split_conv_to_atomic(mod, OldParamDict):
                           SplitParam = relay.Constant(tvm.nd.array(nd_array))
                         NewParams.append(SplitParam)
                       post_nodes[oc_id] = relay.nn.batch_norm(post_nodes[oc_id], *NewParams)[0]
+                    elif PostNode.op == op.get("imcflow.fused_batch_norm"):
+                      NewParams = []
+                      for i in range(1, 3):
+                        if isinstance(PostNode.args[i], relay.Var):
+                          ParamOldName = PostNode.args[i].name_hint
+                          ParamNewName = f"{ParamOldName}_oc{oc_id}"
+                          ParamNewType = relay.TensorType([oc_size], dtype=PostNode.args[i].type_annotation.dtype)
+                          SplitParam = relay.Var(ParamNewName, ParamNewType)
+                          OldParam = self.OldParamDict[ParamOldName]
+                          if isinstance(OldParam, tvm.nd.NDArray):
+                            NewData = OldParam.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                            self.addParamVar(SplitParam, tvm.nd.array(NewData, device=OldParam.device))
+                          else:
+                            NewData = OldParam[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                            self.addParamVar(SplitParam, tvm.nd.array(NewData))
+                        else:
+                          assert isinstance(PostNode.args[i], relay.Constant), "PostNode.args[i] must be a Var or Constant"
+                          nd_array = PostNode.args[i].data.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
+                          SplitParam = relay.Constant(tvm.nd.array(nd_array))
+                        NewParams.append(SplitParam)
+                      post_nodes[oc_id] = imcflow_batch_norm(post_nodes[oc_id], *NewParams)[0]
 
                 concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
             else:
@@ -650,17 +714,20 @@ def split_conv_to_atomic(mod, OldParamDict):
             return concat_node
 
           def visit_call(self, call):
-            if call.op == op.get("nn.conv2d"):
+            if call.op == op.get("nn.imcflow_qconv"):
               PostProcess = self.PostProcess[:]
               self.PostProcess = []
               NewCall = super().visit_call(call)
               NewCall = self.split_and_optimize_conv2d(NewCall, mod, PostProcess)
               return NewCall
-            elif call.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm")]:
+            elif call.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm"), op.get("imcflow.fused_batch_norm")]:
               self.PostProcess.append(call)
               NewCall = super().visit_call(call)
               if hasattr(call, "ShouldDelete"):
-                return relay.Tuple([NewCall.args[0]]) if call.op == op.get("nn.batch_norm") else NewCall.args[0]
+                if call.op in [op.get("nn.batch_norm"), op.get("imcflow.fused_batch_norm")]:
+                  return relay.Tuple([NewCall.args[0]]) 
+                else:
+                  return NewCall.args[0]
               else:
                 return NewCall
             else:
@@ -1183,7 +1250,7 @@ class AnnotGenerator:
                 RecurInputRegions = self.getRegion(getInputNodes(InputNode, True))
                 if InputRegion in RecurInputRegions:
                   try:
-                    CandidateRegions.pop(InputRegion)
+                    CandidateRegions.remove(InputRegion)
                   except:
                     pass
 
@@ -1255,6 +1322,7 @@ def partitionRound(mod):
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
       target_mod = transform.PartitionGraph()(target_mod)
 
       for new_gv, new_func in target_mod.functions.items():
@@ -1265,6 +1333,58 @@ def partitionRound(mod):
           mod[new_gv] = new_func
 
   return mod
+
+def quantizeWeight(weight, scale):
+  """
+  do 4bit quantization. but numpy's smallest data type is int8.
+  so sign extend to int8 and use only 16 values from -8 to 7.
+  """
+  data = weight.data.numpy()
+  quantized = np.round(data / scale).astype(np.int8)
+  quantized = np.clip(quantized, -8, 7)
+  quantized = tvm.nd.array(quantized)
+  return quantized
+
+def gatherQuantScaleFactors(min_max_quant_node):
+  """
+  gather conv2d weight scale and nn.bn's scale and bias.
+  traverse nodes until meet min_max_quant node.
+  From gathered scale and bias, calculate min and max values.
+  """
+  return None
+
+def calMinMaxParam(node):
+  """
+  calculate min and max values from scale and bias for this node
+  """
+  return None
+
+def insertMinMaxQuant(input):
+  """
+  quantize input activation to 4bit.
+  input relay expr is not constant, so just change dtype to int4.
+  no need to construct numpy array
+  """
+
+def quantizeConv2d(conv, weight_scale):
+  """
+  convert nn.conv2d to imcflow.qconv2d with quantized weight
+  1. quantize weight. int4 type but int8 sign extension
+  2. insert min_max_quant before conv2d input if already int4 type.
+  3. change conv2d to qconv2d
+  """
+  pass
+
+def quantizeBatchNorm(bn, scale, bias):
+  """
+  convert nn.batch_norm to imcflow.qbatch_norm with quantized scale and bias
+  1. quantize scale and bias. int16 type. 
+  2. change batch_norm to qbatch_norm
+  """
+  pass
+
+def quantizeImcflowFuncs(mod, scale_factor_dict):
+  pass
 
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
