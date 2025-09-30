@@ -1322,6 +1322,8 @@ def partitionRound(mod):
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
+      printModel("resnet8_eval", target_mod, {}, f"{name}_round_partitioned")
+      exit(1)
       target_mod = transform.PartitionGraph()(target_mod)
 
       for new_gv, new_func in target_mod.functions.items():

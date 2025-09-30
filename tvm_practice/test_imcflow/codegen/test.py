@@ -138,7 +138,6 @@ def run_test_evl(test_name, mod, param_dict):
   # split imcflow function conv to atomic ops
   eval_mod, eval_param_dict = imcflow_transform.split_conv_to_atomic(eval_mod, eval_param_dict)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_atom_split")
-  exit(0)
 
   # merge composite OPs
   eval_mod = imcflow_transform.merge_composite_ops(eval_mod)
@@ -150,6 +149,7 @@ def run_test_evl(test_name, mod, param_dict):
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_annot")
+  exit(0)
 
   eval_mod = imcflow.flattenImcflowTopFuncs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_flatten")
