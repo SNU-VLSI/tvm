@@ -19,6 +19,7 @@ import os
 
 from models import real_model, real_model2, test_models
 from models import small_model
+from models import resnet8_cifar
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
@@ -137,6 +138,7 @@ def run_test_evl(test_name, mod, param_dict):
   # split imcflow function conv to atomic ops
   eval_mod, eval_param_dict = imcflow_transform.split_conv_to_atomic(eval_mod, eval_param_dict)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_atom_split")
+  exit(0)
 
   # merge composite OPs
   eval_mod = imcflow_transform.merge_composite_ops(eval_mod)
@@ -154,7 +156,6 @@ def run_test_evl(test_name, mod, param_dict):
 
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
-  exit(1)
 
   # eval_mod = imcflow_transform.PackingInserter()(eval_mod)
   # printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
@@ -257,6 +258,10 @@ def test_model_1():
   """Generate evaluation for model 1"""
   mod, param_dict = test_models.get_model1()
   run_test_evl("model_1", mod, param_dict)
+
+def test_resnet8():
+  mod, param_dict = resnet8_cifar.getModel()
+  run_test_evl("resnet8", mod, param_dict)
 
 if __name__ == "__main__":
   tvm.testing.main()

@@ -1701,8 +1701,9 @@ bool ImcflowBatchNormRel(const Array<Type>& types, int num_inputs, const Attrs& 
   // new running variance, saved mean and saved variance (the latter are all
   // vectors of length dim)
   std::vector<Type> fields;
-  auto vec_ty = TensorType(Array<IndexExpr>({data->shape[axis]}), data->dtype);
-  fields.push_back(TensorType(data->shape, data->dtype));
+  // auto vec_ty = TensorType(Array<IndexExpr>({data->shape[axis]}), data->dtype);
+  auto vec_ty = TensorType(Array<IndexExpr>({data->shape[axis]}), DataType::Int(16));
+  fields.push_back(TensorType(data->shape, DataType::Int(16)));
   fields.push_back(vec_ty);
   fields.push_back(vec_ty);
   reporter->Assign(types[3], TupleType(Array<Type>(fields)));

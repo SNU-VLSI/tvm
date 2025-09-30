@@ -61,7 +61,6 @@ def run_test(test_name, mod, param_dict):
   eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
   eval_mod = transform.InferType()(eval_mod)
   printModel(test_name, eval_mod, eval_param_dict, "after_bind")
-  exit(0)
 
   eval_mod = transform.MergeComposite(imcflow.pattern_table())(eval_mod)
   printModel(test_name, eval_mod, eval_param_dict, "after_merge")
