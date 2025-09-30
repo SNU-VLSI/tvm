@@ -4455,7 +4455,7 @@ bool ImcflowPackingRel(const Array<Type>& types, int num_inputs, const Attrs& at
   // dimensions in the input shape
   Array<IndexExpr> data_shape;
   data_shape = data->shape;
-  reporter->Assign(types[1], TensorType(oshape, DataType::Int(8)));
+  reporter->Assign(types[1], TensorType(oshape, attr->dtype));
   return true;
 }
 Expr MakeImcflowPacking(Expr data, Array<Integer> newshape, DataType dtype) {
@@ -4496,7 +4496,7 @@ bool ImcflowUnPackingRel(const Array<Type>& types, int num_inputs, const Attrs& 
   // dimensions in the input shape
   Array<IndexExpr> data_shape;
   data_shape = data->shape;
-  reporter->Assign(types[1], TensorType(oshape, DataType::Float(32)));
+  reporter->Assign(types[1], TensorType(oshape, attr->dtype));
   return true;
 }
 Expr MakeImcflowUnPacking(Expr data, Array<Integer> newshape, DataType dtype) {
