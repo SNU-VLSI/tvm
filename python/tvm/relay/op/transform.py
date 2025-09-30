@@ -20,6 +20,7 @@
 
 from typing import Optional
 
+import tvm
 from ...tir import expr as _expr
 from ..expr import Constant, Expr, Tuple, TupleWrapper, const
 from . import _make
@@ -2020,6 +2021,18 @@ def imcflow_packing(data, newshape, out_dtype="float32"):
         newshape = list(newshape.data.numpy())
     if isinstance(newshape, int):
         newshape = [newshape]
+    if isinstance(newshape, tvm.ir.container.Array):
+        # Handle TensorType.shape which is of type tvm.ir.container.Array
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
     if isinstance(newshape, (tuple, list)):
         tempshape = []
         for shape in newshape:
@@ -2038,6 +2051,18 @@ def imcflow_unpacking(data, newshape, out_dtype="float32"):
         newshape = list(newshape.data.numpy())
     if isinstance(newshape, int):
         newshape = [newshape]
+    if isinstance(newshape, tvm.ir.container.Array):
+        # Handle TensorType.shape which is of type tvm.ir.container.Array
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
     if isinstance(newshape, (tuple, list)):
         tempshape = []
         for shape in newshape:

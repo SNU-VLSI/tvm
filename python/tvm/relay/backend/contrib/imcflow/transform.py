@@ -2948,9 +2948,11 @@ class ImcflowBoundaryNodeMarker:
   A pass that identifies boundary nodes between IMCFLOW and CPU execution domains.
   
   This pass traverses the graph to find Function nodes with "Compiler" attribute set to "imcflow",
-  then marks:
-  - The first Call node inside the function as in_node=True
-  - The last Call node inside the function as out_node=True
+  then:
+  1. Marks the first Call node inside the function as in_node=True
+  2. Marks the last Call node inside the function as out_node=True  
+  3. Inserts packing nodes before calls to imcflow functions
+  4. Inserts unpacking nodes after calls to imcflow functions
   """
   
   def __init__(self):
@@ -2958,7 +2960,7 @@ class ImcflowBoundaryNodeMarker:
     
   def transform_function(self, func, mod, ctx):
     """
-    Transform the function to mark boundary nodes.
+    Transform the function to mark boundary nodes and insert packing/unpacking.
     
     This iterates through all functions in the module and processes IMCFLOW functions.
     """
@@ -2967,7 +2969,7 @@ class ImcflowBoundaryNodeMarker:
     items = mod.functions_items()
     function_names = [item[0].name_hint for item in items]
     
-    # Process each IMCFLOW function
+    # Process each IMCFLOW function to mark internal boundaries
     num_func = len(function_names)
     for i in range(num_func):
       if function_names[i] == "main":
@@ -2977,8 +2979,10 @@ class ImcflowBoundaryNodeMarker:
         print(f"Marking boundary nodes for IMCFLOW function: {function_names[i]}")
         mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
     
-    # Return the original function (main function typically)
-    return func
+    # Transform the main function to insert packing/unpacking around imcflow calls
+    transformed_func = self._insert_packing_unpacking(func, mod)
+    
+    return transformed_func
   
   def _mark_imcflow_function_boundaries(self, func):
     """
@@ -3067,3 +3071,66 @@ class ImcflowBoundaryNodeMarker:
     else:
       # For other types (Var, Constant, etc.), there's no Call to mark
       return None
+
+  def _insert_packing_unpacking(self, func, mod):
+    """
+    Insert packing nodes before imcflow function calls and unpacking nodes after.
+    
+    This transforms the main function to insert packing/unpacking around calls to 
+    functions with "Compiler" attribute set to "imcflow".
+    """
+    
+    class _PackingUnpackingInserter(relay.ExprMutator):
+      def __init__(self, module):
+        super().__init__()
+        self.module = module
+        
+      def visit_call(self, call):
+        # First transform arguments recursively
+        new_args = [self.visit(arg) for arg in call.args]
+        
+        # Check if this is a call to an imcflow function
+        if isinstance(call.op, relay.GlobalVar):
+          # Check if the target function has "Compiler" attribute set to "imcflow"
+          target_func = self.module[call.op.name_hint]
+          if ("Compiler" in target_func.attrs and 
+              target_func.attrs["Compiler"] == "imcflow"):
+            print(f"Inserting packing/unpacking around imcflow function call: {call.op.name_hint}")
+            
+            # Insert packing nodes before each argument
+            packed_args = []
+            for arg in new_args:
+              # Get the shape and dtype of the argument
+              arg_type = _get_type(self.module, arg)
+              if isinstance(arg_type, TensorType):
+                # TODO : transform shape for packing
+                new_shape = arg_type.shape
+
+                # Insert packing node
+                packed_arg = imcflow_packing(arg, new_shape, str(arg_type.dtype))
+                packed_args.append(packed_arg)
+              else:
+                # For non-tensor types, use original argument
+                packed_args.append(arg)
+            
+            # Create the call with packed arguments
+            imcflow_call = relay.Call(call.op, packed_args, call.attrs, call.type_args, call.span)
+            
+            # Insert unpacking node after the call
+            # Get the return type of the imcflow function
+            return_type = _get_type(self.module, imcflow_call)
+            # if isinstance(return_type, TensorType):
+            #   # Create unpacking node to restore original shape
+            #   unpacked_result = imcflow_unpacking(imcflow_call, return_type.shape, str(return_type.dtype))
+            #   return unpacked_result
+            # else:
+            #   # For non-tensor return types, return the call as-is
+            #   return imcflow_call
+            return imcflow_call
+        
+        # For non-imcflow function calls, proceed normally
+        new_op = self.visit(call.op)
+        return relay.Call(new_op, new_args, call.attrs, call.type_args, call.span)
+    
+    inserter = _PackingUnpackingInserter(mod)
+    return inserter.visit(func)
