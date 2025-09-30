@@ -27,6 +27,7 @@ def getModel_(input_shape):
   y = relay.nn.conv2d(
       input,
       relay.var("weight1", shape=(16, 3, 3, 3), dtype="float32"),
+      in_channels=3,
       channels=16,
       kernel_size=(3, 3),
       padding=(1, 1),
@@ -41,7 +42,7 @@ def getModel_(input_shape):
 
   # basic block 1
   residual = y
-  y = imcflow_min_max_quantize(y, relay.var("quant_min_1", shape=(1,), dtype="int16"), relay.var("quant_max_1", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_1", shape=(), dtype="int16"), relay.var("quant_max_1", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y = imcflow_qconv2d(
     y,
     relay.var("weight2_1", shape=(16,16,3,3), dtype="int4"),
@@ -52,7 +53,7 @@ def getModel_(input_shape):
     out_dtype="int16"
   )
   y = imcflow_batch_norm(y, relay.var("fused_scale1", shape=(16,), dtype="int16"), relay.var("fused_bias1", shape=(16,), dtype="int16"))[0]
-  y = imcflow_min_max_quantize(y, relay.var("quant_min_2", shape=(1,), dtype="int16"), relay.var("quant_max_2", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_2", shape=(), dtype="int16"), relay.var("quant_max_2", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y = imcflow_qconv2d(
     y,
     relay.var("weight2_2", shape=(16,16,3,3), dtype="int4"),
@@ -67,7 +68,7 @@ def getModel_(input_shape):
 
   # basic block 2
   residual = y
-  y = imcflow_min_max_quantize(y, relay.var("quant_min_3", shape=(1,), dtype="int16"), relay.var("quant_max_3", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_3", shape=(), dtype="int16"), relay.var("quant_max_3", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y = imcflow_qconv2d(
     y,
     relay.var("weight3_1", shape=(32,16,3,3), dtype="int4"),
@@ -79,7 +80,7 @@ def getModel_(input_shape):
     out_dtype="int16"
   )
   y = imcflow_batch_norm(y, relay.var("fused_scale3", shape=(32,), dtype="int16"), relay.var("fused_bias3", shape=(32,), dtype="int16"))[0]
-  y = imcflow_min_max_quantize(y, relay.var("quant_min_4", shape=(1,), dtype="int16"), relay.var("quant_max_4", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_4", shape=(), dtype="int16"), relay.var("quant_max_4", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y = imcflow_qconv2d(
     y,
     relay.var("weight3_2", shape=(32,32,3,3), dtype="int4"),
@@ -91,7 +92,7 @@ def getModel_(input_shape):
   )
   y = imcflow_batch_norm(y, relay.var("fused_scale4", shape=(32,), dtype="int16"), relay.var("fused_bias4", shape=(32,), dtype="int16"))[0]
 
-  y_residual = imcflow_min_max_quantize(residual, relay.var("quant_min_4_2", shape=(1,), dtype="int16"), relay.var("quant_max_4_2", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y_residual = imcflow_min_max_quantize(residual, relay.var("quant_min_4_2", shape=(), dtype="int16"), relay.var("quant_max_4_2", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y_residual = imcflow_qconv2d(
     y_residual,
     relay.var("weight3_0", shape=(32,16,1,1), dtype="int4"),
@@ -101,12 +102,12 @@ def getModel_(input_shape):
     strides=(2,2),
     out_dtype="int16"
   )
-  y_residual = relay.var("bn_out_f_1", shape=(32,), dtype="int16") * y_residual + relay.var("bn_out_f_0", shape=(32,), dtype="int16")
+  y_residual = relay.var("bn_out_f_1", shape=(32,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_0", shape=(32,1,1), dtype="int16")
   y = y + y_residual
 
   # basic block 3
   residual = y
-  y = imcflow_min_max_quantize(y, relay.var("quant_min_5", shape=(1,), dtype="int16"), relay.var("quant_max_5", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_5", shape=(), dtype="int16"), relay.var("quant_max_5", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y = imcflow_qconv2d(
     y,
     relay.var("weight4_1", shape=(64,32,3,3), dtype="int4"),
@@ -118,7 +119,7 @@ def getModel_(input_shape):
     out_dtype="int16"
   )
   y = imcflow_batch_norm(y, relay.var("fused_scale5", shape=(64,), dtype="int16"), relay.var("fused_bias5", shape=(64,), dtype="int16"))[0]
-  y = imcflow_min_max_quantize(y, relay.var("quant_min_6", shape=(1,), dtype="int16"), relay.var("quant_max_6", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_6", shape=(), dtype="int16"), relay.var("quant_max_6", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y = imcflow_qconv2d(
     y,
     relay.var("weight4_2", shape=(64,64,3,3), dtype="int4"),
@@ -130,7 +131,7 @@ def getModel_(input_shape):
   )
   y = imcflow_batch_norm(y, relay.var("fused_scale6", shape=(64,), dtype="int16"), relay.var("fused_bias6", shape=(64,), dtype="int16"))[0]
 
-  y_residual = imcflow_min_max_quantize(residual, relay.var("quant_min_6_2", shape=(1,), dtype="int16"), relay.var("quant_max_6_2", shape=(1,), dtype="int16"), axis=1, out_dtype="int4")
+  y_residual = imcflow_min_max_quantize(residual, relay.var("quant_min_6_2", shape=(), dtype="int16"), relay.var("quant_max_6_2", shape=(), dtype="int16"), axis=1, out_dtype="int4")
   y_residual = imcflow_qconv2d(
     y_residual,
     relay.var("weight4_0", shape=(64,32,1,1), dtype="int4"),
@@ -140,7 +141,7 @@ def getModel_(input_shape):
     strides=(2,2),
     out_dtype="int16"
   )
-  y_residual = relay.var("bn_out_f_3", shape=(64,), dtype="int16") * y_residual + relay.var("bn_out_f_2", shape=(64,), dtype="int16")
+  y_residual = relay.var("bn_out_f_3", shape=(64,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_2", shape=(64,1,1), dtype="int16")
 
   y = y + y_residual
 

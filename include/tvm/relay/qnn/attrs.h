@@ -131,6 +131,7 @@ struct ImcflowMinMaxQuantizeAttrs : public tvm::AttrsNode<ImcflowMinMaxQuantizeA
   DataType out_dtype;
   DataType param_dtype;
   int axis;
+  int channel;
 
   TVM_DECLARE_ATTRS(ImcflowMinMaxQuantizeAttrs, "relay.attrs.ImcflowMinMaxQuantizeAttrs") {
     TVM_ATTR_FIELD(out_dtype).describe("Output data type, always int4.").set_default(DataType::Float(32));
@@ -139,6 +140,10 @@ struct ImcflowMinMaxQuantizeAttrs : public tvm::AttrsNode<ImcflowMinMaxQuantizeA
         .describe(
             "The output channel axis for channel wise quantization. Default value is -1,"
             "which corresponds to the last axis.")
+        .set_default(-1);
+    TVM_ATTR_FIELD(channel)
+        .describe(
+            "The number of channels. we need this retrieve the channel number after padding inserted")
         .set_default(-1);
   }
 };

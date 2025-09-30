@@ -1614,6 +1614,7 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
   tvm::String auto_scheduler_rewritten_layout;   // The layout after auto-scheduler's layout rewrite
   Array<PrimExpr> meta_schedule_original_shape;  // The original shape of the weights
   DataType out_dtype;
+  bool const_packed_node;
 
   TVM_DECLARE_ATTRS(ImcflowQConv2DAttrs, "relay.attrs.ImcflowQConv2DAttrs") {
     TVM_ATTR_FIELD(strides)
@@ -1660,11 +1661,12 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
             "Dimension ordering of output. Can be 'NCHW', 'NHWC', etc."
             "'N', 'C', 'H', 'W' stands for batch, channel, height, and width"
             "dimensions respectively. Default to be same as input layout.");
-
-    // use 0 bits to indicate none.
-    TVM_ATTR_FIELD(out_dtype)
+    TVM_ATTR_FIELD(out_dtype) // use 0 bits to indicate none.
         .set_default(NullValue<DataType>())
         .describe("Output data type, set to explicit type under mixed precision setting");
+    TVM_ATTR_FIELD(const_packed_node)
+        .set_default(false)
+        .describe("Whether the weight is a constant packed node");
   }
 };
 

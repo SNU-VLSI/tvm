@@ -195,57 +195,72 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
     return false;
   }
 
-  /*
-    from qconv : [N, OC/64, OH, OW, 4, 16]
-    from others : [N, OC/16, OH, OW, 16]
-  */
-  Array<IndexExpr> data_shape = data->shape;
-  const DataType input_dtype = data->dtype;
-
-  ICHECK(data_shape.size() == 5 || data_shape.size() == 6) << "Input data must have 5 or 6 dimensions";
-  int in_last_dim = data_shape.size()-1;
-
-  ICHECK(data_shape[in_last_dim].as<IntImmNode>()->value == 16)
-      << "Input data must have 16 channels in the last dimension, but got "
-      << data_shape[in_last_dim].as<IntImmNode>()->value;
-  
-  if(data_shape.size() == 6) {
-    ICHECK(data_shape[in_last_dim-1].as<IntImmNode>()->value == 4)
-        << "Input data must have 4 channels in the second last dimension, but got "
-        << data_shape[in_last_dim-1].as<IntImmNode>()->value;
-  } 
-
-  ICHECK(input_dtype == DataType::Int(16))
-      << "Input type should be one of int16 but was " << input_dtype;
-
   const ImcflowMinMaxQuantizeAttrs* quantize_attrs = attrs.as<ImcflowMinMaxQuantizeAttrs>();
 
-  ICHECK(quantize_attrs->param_dtype == DataType::Int(16)) 
-      << "Parameter type should be int16 but was " << quantize_attrs->param_dtype;
+  // check input data layout and dtype
+  Array<IndexExpr> data_shape = data->shape;
+  const DataType input_dtype = data->dtype;
+  int in_last_dim = data_shape.size()-1;
+  IndexExpr batch; 
+  IndexExpr ic; 
+  IndexExpr ih; 
+  IndexExpr iw; 
+  if(quantize_attrs->in_node) {
+    ICHECK(data_shape.size() == 5) << "Input data must have 5 dimensions for in_node";
+    ICHECK(data_shape[in_last_dim].as<IntImmNode>()->value == 16)
+        << "Input data must have 16 channels in the last dimension, but got "
+        << data_shape[in_last_dim].as<IntImmNode>()->value;
+    batch = data_shape[1];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+    ic    = quantize_attrs->channel;
+    ICHECK(quantize_attrs->channel > 0) << "channel attribute must be set to a positive integer for in_node";
+  } else {
+    ICHECK(data_shape.size() == 4) << "Input data must have 4 dimensions for not in_node";
+    batch = data_shape[0];
+    ic    = data_shape[1];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+  }
+  ICHECK(input_dtype == DataType::Int(16)) << "Input type should be int16 but was " << input_dtype;
 
-  reporter->Assign(types[1], TensorType({}, quantize_attrs->param_dtype)); // min
-  reporter->Assign(types[2], TensorType({}, quantize_attrs->param_dtype)); // max
+  // check param data layout and dtype
+  const auto* min_param = types[1].as<TensorTypeNode>();
+  const auto* max_param = types[2].as<TensorTypeNode>();
+  ICHECK(min_param->dtype == DataType::Int(16))
+      << "Min param type should be int16 but was " << min_param->dtype;
+  ICHECK(max_param->dtype == DataType::Int(16))
+      << "Max param type should be int16 but was " << max_param->dtype;
+  ICHECK(min_param->shape.size() == 0) << "Min param should be scalar but was "
+                                      << min_param->shape.size();
+  ICHECK(max_param->shape.size() == 0) << "Max param should be scalar but was "
+                                      << max_param->shape.size();
+  // assign output tensor type
+  if(quantize_attrs->out_node) {
+    IndexExpr c_group = ceildiv(ic,256);
+    Array<IndexExpr> oshape({c_group, batch, ih, iw, 8});
+    DataType out_dtype = DataType::UInt(32);
+    reporter->Assign(types[3], TensorType(oshape, out_dtype));
+  } else {
+    Array<IndexExpr> oshape({batch, ic, ih, iw});
+    DataType out_dtype = DataType::UInt(4);
+    reporter->Assign(types[3], TensorType(oshape, out_dtype));
+  }
 
-  IndexExpr batch = data_shape[0];
-  IndexExpr oc_gnum = data_shape[1];
-  IndexExpr ih = data_shape[2];
-  IndexExpr iw = data_shape[3];
+  // assign param type
+  reporter->Assign(types[1], TensorType({}, DataType::Int(16))); // min
+  reporter->Assign(types[2], TensorType({}, DataType::Int(16))); // max
 
-  IndexExpr oc = (in_last_dim == 5) ? oc_gnum * 64 : oc_gnum * 16;
-  IndexExpr out_oc_gnum = ceildiv(oc,256);
-
-  Array<IndexExpr> oshape({batch, out_oc_gnum, ih, iw, 4, 8});
-  DataType out_dtype = quantize_attrs->out_dtype;
-  reporter->Assign(types[3], TensorType(oshape, out_dtype)); // output
   return true;
 }
 
 Expr MakeImcflowMinMaxQuantize(Expr data, Expr min, Expr max, int axis, DataType out_dtype,
-                               DataType param_dtype) {
+                               DataType param_dtype, int channel) {
   auto attrs = make_object<ImcflowMinMaxQuantizeAttrs>();
   attrs->axis = axis;
   attrs->out_dtype = std::move(out_dtype);
   attrs->param_dtype = std::move(param_dtype);
+  attrs->channel = channel;
   static const Op& op = Op::Get("qnn.imcflow_min_max_quantize");
   return Call(op, {data, min, max}, Attrs(attrs), {});
 }
