@@ -149,13 +149,13 @@ def run_test_evl(test_name, mod, param_dict):
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_annot")
-  exit(0)
 
   eval_mod = imcflow.flattenImcflowTopFuncs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_flatten")
 
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
+  exit(0)
 
   # eval_mod = imcflow_transform.PackingInserter()(eval_mod)
   # printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")

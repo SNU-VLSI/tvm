@@ -1250,7 +1250,7 @@ class AnnotGenerator:
                 RecurInputRegions = self.getRegion(getInputNodes(InputNode, True))
                 if InputRegion in RecurInputRegions:
                   try:
-                    CandidateRegions.pop(InputRegion)
+                    CandidateRegions.remove(InputRegion)
                   except:
                     pass
 
@@ -1322,8 +1322,7 @@ def partitionRound(mod):
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
-      printModel("resnet8_eval", target_mod, {}, f"{name}_round_partitioned")
-      exit(1)
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
       target_mod = transform.PartitionGraph()(target_mod)
 
       for new_gv, new_func in target_mod.functions.items():
