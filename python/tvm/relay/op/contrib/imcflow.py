@@ -1534,23 +1534,28 @@ def flattenImcflowTopFuncs(mod):
               func = mod[name]
               var_map = {}
               for arg, param in zip(call.args, func.params):
-                var_map[param] = super().visit(arg)
-              new_body = relay.bind(super().visit(func.body), var_map)
+                var_map[param] = self.visit(arg)
+              new_body = relay.bind(self.visit(func.body), var_map)
               return new_body
           elif isinstance(call.op, GlobalVar) and "Compiler" in mod[call.op].attrs and "round" in mod[call.op].attrs["Compiler"]:
               # "Inline" the subgraph back into new main function.
               name = call.op.name_hint
               func = mod[name]
-              new_body = super().visit(func.body)
+              new_body = self.visit(func.body)
               new_func = relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
               mod[name] = new_func
-              return call
+
+              new_args = []
+              for arg in call.args:
+                new_args.append(self.visit(arg))
+              new_call = relay.Call(call.op, new_args, call.attrs)
+              return new_call
           elif isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and "split_concat" in call.op.attrs["Composite"]:
               func = call.op
               var_map = {}
               for arg, param in zip(call.args, func.params):
-                var_map[param] = super().visit(arg)
-              new_body = relay.bind(super().visit(func.body), var_map)
+                var_map[param] = self.visit(arg)
+              new_body = relay.bind(self.visit(func.body), var_map)
               return new_body
           else:
             return super().visit_call(call)
