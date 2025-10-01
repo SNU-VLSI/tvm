@@ -937,7 +937,8 @@ def compute_bitpack(attrs, inputs, out_dtype):
     bit_axis = attrs.bit_axis
     pack_type = attrs.pack_type
     name = attrs.name
-    out = topi.nn.bitpack(inputs[0], bits, pack_axis, bit_axis, pack_type, name)
+    msb_first = attrs.msb_first
+    out = topi.nn.bitpack(inputs[0], bits, pack_axis, bit_axis, pack_type, name, msb_first)
     return [out]
 
 

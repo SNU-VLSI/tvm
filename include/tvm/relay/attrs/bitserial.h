@@ -40,6 +40,7 @@ struct BitPackAttrs : public tvm::AttrsNode<BitPackAttrs> {
   int bit_axis;
   DataType pack_type;
   std::string name;
+  bool msb_first;
 
   TVM_DECLARE_ATTRS(BitPackAttrs, "relay.attrs.BitPackAttrs") {
     TVM_ATTR_FIELD(bits).set_default(1).describe("Number of bits to quantize with.");
@@ -50,6 +51,8 @@ struct BitPackAttrs : public tvm::AttrsNode<BitPackAttrs> {
         .set_default(NullValue<DataType>())
         .describe("Type of int to pack bits into.");
     TVM_ATTR_FIELD(name).set_default("BitPack").describe("Name of operation.");
+    TVM_ATTR_FIELD(msb_first).set_default(true).describe(
+        "Whether to pack bits MSB first (true, default) or LSB first (false).");
   }
 };
 

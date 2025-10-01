@@ -60,6 +60,15 @@ bool BitPackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   DataType pack_type = param->pack_type;
 
   int pack_bits = pack_type.bits();
+  
+  // Determine if we need chunking for 32-bit targets
+  // uint64/uint128/uint256 are split into multiple uint32 chunks
+  int num_chunks = 1;
+  DataType chunk_type = pack_type;
+  if (pack_type.bits() > 32) {
+    num_chunks = pack_type.bits() / 32;
+    chunk_type = DataType::UInt(32);
+  }
 
   Array<IndexExpr> out_shape;
   for (int i = 0; i < ndim; ++i) {
@@ -80,19 +89,25 @@ bool BitPackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   if (bit_axis == ndim) {
     out_shape.push_back(bits);
   }
+  
+  // Add chunk dimension at the end for uint64/uint128/uint256
+  if (num_chunks > 1) {
+    out_shape.push_back(num_chunks);
+  }
 
-  reporter->Assign(types[1], TensorType(out_shape, pack_type));
+  reporter->Assign(types[1], TensorType(out_shape, chunk_type));
   return true;
 }
 
 Expr MakeBitPack(Expr data, int bits, int pack_axis, int bit_axis, DataType pack_type,
-                 String name) {
+                 String name, bool msb_first) {
   auto attrs = make_object<BitPackAttrs>();
   attrs->bits = bits;
   attrs->pack_axis = pack_axis;
   attrs->bit_axis = bit_axis;
   attrs->pack_type = pack_type;
   attrs->name = name;
+  attrs->msb_first = msb_first;
   static const Op& op = Op::Get("nn.bitpack");
   return Call(op, {data}, Attrs(attrs), {});
 }
