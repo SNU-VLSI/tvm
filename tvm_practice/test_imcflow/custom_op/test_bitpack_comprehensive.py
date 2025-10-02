@@ -626,56 +626,76 @@ def transform_4d_to_qconv_input(input_data, kernel_size):
     return output
 
 def test_relay_qconv2d_input():
-    """Test quantized convolution 2D input at Relay level and compare with numpy implementation"""
+    """Test quantized convolution 2D input at Relay level and compare with numpy implementation
+    
+    Tests multiple input shapes to ensure robustness
+    """
     print("\n" + "="*70)
-    print("Relay Test 8: quantized convolution 2D input")
+    print("Relay Test 8: quantized convolution 2D input (uint256)")
     print("="*70)
     
-    data_np = np.random.randint(0, 256, size=(2, 32, 5, 5), dtype=np.uint8)
-    print(f"Input shape: {data_np.shape}")
-    print(f"bits=4, pack_axis=1, bit_axis=4, pack_type=uint256, msb_first=False")
-    
-    # Get relay result
-    data_var = relay.var("data", shape=(2, 32, 5, 5), dtype="uint8")
-    out = relay.nn.bitpack(data_var, bits=4, pack_axis=1, bit_axis=4, pack_type="uint256", msb_first=False)
-    func = relay.Function([data_var], out)
+    # Test multiple input shapes
+    test_shapes = [
+        (1, 256, 5, 5),   # Exactly 1 uint256 per spatial location
+        (2, 32, 5, 5),    # Less than 256 channels
+        (1, 512, 3, 3),   # Exactly 2 uint256s per spatial location
+        (2, 100, 7, 7),   # Non-power-of-2 channels
+    ]
     
     target = "llvm"
     dev = tvm.device(target, 0)
     
-    with tvm.transform.PassContext(opt_level=3):
-        lib = relay.build(func, target=target)
-    
-    module = tvm.contrib.graph_executor.GraphModule(lib["default"](dev))
-    module.set_input("data", data_np)
-    module.run()
-    relay_result = module.get_output(0).numpy()
+    for shape_idx, input_shape in enumerate(test_shapes):
+        print(f"\n--- Test shape {shape_idx + 1}/{len(test_shapes)}: {input_shape} ---")
+        
+        try:
+            N, IC, IH, IW = input_shape
+            data_np = np.random.randint(0, 256, size=input_shape, dtype=np.uint8)
+            print(f"Input shape: {data_np.shape}")
+            print(f"bits=4, pack_axis=1, bit_axis=4, pack_type=uint256, msb_first=False")
+            
+            # Get relay result
+            data_var = relay.var("data", shape=input_shape, dtype="uint8")
+            out = relay.nn.bitpack(data_var, bits=4, pack_axis=1, bit_axis=4, 
+                                   pack_type="uint256", msb_first=False)
+            func = relay.Function([data_var], out)
+            
+            with tvm.transform.PassContext(opt_level=3):
+                lib = relay.build(func, target=target)
+            
+            module = tvm.contrib.graph_executor.GraphModule(lib["default"](dev))
+            module.set_input("data", data_np)
+            module.run()
+            relay_result = module.get_output(0).numpy()
 
-    # Get numpy implementation result
-    numpy_result = transform_4d_to_qconv_input(data_np, kernel_size=3)
-    print(f"Numpy output shape: {numpy_result.shape}")
-    print(f"Relay output shape: {relay_result.shape}")
+            # Get numpy implementation result
+            numpy_result = transform_4d_to_qconv_input(data_np, kernel_size=3)
+            print(f"Numpy output shape: {numpy_result.shape}")
+            print(f"Relay output shape: {relay_result.shape}")
+            
+            # Compare shapes
+            assert numpy_result.shape == relay_result.shape, \
+                f"Shape mismatch between numpy and relay: {numpy_result.shape} vs {relay_result.shape}"
+            
+            # Check if values match
+            if np.allclose(numpy_result, relay_result):
+                print(f"✓ Shape {input_shape}: Results match!")
+            else:
+                max_diff = np.max(np.abs(numpy_result.astype(np.float32) - relay_result.astype(np.float32)))
+                print(f"✗ Shape {input_shape}: Results differ! Max difference: {max_diff}")
+                # Print sample for debugging
+                print(f"Numpy sample [0,0,0,0,0,:]: {numpy_result[0,0,0,0,0,:]}")
+                print(f"Relay sample [0,0,0,0,0,:]: {relay_result[0,0,0,0,0,:]}")
+                raise AssertionError(f"Numpy and Relay results do not match for shape {input_shape}")
+                
+        except Exception as e:
+            print(f"✗ Failed for shape {input_shape}")
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
-    expected_shape = numpy_result.shape
-    assert relay_result.shape == expected_shape, f"Shape mismatch: {relay_result.shape}"
-    
-    
-    # Compare results
-    assert numpy_result.shape == relay_result.shape, \
-        f"Shape mismatch between numpy and relay: {numpy_result.shape} vs {relay_result.shape}"
-    
-    # Check if values match
-    if np.allclose(numpy_result, relay_result):
-        print("✓ Numpy and Relay results match!")
-    else:
-        max_diff = np.max(np.abs(numpy_result.astype(np.float32) - relay_result.astype(np.float32)))
-        print(f"✗ Results differ! Max difference: {max_diff}")
-        # Print sample for debugging
-        print(f"Numpy sample [0,0,0,0,0,:]: {numpy_result[0,0,0,0,0,:]}")
-        print(f"Relay sample [0,0,0,0,0,:]: {relay_result[0,0,0,0,0,:]}")
-        raise AssertionError("Numpy and Relay results do not match")
-    
-    print("✓ PASS")
+    print("\n✓ ALL INPUT SHAPES PASSED")
     return True
 
 
@@ -689,25 +709,25 @@ if __name__ == "__main__":
     print("="*70)
     
     te_tests = [
-        # ("TE: MSB vs LSB (bits=1)", test_te_msb_lsb_bits1),
-        # ("TE: uint64 chunking (bits=1)", test_te_uint64_chunking_bits1),
-        # ("TE: uint128 chunking (bits=1)", test_te_uint128_chunking_bits1),
-        # ("TE: uint32 no chunking (bits=1)", test_te_uint32_no_chunking_bits1),
-        # ("TE: bits=4 with uint8", test_te_bits4_uint8),
-        # ("TE: bits=4 with uint64", test_te_bits4_uint64),
-        # ("TE: bit_axis 2nd lowest (bits=1)", test_te_bit_axis_second_lowest),
-        # ("TE: bit_axis 2nd lowest (bits=4)", test_te_bit_axis_second_lowest_bits4),
-        # ("TE: padding with bits=4", test_te_padding_bits4),
+        ("TE: MSB vs LSB (bits=1)", test_te_msb_lsb_bits1),
+        ("TE: uint64 chunking (bits=1)", test_te_uint64_chunking_bits1),
+        ("TE: uint128 chunking (bits=1)", test_te_uint128_chunking_bits1),
+        ("TE: uint32 no chunking (bits=1)", test_te_uint32_no_chunking_bits1),
+        ("TE: bits=4 with uint8", test_te_bits4_uint8),
+        ("TE: bits=4 with uint64", test_te_bits4_uint64),
+        ("TE: bit_axis 2nd lowest (bits=1)", test_te_bit_axis_second_lowest),
+        ("TE: bit_axis 2nd lowest (bits=4)", test_te_bit_axis_second_lowest_bits4),
+        ("TE: padding with bits=4", test_te_padding_bits4),
     ]
     
     relay_tests = [
-        # ("Relay: MSB vs LSB (bits=1)", test_relay_msb_lsb_bits1),
-        # ("Relay: uint64 chunking (bits=1)", test_relay_uint64_chunking_bits1),
-        # ("Relay: uint128 chunking (bits=1)", test_relay_uint128_chunking_bits1),
-        # ("Relay: bits=4 with uint8", test_relay_bits4_uint8),
-        # ("Relay: bits=4 with uint64", test_relay_bits4_uint64),
-        # ("Relay: bit_axis 2nd lowest (bits=1)", test_relay_bit_axis_second_lowest),
-        # ("Relay: bit_axis 2nd lowest (bits=4)", test_relay_bit_axis_second_lowest_bits4),
+        ("Relay: MSB vs LSB (bits=1)", test_relay_msb_lsb_bits1),
+        ("Relay: uint64 chunking (bits=1)", test_relay_uint64_chunking_bits1),
+        ("Relay: uint128 chunking (bits=1)", test_relay_uint128_chunking_bits1),
+        ("Relay: bits=4 with uint8", test_relay_bits4_uint8),
+        ("Relay: bits=4 with uint64", test_relay_bits4_uint64),
+        ("Relay: bit_axis 2nd lowest (bits=1)", test_relay_bit_axis_second_lowest),
+        ("Relay: bit_axis 2nd lowest (bits=4)", test_relay_bit_axis_second_lowest_bits4),
         ("Relay: qconv2d input (uint256)", test_relay_qconv2d_input),
     ]
     
@@ -724,6 +744,8 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"✗ FAILED: {name}")
                 print(f"  Error: {e}")
+                import traceback
+                traceback.print_exc()
                 failed_tests.append((name, e))
         
         # Run Relay tests
@@ -736,6 +758,8 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"✗ FAILED: {name}")
                 print(f"  Error: {e}")
+                import traceback
+                traceback.print_exc()
                 failed_tests.append((name, e))
         
         # Summary
