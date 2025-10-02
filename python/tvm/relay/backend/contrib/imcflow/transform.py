@@ -12,7 +12,7 @@ from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
-from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking
+from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking, imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 import numpy as np
 from tvm.relay.op.contrib import imcflow
 
@@ -83,6 +83,17 @@ def _get_type(parent_mod, node):
       out_type = relay.transform.InferTypeLocal(node.body)
     elif isinstance(node, relay.Var):
       out_type = node.checked_type
+    elif isinstance(node, relay.TupleGetItem):
+      # For TupleGetItem, get the type of the tuple and extract the field type
+      tuple_type = _get_type(parent_mod, node.tuple_value)
+      if isinstance(tuple_type, relay.TupleType):
+        out_type = tuple_type.fields[node.index]
+      else:
+        raise RuntimeError(f"TupleGetItem node has non-tuple parent type: {tuple_type}")
+    elif isinstance(node, relay.Tuple):
+      # For Tuple, infer the type of each field and construct a TupleType
+      field_types = [_get_type(parent_mod, field) for field in node.fields]
+      out_type = relay.TupleType(field_types)
     else:
       raise RuntimeError(f"can't infer type for node {node}")
 
@@ -3293,7 +3304,8 @@ class ImcflowBoundaryNodeMarker:
   """
   
   def __init__(self):
-    pass
+    self.input_call_dict = {}
+    self.output_call_dict = {}
     
   def transform_function(self, mod):
     """
@@ -3317,7 +3329,7 @@ class ImcflowBoundaryNodeMarker:
         mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
     
     # Transform the main function to insert packing/unpacking around imcflow calls
-    # transformed_func = self._insert_packing_unpacking(func, mod)
+    mod = self._insert_packing_unpacking(mod)
     
     # return transformed_func
     return mod
@@ -3344,11 +3356,13 @@ class ImcflowBoundaryNodeMarker:
       return func
     
     # Find the first call node that uses function parameters
-    first_calls = self._find_input_call(func, call_nodes)
+    input_calls = self._find_input_call(func, call_nodes)
+    self.input_call_dict[func] = input_calls
     
     # Find the output call node - the one that directly produces the function's return
     output_calls = self._find_output_call(func.body)
-    
+    self.output_call_dict[func] = output_calls
+
     class _BoundaryMarker(relay.ExprMutator):
       def visit_call(self, call):
         new_call = super().visit_call(call)
@@ -3360,7 +3374,9 @@ class ImcflowBoundaryNodeMarker:
         # Handle both single call and list of calls
         if (isinstance(output_calls, list) and call in output_calls) or call == output_calls:
           return modify_call_node_attrs(new_call, in_node=None, out_node=True)
-        
+        if (isinstance(input_calls, list) and call in input_calls) or call == input_calls:
+          return modify_call_node_attrs(new_call, in_node=True, out_node=None)
+
         return new_call
     
     marker = _BoundaryMarker()
@@ -3412,7 +3428,7 @@ class ImcflowBoundaryNodeMarker:
     else:
       raise ValueError("Unsupported body type for finding output call")
 
-  def _insert_packing_unpacking(self, func, mod):
+  def _insert_packing_unpacking(self, mod):
     """
     Insert packing nodes before imcflow function calls and unpacking nodes after.
     
@@ -3420,11 +3436,53 @@ class ImcflowBoundaryNodeMarker:
     functions with "Compiler" attribute set to "imcflow".
     """
     
-    class _PackingUnpackingInserter(relay.ExprMutator):
+    # Run type inference on the module to ensure all nodes have checked_type
+    # mod = relay.transform.InferType()(mod)
+    
+    class _LayoutTransformer(relay.ExprMutator):
       def __init__(self, module):
         super().__init__()
         self.module = module
+
+      # Helper function to find the child node (consumer) of a parameter in the function body
+      def find_child_node_of_param(self, func_body, param):
+        """Find the node that directly uses the given parameter as an argument"""
+        child_nodes = []
         
+        class _ChildNodeFinder(relay.ExprVisitor):
+          def visit_call(self, call):
+            # Check if this call uses the parameter as one of its arguments
+            for arg in call.args:
+              if arg == param:
+                child_nodes.append(call)
+                break
+            # Continue visiting children
+            super().visit_call(call)
+        
+        _ChildNodeFinder().visit(func_body)
+        return child_nodes[0] if child_nodes else None
+
+      # Helper function to find the parent node (producer) that generates the function's output
+      def find_parent_node_of_output(self, func_body):
+        """Find the node that directly produces the function's output (right before return)"""
+        # Handle different body types
+        if isinstance(func_body, relay.Call):
+          # If body is directly a Call, that's our parent node
+          return func_body
+        elif isinstance(func_body, relay.TupleGetItem):
+          # If body is TupleGetItem, find the call that produces the tuple
+          return self.find_parent_node_of_output(func_body.tuple_value)
+        elif isinstance(func_body, relay.Tuple):
+          # If body is a Tuple, find the calls that produce each field
+          parent_nodes = []
+          for field in func_body.fields:
+            parent_node = self.find_parent_node_of_output(field)
+            parent_nodes.append(parent_node)
+          return parent_nodes
+        else:
+          # For other types, return None
+          return None        
+
       def visit_call(self, call):
         # First transform arguments recursively
         new_args = [self.visit(arg) for arg in call.args]
@@ -3433,44 +3491,64 @@ class ImcflowBoundaryNodeMarker:
         if isinstance(call.op, relay.GlobalVar):
           # Check if the target function has "Compiler" attribute set to "imcflow"
           target_func = self.module[call.op.name_hint]
-          if ("Compiler" in target_func.attrs and 
-              target_func.attrs["Compiler"] == "imcflow"):
+          if ("Compiler" in target_func.attrs and target_func.attrs["Compiler"] == "imcflow"):
             print(f"Inserting packing/unpacking around imcflow function call: {call.op.name_hint}")
             
-            # Insert packing nodes before each argument
+            # step1: Insert node before the call
             packed_args = []
-            for arg in new_args:
-              # Get the shape and dtype of the argument
-              arg_type = _get_type(self.module, arg)
-              if isinstance(arg_type, TensorType):
-                # TODO : transform shape for packing
-                new_shape = arg_type.shape
-
-                # Insert packing node
-                packed_arg = imcflow_packing(arg, new_shape, str(arg_type.dtype))
-                packed_args.append(packed_arg)
+            for i, arg in enumerate(new_args):
+              # Get the receiver (child node) of this argument
+              # The receiver is the parameter in the target imcflow function that receives this argument
+              receiver_param = target_func.params[i]
+              receiver_type = receiver_param.checked_type
+              
+              # Get the shape and dtype from the receiver
+              if isinstance(arg, TupleGetItem):
+                # NOTE: This is a hack. In resnet8, if arg is a TupleGetItem, then imcflow function precede right before it.
+                packed_arg = arg
+              elif isinstance(receiver_type, TensorType):
+                # Find the child node inside target_func that uses this receiver_param
+                child_node = self.find_child_node_of_param(target_func.body, receiver_param)
+                if child_node.op == op.get("nn.imcflow_qconv"):
+                  packed_arg = imcflow_4d_to_qconv_input(arg)
+                elif child_node.op == op.get("qnn.imcflow_min_max_quantize"):
+                  packed_arg = relay.layout_transform(arg, "NCHW", "NCHWc16")
+                else: # Vector operations
+                  packed_arg = relay.layout_transform(arg, "NCHW", "NCHWc16")
               else:
-                # For non-tensor types, use original argument
-                packed_args.append(arg)
-            
+                raise ValueError("Unsupported receiver type for packing")
+              
+              # Insert packing node
+              packed_args.append(packed_arg)
+
             # Create the call with packed arguments
             imcflow_call = relay.Call(call.op, packed_args, call.attrs, call.type_args, call.span)
+
+            # step2: Insert node after the call
+            # Get the return type of the imcflow function to determine unpacking shape
+            return_type = target_func.ret_type                        
+            if isinstance(return_type, relay.TupleType):
+              # NOTE: This is a hack. In resnet8, if return_type is a tuple, then imcflow function follows right after it.
+              unpacked_result = imcflow_call
+            elif isinstance(return_type, TensorType):
+              # Find the parent node inside target_func that produces the output
+              parent_node = self.find_parent_node_of_output(target_func.body)
+              if parent_node.op == op.get("qnn.imcflow_min_max_quantize"):
+                unpacked_result = imcflow_mmquant_out_to_4d(imcflow_call, return_type.shape, str(return_type.dtype))
+              elif parent_node.op == op.get("nn.imcflow_qconv"):
+                raise ValueError("imcflow_qconv cannot be the last node in an imcflow function")
+              else: # Vector operations
+                unpacked_result = relay.layout_transform(imcflow_call, "NCHWc16", "NCHW")
+            else:
+              raise ValueError("Unsupported return type for unpacking")
             
-            # Insert unpacking node after the call
-            # Get the return type of the imcflow function
-            return_type = _get_type(self.module, imcflow_call)
-            # if isinstance(return_type, TensorType):
-            #   # Create unpacking node to restore original shape
-            #   unpacked_result = imcflow_unpacking(imcflow_call, return_type.shape, str(return_type.dtype))
-            #   return unpacked_result
-            # else:
-            #   # For non-tensor return types, return the call as-is
-            #   return imcflow_call
-            return imcflow_call
+            return unpacked_result
         
         # For non-imcflow function calls, proceed normally
         new_op = self.visit(call.op)
         return relay.Call(new_op, new_args, call.attrs, call.type_args, call.span)
     
-    inserter = _PackingUnpackingInserter(mod)
-    return inserter.visit(func)
+    inserter = _LayoutTransformer(mod)
+    new_main = inserter.visit(mod["main"])
+    mod.update_func(mod.get_global_var("main"), new_main)
+    return mod
