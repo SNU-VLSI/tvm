@@ -60,13 +60,15 @@ bool BitPackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   DataType pack_type = param->pack_type;
 
   int pack_bits = pack_type.bits();
+  if(pack_bits == 255) pack_bits = 256; // Handle special case for 256 bits
+  std::cout<<"BitPackRel pack_bits : " << pack_bits << std::endl;
   
   // Determine if we need chunking for 32-bit targets
   // uint64/uint128/uint256 are split into multiple uint32 chunks
   int num_chunks = 1;
   DataType chunk_type = pack_type;
-  if (pack_type.bits() > 32) {
-    num_chunks = pack_type.bits() / 32;
+  if (pack_bits > 32) {
+    num_chunks = pack_bits / 32;
     chunk_type = DataType::UInt(32);
   }
 
@@ -75,12 +77,12 @@ bool BitPackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
     if (i == bit_axis) {
       out_shape.push_back(bits);
       if (i == pack_axis) {
-        out_shape.push_back(indexdiv(data->shape[i], pack_bits));
+        out_shape.push_back(shapediv(data->shape[i], pack_bits));
       } else {
         out_shape.push_back(data->shape[i]);
       }
     } else if (i == pack_axis) {
-      out_shape.push_back(indexdiv(data->shape[i], pack_bits));
+      out_shape.push_back(shapediv(data->shape[i], pack_bits));
     } else {
       out_shape.push_back(data->shape[i]);
     }
@@ -96,6 +98,11 @@ bool BitPackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   }
 
   reporter->Assign(types[1], TensorType(out_shape, chunk_type));
+  printf("BitPackRel output shape: ");
+  for(const auto& dim : out_shape) {
+    std::cout << dim << ",";
+  }
+  std::cout << std::endl;
   return true;
 }
 
@@ -106,6 +113,7 @@ Expr MakeBitPack(Expr data, int bits, int pack_axis, int bit_axis, DataType pack
   attrs->pack_axis = pack_axis;
   attrs->bit_axis = bit_axis;
   attrs->pack_type = pack_type;
+  std::cout<<"MakeBitPack pack_type : " << pack_type << std::endl;
   attrs->name = name;
   attrs->msb_first = msb_first;
   static const Op& op = Op::Get("nn.bitpack");

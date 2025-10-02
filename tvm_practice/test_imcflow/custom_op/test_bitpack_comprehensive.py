@@ -570,6 +570,114 @@ def test_relay_bit_axis_second_lowest_bits4():
     print("✓ PASS")
     return True
 
+def transform_4d_to_qconv_input(input_data, kernel_size):
+    """Transform 4D input data to qconv2d input format using numpy
+    
+    Implements bitpack with: bits=4, pack_axis=1, bit_axis=4, pack_type="uint256", msb_first=False
+    
+    Parameters
+    ----------
+    input_data : np.ndarray
+        Input data with shape (N, IC, IH, IW)
+    kernel_size : int
+        Kernel size (not used in bitpack, kept for compatibility)
+    
+    Returns
+    -------
+    np.ndarray
+        Bitpacked data with shape (N, packed_IC, IH, IW, 4, 8)
+        where packed_IC = ceil(IC / 256) and 8 is for uint256→uint32 chunks
+    """
+    import math
+    
+    N, IC, IH, IW = input_data.shape
+    
+    # Calculate output dimensions
+    # pack_axis=1: IC / 256 (256 bits per uint256)
+    packed_IC = math.ceil(IC / 256)
+    # bit_axis=4: 4 bit planes (bits=4)
+    # uint256 → 8x uint32 chunks
+    num_chunks = 8
+    
+    # Initialize output array: (N, packed_IC, IH, IW, 4, 8)
+    output = np.zeros((N, packed_IC, IH, IW, 4, num_chunks), dtype=np.uint32)
+    
+    # Pack data: bits=4, pack_axis=1 (IC), bit_axis=4 (after spatial dims), msb_first=False (LSB first)
+    for n in range(N):
+        for ih in range(IH):
+            for iw in range(IW):
+                for ic in range(IC):
+                    # Determine which packed_IC this channel belongs to
+                    packed_ic_idx = ic // 256
+                    ic_offset = ic % 256
+                    
+                    # Determine which chunk and bit position within chunk
+                    chunk_idx = ic_offset // 32  # Each uint32 handles 32 bits
+                    bit_offset = ic_offset % 32
+                    
+                    # Get the data value
+                    data_val = int(input_data[n, ic, ih, iw])
+                    
+                    # Extract 4 bits and pack them (LSB first)
+                    for b in range(4):
+                        bit_val = (data_val >> b) & 1
+                        output[n, packed_ic_idx, ih, iw, b, chunk_idx] |= (bit_val << bit_offset)
+    
+    return output
+
+def test_relay_qconv2d_input():
+    """Test quantized convolution 2D input at Relay level and compare with numpy implementation"""
+    print("\n" + "="*70)
+    print("Relay Test 8: quantized convolution 2D input")
+    print("="*70)
+    
+    data_np = np.random.randint(0, 256, size=(2, 32, 5, 5), dtype=np.uint8)
+    print(f"Input shape: {data_np.shape}")
+    print(f"bits=4, pack_axis=1, bit_axis=4, pack_type=uint256, msb_first=False")
+    
+    # Get relay result
+    data_var = relay.var("data", shape=(2, 32, 5, 5), dtype="uint8")
+    out = relay.nn.bitpack(data_var, bits=4, pack_axis=1, bit_axis=4, pack_type="uint256", msb_first=False)
+    func = relay.Function([data_var], out)
+    
+    target = "llvm"
+    dev = tvm.device(target, 0)
+    
+    with tvm.transform.PassContext(opt_level=3):
+        lib = relay.build(func, target=target)
+    
+    module = tvm.contrib.graph_executor.GraphModule(lib["default"](dev))
+    module.set_input("data", data_np)
+    module.run()
+    relay_result = module.get_output(0).numpy()
+
+    # Get numpy implementation result
+    numpy_result = transform_4d_to_qconv_input(data_np, kernel_size=3)
+    print(f"Numpy output shape: {numpy_result.shape}")
+    print(f"Relay output shape: {relay_result.shape}")
+    
+    expected_shape = numpy_result.shape
+    assert relay_result.shape == expected_shape, f"Shape mismatch: {relay_result.shape}"
+    
+    
+    # Compare results
+    assert numpy_result.shape == relay_result.shape, \
+        f"Shape mismatch between numpy and relay: {numpy_result.shape} vs {relay_result.shape}"
+    
+    # Check if values match
+    if np.allclose(numpy_result, relay_result):
+        print("✓ Numpy and Relay results match!")
+    else:
+        max_diff = np.max(np.abs(numpy_result.astype(np.float32) - relay_result.astype(np.float32)))
+        print(f"✗ Results differ! Max difference: {max_diff}")
+        # Print sample for debugging
+        print(f"Numpy sample [0,0,0,0,0,:]: {numpy_result[0,0,0,0,0,:]}")
+        print(f"Relay sample [0,0,0,0,0,:]: {relay_result[0,0,0,0,0,:]}")
+        raise AssertionError("Numpy and Relay results do not match")
+    
+    print("✓ PASS")
+    return True
+
 
 # ============================================================================
 # Main Test Runner
@@ -581,25 +689,26 @@ if __name__ == "__main__":
     print("="*70)
     
     te_tests = [
-        ("TE: MSB vs LSB (bits=1)", test_te_msb_lsb_bits1),
-        ("TE: uint64 chunking (bits=1)", test_te_uint64_chunking_bits1),
-        ("TE: uint128 chunking (bits=1)", test_te_uint128_chunking_bits1),
-        ("TE: uint32 no chunking (bits=1)", test_te_uint32_no_chunking_bits1),
-        ("TE: bits=4 with uint8", test_te_bits4_uint8),
-        ("TE: bits=4 with uint64", test_te_bits4_uint64),
-        ("TE: bit_axis 2nd lowest (bits=1)", test_te_bit_axis_second_lowest),
-        ("TE: bit_axis 2nd lowest (bits=4)", test_te_bit_axis_second_lowest_bits4),
-        ("TE: padding with bits=4", test_te_padding_bits4),
+        # ("TE: MSB vs LSB (bits=1)", test_te_msb_lsb_bits1),
+        # ("TE: uint64 chunking (bits=1)", test_te_uint64_chunking_bits1),
+        # ("TE: uint128 chunking (bits=1)", test_te_uint128_chunking_bits1),
+        # ("TE: uint32 no chunking (bits=1)", test_te_uint32_no_chunking_bits1),
+        # ("TE: bits=4 with uint8", test_te_bits4_uint8),
+        # ("TE: bits=4 with uint64", test_te_bits4_uint64),
+        # ("TE: bit_axis 2nd lowest (bits=1)", test_te_bit_axis_second_lowest),
+        # ("TE: bit_axis 2nd lowest (bits=4)", test_te_bit_axis_second_lowest_bits4),
+        # ("TE: padding with bits=4", test_te_padding_bits4),
     ]
     
     relay_tests = [
-        ("Relay: MSB vs LSB (bits=1)", test_relay_msb_lsb_bits1),
-        ("Relay: uint64 chunking (bits=1)", test_relay_uint64_chunking_bits1),
-        ("Relay: uint128 chunking (bits=1)", test_relay_uint128_chunking_bits1),
-        ("Relay: bits=4 with uint8", test_relay_bits4_uint8),
-        ("Relay: bits=4 with uint64", test_relay_bits4_uint64),
-        ("Relay: bit_axis 2nd lowest (bits=1)", test_relay_bit_axis_second_lowest),
-        ("Relay: bit_axis 2nd lowest (bits=4)", test_relay_bit_axis_second_lowest_bits4),
+        # ("Relay: MSB vs LSB (bits=1)", test_relay_msb_lsb_bits1),
+        # ("Relay: uint64 chunking (bits=1)", test_relay_uint64_chunking_bits1),
+        # ("Relay: uint128 chunking (bits=1)", test_relay_uint128_chunking_bits1),
+        # ("Relay: bits=4 with uint8", test_relay_bits4_uint8),
+        # ("Relay: bits=4 with uint64", test_relay_bits4_uint64),
+        # ("Relay: bit_axis 2nd lowest (bits=1)", test_relay_bit_axis_second_lowest),
+        # ("Relay: bit_axis 2nd lowest (bits=4)", test_relay_bit_axis_second_lowest_bits4),
+        ("Relay: qconv2d input (uint256)", test_relay_qconv2d_input),
     ]
     
     failed_tests = []

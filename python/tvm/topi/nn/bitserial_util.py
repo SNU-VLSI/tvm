@@ -45,6 +45,7 @@ def bitpack(data, bits, pack_axis, bit_axis, pack_type, name="QuantizeInput", ms
     n = len(ishape)
     
     # Determine data width and chunking for 32-bit targets
+    if pack_type == "uint255": pack_type = "uint256"  # Handle special case for 256 bits
     if pack_type == "uint8":
         data_width = 8
         num_chunks = 1
