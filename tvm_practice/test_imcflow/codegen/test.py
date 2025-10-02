@@ -162,26 +162,24 @@ def run_test_evl(test_name, mod, param_dict):
 
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
+  print("-------------------- CustomID TO Name --------------------")
+  print(imcflow.CustomIDToName())
   printModel(eval_dir, eval_mod, eval_param_dict, "with_custom_id")
 
-  imcflow_transform.NodeMapper()(eval_mod)
-  imcflow_transform.constructTensorEdgeList(eval_mod)
-  imcflow_transform.constructActiveIMCEDict(eval_mod)
-
-  print("Active IMCE list")
-  print(DevConfig().ActiveIMCEPerFunc)
-
-  print("HW MAP")
+  imcflow_transform.NodeMapper().run(eval_mod)
+  print("------------------------------- HW MAP PASS 1----------------------------------")
   print(DevConfig().HWNodeMap)
 
-  print("CustomID TO Name")
-  print(imcflow.CustomIDToName())
-
-  print("Tensor Edge List")
+  imcflow_transform.constructTensorEdgeList(eval_mod)
+  print("------------------------------- Tensor Edge List --------------------------------------")
   for key, paths in DevConfig().TensorEdgeListDict.items():
     print(key)
     for path in paths:
       print(path)
+
+  imcflow_transform.constructActiveIMCEDict(eval_mod)
+  print("------------------------------  Active IMCE list ---------------------- ")
+  print(DevConfig().ActiveIMCEPerFunc)
 
   imcflow_transform.constructTensorIDToTensorEdgeDict()
   print("Tensor ID to Tensor Edge")
@@ -195,7 +193,9 @@ def run_test_evl(test_name, mod, param_dict):
     for k, v in paths.items():
       print(k, v)
 
-  imcflow_transform.MemoryAllocator()(eval_mod)
+  imcflow_transform.MemoryAllocator().run(eval_mod)
+  return 
+
   imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
 
   # get the config

@@ -1639,7 +1639,7 @@ class NodeMapper:
       # self.MappingDict_2D = {}
       self.MappingDict = {}
 
-    def transform_function(self, func, mod, ctx):
+    def run_(self, func):
       class _Nodemapper(tvm.relay.ExprVisitor):
         """
           Target Operators:
@@ -1677,8 +1677,8 @@ class NodeMapper:
           # check if this node is
           IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
           IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
-          IsPacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_packing"]
-          IsUnpacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_unpacking"]
+          # IsPacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_packing"]
+          # IsUnpacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_unpacking"]
           if IsConcat:
               if from_host is True:
                   raise ValueError("concatenate should have at least 1 child node")
@@ -1693,29 +1693,29 @@ class NodeMapper:
               else:
                   # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
-          elif IsPacking:
-            # map to child
-            self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
-            # # map to nearest inode of argument's hw node
-            # SrcHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call.args[-1])])[0]
-            # InodeID = NodeID.from_inode_coord(SrcHWNodeID)
-            # self.MappingDict[getNodeID(call)] = InodeID
+          # elif IsPacking:
+          #   # map to child
+          #   self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
+          #   # # map to nearest inode of argument's hw node
+          #   # SrcHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call.args[-1])])[0]
+          #   # InodeID = NodeID.from_inode_coord(SrcHWNodeID)
+          #   # self.MappingDict[getNodeID(call)] = InodeID
 
-          elif IsUnpacking:
-              # keep unpacking node and determine its NodeID in parent node
-              self.undetermined_callnode_exists = True
-              self.undetermined_callnode = getNodeID(call)
+          # elif IsUnpacking:
+          #     # keep unpacking node and determine its NodeID in parent node
+          #     self.undetermined_callnode_exists = True
+          #     self.undetermined_callnode = getNodeID(call)
           else:
               self.MappingDict[getNodeID(call)] = NodeID.from_imce_coord(self.imce_index)
               self.imce_index -= 1
               # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
 
-          # handle undetermined unpacking node
-          if IsUnpacking is False and self.undetermined_callnode_exists is True:
-              DstHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call)])[0]
-              InodeID = NodeID.from_inode_coord(DstHWNodeID)
-              self.MappingDict[self.undetermined_callnode] = InodeID # assign inode in a same row with parent node
-              self.undetermined_callnode_exists = False
+          # # handle undetermined unpacking node
+          # if IsUnpacking is False and self.undetermined_callnode_exists is True:
+          #     DstHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call)])[0]
+          #     InodeID = NodeID.from_inode_coord(DstHWNodeID)
+          #     self.MappingDict[self.undetermined_callnode] = InodeID # assign inode in a same row with parent node
+          #     self.undetermined_callnode_exists = False
 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
@@ -1723,25 +1723,16 @@ class NodeMapper:
         def visit_tuple(self, op):
           super().visit_tuple(op)
 
-      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
-      items = mod.functions_items()
-      function_names = [item[0].name_hint for item in items]
+      # self.MappingDict.update(_Nodemapper().traverse_func(func))
 
-      num_func = len(function_names)
-      # for i in range(num_func):
-      #   if function_names[i]=="main": continue
-      #   elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-      #     self.MappingDict.update(_Nodemapper().traverse_func(mod[function_names[i]]))
-      
+      return _Nodemapper().traverse_func(func)
+    
+    def run(self, mod):
       for global_var, func in mod.functions.items():
-        if global_var.name_hint == "main":continue
-        if "imcflow" in func.attrs["global_symbol"]:
-          self.MappingDict.update(_Nodemapper().traverse_func(func))
-
-      ImcflowDeviceConfig().HWNodeMap = self.MappingDict
-
-      # # find all regions
-      return func
+        if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+          mapping_dict = self.run_(func)
+          ImcflowDeviceConfig().HWNodeMap.update(mapping_dict)
+      return mod
 
 def constructTensorEdgeList(mod):
   @dataclass
@@ -1861,11 +1852,11 @@ def constructTensorEdgeList(mod):
                 InputGraphNodeID = (self.SubFunctionNodeID, self.getCustomID(SrcGraphNode))
                 self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
                 return True
-              if self.IsSrcUnpacking is True:
-                # append edge if (src: unpacking -> dst: qconv)
-                InputGraphNodeID = (self.SubFunctionNodeID, self.getCustomID(SrcGraphNode))
-                self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
-                self.IsSrcUnpacking = False
+              # if self.IsSrcUnpacking is True:
+              #   # append edge if (src: unpacking -> dst: qconv)
+              #   InputGraphNodeID = (self.SubFunctionNodeID, self.getCustomID(SrcGraphNode))
+              #   self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
+              #   self.IsSrcUnpacking = False
 
         if IsComposite:
           self.InSubFunction = True
@@ -1882,51 +1873,47 @@ def constructTensorEdgeList(mod):
         elif IsSupportedOp:
           if call.op == op.get("split"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          if call.op == op.get("concatenate"):
+          elif call.op == op.get("concatenate"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          if call.op == op.get("nn.imcflow_qconv"):
-            # if src node is "imcflow_unpacking", append to tensoredgelist by flag self.IsSrcUnpacking
-            self.IsSrcUnpacking = True if isinstance(call.args[0], Call) and call.args[0].op.name == "imcflow_unpacking" else False
+          elif call.op == op.get("add"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
+          elif call.op == op.get("divide"):
+            ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
+            InputNode = 1 if ScaleNode == 0 else 0
+            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
+          elif call.op == op.get("multiply"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
+          elif call.op == op.get("nn.conv2d"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            self.IsSrcUnpacking = True if isinstance(call.args[1], Call) and call.args[1].op.name == "imcflow_unpacking" else False
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
-            self.IsSrcUnpacking = False
-          if call.op == op.get("nn.conv2d"):
-            self.IsSrcUnpacking = True if isinstance(call.args[0], Call) and call.args[0].op.name == "imcflow_unpacking" else False
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            self.IsSrcUnpacking = True if isinstance(call.args[1], Call) and call.args[1].op.name == "imcflow_unpacking" else False
-            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
-            self.IsSrcUnpacking = False
-          if call.op == op.get("nn.bias_add"):
+          elif call.op == op.get("nn.bias_add"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
-          if call.op == op.get("imcflow.fused_batch_norm"):
+          elif call.op == op.get("nn.relu"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+          elif call.op == op.get("nn.imcflow_qconv"):
+            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
+          elif call.op == op.get("imcflow.fused_batch_norm"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "fused_scale", DstGraphNodeID, "fused_scale", None)
             _processInputNode(call.args[2], "fused_bias", DstGraphNodeID, "fused_bias", None)
-          if call.op == op.get("nn.relu"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          if call.op == op.get("add"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
-          if call.op == op.get("qnn.imcflow_min_max_quantize"):
+          elif call.op == op.get("qnn.imcflow_min_max_quantize"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "min", DstGraphNodeID, "min", None)
             _processInputNode(call.args[2], "max", DstGraphNodeID, "max", None)
-          if call.op == op.get("qnn.imcflow_nu_quantize"):
+          elif call.op == op.get("qnn.imcflow_nu_quantize"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "threshold", DstGraphNodeID, "threshold", None)
-          if call.op == op.get("divide"):
-            ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
-            InputNode = 1 if ScaleNode == 0 else 0
-            # _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
-            # _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "scale", None)
-            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
-            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
-          if call.op == op.get("imcflow_packing"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          if call.op == op.get("imcflow_unpacking"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+          # elif call.op == op.get("imcflow_packing"):
+          #   _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+          # elif call.op == op.get("imcflow_unpacking"):
+          #   _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
+          else:
+            raise ValueError("Unsupported operator detected. please check.")
 
         #Pre DFS search: Traverse child nodes
         for a in call.args:
@@ -1978,28 +1965,15 @@ def constructNoCPathDict(mod):
         SrcGraphNode = CustomIDToNode()[getInnerNodeID(SrcTensorID.graph_node_id)]
         DstGraphNode = CustomIDToNode()[getInnerNodeID(DstTensorID.graph_node_id)]
         if isinstance(SrcGraphNode, (Var, Constant)):
-          if isinstance(DstGraphNode, Call) and DstGraphNode.op.name == "imcflow_unpacking":
-            # if dst node is unpacking, src and dst are the same (inode -> inode). Do not make NoCPath.
-            pass
-          else:
-            # else, map src node into inode
-            DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
-            # if "inode" not in DstHwNodeID:
-            if not DstHwNodeID.is_inode():
-              InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
-              NocPaths[func_name_var.name_hint][tensor_edge] = (
-                (InodeID, DstHwNodeID, SplitIdx)
-              )
-              HwMapping[SrcTensorID.graph_node_id] = InodeID
-        elif isinstance(SrcGraphNode, Call) and SrcGraphNode.op.name == "imcflow_unpacking" and isinstance(DstTensorID.graph_node_id, tuple):
-          # if src is unpacking in subfunction, unpacking node was not mapped to HWnode by NodeMapper.
-          # so, map unpacking node into specific inode here.
+          # else, map src node into inode
           DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
-          InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
-          NocPaths[func_name_var.name_hint][tensor_edge] = (
-            (InodeID, DstHwNodeID, SplitIdx)
-          )
-          HwMapping[SrcTensorID.graph_node_id] = InodeID
+          # if "inode" not in DstHwNodeID:
+          if not DstHwNodeID.is_inode():
+            InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
+            NocPaths[func_name_var.name_hint][tensor_edge] = (
+              (InodeID, DstHwNodeID, SplitIdx)
+            )
+            HwMapping[SrcTensorID.graph_node_id] = InodeID
         elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" :
           # if this tensoredge is the final edge directly connected to host (= if destination is function)
           SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
@@ -2035,9 +2009,8 @@ def constructTensorIDToTensorEdgeDict():
     _add(SrcID, tensor_edge)
     _add(DstID, tensor_edge)
 
-@relay.transform.function_pass(opt_level=0)
 class MemoryAllocator:
-    def transform_function(self, func, mod, ctx):
+    def run_(self, func):
       class _MemoryAllocator(tvm.relay.ExprVisitor):
         """
           Target Operators:
@@ -2359,19 +2332,13 @@ class MemoryAllocator:
         def visit_tuple(self, op):
           super().visit_tuple(op)
 
-      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
-      items = mod.functions_items()
-      function_names = [item[0].name_hint for item in items]
-
-      num_func = len(function_names)
-      for i in range(num_func):
-        if function_names[i]=="main": continue
-          # _Nodemapper().visit(mod["main"])
-        elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          _MemoryAllocator().traverse_func(mod[function_names[i]])
-
-      # find all regions
+      _MemoryAllocator().traverse_func(func)
       return func
+    
+    def run(self, mod):
+      for _, func in mod.functions.items():
+        if isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow":
+          self.run_(func)
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
