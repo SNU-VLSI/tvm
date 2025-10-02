@@ -45,6 +45,7 @@ from .rms_norm import rms_norm
 from .local_response_norm import *
 from .bitserial_conv2d import *
 from .bitserial_dense import *
+from .bitserial_util import bitpack, bitunpack
 from .batch_matmul import *
 from .batch_norm import *
 from .sparse import *

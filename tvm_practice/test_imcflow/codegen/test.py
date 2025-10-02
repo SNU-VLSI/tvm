@@ -16,6 +16,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
 from tvm.contrib.imcflow import DataBlock
 import os
+from tvm.relay.op.transform import imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 
 from models import real_model, real_model2, test_models
 from models import small_model

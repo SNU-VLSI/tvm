@@ -26,6 +26,7 @@ from ..expr import Constant, Expr, Tuple, TupleWrapper, const
 from . import _make
 from .dyn import _make as _dyn_make
 from .tensor import shape_of
+from tvm import relay
 
 
 def sliding_window(data, axis, window_shape, strides):
@@ -2075,3 +2076,13 @@ def imcflow_unpacking(data, newshape, out_dtype="float32"):
                     raise RuntimeError(f"Unrecognized shape type: {err}")
         newshape = tempshape
     return _make.imcflow_unpacking(data, list(newshape), out_dtype)
+
+def imcflow_4d_to_qconv_input(data):
+    out = relay.nn.bitpack(data, bits=4, pack_axis=1, bit_axis=4, pack_type="uint256", msb_first=False)
+    return out
+
+def imcflow_mmquant_out_to_4d(data, origin_ch_size):
+    unpacked = relay.nn.bitunpack(data, bits=4, pack_axis=1, bit_axis=4,
+                                   pack_type="uint256", out_size=origin_ch_size,
+                                   out_dtype="uint8", msb_first=False)
+    return unpacked
