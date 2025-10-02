@@ -86,6 +86,23 @@ namespace relay {
       .set_attr<TOpIsStateful>("TOpIsStateful", false)                                  \
       .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BinaryBroadcastLayout)
 
+TVM_REGISTER_NODE_TYPE(BinaryOpAttrs);
+#define RELAY_REGISTER_BINARY_OP_WITH_ATTRS(OpName)                                     \
+  TVM_REGISTER_GLOBAL("relay.op._make." OpName).set_body_typed([](Expr lhs, Expr rhs) { \
+    auto attrs = make_object<BinaryOpAttrs>();                                        \
+    static const Op& op = Op::Get(OpName);                                              \
+    return Call(op, {lhs, rhs}, Attrs(attrs), {});                                           \
+  });                                                                                   \
+  RELAY_REGISTER_OP(OpName)                                                             \
+      .set_attrs_type<BinaryOpAttrs>()                                                             \
+      .set_num_inputs(2)                                                                \
+      .add_argument("lhs", "Tensor", "The left hand side tensor.")                      \
+      .add_argument("rhs", "Tensor", "The right hand side tensor.")                     \
+      .add_type_rel("Broadcast", BroadcastRel)                                          \
+      .set_attr<TOpPattern>("TOpPattern", kBroadcast)                                   \
+      .set_attr<TOpIsStateful>("TOpIsStateful", false)                                  \
+      .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BinaryBroadcastLayout)
+
 // Comparisons
 #define RELAY_REGISTER_CMP_OP(OpName)                                                   \
   TVM_REGISTER_GLOBAL("relay.op._make." OpName).set_body_typed([](Expr lhs, Expr rhs) { \

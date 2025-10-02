@@ -19,6 +19,10 @@ from tvm.ir import Attrs
 import tvm._ffi
 
 
+@tvm._ffi.register_object("relay.attrs.BinaryOpAttrs")
+class BinaryOpAttrs(Attrs):
+    """Attributes for binary operations"""
+
 @tvm._ffi.register_object("relay.attrs.Conv1DAttrs")
 class Conv1DAttrs(Attrs):
     """Attributes for nn.conv1d"""

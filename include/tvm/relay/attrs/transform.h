@@ -34,6 +34,20 @@
 namespace tvm {
 namespace relay {
 
+/*! \brief Attributes used for binary operators with boundary information */
+struct BinaryOpAttrs : public tvm::AttrsNode<BinaryOpAttrs> {
+  bool in_node;
+  bool out_node;
+  TVM_DECLARE_ATTRS(BinaryOpAttrs, "relay.attrs.BinaryOpAttrs") {
+    TVM_ATTR_FIELD(in_node)
+        .set_default(false)
+        .describe("Whether this node is an input boundary node");
+    TVM_ATTR_FIELD(out_node)
+        .set_default(false)
+        .describe("Whether this node is an output boundary node");
+  }
+};  // struct BinaryOpAttrs
+
 /*! \brief Attributes used for the sliding_window operator */
 struct SlidingWindowAttrs : public tvm::AttrsNode<SlidingWindowAttrs> {
   int axis;

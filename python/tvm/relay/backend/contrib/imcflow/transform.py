@@ -3296,21 +3296,23 @@ def modify_call_node_attrs(call_node, in_node=None, out_node=None):
       else:
         new_attr_dict[str(key)] = attr_value
   
+    attr_type = str(call_node.attrs).split("(")[0]
+  else:
+    attr_type = "DictAttrs"
+  
   # Set the new in_node and out_node values 
   if in_node is not None:
     new_attr_dict["in_node"] = in_node
   if out_node is not None:
     new_attr_dict["out_node"] = out_node
     
-  # Debug: print what we're passing to make_node
-  attr_type = str(call_node.attrs).split("(")[0]  
   new_attrs = tvm.ir.make_node(attr_type, **new_attr_dict)
       
   return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
 
 
 
-@relay.transform.function_pass(opt_level=0)
+# @relay.transform.function_pass(opt_level=0)
 class ImcflowBoundaryNodeMarker:
   """
   A pass that identifies boundary nodes between IMCFLOW and CPU execution domains.
@@ -3326,7 +3328,7 @@ class ImcflowBoundaryNodeMarker:
   def __init__(self):
     pass
     
-  def transform_function(self, func, mod, ctx):
+  def transform_function(self, mod):
     """
     Transform the function to mark boundary nodes and insert packing/unpacking.
     
@@ -3348,9 +3350,10 @@ class ImcflowBoundaryNodeMarker:
         mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
     
     # Transform the main function to insert packing/unpacking around imcflow calls
-    transformed_func = self._insert_packing_unpacking(func, mod)
+    # transformed_func = self._insert_packing_unpacking(func, mod)
     
-    return transformed_func
+    # return transformed_func
+    return mod
   
   def _mark_imcflow_function_boundaries(self, func):
     """
@@ -3374,20 +3377,21 @@ class ImcflowBoundaryNodeMarker:
       return func
     
     # Find the first call node that uses function parameters
-    first_call = self._find_input_call(func, call_nodes)
+    first_calls = self._find_input_call(func, call_nodes)
     
     # Find the output call node - the one that directly produces the function's return
-    output_call = self._find_output_call(func.body)
+    output_calls = self._find_output_call(func.body)
     
     class _BoundaryMarker(relay.ExprMutator):
       def visit_call(self, call):
         new_call = super().visit_call(call)
         
-        # Mark first call that uses params as input node
-        if call == first_call:
-          return modify_call_node_attrs(new_call, in_node=True, out_node=None)
+        # # Mark first call that uses params as input node
+        # if call in first_calls:
+        #   return modify_call_node_attrs(new_call, in_node=True, out_node=None)
         # Mark output call as output node
-        elif call == output_call:
+        # Handle both single call and list of calls
+        if (isinstance(output_calls, list) and call in output_calls) or call == output_calls:
           return modify_call_node_attrs(new_call, in_node=None, out_node=True)
         
         return new_call
@@ -3403,16 +3407,17 @@ class ImcflowBoundaryNodeMarker:
     # Create set of function parameter variables for quick lookup
     param_vars = set(func.params)
     
+    input_calls = []
+    
     # Check each call node to see if it directly uses function parameters
     for call in call_nodes:
       # Check if any of the call's arguments are function parameters
       for arg in call.args:
         if isinstance(arg, relay.Var) and arg in param_vars:
-          return call
+          input_calls.append(call)
 
-    # Fallback: if no call directly uses parameters, return None
-    return None
-  
+    return input_calls
+
   def _find_output_call(self, body):
     """
     Find the Call node that directly produces the function's output.
@@ -3420,6 +3425,10 @@ class ImcflowBoundaryNodeMarker:
     """
     # Handle different body types
     if isinstance(body, relay.Call):
+      # If body is a Call to a composite function, we need to look inside
+      if hasattr(body.op, "attrs"):
+        if hasattr(body.op.attrs, "Composite"):
+          return self._find_output_call(body.op.body)
       # If body is directly a Call, that's our output call
       return body
     elif isinstance(body, relay.TupleGetItem):
@@ -3428,17 +3437,13 @@ class ImcflowBoundaryNodeMarker:
     elif isinstance(body, relay.Tuple):
       # If body is a Tuple, we need to find the calls that produce each field
       # For now, we'll just return the first Call we find in the fields
+      output_calls = []
       for field in body.fields:
         output_call = self._find_output_call(field)
-        if output_call:
-          return output_call
-      return None
-    elif isinstance(body, relay.Let):
-      # If body is Let, the output is in the body of the Let
-      return self._find_output_call(body.body)
+        output_calls.append(output_call)
+      return output_calls
     else:
-      # For other types (Var, Constant, etc.), there's no Call to mark
-      return None
+      raise ValueError("Unsupported body type for finding output call")
 
   def _insert_packing_unpacking(self, func, mod):
     """
