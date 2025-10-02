@@ -168,7 +168,7 @@ def test_te_bits4_uint8():
                   pack_type="uint8", msb_first=True)
     
     print(f"Output shape: {out.shape}")
-    print(f"Expected:     (1, 1, 1, 8, 4) - 16*4bits = 64bits = 8 bytes, 4 bit planes")
+    print(f"Expected:     (1, 1, 1, 4, 2) - 4 bit planes, 16/8=2 packed uint8s per plane")
     
     s = te.create_schedule(out.op)
     f = tvm.build(s, [data, out], "llvm", name="bitpack_bits4")
@@ -183,7 +183,7 @@ def test_te_bits4_uint8():
     print(f"Result shape: {result.shape}")
     print(f"Result sample [0,0,0,0,:]: {[hex(x) for x in result[0, 0, 0, 0, :]]}")
     
-    assert result.shape == (1, 1, 1, 8, 4), f"Shape mismatch: {result.shape}"
+    assert result.shape == (1, 1, 1, 4, 2), f"Shape mismatch: {result.shape}"
     print("✓ PASS")
     return True
 
@@ -204,14 +204,13 @@ def test_te_bits4_uint64():
                   pack_type="uint64", msb_first=True)
     
     print(f"Output shape: {out.shape}")
-    print(f"Expected:     (1, 4, 8, 2, 2, 2)")
-    print(f"  - 128*4bits = 512bits")
-    print(f"  - 512bits / 64bits_per_uint64 = 8 uint64s")
+    print(f"Expected:     (1, 4, 2, 2, 2, 2)")
+    print(f"  - 128 elements / 64 bits_per_uint64 = 2 packed per plane")
     print(f"  - Each uint64 → 2 uint32 chunks (last dim)")
     print(f"  - 4 bit planes (bit_axis dimension)")
     
-    expected_shape = (1, 4, 8, 2, 2, 2)
-    assert out.shape == expected_shape, f"Shape mismatch: got {out.shape}, expected {expected_shape}"
+    expected_shape = (1, 4, 2, 2, 2, 2)
+    assert tuple(out.shape) == expected_shape, f"Shape mismatch: got {out.shape}, expected {expected_shape}"
     print("✓ PASS")
     return True
 
@@ -239,7 +238,7 @@ def test_te_bit_axis_second_lowest():
     print(f"  - pack_axis=2 compresses 32 → 1 (32bits/32bits)")
     
     expected_shape = (1, 2, 1, 1, 4)
-    assert out.shape == expected_shape, f"Shape mismatch: got {out.shape}, expected {expected_shape}"
+    assert tuple(out.shape) == expected_shape, f"Shape mismatch: got {out.shape}, expected {expected_shape}"
     print("✓ PASS")
     return True
 
@@ -263,12 +262,12 @@ def test_te_bit_axis_second_lowest_bits4():
                   pack_type="uint32", msb_first=True)
     
     print(f"Output shape: {out.shape}")
-    print(f"Expected:     (1, 3, 4, 8, 5)")
+    print(f"Expected:     (1, 3, 4, 2, 5)")
     print(f"  - bit_axis=2 inserts 'bits=4' dimension")
-    print(f"  - pack_axis=2: 64*4bits = 256bits / 32bits = 8")
+    print(f"  - pack_axis=2: 64 elements / 32 bits = 2 packed per plane")
     
-    expected_shape = (1, 3, 4, 8, 5)
-    assert out.shape == expected_shape, f"Shape mismatch: got {out.shape}, expected {expected_shape}"
+    expected_shape = (1, 3, 4, 2, 5)
+    assert tuple(out.shape) == expected_shape, f"Shape mismatch: got {out.shape}, expected {expected_shape}"
     print("✓ PASS")
     return True
 
@@ -301,9 +300,9 @@ def test_te_padding_bits4():
     result = out_tvm.numpy()
     
     print(f"Output shape: {result.shape}")
-    print(f"Expected:     (1, 1, 4, 6) - 4 bit planes, 6 packed bytes")
+    print(f"Expected:     (1, 1, 4, 2) - 4 bit planes, 11/8=2 packed uint8s per plane (with padding)")
     
-    expected_shape = (1, 1, 4, 6)
+    expected_shape = (1, 1, 4, 2)
     assert result.shape == expected_shape, f"Shape mismatch: {result.shape}"
     print("✓ PASS")
     return True
@@ -460,9 +459,9 @@ def test_relay_bits4_uint8():
     result = module.get_output(0).numpy()
     
     print(f"Output shape: {result.shape}")
-    print(f"Expected:     (1, 1, 4, 8) - 4 bit planes, 8 packed bytes")
+    print(f"Expected:     (1, 1, 4, 2) - 4 bit planes, 16/8=2 packed uint8s per plane")
     
-    expected_shape = (1, 1, 4, 8)
+    expected_shape = (1, 1, 4, 2)
     assert result.shape == expected_shape, f"Shape mismatch: {result.shape}"
     print("✓ PASS")
     return True
@@ -494,9 +493,9 @@ def test_relay_bits4_uint64():
     result = module.get_output(0).numpy()
     
     print(f"Output shape: {result.shape}")
-    print(f"Expected:     (1, 4, 8, 2, 2, 2)")
+    print(f"Expected:     (1, 4, 2, 2, 2, 2) - 4 bit planes, 128/64=2 packed per plane, 2 chunks")
     
-    expected_shape = (1, 4, 8, 2, 2, 2)
+    expected_shape = (1, 4, 2, 2, 2, 2)
     assert result.shape == expected_shape, f"Shape mismatch: {result.shape}"
     print("✓ PASS")
     return True
@@ -564,9 +563,9 @@ def test_relay_bit_axis_second_lowest_bits4():
     result = module.get_output(0).numpy()
     
     print(f"Output shape: {result.shape}")
-    print(f"Expected:     (1, 3, 4, 8, 5)")
+    print(f"Expected:     (1, 3, 4, 2, 5) - 4 bit planes, 64/32=2 packed per plane")
     
-    expected_shape = (1, 3, 4, 8, 5)
+    expected_shape = (1, 3, 4, 2, 5)
     assert result.shape == expected_shape, f"Shape mismatch: {result.shape}"
     print("✓ PASS")
     return True
