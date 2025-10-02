@@ -56,6 +56,37 @@ struct BitPackAttrs : public tvm::AttrsNode<BitPackAttrs> {
   }
 };
 
+/*! \brief Attributes used in bitunpack operators */
+struct BitUnpackAttrs : public tvm::AttrsNode<BitUnpackAttrs> {
+  int bits;
+  int pack_axis;
+  int bit_axis;
+  DataType pack_type;
+  DataType out_dtype;
+  bool msb_first;
+  Optional<Integer> out_size;
+  std::string name;
+
+  TVM_DECLARE_ATTRS(BitUnpackAttrs, "relay.attrs.BitUnpackAttrs") {
+    TVM_ATTR_FIELD(bits).set_default(1).describe("Number of bits per element.");
+    TVM_ATTR_FIELD(pack_axis).set_default(1).describe(
+        "Axis that was compressed, typically channels.");
+    TVM_ATTR_FIELD(bit_axis).set_default(-1).describe("Axis where bit planes are located.");
+    TVM_ATTR_FIELD(pack_type)
+        .set_default(NullValue<DataType>())
+        .describe("Type of int that bits were packed into.");
+    TVM_ATTR_FIELD(out_dtype)
+        .set_default(NullValue<DataType>())
+        .describe("Output data type.");
+    TVM_ATTR_FIELD(msb_first).set_default(true).describe(
+        "Whether bits were packed MSB first (true, default) or LSB first (false).");
+    TVM_ATTR_FIELD(out_size)
+        .set_default(NullValue<Integer>())
+        .describe("Original size before padding. None means full unpack.");
+    TVM_ATTR_FIELD(name).set_default("BitUnpack").describe("Name of operation.");
+  }
+};
+
 /*! \brief Attribues used in bitserial convolution operators */
 struct BinaryConv2DAttrs : public tvm::AttrsNode<BinaryConv2DAttrs> {
   Array<IndexExpr> strides;

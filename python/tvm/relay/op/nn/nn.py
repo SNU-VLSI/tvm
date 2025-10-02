@@ -2946,6 +2946,131 @@ def bitpack(data, bits=1, pack_axis=1, bit_axis=2, pack_type="uint32", name="Bit
     return _make.bitpack(data, bits, pack_axis, bit_axis, pack_type, name, msb_first)
 
 
+def bitunpack(data, bits=1, pack_axis=1, bit_axis=2, pack_type="uint32",
+              out_size=None, out_dtype="uint8", name="BitUnpack", msb_first=True):
+    """Unpack bitpacked data back to original format.
+
+    This operation reverses the bitpack operation, extracting individual elements
+    from packed representations. It supports various pack types including uint256
+    with automatic chunking, and handles padding through the out_size parameter.
+
+    Parameters
+    ----------
+    data : tvm.relay.Expr
+        Packed input tensor with shape (..., packed_size, ..., bits, [chunks]).
+        The input should be the output of a bitpack operation.
+
+    bits : int, optional
+        Number of bits per element (1, 2, 4, 8, etc.). Must match the value
+        used in the corresponding bitpack operation. Default is 1.
+
+    pack_axis : int, optional
+        Original axis that was packed. This axis will be expanded during unpacking.
+        Negative indexing is supported. Default is 1.
+
+    bit_axis : int, optional
+        Axis where bit planes are located in the packed data. This dimension
+        will be removed during unpacking. Negative indexing is supported. Default is 2.
+
+    pack_type : str, optional
+        Original pack type used during bitpack (uint8, uint16, uint32, uint64, 
+        uint128, uint256). For types larger than uint32, automatic chunking is 
+        handled. Default is "uint32".
+
+    out_size : int or relay.Expr, optional
+        Original size of pack_axis before padding was added during bitpack.
+        - If None: unpacks to full size (packed_size * data_width), including padding
+        - If specified: unpacks and returns only the first out_size elements
+        Example: If 100 channels were padded to 256 during bitpack, set out_size=100
+        to get the original 100 channels back. Default is None.
+
+    out_dtype : str, optional
+        Output data type (uint8, int8, uint16, int16, etc.). Should match the
+        original data type before bitpack. Default is "uint8".
+
+    name : str, optional
+        Name of the operation. Default is "BitUnpack".
+
+    msb_first : bool, optional
+        Whether bits were packed MSB first (True) or LSB first (False).
+        Must match the value used in bitpack. Default is True.
+
+    Returns
+    -------
+    result : tvm.relay.Expr
+        Unpacked tensor with shape (..., out_size or full_size, ...).
+        The bit_axis and chunk dimensions (if present) are removed.
+
+    Examples
+    --------
+    Basic usage without padding:
+
+    .. code-block:: python
+
+        # Pack data with 4 bits per element into uint256
+        data = relay.var("data", shape=(1, 256, 7, 7), dtype="uint8")
+        packed = relay.nn.bitpack(data, bits=4, pack_axis=1, bit_axis=4,
+                                  pack_type="uint256", msb_first=False)
+        # packed shape: (1, 1, 7, 7, 4, 8)
+
+        # Unpack back to original
+        unpacked = relay.nn.bitunpack(packed, bits=4, pack_axis=1, bit_axis=4,
+                                      pack_type="uint256", out_dtype="uint8",
+                                      msb_first=False)
+        # unpacked shape: (1, 256, 7, 7)
+
+    Handling padding:
+
+    .. code-block:: python
+
+        # Original data with 100 channels (padded to 256 during bitpack)
+        data = relay.var("data", shape=(1, 100, 7, 7), dtype="uint8")
+        packed = relay.nn.bitpack(data, bits=4, pack_axis=1, bit_axis=4,
+                                  pack_type="uint256", msb_first=False)
+        # packed shape: (1, 1, 7, 7, 4, 8) - 100 channels padded to 256
+
+        # Unpack with original size to remove padding
+        unpacked = relay.nn.bitunpack(packed, bits=4, pack_axis=1, bit_axis=4,
+                                      pack_type="uint256", out_size=100,
+                                      out_dtype="uint8", msb_first=False)
+        # unpacked shape: (1, 100, 7, 7) - original size restored
+
+    Round-trip example:
+
+    .. code-block:: python
+
+        # Original data
+        original = relay.var("data", shape=(2, 64, 5, 5), dtype="uint8")
+        
+        # Pack
+        packed = relay.nn.bitpack(original, bits=4, pack_axis=1, bit_axis=4,
+                                  pack_type="uint64", msb_first=False)
+        
+        # Unpack
+        restored = relay.nn.bitunpack(packed, bits=4, pack_axis=1, bit_axis=4,
+                                      pack_type="uint64", out_size=64,
+                                      out_dtype="uint8", msb_first=False)
+        
+        # restored should equal original
+
+    Notes
+    -----
+    - For pack types larger than uint32 (uint64, uint128, uint256), the data is
+      internally chunked into multiple uint32 values. The bitunpack operation
+      automatically handles this chunking.
+    - The bits parameter determines how many bits represent each element. For example,
+      bits=4 means each element uses 4 bits, allowing values from 0-15.
+    - When out_size is specified, only the first out_size elements along pack_axis
+      are returned, effectively removing any padding that was added during bitpack.
+
+    See Also
+    --------
+    bitpack : Pack data into bitserial format
+    """
+    return _make.bitunpack(data, bits, pack_axis, bit_axis, pack_type, 
+                          out_size, out_dtype, name, msb_first)
+
+
 def bitserial_conv2d(
     data,
     weight,

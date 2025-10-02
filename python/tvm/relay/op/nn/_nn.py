@@ -945,6 +945,26 @@ def compute_bitpack(attrs, inputs, out_dtype):
 reg.register_schedule("nn.bitpack", strategy.schedule_bitpack)
 
 
+# bitunpack
+@reg.register_compute("nn.bitunpack")
+def compute_bitunpack(attrs, inputs, out_dtype):
+    """Compute definition for bitunpack"""
+    bits = attrs.bits
+    pack_axis = attrs.pack_axis
+    bit_axis = attrs.bit_axis
+    pack_type = attrs.pack_type
+    out_size = attrs.out_size.value if attrs.out_size else None
+    out_dtype_val = attrs.out_dtype
+    name = attrs.name
+    msb_first = attrs.msb_first
+    out = topi.nn.bitunpack(inputs[0], bits, pack_axis, bit_axis, pack_type, 
+                            out_size, out_dtype_val, name, msb_first)
+    return [out]
+
+
+reg.register_schedule("nn.bitunpack", strategy.schedule_bitpack)
+
+
 # bitserial_conv2d
 reg.register_strategy("nn.bitserial_conv2d", strategy.bitserial_conv2d_strategy)
 

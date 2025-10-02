@@ -139,6 +139,146 @@ efficient implementation of bitserial operations.
     .add_type_rel("BitPack", BitPackRel)
     .set_attr<TOpPattern>("TOpPattern", kInjective);
 
+// relay.nn.bitunpack
+TVM_REGISTER_NODE_TYPE(BitUnpackAttrs);
+
+bool BitUnpackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                  const TypeReporter& reporter) {
+  ICHECK_EQ(types.size(), 2);
+  const auto* data = types[0].as<TensorTypeNode>();
+  const BitUnpackAttrs* param = attrs.as<BitUnpackAttrs>();
+  ICHECK(param != nullptr);
+  ICHECK(data != nullptr);
+
+  const Array<IndexExpr>& ishape = data->shape;
+  int ndim = static_cast<int>(ishape.size());
+  
+  int pack_axis = param->pack_axis;
+  int bit_axis = param->bit_axis;
+  int bits = param->bits;
+  DataType pack_type = param->pack_type;
+  DataType out_dtype = param->out_dtype;
+
+  // Handle negative indexing
+  if (pack_axis < 0) {
+    pack_axis = ndim + pack_axis;
+  }
+  if (bit_axis < 0) {
+    bit_axis = ndim + bit_axis;
+  }
+
+  ICHECK_LT(pack_axis, ndim) << "pack_axis " << pack_axis << " is out of range";
+  ICHECK_LT(bit_axis, ndim) << "bit_axis " << bit_axis << " is out of range";
+  
+  // Adjust pack_axis like bitpack does: if bit_axis comes before or at pack_axis,
+  // the actual packed dimension in input is shifted by 1
+  int adjusted_pack_axis = pack_axis;
+  if (bit_axis <= pack_axis) {
+    adjusted_pack_axis = pack_axis + 1;
+  }
+  
+  std::cout << "BitUnpackRel pack_axis: " << pack_axis << ", bit_axis: " << bit_axis 
+            << ", adjusted_pack_axis: " << adjusted_pack_axis << std::endl;
+
+  // Parse pack_type bits
+  int pack_bits = pack_type.bits();
+  if (pack_bits == 255) pack_bits = 256;  // Handle uint256 special case
+  
+  std::cout << "BitUnpackRel pack_bits : " << pack_bits << std::endl;
+  
+  // Determine if we have chunking
+  int num_chunks = 1;
+  bool has_chunks = false;
+  if (pack_bits > 32) {
+    num_chunks = pack_bits / 32;
+    has_chunks = true;
+    std::cout << "BitUnpackRel num_chunks : " << num_chunks << std::endl;
+  }
+
+  // Calculate data width (number of elements per packed unit)
+  int data_width = pack_bits / bits;
+  std::cout << "BitUnpackRel data_width : " << data_width << std::endl;
+  
+  // Calculate full unpacked size using adjusted_pack_axis
+  IndexExpr packed_size = ishape[adjusted_pack_axis];
+  IndexExpr full_size = packed_size * data_width;
+  std::cout << "BitUnpackRel packed_size : " << packed_size << ", full_size: " << full_size << std::endl;
+  
+  // Use out_size if specified, otherwise full_size
+  IndexExpr output_size;
+  if (param->out_size.defined()) {
+    output_size = param->out_size.value();
+    std::cout << "BitUnpackRel output_size (specified) : " << output_size << std::endl;
+  } else {
+    output_size = full_size;
+    std::cout << "BitUnpackRel output_size (full) : " << output_size << std::endl;
+  }
+
+  // Build output shape
+  Array<IndexExpr> out_shape;
+  int chunk_axis = -1;
+  if (has_chunks) {
+    chunk_axis = ndim - 1;  // Chunks are typically at the end
+  }
+
+  for (int i = 0; i < ndim; ++i) {
+    if (i == bit_axis) {
+      continue;  // Skip bit_axis dimension
+    } else if (has_chunks && i == chunk_axis) {
+      continue;  // Skip chunk dimension
+    } else if (i == adjusted_pack_axis) {
+      out_shape.push_back(output_size);  // Expanded size
+    } else {
+      out_shape.push_back(ishape[i]);
+    }
+  }
+
+  reporter->Assign(types[1], TensorType(out_shape, out_dtype));
+  
+  printf("BitUnpackRel output shape: ");
+  for(const auto& dim : out_shape) {
+    std::cout << dim << ",";
+  }
+  std::cout << std::endl;
+  
+  return true;
+}
+
+Expr MakeBitUnpack(Expr data, int bits, int pack_axis, int bit_axis, DataType pack_type,
+                   Optional<Integer> out_size, DataType out_dtype, String name, bool msb_first) {
+  auto attrs = make_object<BitUnpackAttrs>();
+  attrs->bits = bits;
+  attrs->pack_axis = pack_axis;
+  attrs->bit_axis = bit_axis;
+  attrs->pack_type = pack_type;
+  attrs->out_size = out_size;
+  attrs->out_dtype = out_dtype;
+  attrs->name = name;
+  attrs->msb_first = msb_first;
+  std::cout << "MakeBitUnpack pack_type : " << pack_type << std::endl;
+  std::cout << "MakeBitUnpack out_dtype : " << out_dtype << std::endl;
+  static const Op& op = Op::Get("nn.bitunpack");
+  return Call(op, {data}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op.nn._make.bitunpack").set_body_typed(MakeBitUnpack);
+
+RELAY_REGISTER_OP("nn.bitunpack")
+    .describe(R"code(Bitunpack layer that unpacks bitpacked data.
+
+This layer unpacks bits from a packed datatype back to the original format,
+reversing the bitpack operation.
+
+- **data**: Packed input tensor with shape (..., packed_size, ..., bits, [chunks])
+- **out**:  Unpacked tensor with shape (..., unpacked_size, ...)
+)code" TVM_ADD_FILELINE)
+    .set_num_inputs(1)
+    .set_attrs_type<BitUnpackAttrs>()
+    .add_argument("data", "Tensor", "Packed input data.")
+    .set_support_level(2)
+    .add_type_rel("BitUnpack", BitUnpackRel)
+    .set_attr<TOpPattern>("TOpPattern", kInjective);
+
 // relay.nn.bitserial_conv2d
 TVM_REGISTER_NODE_TYPE(BinaryConv2DAttrs);
 
