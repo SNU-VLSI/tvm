@@ -3331,25 +3331,105 @@ class ImcflowBoundaryNodeMarker:
             mod[function_names[i]].attrs["Compiler"] == "imcflow"):
         print(f"Marking boundary nodes for IMCFLOW function: {function_names[i]}")
         mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
-        mod[function_names[i]] = self._mark_imcflow_qconv(mod[function_names[i]])
+        mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
     
     # Transform the main function to insert packing/unpacking around imcflow calls
     mod = self._insert_packing_unpacking(mod)
     
     # return transformed_func
     return mod
-  def _mark_imcflow_qconv(self, func):
+  def _mark_and_transform_imcflow_qconv(self, func):
     """
     Mark the imcflow_qconv call nodes in an IMCFLOW function.
     """
-    
+    def qconv_weight_transform(call):
+      """
+      Transform the weight argument of imcflow_qconv
+      Original weight: int8 4D tensor (out_channels, in_channels, kh, kw)
+      Transformed weight: int32 4D tensor (ceil(out_channels/64), ceil(in_channels/ic), 256, 8), where
+      - int32 contains 8 int4 values
+      - ic = floor(256/kh/kw) => 256 = ic * kh * kw
+      Why (ceil(out_channels/64), ceil(in_channels/ic), 256, 8) int32?
+      - 8 int32 values means 64 output channels (that's why ceil(out_channels/64))
+      - 256 = ic * kh * kw means each block contains ic input channels. 256 is internally ordered by (ic, kh, kw).
+      - ceil(in_channels/ic) means the number of input channel blocks, each block contains ic input channels
+      """
+      # Transform the weight argument of imcflow_qconv to int8
+      if call.op == op.get("nn.imcflow_qconv"):
+        OriginWeight = call.args[1].data.asnumpy()
+        
+        # Original weight shape: (out_channels, in_channels, kh, kw)
+        out_channels, in_channels, kh, kw = OriginWeight.shape
+        
+        # Calculate ic: number of input channels per block (floor division)
+        ic = 256 // (kh * kw)
+        
+        # Calculate actual spatial elements per input channel block
+        spatial_elements = ic * kh * kw  # This might be < 256
+        
+        # Calculate padded dimensions
+        out_blocks = (out_channels + 63) // 64  # ceil(out_channels / 64)
+        in_blocks = (in_channels + ic - 1) // ic  # ceil(in_channels / ic)
+        
+        # Pad output channels to multiple of 64
+        padded_out_channels = out_blocks * 64
+        # Pad input channels to multiple of ic
+        padded_in_channels = in_blocks * ic
+        
+        # Create padded weight array
+        PaddedWeight = np.zeros((padded_out_channels, padded_in_channels, kh, kw), dtype=np.int8)
+        PaddedWeight[:out_channels, :in_channels, :, :] = OriginWeight
+        
+        # Reshape to group by blocks
+        # First reshape to (out_blocks, 64, in_blocks, ic, kh, kw)
+        Reshaped = PaddedWeight.reshape(out_blocks, 64, in_blocks, ic, kh, kw)
+        
+        # Transpose to (out_blocks, in_blocks, ic, kh, kw, 64)
+        # This groups the spatial elements (ic*kh*kw) together with 64 output channels
+        Transposed = Reshaped.transpose(0, 2, 3, 4, 5, 1)
+        
+        # Flatten spatial dimensions: (out_blocks, in_blocks, spatial_elements, 64)
+        Flattened = Transposed.reshape(out_blocks, in_blocks, spatial_elements, 64)
+        
+        # Pad spatial dimension to 256 if needed
+        if spatial_elements < 256:
+          padding = 256 - spatial_elements
+          Padded = np.pad(Flattened, ((0, 0), (0, 0), (0, padding), (0, 0)), mode='constant', constant_values=0)
+        else:
+          Padded = Flattened
+        
+        # Now Padded has shape (out_blocks, in_blocks, 256, 64)
+        
+        # Now we need to pack 8 int4 values into each int32
+        # Each group of 8 output channels (64/8 = 8 groups) becomes one int32
+        # Reshape to (out_blocks, in_blocks, 256, 8, 8) where last dim is 8 int4 values to pack
+        ToPack = Padded.reshape(out_blocks, in_blocks, 256, 8, 8)
+        
+        # Pack 8 int4 values into int32
+        # Each int4 occupies 4 bits in the int32
+        Packed = np.zeros((out_blocks, in_blocks, 256, 8), dtype=np.int32)
+        for i in range(8):
+          # Shift each int4 value to its position (4 bits per value)
+          # Mask to 4 bits (0xF) to ensure int4 range
+          Packed += ((ToPack[:, :, :, :, i].astype(np.int32) & 0xF) << (i * 4))
+        
+        NewWeight = relay.Constant(tvm.nd.array(Packed))
+        new_args = [call.args[0], NewWeight]
+        new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "int32")]
+
+        return Call(call.op, new_args, call.attrs, new_type_args, call.span)
+
+      return call
+
     class _BoundaryMarker(relay.ExprMutator):
       def visit_call(self, call):
         new_call = super().visit_call(call)
         
         # Mark imcflow_qconv calls as both input and output nodes
         if isinstance(call.op, tvm.ir.Op) and call.op == op.get("nn.imcflow_qconv"):
-          return modify_call_node_attrs(new_call, const_packed_node=True)
+          new_call = modify_call_node_attrs(new_call, const_packed_node=True)
+          new_call = qconv_weight_transform(new_call)
+          return new_call
 
         return new_call
     
