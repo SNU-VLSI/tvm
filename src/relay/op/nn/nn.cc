@@ -1682,37 +1682,60 @@ bool ImcflowBatchNormRel(const Array<Type>& types, int num_inputs, const Attrs& 
                   const TypeReporter& reporter) {
   ICHECK_EQ(types.size(), 4);
   const auto* data = types[0].as<TensorTypeNode>();
+  const auto* scale = types[1].as<TensorTypeNode>();
+  const auto* bias = types[2].as<TensorTypeNode>();
   if (data == nullptr) return false;
 
   const ImcflowBatchNormAttrs* param = attrs.as<ImcflowBatchNormAttrs>();
 
-  // axis of -1 means use the last dimension
-  ICHECK(param->axis >= -1 && param->axis < (int)data->shape.size());
-  int axis = (param->axis != -1) ? param->axis : data->shape.size() - 1;
-  auto axis_size = data->shape[axis];
+  IndexExpr n, c, h, w, cg;
 
-  // if we are using beta and gamma, they need to be of shape (dim,)
-  // reporter->Assign(types[1], TensorType({axis_size}, data->dtype));
-  // reporter->Assign(types[2], TensorType({axis_size}, data->dtype));
-  reporter->Assign(types[1], TensorType({axis_size}, types[1].as<TensorTypeNode>()->dtype));
-  reporter->Assign(types[2], TensorType({axis_size}, types[2].as<TensorTypeNode>()->dtype));
+  // check input shapes
+  if(param->in_node) {
+    n = data->shape[0];
+    cg = data->shape[1];
+    if(param->in_channels > 0) {
+      c = param->in_channels;
+    } else {
+      c = data->shape[1]*16;
+    }
+    h = data->shape[2];
+    w = data->shape[3];
 
-  // output is a tuple of the normed data (same shape as input), new running mean,
-  // new running variance, saved mean and saved variance (the latter are all
-  // vectors of length dim)
+    ICHECK(data->shape[4].as<IntImmNode>()->value == 16);
+  } else {
+    n = data->shape[0];
+    c = data->shape[1];
+    h = data->shape[2];
+    w = data->shape[3];
+  }
+
+  // check scale and bias shapes
+  ICHECK(scale->shape.size() == 1);
+  ICHECK(bias->shape.size() == 1);
+  ICHECK(scale->shape[0].as<IntImmNode>()->value == c.as<IntImmNode>()->value) << "ImcflowBatchNorm: scale shape inconsistent with data shape";
+  ICHECK(bias->shape[0].as<IntImmNode>()->value == c.as<IntImmNode>()->value) << "ImcflowBatchNorm: bias shape inconsistent with data shape";
+
+  // assign output types
   std::vector<Type> fields;
-  // auto vec_ty = TensorType(Array<IndexExpr>({data->shape[axis]}), data->dtype);
-  auto vec_ty = TensorType(Array<IndexExpr>({data->shape[axis]}), DataType::Int(16));
-  fields.push_back(TensorType(data->shape, DataType::Int(16)));
-  fields.push_back(vec_ty);
-  fields.push_back(vec_ty);
+  auto vec_ty = TensorType(Array<IndexExpr>({c}), DataType::Int(16));
+  if(param->out_node) {
+    fields.push_back(TensorType({n,cg,h,w,16}, DataType::Int(16)));
+    fields.push_back(vec_ty);
+    fields.push_back(vec_ty);
+  } else {
+    fields.push_back(TensorType({n,c,h,w}, DataType::Int(16)));
+    fields.push_back(vec_ty);
+    fields.push_back(vec_ty);
+  }
   reporter->Assign(types[3], TupleType(Array<Type>(fields)));
   return true;
 }
 
-Expr MakeImcflowBatchNorm(Expr data, Expr fused_scale, Expr fused_bias, int axis) {
+Expr MakeImcflowBatchNorm(Expr data, Expr fused_scale, Expr fused_bias, int axis, int in_channels) {
   auto attrs = make_object<ImcflowBatchNormAttrs>();
   attrs->axis = axis;
+  attrs->in_channels = in_channels;
   static const Op& op = Op::Get("imcflow.fused_batch_norm");
   return Call(op, {data, fused_scale, fused_bias}, Attrs(attrs), {});
 }

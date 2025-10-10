@@ -3953,13 +3953,13 @@ def conv2d_backward_weight(
     )
 
 def imcflow_batch_norm(
-    data, fused_scale, fused_bias, axis=1
+    data, fused_scale, fused_bias, axis=1, in_channels=-1
 ):
     r"""
     imcflow batch normalization.
     """
     result = _make.imcflow_fused_batch_norm(
-        data, fused_scale, fused_bias, axis
+        data, fused_scale, fused_bias, axis, in_channels
     )
     return expr.TupleWrapper(result, 3)
 

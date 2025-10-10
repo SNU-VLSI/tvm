@@ -3302,6 +3302,8 @@ class ImcflowBoundaryNodeMarker:
   3. Inserts packing nodes before calls to imcflow functions
   4. Inserts unpacking nodes after calls to imcflow functions
   """
+
+  #TODO: constant layout transform
   
   def __init__(self):
     self.input_call_dict = {}
@@ -3435,6 +3437,8 @@ class ImcflowBoundaryNodeMarker:
     This transforms the main function to insert packing/unpacking around calls to 
     functions with "Compiler" attribute set to "imcflow".
     """
+
+    #TODO: insert bitpack/bitunpack, layout transform. later cancel
     
     # Run type inference on the module to ensure all nodes have checked_type
     # mod = relay.transform.InferType()(mod)

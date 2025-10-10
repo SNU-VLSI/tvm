@@ -1594,9 +1594,13 @@ struct NLLLossAttrs : public tvm::AttrsNode<NLLLossAttrs> {
 
 struct ImcflowBatchNormAttrs : public tvm::AttrsNode<ImcflowBatchNormAttrs> {
   int axis;
+  int in_channels;
 
   TVM_DECLARE_ATTRS(ImcflowBatchNormAttrs, "relay.attrs.ImcflowBatchNormAttrs") {
     TVM_ATTR_FIELD(axis).describe("Specify which shape axis denotes the channel.").set_default(1);
+    TVM_ATTR_FIELD(in_channels)
+        .describe("The number of input channels in the batch norm.")
+        .set_default(-1);
   }
 };  // struct BatchNormAttrs
 

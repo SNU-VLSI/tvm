@@ -22,7 +22,7 @@
       "name": "Python: Current File",
       "type": "debugpy",
       "request": "launch",
-      "program": "/root/project/tvm/tvm_practice/test_imcflow/custom_op/test_bitpack_comprehensive.py",
+      "program": "/root/project/tvm/tvm_practice/test_imcflow/codegen/test.py",
       "console": "integratedTerminal",
       "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
       "cwd": "/root/project/tvm/tvm_practice/test_imcflow/codegen",

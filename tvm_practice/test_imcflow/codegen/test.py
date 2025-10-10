@@ -162,7 +162,6 @@ def run_test_evl(test_name, mod, param_dict):
 
   # Use the new ImcflowBoundaryNodeMarker pass to automatically mark boundary nodes
   eval_mod = imcflow_transform.ImcflowBoundaryNodeMarker().transform_function(eval_mod)
-
   printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out")
 
   imcflow_transform.constructUsefulMappings(eval_mod)

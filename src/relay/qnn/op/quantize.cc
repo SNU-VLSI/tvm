@@ -210,7 +210,7 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
     ICHECK(data_shape[in_last_dim].as<IntImmNode>()->value == 16)
         << "Input data must have 16 channels in the last dimension, but got "
         << data_shape[in_last_dim].as<IntImmNode>()->value;
-    batch = data_shape[1];
+    batch = data_shape[0];
     ih    = data_shape[2];
     iw    = data_shape[3];
     ic    = quantize_attrs->channel;
@@ -238,7 +238,7 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   // assign output tensor type
   if(quantize_attrs->out_node) {
     IndexExpr c_group = ceildiv(ic,256);
-    Array<IndexExpr> oshape({c_group, batch, ih, iw, 8});
+    Array<IndexExpr> oshape({batch, c_group, ih, iw, 8});
     DataType out_dtype = DataType::UInt(32);
     reporter->Assign(types[3], TensorType(oshape, out_dtype));
   } else {
