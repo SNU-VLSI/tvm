@@ -3236,7 +3236,7 @@ def convert_compiler_regions_to_composite(mod):
   return mod
 
 
-def modify_call_node_attrs(call_node, in_node=None, out_node=None):
+def modify_call_node_attrs(call_node, in_node=None, out_node=None, const_packed_node=None):
   """
   Modify the attributes of a Call node by setting in_node and/or out_node flags.
   
@@ -3283,7 +3283,9 @@ def modify_call_node_attrs(call_node, in_node=None, out_node=None):
     new_attr_dict["in_node"] = in_node
   if out_node is not None:
     new_attr_dict["out_node"] = out_node
-    
+  if const_packed_node is not None:
+    new_attr_dict["const_packed_node"] = const_packed_node
+
   new_attrs = tvm.ir.make_node(attr_type, **new_attr_dict)
       
   return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
@@ -3329,12 +3331,31 @@ class ImcflowBoundaryNodeMarker:
             mod[function_names[i]].attrs["Compiler"] == "imcflow"):
         print(f"Marking boundary nodes for IMCFLOW function: {function_names[i]}")
         mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
+        mod[function_names[i]] = self._mark_imcflow_qconv(mod[function_names[i]])
     
     # Transform the main function to insert packing/unpacking around imcflow calls
     mod = self._insert_packing_unpacking(mod)
     
     # return transformed_func
     return mod
+  def _mark_imcflow_qconv(self, func):
+    """
+    Mark the imcflow_qconv call nodes in an IMCFLOW function.
+    """
+    
+    class _BoundaryMarker(relay.ExprMutator):
+      def visit_call(self, call):
+        new_call = super().visit_call(call)
+        
+        # Mark imcflow_qconv calls as both input and output nodes
+        if isinstance(call.op, tvm.ir.Op) and call.op == op.get("nn.imcflow_qconv"):
+          return modify_call_node_attrs(new_call, const_packed_node=True)
+
+        return new_call
+    
+    marker = _BoundaryMarker()
+    new_body = marker.visit(func.body)
+    return relay.Function(func.params, new_body, func.ret_type, func.type_params, func.attrs)
   
   def _mark_imcflow_function_boundaries(self, func):
     """
@@ -3369,10 +3390,6 @@ class ImcflowBoundaryNodeMarker:
       def visit_call(self, call):
         new_call = super().visit_call(call)
         
-        # # Mark first call that uses params as input node
-        # if call in first_calls:
-        #   return modify_call_node_attrs(new_call, in_node=True, out_node=None)
-        # Mark output call as output node
         # Handle both single call and list of calls
         if (isinstance(output_calls, list) and call in output_calls) or call == output_calls:
           return modify_call_node_attrs(new_call, in_node=None, out_node=True)
