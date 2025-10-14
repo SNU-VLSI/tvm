@@ -62,52 +62,54 @@ class CodegenSuite:
     PolicyTableCodegen(func_name, self.build_dir).generate(func_name)
 
     return func
-  
+
 class PolicyTableCodegen:
+  """
+  Write out a binary file for policy tables for each node.
+  """
   def __init__(self, func_name, build_dir="/tmp"):
     super().__init__()
     self.func_name = func_name
+    self.build_dir = build_dir
     self.func_dir = os.path.join(build_dir, func_name)
 
   def pack_to_bin(self, entry, endian):
-    bin_data = bytearray()
+    assert set(entry.keys()) == {'Local', 'North', 'East', 'South', 'West'}, "Invalid policy table entry"
+
+    def get_bits(val, num_bits):
+      return (val & ((1 << num_bits) - 1)) if val is not None else 0
+
     val = 0
-    for direction, value in entry.items():
-      if direction != 'Local':
-        addr = value["addr"] & 0b111111
-        enable = 1 if value["enable"] else 0
-        val = (val << 1) | enable
-        val = (val << 6) | addr
-      else:
-        if value["chunk_index"] == None:
-          # Local entry without chunk_index
-          chunk_index = 0b000000
-        else:
-          chunk_index = value["chunk_index"] & 0b111111
-        ksel = 0b000
-        addr = value["addr"] & 0b111111
-        enable = 1 if value["enable"] else 0
-        val = (enable << 6) | addr
-        val = (val << 3) | ksel
-        val = (val << 6) | chunk_index
-    val = val << 4
-    bin_data.extend(val.to_bytes(6, byteorder=endian, signed=False))
-    # pad to 32-byte boundary
-    padding = (-len(bin_data)) % 32
-    if padding:
-      bin_data.extend(b'\x00' * padding)
+    for direction in ['Local', 'North', 'East', 'South', 'West']:
+      conf = entry[direction]
+      val = (val << 1) | (1 if conf["enable"] else 0)
+      val = (val << 6) | get_bits(conf["addr"], 6)
+      if direction == 'Local':
+        val = (val << 3) | 0b000
+        val = (val << 6) | get_bits(conf["chunk_index"], 6)
+
+    bin_data = bytearray()
+    bin_data.extend(val.to_bytes(32, byteorder=endian, signed=False))
     return bytes(bin_data)
-  
+
   def generate(self, func_name):
     for node_name, entries in transform.ImcflowDeviceConfig().PolicyTableDict.items():
-      policytable_path = os.path.join(self.func_dir, f"{node_name.name}_policy.bin")
-      with open(policytable_path, "wb") as file:
+      policytable_path = os.path.join(self.func_dir, f"{node_name.name}_policy")
+      policytable_bin_file = f"{policytable_path}.bin"
+      policytable_host_obj_file = f"{node_name.name}_policy.host.o"
+      with open(policytable_bin_file, "wb") as file:
         for entry in entries:
-          policytable_bin = self.pack_to_bin(entry, endian='big')
+          policytable_bin = self.pack_to_bin(entry, endian='little')
           file.write(policytable_bin)
+      if ("inode" in node_name.name):
+        DevCodegen = DeviceCodegen("inode", self.build_dir)
+        DevCodegen.func_dir = self.func_dir
+        DevCodegen.create_host_object(f"{node_name.name}_policy.bin", policytable_host_obj_file)
+      if ("imce" in node_name.name):
+        DevCodegen = DeviceCodegen("inode", self.build_dir)
+        DevCodegen.func_dir = self.func_dir
+        DevCodegen.create_host_object(f"{node_name.name}_policy.bin", policytable_host_obj_file)
     return
-  
-  
 
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
@@ -191,7 +193,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # We use it to determine the qreg_start_idx for MinMaxQuantBlock but may not work
     # when there is more tuples in a composite call.
     self.edges = edges
-    self.codeblocks = CodeBlocks(func_name, "imce")
+    self.codeblocks = ImceCodeBlockManager(func_name)
 
   def visit_tuple(self, tup):
     for idx, x in enumerate(tup.fields):
@@ -453,15 +455,27 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name, edges):
     super().__init__()
     self.edges = edges
-    self.codeblocks = CodeBlocks(func_name, "inode")
+    self.codeblocks = InodeCodeBlockManager(func_name)
     self.initialize()
     self.curr_composite_id = None
+    self.finalize()
 
   def initialize(self):
     # policy update
     for inode in NodeID.inodes():
       block = PolicyUpdateBlock(inode, "policy update")
       self.codeblocks.append(inode, block, CodePhase.INIT)
+
+    # standby and intrt
+    inode_master = NodeID.inode_3
+    inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
+    block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
+    self.codeblocks.append(inode_master, block, CodePhase.INIT)
+
+    # set_flag
+    block = SetFlagAndHaltBlock()
+    for inode_slv in inode_slaves:
+      self.codeblocks.append(inode_slv, block, CodePhase.INIT)
 
     # imem write
     for imce, inst_edge in DevConfig().InstEdgeInfoDict.items():
@@ -472,6 +486,19 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for node in NodeID.inodes():
       block = WriteIMCUBlock(node, "imcu write")
       self.codeblocks.append(node, block, CodePhase.INIT)
+
+  def finalize(self):
+    # standby and intrt
+    # FIXME: hardcoded inode_3
+    inode_master = NodeID.inode_3
+    inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
+    block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
+    self.codeblocks.append(inode_master, block, CodePhase.END)
+
+    # set_flag
+    block = SetFlagAndHaltBlock()
+    for inode_slv in inode_slaves:
+      self.codeblocks.append(inode_slv, block, CodePhase.END)
 
   def visit_call(self, call):
     IsComposite = isinstance(call.op, relay.Function) and \
@@ -496,6 +523,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
     tid = out_edge.src_id
     hid = self.get_hid(node)
+
+    block = IMCEComputeBlock(f"imce compute start")
+    self.codeblocks.append(hid, block, CodePhase.EXEC)
+
     db = DevConfig().MemLayout.get_data_block_by_id(tid)
 
     block = SendBlock(db, out_edge_info.fifo_id, "send")
@@ -523,42 +554,6 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.curr_composite_id = None
     for idx, a in enumerate(call.args):
       self.visit(a)
-
-  # def visit_send_call(self, call):
-  #   out_edge = self.get_output_edges(call)[0]
-  #   out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
-  #   out_tid = out_edge.src_id
-  #   hid = self.get_hid(call)
-  #   db = DevConfig().MemLayout.get_data_block_by_id(out_tid)
-
-  #   dst_hw_node = DevConfig().get_hw_node(out_edge.dst_id.graph_node_id)
-  #   if dst_hw_node is not None and dst_hw_node.is_inode():
-  #     # The only available case that unpacking's dst hw node is inode is [unpacking -> split].
-  #     # [unpacking -> split -> qconv], then both unpacking and split are inode.
-  #     # In this case, no tensor edge exists in [unpacking -> split], so handle this case separately.
-
-  #     # TODO: Need to add another blocks(control block, etc)
-  #     block = SendBlock(db, 0, "send idata") # FIFO ID for input of qconv is always 0. Refer to transform.py/PolicyTableGenerator.add_EdgeInfo
-  #     self.codeblocks.append(hid, block, CodePhase.EXEC)
-  #   else:
-  #     # TODO: Need to add another blocks(control block, etc)
-  #     block = SendBlock(db, out_edge_info.fifo_id, "send")
-  #     self.codeblocks.append(hid, block, CodePhase.EXEC)
-
-  #   return
-
-  # def visit_recv_call(self, call):
-  #   in_edge = self.get_input_edges(call)[0]
-  #   in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
-  #   in_tid = in_edge.dst_id
-  #   hid = self.get_hid(call)
-  #   db = DevConfig().MemLayout.get_data_block_by_id(in_tid)
-
-  #   # TODO: Need to add another blocks(control block, etc)
-  #   block = RecvBlock(db, in_edge_info.fifo_id, "recv")
-  #   self.codeblocks.append(hid, block, CodePhase.EXEC)
-
-  #   return
 
   def get_graph_node_id(self, call):
     if self.curr_composite_id:

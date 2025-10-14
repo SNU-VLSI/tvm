@@ -7,5 +7,4 @@ set(MLF_TAR "${CMAKE_CURRENT_LIST_DIR}/../../one_relu_evl/lib_graph_system-lib.t
 set(TVM_BUILD_HOST_RUNNER OFF CACHE BOOL "Build host runner")
 set(TVM_BUILD_ARM_RUNNER ON CACHE BOOL "Build ARM runner")
 set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/arm-cortex-a53.cmake" CACHE FILEPATH "Path to toolchain file")
-
-file(COPY "${CMAKE_CURRENT_LIST_DIR}/../../one_relu_evl/build" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
+set(H_OBJ_PATH "${CMAKE_CURRENT_LIST_DIR}/../../one_relu_evl/build/tvmgen_default_imcflow_main_0" CACHE PATH "Path to Host object files")

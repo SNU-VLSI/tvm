@@ -7,51 +7,7 @@ from . import transform as imcflow_transform
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.expr import (Var, Constant)
-
-import re
 import math
-
-
-def getCompiledDataBlocks(func_name, func):
-  compiled_blocks = []
-
-  for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
-    for block_name, block in memory_region.blocks.items():
-      if isinstance(block_name, str):
-        compiled_blocks.append(block)
-
-  return compiled_blocks
-
-
-def getDataBlocks(func_name, func):
-  input_data_blocks = []
-  output_data_blocks = []
-
-  # get input/output node ID
-  input_node_ids = [imcflow_transform.getNodeID(
-      n) for n in imcflow_transform.getInputNodesOfFunc(func)]
-  output_node_id = imcflow_transform.getNodeID(
-      imcflow_transform.getOutputNodesOfFunc(func))
-
-  # get input data blocks
-  for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-    if re.match(r"inode_\d+_data", key):
-      for block_name, block in memory_region.blocks.items():
-        current_func_input_data = isinstance(block.id, TensorID) and any(
-            [input_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids])
-        if current_func_input_data:
-          input_data_blocks.append(block)
-
-  # get output data blocks
-  # TODO : odata ??
-  for key, memory_region in ImcflowDeviceConfig().MemLayout.regions.items():
-    if re.match(r"inode_\d+_data", key):
-      for block_name, block in memory_region.blocks.items():
-        if isinstance(block_name, TensorID) and output_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id):
-          output_data_blocks.append(block)
-
-  return input_data_blocks, output_data_blocks
-
 
 def align_to_n_bytes(size, n_bytes):
   if (size % n_bytes) != 0:
@@ -107,18 +63,6 @@ class CodeWriter:
       self.write(other)
       return self
 
-
-def generateCompiledDataDef():
-  code = CodeWriter()
-  for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
-    for block_name, block in memory_region.blocks.items():
-      if isinstance(block_name, str):
-        size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
-        numel = math.ceil(size / 4)
-        code += f"int32_t {block_name}[{numel}] = {{0,}};\n"
-  return code
-
-
 def makeBaseAddrName(block):
   if isinstance(block.id, TensorID):
     return f"{block.id.tensor_type.upper()}_{imcflow_transform.getInnerNodeID(block.id.graph_node_id)}_BASE_ADDR"
@@ -147,38 +91,40 @@ def getConstantIdx(func, node_id):
 
 def getCInputVarName(func, func_name, data_block):
   node_map = CustomIDToNode()
-
-  if isinstance(data_block.id, TensorID):
-    graph_node_inner_id = imcflow_transform.getInnerNodeID(
-        data_block.id.graph_node_id)
-    if isinstance(node_map[graph_node_inner_id], Var):
-      return node_map[graph_node_inner_id].name_hint
-    elif isinstance(node_map[graph_node_inner_id], Constant):
-      data_type = dtype_to_cpp(
-          node_map[graph_node_inner_id].checked_type.dtype)
-      return f"(({data_type}*)({func_name}_consts[{getConstantIdx(func, graph_node_inner_id)}]->data))"
-    else:
-      print(data_block)
-      raise ValueError("Wrong data block type!")
-  elif isinstance(data_block.id, str):
-    return data_block.id
+  assert isinstance(data_block.id, TensorID), "data_block.id must be TensorID to get C input var name"
+  graph_node_inner_id = imcflow_transform.getInnerNodeID(
+      data_block.id.graph_node_id)
+  node_type = node_map[graph_node_inner_id]
+  if isinstance(node_type, Var):
+    return node_type.name_hint
+  elif isinstance(node_type, Constant):
+    data_type = dtype_to_cpp(node_type.checked_type.dtype)
+    return f"(({data_type}*)({func_name}_consts[{getConstantIdx(func, graph_node_inner_id)}]->data))"
   else:
-    print(data_block)
-    raise ValueError("Wrong data block type!")
+    raise ValueError(f"Invalid node_type!: {node_type}")
 
+def getObjectFileName(data_block):
+  assert isinstance(data_block.id, str), "data_block.id must be string to get object file name"
+  return f"_binary_{data_block.id}_bin"
 
 def generateToNpuTransferCode(func, func_name, blocks, address_macros):
   code = CodeWriter()
   code += "// Transfer data into NPU memory\n"
   for block in blocks:
-    size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
     base_address = block.base_address
     base_address_name = makeBaseAddrName(block)
     address_macros.update({base_address_name: base_address})
-    numel = math.ceil(size/4)
-    code += f"for(int i=0; i<{numel}; i++){{\n"
-    code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {getCInputVarName(func, func_name, block)}[i];\n"
-    code += f"}}\n"
+    if isinstance(block.id, str):
+      var_prefix = getObjectFileName(block)
+      code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {var_prefix}_start[i];\n"
+      code += f"}}\n"
+    else:
+      size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
+      numel = math.ceil(size/4)
+      code += f"for(int i=0; i<{numel}; i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {getCInputVarName(func, func_name, block)}[i];\n"
+      code += f"}}\n"
   return code
 
 
@@ -204,22 +150,15 @@ def generateBaseAddrMacros(base_address_macros):
   code += "\n"
   return code
 
-
-def generateLoadBinaryCode(func_name, compiled_blocks):
+def generateExternLink(func_name, compiled_blocks):
   code = CodeWriter()
-  code += "// Load binary files into buffers\n"
+  code += 'extern "C" { \n'
   for block in compiled_blocks:
     if isinstance(block.id, str):
-      filename = f"./build/{func_name}/{block.id}.bin"
-      size = math.ceil(block.size / 4)
-      code += (
-          f'{{\n'
-          f'FILE *fp = fopen("{filename}", "rb");\n'
-          f'if (!fp) {{ perror("fopen failed"); exit(1); }}\n'
-          f'fread(&{block.id}, sizeof(int32_t), {size}, fp);\n'
-          f'fclose(fp);\n'
-          f'}}\n'
-      )
+      filename = f"_binary_{block.id}_bin"
+      code += f'  extern const int32_t {filename}_start[];\n'
+      code += f'  extern const int32_t {filename}_end[];\n'
+  code += '}\n'
   return code
 
 
@@ -294,15 +233,13 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
 
   code = CodeWriter()
   code += generateHeader()
+  code += generateExternLink(func_name, compiled_blocks)
   code += generateInterruptUtilities()
-  code += generateCompiledDataDef()
 
   # Kernel function prototype and definition (C)
-  code += f"void {func_name}_kernel({args_proto_type});\n"
   code += f"void {func_name}_kernel({args_proto_type}) {{\n"
   code.nextIndent()
   code += generateDevicePointerSetup()
-  code += generateLoadBinaryCode(func_name, compiled_blocks)
   code += generateToNpuTransferCode(func, func_name,
                                     compiled_blocks, base_address_macros)
   code += generateToNpuTransferCode(func, func_name,
@@ -321,8 +258,8 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
 
 
 def makeKernelStartCode(func_name, func):
-  compiled_blocks = getCompiledDataBlocks(func_name, func)
-  data_blocks = getDataBlocks(func_name, func)
+  compiled_blocks = ImcflowDeviceConfig().DataBlocks["compiled"]
+  data_blocks = ImcflowDeviceConfig().DataBlocks["input"], ImcflowDeviceConfig().DataBlocks["output"]
   kernel_def = makeKernelDef(func_name, func, compiled_blocks, data_blocks)
   code = kernel_def
 
@@ -409,17 +346,15 @@ if (int_ack_gen_pointer == MAP_FAILED) {
 
 def generateInvokeCode():
   return ("""
-// Invoke with policy update mode
+// Set the inode pc to 0 and run.
 for(int i=0; i<INODE_NUM; i++) {
-  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P0_ENUM_VAL << 30 + 0);
+  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);
 }
 enable_imcflow_interrupt(npu_fd);
 *(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;
 wait_imcflow_interrupt(npu_fd);
 generate_ack(int_ack_gen_pointer);
 npu_pointer[7] = 1;
-
-// Invoke with compute mode
 for(int i=0; i<INODE_NUM; i++) {
   *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);
 }

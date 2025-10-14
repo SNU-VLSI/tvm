@@ -5,7 +5,8 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
-from tvm.relay.backend.contrib.imcflow.codeblock import CodeBlock, TextBlock, SimpleFor, UniqueVar
+from tvm.relay.backend.contrib.imcflow.codeblock import *
+from textwrap import indent
 import logging
 import pdb
 
@@ -320,6 +321,35 @@ class ConvBlock(ImceCodeBlock):
       code += self._outer_loop_content(row_pat["count"], row_pat["pattern"])
 
     return code
+
+
+class ImceCodeBlockManager(NodeCodeBlockManager):
+  """A class that manages and generates code blocks for imces."""
+
+  def __init__(self, func_name: str):
+    super().__init__()
+    self.func_name = func_name
+
+  @property
+  def nodes(self) -> List[NodeID]:
+    return NodeID.imces()
+
+  @property
+  def target(self) -> str:
+    return "imce"
+
+  def start_block(self) -> str:
+    code = (
+      "#include \"../common_decl.h\"\n"
+      f"void {self.func_name}() {{\n"
+      "  int hid = __builtin_IMCE_GET_CORE_HID();\n"
+      "  int wid = __builtin_IMCE_GET_CORE_WID();\n"
+      f"{indent(UniqueVar.get_decls_str(), '  ')}\n"
+    )
+    return code
+
+  def end_block(self) -> str:
+    return "}\n"
 
 
 """

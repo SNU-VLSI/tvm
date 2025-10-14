@@ -2452,7 +2452,7 @@ class PolicyTableGenerator:
                 dest_node = mapping_info[1]
                 dest_index = mapping_info[2]
                 if isinstance(edge, NodeID):
-                  source_node_data_type ="instruction"
+                  source_node_data_type = f"instruction_{edge.name}"
                 else:
                   source_node_data_type = edge.src_id.tensor_type
 
@@ -2525,7 +2525,7 @@ class PolicyTableGenerator:
                 dest_node = mapping_info[1]
                 # dest_index = mapping_info[2]
                 if isinstance(edge, NodeID):
-                  source_node_data_type ="instruction"
+                  source_node_data_type = f"instruction_{edge.name}"
                 else:
                   source_node_data_type = edge.src_id.tensor_type
 
@@ -3653,3 +3653,8 @@ class ImcflowBoundaryNodeMarker:
     new_main = inserter.visit(mod["main"])
     mod.update_func(mod.get_global_var("main"), new_main)
     return mod
+def constructDataBlockDict(mod):
+  for func_name_var, func in mod.functions.items():
+    if func_name_var.name_hint == "main": continue
+    elif func.attrs["Compiler"]=="imcflow":
+      ImcflowDeviceConfig().get_data_block_dict(func)

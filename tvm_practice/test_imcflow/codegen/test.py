@@ -198,7 +198,6 @@ def run_test_evl(test_name, mod, param_dict):
       print(k, v)
 
   imcflow_transform.MemoryAllocator().run(eval_mod)
-  return 
 
   imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
 
@@ -208,6 +207,7 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"nodemap: {config.HWNodeMap}")
   print(f"edgeinfo: {config.TensorEdgetoInfo}")
   print(f"idtoedge: {config.TensorIDtoEdge}")
+  print(f"policy_table: {config.PolicyTableDict}")
 
   CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
   CodegenSuite(eval_mod)
@@ -215,7 +215,10 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"mem_layout: {config.MemLayout}")
   print(f"Evaluation generation completed for {test_name}")
 
-  # generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
+  imcflow_transform.constructDataBlockDict(eval_mod)
+  print(f"data_blocks: {config.DataBlocks}")
+
+  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():

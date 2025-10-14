@@ -18,6 +18,9 @@
 from typing import Tuple, List, Dict, Union
 from enum import Enum
 
+import re
+import math
+
 SMALL_DEBUG = 0
 
 
@@ -384,6 +387,7 @@ class ImcflowDeviceConfig:
     )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
+    self.DataBlocks = {}
 
   def clear(self):
     self._initialize()
@@ -440,3 +444,32 @@ class ImcflowDeviceConfig:
   def get_inst_edge_info(self, imce_id: NodeID):
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
     return self.InstEdgeInfoDict.get(imce_id, None)
+
+  def get_data_block_dict(self, func):
+    from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
+    compiled_blocks, input_data_blocks, output_data_blocks = [], [], []
+
+    # get input/output node ID
+    input_node_ids = [imcflow_transform.getNodeID(
+        n) for n in imcflow_transform.getInputNodesOfFunc(func)]
+    output_node_id = imcflow_transform.getNodeID(func)
+
+    for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
+      for block_name, block in memory_region.blocks.items():
+        # get compiled data blocks
+        if isinstance(block_name, str):
+          compiled_blocks.append(block)
+        # get input & output data blocks
+        if isinstance(block_name, TensorID):
+          # get input data blocks
+          if any([input_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids]):
+            input_data_blocks.append(block)
+          # get output data blocks
+          if output_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id):
+            output_data_blocks.append(block)
+
+    self.DataBlocks = {
+        "compiled": compiled_blocks,
+        "input": input_data_blocks,
+        "output": output_data_blocks,
+    }

@@ -42,6 +42,10 @@ class UniqueVar:
       yield f"{value.dtype} {value.name}; // {obj}"
 
   @classmethod
+  def get_decls_str(cls):
+    return "\n".join(cls.get_decls())
+
+  @classmethod
   def reset(cls):
     cls._instances = {}
     cls._counter = 0
@@ -50,6 +54,7 @@ class UniqueVar:
 class CodePhase(Enum):
   INIT = "INIT"
   EXEC = "EXEC"
+  END = "END"
 
 
 class CodeBlock(metaclass=ABCMeta):
@@ -127,9 +132,9 @@ class SimpleFor(CodeBlock):
       formatted_body = self.body(0) if callable(self.body) else str(self.body)
       return TextBlock(formatted_body)
 
-
     with self.manage_scope() as var_iter:
-      formatted_body = self.body(var_iter) if callable(self.body) else str(self.body)
+      formatted_body = self.body(var_iter) if callable(
+          self.body) else str(self.body)
 
       if self.annotation:
         code = TextBlock("")
@@ -147,39 +152,6 @@ class SimpleFor(CodeBlock):
     return code
 
 
-class CodeBlockStart(CodeBlock):
-  def __init__(self, name: str, target: str):
-    super().__init__()
-    assert target in ["inode", "imce"], \
-        "target must be either 'inode' or 'imce'"
-    self.target = target
-    self.func_name = name
-
-  def content(self) -> CodeBlock:
-    code = TextBlock("")
-    code += "#include \"../common_decl.h\"\n"
-    code += f"void {self.func_name}() {{"
-    if self.target == "imce":
-      code += f"  int hid = __builtin_IMCE_GET_CORE_HID();"
-      code += f"  int wid = __builtin_IMCE_GET_CORE_WID();\n"
-    else:
-      code += f"  int hid = __builtin_INODE_GET_CORE_HID();"
-      code += f"  int wid = 0;\n"
-    for decl in UniqueVar.get_decls():
-      code += f"  {decl}"
-    code += "\n"
-
-    return code
-
-
-class CodeBlockEnd(CodeBlock):
-  def __init__(self):
-    super().__init__()
-
-  def content(self) -> str:
-    return "}\n"
-
-
 class CtrlBlock(CodeBlock):
   """
   DONE, HALT, INTRT, STANDBY, SET_ADDR_CNT, SET_FLAG
@@ -188,24 +160,35 @@ class CtrlBlock(CodeBlock):
   pass
 
 
-class CodeBlocks:
+class NodeCodeBlockManager:
   """A class that manages and generates code blocks for each node."""
 
-  def __init__(self, name: str, target: str = "imce"):
+  def __init__(self):
     # reset UniqueVar for each new instance of codeblocks
     UniqueVar.reset()
-
-    if target == "imce":
-      self.nodes = NodeID.imces()
-    elif target == "inode":
-      self.nodes = NodeID.inodes()
-    else:
-      raise ValueError(f"Unknown target: {target}")
-
-    self.start = CodeBlockStart(name, target)
-    self.blocks = {key: {CodePhase.INIT: [], CodePhase.EXEC: []}
+    self.blocks = {key: {CodePhase.INIT: [], CodePhase.EXEC: [], CodePhase.END: []}
                    for key in self.nodes}
-    self.end = CodeBlockEnd()
+
+  @property
+  @abstractmethod
+  def nodes(self) -> List[NodeID]:
+    pass
+
+  @property
+  @abstractmethod
+  def target(self) -> str:
+    pass
+
+  @abstractmethod
+  def start_block(self) -> str:
+    """
+    The subclass should use UniqueVar.get_decls() to declare variables.
+    """
+    pass
+
+  @abstractmethod
+  def end_block(self) -> str:
+    pass
 
   def append(self, hid, block, block_type: CodePhase = CodePhase.EXEC):
     self.blocks[hid][block_type].append(block)
@@ -222,6 +205,9 @@ class CodeBlocks:
       # Generate COMPUTE blocks next
       for codeblock in self.blocks[node][CodePhase.EXEC]:
         code += f"{indent(str(codeblock), '  ')}\n"
+      # Generate END blocks last
+      for codeblock in self.blocks[node][CodePhase.END]:
+        code += f"{indent(str(codeblock), '  ')}\n"
       code += "}\n"
       first = False
     return code
@@ -231,7 +217,7 @@ class CodeBlocks:
     # then generate start, where variables are declared
     body = self.generate_body()
 
-    start = str(self.start)
-    end = str(self.end)
+    start = self.start_block()
+    end = self.end_block()
 
-    return start + body + end
+    return start + indent(body, '  ') + end

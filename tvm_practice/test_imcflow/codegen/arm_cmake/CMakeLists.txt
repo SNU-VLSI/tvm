@@ -11,6 +11,8 @@ if(NOT EXISTS "${MLF_TAR}")
   message(FATAL_ERROR "MLF_TAR not found: ${MLF_TAR}\nGenerate it with build_arm.py -e graph")
 endif()
 
+file(GLOB_RECURSE HOST_OBJ_FILES "${H_OBJ_PATH}/*.host.o")
+
 # Locate TVM root (defaults to 4 directories up from this file), allow overrides
 # and fall back to TVM_ROOT/TVM_HOME env vars if provided.
 if(NOT DEFINED TVM_ROOT)
@@ -88,7 +90,7 @@ add_library(tvm_model STATIC)
 # Note: object files (if any) are added as sources; CMake will link them in.
 # Treat C++ sources as C++
 set_source_files_properties(${TVM_MODEL_SRCS} PROPERTIES LANGUAGE CXX)
-target_sources(tvm_model PRIVATE ${TVM_MODEL_SRCS} ${TVM_MODEL_OBJS})
+target_sources(tvm_model PRIVATE ${TVM_MODEL_SRCS} ${TVM_MODEL_OBJS} ${HOST_OBJ_FILES})
 
 target_include_directories(tvm_model PRIVATE
   ${TVM_MODEL_INCLUDE}
@@ -181,3 +183,55 @@ endif()
 message(STATUS "Using TVM root: ${TVM_ROOT}")
 message(STATUS "Extracted MLF to: ${MLF_DIR}")
 message(STATUS "Built libraries: tvm_model, ${CRT_LIBS}")
+
+# Custom target to create/update host object files
+# This ensures host.o files are compatible with the current linker
+if(DEFINED AARCH64_LINKER AND HOST_OBJ_FILES)
+  message(STATUS "Setting up host object creation with linker: ${AARCH64_LINKER}")
+
+
+
+  # Create custom target for host object creation
+  add_custom_target(create_host_objects ALL
+    COMMENT "Creating/updating host object files with ${AARCH64_LINKER}"
+  )
+
+    # Add commands to create each host object
+  set(HOST_OBJ_TARGETS "")
+  foreach(host_obj_file ${HOST_OBJ_FILES})
+    # Extract the binary file name from host object path
+    get_filename_component(host_obj_name ${host_obj_file} NAME_WE)
+    string(REPLACE ".host" "" base_name ${host_obj_name})
+    set(bin_file_name "${base_name}.bin")
+
+    # Look for binary file in the same directory
+    get_filename_component(host_obj_dir ${host_obj_file} DIRECTORY)
+    set(bin_file_path "${host_obj_dir}/${bin_file_name}")
+
+    # Create a unique target name for this host object
+    string(REPLACE "/" "_" host_obj_target_name ${host_obj_name})
+    set(host_obj_target "create_${host_obj_target_name}")
+
+    # Add custom command to create this host object
+    add_custom_command(
+      OUTPUT ${host_obj_file}
+      COMMAND ${CMAKE_COMMAND} -E echo "Processing ${host_obj_file}"
+      COMMAND ${AARCH64_LINKER} -r -b binary -o ${host_obj_file} ${bin_file_name}
+      DEPENDS ${bin_file_path}
+      COMMENT "Creating host object: ${host_obj_file}"
+      WORKING_DIRECTORY ${host_obj_dir}
+    )
+
+    # Create a custom target for this host object
+    add_custom_target(${host_obj_target} DEPENDS ${host_obj_file})
+    list(APPEND HOST_OBJ_TARGETS ${host_obj_target})
+  endforeach()
+
+  # Make the main target depend on all individual host object targets
+  if(HOST_OBJ_TARGETS)
+    add_dependencies(create_host_objects ${HOST_OBJ_TARGETS})
+  endif()
+
+  # Make tvm_model depend on host object creation
+  add_dependencies(tvm_model create_host_objects)
+endif()
