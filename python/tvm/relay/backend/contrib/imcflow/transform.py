@@ -2111,11 +2111,24 @@ class MemoryAllocator:
           return
 
         def visit_function(self, fn):
-          def get_size(call):
+          def get_size(edge, call):
             size = None
             op_found = False
             arg_node = call.body
-            arg_node_shape = call.body.type_args[0].shape
+            # arg_node_shape = call.body.type_args[0].shape
+            if isinstance(arg_node, Tuple):
+              # find field of current edge
+              for i, field in enumerate(arg_node.fields):
+                if isinstance(edge.src_id.graph_node_id, tuple):
+                  if getNodeID(field) in edge.src_id.graph_node_id:
+                    arg_node = field
+                    func_ret_shape = call.ret_type.fields[i].shape
+                else:
+                  if getNodeID(field) == edge.src_id.graph_node_id:
+                    arg_node = field
+                    func_ret_shape = call.ret_type.fields[i].shape
+            else:                                 
+              func_ret_shape = call.ret_type.shape
             # traverse until we find the final operation
             while op_found is False:
               if isinstance(arg_node, Call):
@@ -2123,18 +2136,13 @@ class MemoryAllocator:
                 if isinstance(arg_op, Function):
                   # if arg is Composite node
                   arg_node = arg_node.op.body
-                elif arg_op == op.get("qnn.imcflow_min_max_quantize"):
-                  arg_node = arg_node.args[0]
+                elif arg_op == op.get("qnn.imcflow_min_max_quantize") or arg_op == op.get("nn.imcflow_qconv"):
+                  size = func_ret_shape[2] * func_ret_shape[3] * 4 #TODO: check again!
+                  op_found = True
                 elif arg_op == op.get("concatenate"):
                   arg_node = arg_node.args[0]
-                elif arg_op == op.get("nn.imcflow_qconv"):
-                  size = arg_node_shape[2] * arg_node_shape[3] * 4
-                  op_found = True
-                elif arg_op == op.get("imcflow.fused_batch_norm"):
-                  size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
-                  op_found = True
-                elif arg_op == op.get("nn.relu"):
-                  size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
+                elif arg_op in [op.get("multiply"), op.get("add"), op.get("nn.bias_add"), op.get("nn.relu"), op.get("imcflow.fused_batch_norm")]:
+                  size = func_ret_shape[2] * func_ret_shape[3] * math.ceil(int(func_ret_shape[1])/16) #TODO: check again!
                   op_found = True
                 else:
                   raise ValueError("Undefined operation!")
@@ -2153,15 +2161,16 @@ class MemoryAllocator:
           super().visit_function(fn)
 
           if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
-            edge = self.find_edge_from_list(fn)[0]
-            size = get_size(fn)
-            if size is not None:
-              inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
-              datablock = DataBlock(inode_tensorid[1], None)
-              datablock.set_size(size)
-              self.DataBlockDict[edge] = datablock
-            else:
-              raise ValueError("There should be at least one edge connected to function node.")
+            edges = self.find_edge_from_list(fn)
+            for edge in edges:
+              size = get_size(edge, fn)
+              if size is not None:
+                inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
+                datablock = DataBlock(inode_tensorid[1], None)
+                datablock.set_size(size)
+                self.DataBlockDict[edge] = datablock
+              else:
+                raise ValueError("There should be at least one edge connected to function node.")
 
         def visit_call(self, call):
           def get_size(edge, call):
@@ -2218,108 +2227,40 @@ class MemoryAllocator:
             IsSrcInode = True if edge.src_id == inode_id else False
             IsDstInode = True if edge.dst_id == inode_id else False
 
-            if arg_idx is None:
-              raise ValueError("find my arg is wrong!!")
-
             if arg_idx is not None:
-              if IsSrcInode:
-              # src = inode, dst = op
                 if src_op == "Op(split)":
-                  # when first node of subgraph is split, memoryblock is already allocated by (src: unpacking or var -> dst: split) case.
-                  pass
-                elif dst_op == op.get("nn.relu"):
-                  if arg_idx == 0: # input var
-                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16)
-                  else:
-                    raise ValueError("nn.relu only has 1 argument, but you got over 1.")
-                elif dst_op == op.get("nn.bias_add"):
-                  if arg_idx == 1: # const
-                    size = math.ceil(int(arg_shape[0]) / 16)
-                  else:
-                    raise ValueError("Const of nn.bias_add is only defined.")
+                  # when first node of subgraph is split, memoryblock is already allocated by (src: var -> dst: split) case.
+                  size = -1
                 elif dst_op == op.get("split"):
                   # if split, same as conv2d
-                  if arg_idx == 0: # input var
-                    size = arg_shape[2] * arg_shape[3] * 4
-                  else:
-                    raise ValueError("split only has 1 arguments, but you got over 1.")
-                elif dst_op == op.get("add"):
-                  raise ValueError("add cannot receive data from inode.")
-                elif dst_op == op.get("concatenate"):
-                  raise ValueError("concat cannot receive data from inode.")
-                # elif dst_op == op.get("imcflow_unpacking"):
-                #   pass # do nothing because (src: unpacking -> dst: qconv) can handle the actual allocation.
-                elif dst_op == op.get("nn.imcflow_qconv"):
-                  if arg_idx == 0: # input var
-                    size = arg_shape[2] * arg_shape[3] * 4
-                  elif arg_idx == 1: # const(weight)
-                    size = 256
-                  else:
-                    raise ValueError("qconv only has 2 arguments, but you got over 2.")
-                elif dst_op == op.get("imcflow.fused_batch_norm"):
-                  if arg_idx == 0: # input var
-                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16)
-                  elif arg_idx <= 4: # const
+                  if isinstance(call.args[arg_idx], Var):
+                    size = arg_shape[2] * arg_shape[3] * 4 #TODO: check again!
+                elif dst_op in [op.get("multiply"), op.get("add"), op.get("nn.bias_add"), op.get("nn.relu"), op.get("imcflow.fused_batch_norm")]:
+                  if isinstance(call.args[arg_idx], Constant):
                     size = math.ceil(int(arg_shape[0]) / 16)
-                  else:
-                    raise ValueError("batchnorm only has 5 argument, but you got over 5.")
+                  elif isinstance(call.args[arg_idx], Var):
+                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16)
+                elif dst_op == op.get("nn.imcflow_qconv"):
+                  if isinstance(call.args[arg_idx], Var): # input var
+                    size = arg_shape[2] * arg_shape[3] * 4 #TODO: check again!
+                  elif isinstance(call.args[arg_idx], Constant):# const(weight)
+                    size = 256 #TODO: check again!
                 elif dst_op == op.get("divide"):
-                  if arg_idx == 1: # const
+                  if isinstance(call.args[arg_idx], Constant):
                     size = 1 # TODO: check again!
-                  else:
-                    raise ValueError("Const of divide is only defined.")
                 elif dst_op == op.get("qnn.imcflow_min_max_quantize"):
-                  if arg_idx == 1 or arg_idx==2: # const
-                    size = 1 # TODO: check again!
-                  else:
-                    raise ValueError("Const of min_max_quantize is only defined.")
+                  if isinstance(call.args[arg_idx], Constant):
+                    size = 1
+                  elif isinstance(call.args[arg_idx], Var):
+                    size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16) #TODO: check again!
                 else:
                   raise ValueError("Undefined oeration!")
 
-              elif IsDstInode:
-                # src = const, var, dst = inode
-                pass # if const -> unpacking(inode)
-                # if dst_op == op.get("imcflow_packing"):
-                #   op_found = False
-                #   arg_node = call.args[0]
-                #   arg_node_shape = call.type_args[0].shape
-                #   # traverse until we find the actual operation to calculate output size
-                #   while op_found is False:
-                #     if isinstance(arg_node, Call):
-                #       arg_op = arg_node.op
-                #       if isinstance(arg_op, Function):
-                #         # if arg is Composite node
-                #         arg_node = arg_node.op.body
-                #       elif arg_op == op.get("qnn.imcflow_min_max_quantize"):
-                #         arg_node = arg_node.args[0]
-                #       elif arg_op == op.get("concatenate"):
-                #         arg_node = arg_node.args[0]
-                #       elif arg_op == op.get("nn.imcflow_qconv"):
-                #         size = arg_node_shape[2] * arg_node_shape[3] * 4
-                #         op_found = True
-                #       elif arg_op == op.get("imcflow.fused_batch_norm"):
-                #         size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
-                #         op_found = True
-                #       elif arg_op == op.get("nn.relu"):
-                #         size = arg_node_shape[2] * arg_node_shape[3] * math.ceil(int(arg_node_shape[1])/16)
-                #         op_found = True
-                #       else:
-                #         raise ValueError("Undefined operation!")
-                #     elif isinstance(arg_node, Tuple):
-                #       arg_node = arg_node.fields[0]
-                #     elif isinstance(arg_node, Function):
-                #       arg_node = arg_node.body
-                #     else:
-                #       raise ValueError("Undefined operation!")
-                # else:
-                #   pass # if const -> unpacking (inode), just pass
-
-              else:
-                raise ValueError("Wrong edge detected!")
-
-              if size is not None:
-                # imcflow word width = 256 bit
-                size = int(size) * 256 / 8 #unit: bytes
+            if size is not None:
+              # imcflow word width = 256 bit
+              size = int(size) * 256 / 8 #unit: bytes
+            else:
+              raise ValueError("Size calculation error!")
 
             return size
 
@@ -2331,7 +2272,7 @@ class MemoryAllocator:
             edges = self.find_edge_from_list(call)
             for edge in edges:
               size = get_size(edge, call)
-              if size is not None:
+              if size > 0:
                 inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
                 datablock = DataBlock(inode_tensorid[1], None)
                 datablock.set_size(size)
