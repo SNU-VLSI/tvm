@@ -162,9 +162,8 @@ def run_test_evl(test_name, mod, param_dict):
   # printModel(eval_dir, eval_mod, eval_param_dict, "after_packing")
 
   # Use the new ImcflowBoundaryNodeMarker pass to automatically mark boundary nodes
-  eval_mod = imcflow_transform.ImcflowBoundaryNodeMarker().transform_function(eval_mod)
+  eval_mod = imcflow_transform.ImcflowLayoutLegalizer().transform_mod(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out")
-  exit()
   eval_mod = transform.InferType()(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out_infer")
   
@@ -275,4 +274,5 @@ def test_resnet8():
   run_test_evl("resnet8", mod, param_dict)
 
 if __name__ == "__main__":
-  tvm.testing.main()
+  # tvm.testing.main()
+  test_resnet8()
