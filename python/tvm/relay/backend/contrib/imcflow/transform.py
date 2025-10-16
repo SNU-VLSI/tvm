@@ -3448,11 +3448,11 @@ class ImcflowBoundaryNodeMarker:
         for i in range(8):
           # Shift each int4 value to its position (4 bits per value)
           # Mask to 4 bits (0xF) to ensure int4 range
-          Packed += ((ToPack[:, :, :, :, i].astype(np.int32) & 0xF) << (i * 4))
+          Packed += ((ToPack[:, :, :, :, i].astype(np.uint32) & 0xF) << (i * 4))
         
         NewWeight = relay.Constant(tvm.nd.array(Packed))
         new_args = [call.args[0], NewWeight]
-        new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "int32")]
+        new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "uint32")]
 
         return Call(call.op, new_args, call.attrs, new_type_args, call.span)
 
