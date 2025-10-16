@@ -182,8 +182,78 @@ def getModel_(input_shape):
 
   return out, var_info
 
+def getModel_2(input_shape):
+  input = relay.var("input", shape=input_shape, dtype="float32")
+
+  y = relay.nn.conv2d(
+      input,
+      relay.var("weight1", shape=(16, 3, 3, 3), dtype="float32"),
+      in_channels=3,
+      channels=16,
+      kernel_size=(3, 3),
+      padding=(1, 1),
+  )
+
+  y = relay.nn.batch_norm(y, 
+                          relay.var("bn_gamma", shape=(16,), dtype="float32"), relay.var("bn_beta", shape=(16,), dtype="float32"), 
+                          relay.var("bn_moving_mean", shape=(16,), dtype="float32"), relay.var("bn_moving_var", shape=(16,), dtype="float32"))[0]
+  
+  y = y * relay.var("x_f_1", shape=(1,), dtype="float32")
+  y = relay.cast(y, dtype="int16")
+  # y = relay.layout_transform(y, "NCHW", "NCHW16c")
+
+  # basic block 1
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_1", shape=(), dtype="int16"), relay.var("quant_max_1", shape=(), dtype="int16"), axis=1, out_dtype="int4", channel=16)
+  # y = imcflow_qconv2d(
+  #   y,
+  #   relay.var("weight2_1", shape=(16,16,3,3), dtype="int8"),
+  #   in_channels=16,
+  #   channels=16,
+  #   kernel_size=(3, 3),
+  #   padding=(1, 1),
+  #   out_dtype="int16"
+  # )
+  # y = imcflow_batch_norm(y, relay.var("fused_scale1", shape=(16,), dtype="int16"), relay.var("fused_bias1", shape=(16,), dtype="int16"))[0]
+
+  # post process
+  # y = relay.cast(y,dtype="float32") / relay.var("post_f", shape=(1,), dtype="float32")
+  # y = relay.nn.relu(y)
+  # y = relay.nn.adaptive_avg_pool2d(y, output_size=(1,1))
+  # y = relay.nn.batch_flatten(y) 
+  # y = relay.nn.dense(y, relay.var("dense_weight", shape=(10, 64), dtype="float32"))
+  # y = relay.nn.bias_add(y, relay.var("dense_bias", shape=(10,), dtype="float32"))
+
+  # Collect parameter vars from the graph (exclude the input var)
+  free_vars = relay.analysis.free_vars(y)
+  var_info = {}
+  for v in free_vars:
+    if v is input:
+      continue
+    name = v.name_hint
+    # Deduplicate by name in case of separately-constructed Vars with the same name
+    if name in var_info:
+      continue
+    ttype = v.type_annotation
+    if isinstance(ttype, relay.ty.TensorType):
+      # Convert TVM shape (IntImm / PrimExpr) to Python ints when possible
+      shape = []
+      for dim in ttype.shape:
+        try:
+          shape.append(int(dim))
+        except Exception:
+          # Fallback if dynamic: leave as-is
+          shape.append(dim)
+      var_info[name] = {"shape": tuple(shape), "dtype": ttype.dtype}
+    else:
+      # If no TensorType annotation, skip or set defaults
+      continue
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, var_info
+
 def getModel():
-  out, var_dict = getModel_([1, 3, 28, 28])
+  out, var_dict = getModel_2([1, 3, 28, 28])
 
   def _rand_tensor(dtype: str, shape):
     # Handle common dtypes with appropriate ranges

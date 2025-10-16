@@ -391,7 +391,9 @@ class AvgPool3DAttrs(Attrs):
 @tvm._ffi.register_object("relay.attrs.BitPackAttrs")
 class BitPackAttrs(Attrs):
     """Attributes used in bitpack operator"""
-
+@tvm._ffi.register_object("relay.attrs.BitUnpackAttrs")
+class BitUnpackAttrs(Attrs):
+    """Attributes used in unpackbits operator"""
 
 @tvm._ffi.register_object("relay.attrs.BinaryConv2DAttrs")
 class BinaryConv2DAttrs(Attrs):

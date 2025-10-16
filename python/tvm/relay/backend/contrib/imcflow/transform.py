@@ -3369,12 +3369,14 @@ class ImcflowBoundaryNodeMarker:
         print(f"Marking boundary nodes for IMCFLOW function: {function_names[i]}")
         mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
+        mod[function_names[i]] = self.update_imcflow_func_params(mod[function_names[i]])
     
     # Transform the main function to insert packing/unpacking around imcflow calls
     mod = self._insert_packing_unpacking(mod)
     
     # return transformed_func
     return mod
+
   def _mark_and_transform_imcflow_qconv(self, func):
     """
     Mark the imcflow_qconv call nodes in an IMCFLOW function.
@@ -3444,7 +3446,7 @@ class ImcflowBoundaryNodeMarker:
         
         # Pack 8 int4 values into int32
         # Each int4 occupies 4 bits in the int32
-        Packed = np.zeros((out_blocks, in_blocks, 256, 8), dtype=np.int32)
+        Packed = np.zeros((out_blocks, in_blocks, 256, 8), dtype=np.uint32)
         for i in range(8):
           # Shift each int4 value to its position (4 bits per value)
           # Mask to 4 bits (0xF) to ensure int4 range
@@ -3464,7 +3466,7 @@ class ImcflowBoundaryNodeMarker:
         
         # Mark imcflow_qconv calls as both input and output nodes
         if isinstance(call.op, tvm.ir.Op) and call.op == op.get("nn.imcflow_qconv"):
-          new_call = modify_call_node_attrs(new_call, const_packed_node=True)
+          new_call = modify_call_node_attrs(new_call, const_packed_node=True, in_node=True, out_node=True)
           new_call = qconv_weight_transform(new_call)
           return new_call
 
@@ -3508,12 +3510,13 @@ class ImcflowBoundaryNodeMarker:
         new_call = super().visit_call(call)
         
         # Handle both single call and list of calls
-        if (isinstance(output_calls, list) and call in output_calls) or call == output_calls:
-          return modify_call_node_attrs(new_call, in_node=None, out_node=True)
-        if (isinstance(input_calls, list) and call in input_calls) or call == input_calls:
-          return modify_call_node_attrs(new_call, in_node=True, out_node=None)
+        # if (isinstance(output_calls, list) and call in output_calls) or call == output_calls:
+        #   return modify_call_node_attrs(new_call, in_node=None, out_node=True)
+        # if (isinstance(input_calls, list) and call in input_calls) or call == input_calls:
+        #   return modify_call_node_attrs(new_call, in_node=True, out_node=None)
+        # return new_call
 
-        return new_call
+        return modify_call_node_attrs(new_call, in_node=True, out_node=True)
     
     marker = _BoundaryMarker()
     new_body = marker.visit(func.body)
@@ -3563,6 +3566,282 @@ class ImcflowBoundaryNodeMarker:
       return output_calls
     else:
       raise ValueError("Unsupported body type for finding output call")
+  
+  def update_imcflow_func_params(self, func):
+    class _ImcflowFunctionParamUpdater(relay.ExprMutator):
+      def __init__(self):
+        super().__init__()
+        self.var_consumers = {}  # {var : [(consumer_node, tag), ...]}
+
+      def gather_var_consumers(self, func):
+        """
+        traverse the imcflow function to gather consumer node descriptions of function parameters.
+        we gather tuple of (consumer_node, tag). tag is data type like LHS, RHS, weight, ..
+        {var : [list of consumer nodes]}
+
+        if consumer node is element-wise op node which is not related with layout, we recursively find its consumer nodes.
+        """
+        self.var_consumers = {}
+        
+        # Initialize consumer list for each parameter
+        for param in func.params:
+          self.var_consumers[param] = []
+        
+        # Visitor to find consumers of each variable
+        class _ConsumerFinder(relay.ExprVisitor):
+          def __init__(self, parent):
+            super().__init__()
+            self.parent = parent
+            self.element_wise_ops = [op.get("add"), op.get("multiply"), op.get("divide"), 
+                                     op.get("subtract"), op.get("clip"), op.get("nn.relu")]
+          
+          def visit_call(self, call):
+            # Check if this is an element-wise operation
+            is_element_wise = call.op in self.element_wise_ops
+            
+            # Process each argument
+            for i, arg in enumerate(call.args):
+              if isinstance(arg, relay.Var):
+                # Check if this variable is a function parameter
+                if arg in self.parent.var_consumers:
+                  if is_element_wise:
+                    # For element-wise ops, recursively find consumers
+                    # We don't add the element-wise op itself as a consumer
+                    self._find_downstream_consumers(call, arg)
+                  else:
+                    # For non-element-wise ops, add as consumer with appropriate tag
+                    tag = self._get_arg_tag(call, i)
+                    self.parent.var_consumers[arg].append((call, tag))
+              elif isinstance(arg, relay.TupleGetItem):
+                # Handle TupleGetItem case
+                if isinstance(arg.tuple_value, relay.Var):
+                  var = arg.tuple_value
+                  if var in self.parent.var_consumers:
+                    if is_element_wise:
+                      self._find_downstream_consumers(call, var)
+                    else:
+                      tag = self._get_arg_tag(call, i)
+                      self.parent.var_consumers[var].append((call, tag))
+            
+            # Continue visiting child nodes
+            super().visit_call(call)
+          
+          def _find_downstream_consumers(self, element_wise_call, original_var):
+            """Find consumers downstream of an element-wise operation"""
+            # We need to find where the output of element_wise_call is used
+            # This is a simplified approach - we'll need the full expression tree
+            # For now, we'll mark this as needing the parent function's full traversal
+            pass
+          
+          def _get_arg_tag(self, call, arg_index):
+            """Determine the tag (role) of an argument in a call"""
+            if call.op == op.get("nn.imcflow_qconv"):
+              if arg_index == 0:
+                return "input"
+              elif arg_index == 1:
+                return "weight"
+            elif call.op == op.get("nn.bias_add"):
+              if arg_index == 0:
+                return "input"
+              elif arg_index == 1:
+                return "bias"
+            elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+              if arg_index == 0:
+                return "input"
+              elif arg_index == 1:
+                return "min"
+              elif arg_index == 2:
+                return "max"
+            elif call.op == op.get("split"):
+              return "input"
+            elif call.op == op.get("concatenate"):
+              return "input"
+            elif call.op == op.get("nn.relu"):
+              return "input"
+            elif call.op == op.get("imcflow.fused_batch_norm"):
+              return "input"
+            else:
+              return "input"  # Default tag
+        
+        finder = _ConsumerFinder(self)
+        finder.visit(func.body)
+        
+        return self.var_consumers
+      
+      def get_required_layout(self, consumer_node_desc): 
+        """
+        given a consumer node description, return the required layout for the function parameter.
+        Returns tuple: (layout_type, is_packed)
+        - layout_type: "qconv_input", "qconv_output", "vector", "scalar"
+        - is_packed: True if already packed, False if needs packing
+        """
+        consumer_node, tag = consumer_node_desc
+        assert isinstance(consumer_node, relay.Call), "Consumer node must be a Call node"
+        
+        if consumer_node.op == op.get("split"):
+          return ("qconv_input", True)
+        elif consumer_node.op == op.get("concatenate"):
+          return ("vector", True)
+        elif consumer_node.op == op.get("nn.imcflow_qconv"):
+          if tag == "input":
+            return ("qconv_input", True)
+          elif tag == "weight":
+            return ("qconv_output", True)
+        elif consumer_node.op == op.get("nn.bias_add"):
+          if tag == "input":
+            return ("vector", True)
+          elif tag == "bias":
+            return ("vector", True)
+        elif consumer_node.op == op.get("nn.relu"):
+          return ("vector", True)
+        elif consumer_node.op == op.get("imcflow.fused_batch_norm"):
+          return ("vector", True)
+        elif consumer_node.op == op.get("qnn.imcflow_min_max_quantize"):
+          if tag == "input":
+            return ("vector", True)
+          elif tag == "min" or tag == "max":
+            return ("scalar", False)
+        elif consumer_node.op == op.get("qnn.imcflow_nu_quantize"):
+          raise ValueError("nu_quantize should not be consumer nodes of function parameters")
+        elif consumer_node.op == op.get("nn.conv2d"):
+          raise ValueError("conv2d should not be consumer nodes of function parameters")
+        elif consumer_node.op == op.get("add") or consumer_node.op == op.get("divide") or consumer_node.op == op.get("multiply"):
+          raise ValueError("Element-wise operations should not be consumer nodes of function parameters")
+        else:
+          raise ValueError(f"Unsupported operator detected: {consumer_node.op}. please check.")
+      
+      def update_param(self, var):
+        """
+        Gather required layouts from all consumer nodes of the variable.
+        If more than one consumer node exists, check compatibility of them.
+        If compatible, calculate new shape corresponding to the layout.
+
+        vector : NCHW16c
+        qconv_input : [N, ceil(C/256), H, W, IB, 8] int32
+        
+        Returns updated variable with new type, or original if no update needed.
+        """
+        if var not in self.var_consumers or len(self.var_consumers[var]) == 0:
+          # No consumers, keep original
+          return var
+        
+        consumers = self.var_consumers[var]
+        
+        # Gather all required layouts
+        required_layouts = []
+        for consumer_desc in consumers:
+          layout_info = self.get_required_layout(consumer_desc)
+          required_layouts.append(layout_info)
+        
+        # Check compatibility - all consumers should require the same layout
+        if len(required_layouts) == 0:
+          return var
+        
+        first_layout = required_layouts[0]
+        for layout_info in required_layouts[1:]:
+          if layout_info[0] != first_layout[0]:
+            raise ValueError(f"Incompatible layouts required for parameter {var.name_hint}: "
+                           f"{first_layout[0]} vs {layout_info[0]}")
+        
+        layout_type, is_packed = first_layout
+        
+        # If not packed, keep original (scalar values like min/max)
+        if not is_packed:
+          return var
+        
+        # Calculate new shape based on layout type
+        original_type = var.checked_type
+        if not isinstance(original_type, TensorType):
+          return var
+        
+        original_shape = original_type.shape
+        original_dtype = original_type.dtype
+        
+        # Calculate new shape based on layout type
+        if layout_type == "vector":
+          # NCHW -> NCHW16c
+          if len(original_shape) == 4:
+            N, C, H, W = original_shape
+            C_ceil = tvm.tir.indexdiv(C + 15, 16)
+            new_shape = [N, C_ceil, H, W, 16]
+            new_dtype = original_dtype
+          else:
+            raise ValueError(f"Unsupported shape for vector layout: {original_shape}")
+        
+        elif layout_type == "qconv_input":
+          # NCHW -> [N, ceil(C/256), H, W, IB, 8] int32
+          if len(original_shape) == 4:
+            N, C, H, W = original_shape
+            C_ceil = tvm.tir.indexdiv(C + 255, 256)
+            IB = 32  # Fixed value for qconv_input
+            new_shape = [N, C_ceil, H, W, IB, 8]
+            new_dtype = "int32"
+          else:
+            raise ValueError(f"Unsupported shape for qconv_input layout: {original_shape}")
+        
+        elif layout_type == "qconv_output":
+          # NCHW -> [N, ceil(C/256), H, W, IB, 8] int32 (same as qconv_input for weights)
+          if len(original_shape) == 4:
+            N, C, H, W = original_shape
+            C_ceil = tvm.tir.indexdiv(C + 255, 256)
+            IB = 32  # Fixed value for qconv_output
+            new_shape = [N, C_ceil, H, W, IB, 8]
+            new_dtype = "int32"
+          else:
+            raise ValueError(f"Unsupported shape for qconv_output layout: {original_shape}")
+        
+        else:
+          raise ValueError(f"Unknown layout type: {layout_type}")
+        
+        # Create new variable with updated type
+        new_type = relay.TensorType(new_shape, new_dtype)
+        new_var = relay.Var(var.name_hint, new_type)
+        
+        return new_var
+      
+      def visit_function(self, fn):
+        """
+        update the parameters of imcflow functions to match the packed layout
+        Scan function argument nodes and check layout.
+        if function param layout is different from argument node layout, update the function param layout
+        """
+        # First gather consumers for all parameters
+        self.gather_var_consumers(fn)
+        
+        # Update each parameter based on its consumers
+        new_params = []
+        param_map = {}  # Map from old var to new var
+        
+        for param in fn.params:
+          new_param = self.update_param(param)
+          new_params.append(new_param)
+          if new_param != param:
+            param_map[param] = new_param
+            print(f"  Updated parameter {param.name_hint}: {param.checked_type} -> {new_param.checked_type}")
+        
+        # If no parameters were updated, return original function
+        if len(param_map) == 0:
+          return fn
+        
+        # Update the function body with variable substitution
+        new_body = relay.bind(fn.body, param_map)
+        
+        # Create new function with updated parameters
+        new_func = relay.Function(
+          new_params,
+          new_body,
+          fn.ret_type,
+          fn.type_params,
+          fn.attrs
+        )
+        
+        return new_func
+
+      def run(self, func):
+        return self.visit(func)
+      
+    updater = _ImcflowFunctionParamUpdater()
+    return updater.run(func)
 
   def _insert_packing_unpacking(self, mod):
     """
@@ -3650,9 +3929,9 @@ class ImcflowBoundaryNodeMarker:
                 if child_node.op == op.get("nn.imcflow_qconv"):
                   packed_arg = imcflow_4d_to_qconv_input(arg)
                 elif child_node.op == op.get("qnn.imcflow_min_max_quantize"):
-                  packed_arg = relay.layout_transform(arg, "NCHW", "NCHWc16")
+                  packed_arg = relay.layout_transform(arg, "NCHW", "NCHW16c")
                 else: # Vector operations
-                  packed_arg = relay.layout_transform(arg, "NCHW", "NCHWc16")
+                  packed_arg = relay.layout_transform(arg, "NCHW", "NCHW16c")
               else:
                 raise ValueError("Unsupported receiver type for packing")
               
@@ -3672,11 +3951,12 @@ class ImcflowBoundaryNodeMarker:
               # Find the parent node inside target_func that produces the output
               parent_node = self.find_parent_node_of_output(target_func.body)
               if parent_node.op == op.get("qnn.imcflow_min_max_quantize"):
-                unpacked_result = imcflow_mmquant_out_to_4d(imcflow_call, return_type.shape, str(return_type.dtype))
+                # unpacked_result = imcflow_mmquant_out_to_4d(imcflow_call, return_type.shape, str(return_type.dtype))
+                unpacked_result = imcflow_mmquant_out_to_4d(imcflow_call, 16)
               elif parent_node.op == op.get("nn.imcflow_qconv"):
                 raise ValueError("imcflow_qconv cannot be the last node in an imcflow function")
               else: # Vector operations
-                unpacked_result = relay.layout_transform(imcflow_call, "NCHWc16", "NCHW")
+                unpacked_result = relay.layout_transform(imcflow_call, "NCHW16c", "NCHW")
             else:
               raise ValueError("Unsupported return type for unpacking")
             
@@ -3686,10 +3966,300 @@ class ImcflowBoundaryNodeMarker:
         new_op = self.visit(call.op)
         return relay.Call(new_op, new_args, call.attrs, call.type_args, call.span)
     
+    class _ImcflowFunctionParamUpdater(relay.ExprMutator):
+      def __init__(self):
+        super().__init__()
+        self.var_consumers = {}  # {var : [(consumer_node, tag), ...]}
+
+      def gather_var_consumers(self, func):
+        """
+        traverse the imcflow function to gather consumer node descriptions of function parameters.
+        we gather tuple of (consumer_node, tag). tag is data type like LHS, RHS, weight, ..
+        {var : [list of consumer nodes]}
+
+        if consumer node is element-wise op node which is not related with layout, we recursively find its consumer nodes.
+        """
+        self.var_consumers = {}
+        
+        # Initialize consumer list for each parameter
+        for param in func.params:
+          self.var_consumers[param] = []
+        
+        # Visitor to find consumers of each variable
+        class _ConsumerFinder(relay.ExprVisitor):
+          def __init__(self, parent):
+            super().__init__()
+            self.parent = parent
+            self.element_wise_ops = [op.get("add"), op.get("multiply"), op.get("divide"), 
+                                     op.get("subtract"), op.get("clip"), op.get("nn.relu")]
+          
+          def visit_call(self, call):
+            # Check if this is an element-wise operation
+            is_element_wise = call.op in self.element_wise_ops
+            
+            # Process each argument
+            for i, arg in enumerate(call.args):
+              if isinstance(arg, relay.Var):
+                # Check if this variable is a function parameter
+                if arg in self.parent.var_consumers:
+                  if is_element_wise:
+                    # For element-wise ops, recursively find consumers
+                    # We don't add the element-wise op itself as a consumer
+                    self._find_downstream_consumers(call, arg)
+                  else:
+                    # For non-element-wise ops, add as consumer with appropriate tag
+                    tag = self._get_arg_tag(call, i)
+                    self.parent.var_consumers[arg].append((call, tag))
+              elif isinstance(arg, relay.TupleGetItem):
+                # Handle TupleGetItem case
+                if isinstance(arg.tuple_value, relay.Var):
+                  var = arg.tuple_value
+                  if var in self.parent.var_consumers:
+                    if is_element_wise:
+                      self._find_downstream_consumers(call, var)
+                    else:
+                      tag = self._get_arg_tag(call, i)
+                      self.parent.var_consumers[var].append((call, tag))
+            
+            # Continue visiting child nodes
+            super().visit_call(call)
+          
+          def _find_downstream_consumers(self, element_wise_call, original_var):
+            """Find consumers downstream of an element-wise operation"""
+            # We need to find where the output of element_wise_call is used
+            # This is a simplified approach - we'll need the full expression tree
+            # For now, we'll mark this as needing the parent function's full traversal
+            pass
+          
+          def _get_arg_tag(self, call, arg_index):
+            """Determine the tag (role) of an argument in a call"""
+            if call.op == op.get("nn.imcflow_qconv"):
+              if arg_index == 0:
+                return "input"
+              elif arg_index == 1:
+                return "weight"
+            elif call.op == op.get("nn.bias_add"):
+              if arg_index == 0:
+                return "input"
+              elif arg_index == 1:
+                return "bias"
+            elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+              if arg_index == 0:
+                return "input"
+              elif arg_index == 1:
+                return "min"
+              elif arg_index == 2:
+                return "max"
+            elif call.op == op.get("split"):
+              return "input"
+            elif call.op == op.get("concatenate"):
+              return "input"
+            elif call.op == op.get("nn.relu"):
+              return "input"
+            elif call.op == op.get("imcflow.fused_batch_norm"):
+              return "input"
+            else:
+              return "input"  # Default tag
+        
+        finder = _ConsumerFinder(self)
+        finder.visit(func.body)
+        
+        return self.var_consumers
+      
+      def get_required_layout(self, consumer_node_desc): 
+        """
+        given a consumer node description, return the required layout for the function parameter.
+        Returns tuple: (layout_type, is_packed)
+        - layout_type: "qconv_input", "qconv_output", "vector", "scalar"
+        - is_packed: True if already packed, False if needs packing
+        """
+        consumer_node, tag = consumer_node_desc
+        assert isinstance(consumer_node, relay.Call), "Consumer node must be a Call node"
+        
+        if consumer_node.op == op.get("split"):
+          return ("qconv_input", True)
+        elif consumer_node.op == op.get("concatenate"):
+          return ("vector", True)
+        elif consumer_node.op == op.get("nn.imcflow_qconv"):
+          if tag == "input":
+            return ("qconv_input", True)
+          elif tag == "weight":
+            return ("qconv_output", True)
+        elif consumer_node.op == op.get("nn.bias_add"):
+          if tag == "input":
+            return ("vector", True)
+          elif tag == "bias":
+            return ("vector", True)
+        elif consumer_node.op == op.get("nn.relu"):
+          return ("vector", True)
+        elif consumer_node.op == op.get("imcflow.fused_batch_norm"):
+          return ("vector", True)
+        elif consumer_node.op == op.get("qnn.imcflow_min_max_quantize"):
+          if tag == "input":
+            return ("vector", True)
+          elif tag == "min" or tag == "max":
+            return ("scalar", False)
+        elif consumer_node.op == op.get("qnn.imcflow_nu_quantize"):
+          raise ValueError("nu_quantize should not be consumer nodes of function parameters")
+        elif consumer_node.op == op.get("nn.conv2d"):
+          raise ValueError("conv2d should not be consumer nodes of function parameters")
+        elif consumer_node.op == op.get("add") or consumer_node.op == op.get("divide") or consumer_node.op == op.get("multiply"):
+          raise ValueError("Element-wise operations should not be consumer nodes of function parameters")
+        else:
+          raise ValueError(f"Unsupported operator detected: {consumer_node.op}. please check.")
+      
+      def update_param(self, var):
+        """
+        Gather required layouts from all consumer nodes of the variable.
+        If more than one consumer node exists, check compatibility of them.
+        If compatible, calculate new shape corresponding to the layout.
+
+        vector : NCHW16c
+        qconv_input : [N, ceil(C/256), H, W, IB, 8] int32
+        
+        Returns updated variable with new type, or original if no update needed.
+        """
+        if var not in self.var_consumers or len(self.var_consumers[var]) == 0:
+          # No consumers, keep original
+          return var
+        
+        consumers = self.var_consumers[var]
+        
+        # Gather all required layouts
+        required_layouts = []
+        for consumer_desc in consumers:
+          layout_info = self.get_required_layout(consumer_desc)
+          required_layouts.append(layout_info)
+        
+        # Check compatibility - all consumers should require the same layout
+        if len(required_layouts) == 0:
+          return var
+        
+        first_layout = required_layouts[0]
+        for layout_info in required_layouts[1:]:
+          if layout_info[0] != first_layout[0]:
+            raise ValueError(f"Incompatible layouts required for parameter {var.name_hint}: "
+                           f"{first_layout[0]} vs {layout_info[0]}")
+        
+        layout_type, is_packed = first_layout
+        
+        # If not packed, keep original (scalar values like min/max)
+        if not is_packed:
+          return var
+        
+        # Calculate new shape based on layout type
+        original_type = var.checked_type
+        if not isinstance(original_type, TensorType):
+          return var
+        
+        original_shape = original_type.shape
+        original_dtype = original_type.dtype
+        
+        # Calculate new shape based on layout type
+        if layout_type == "vector":
+          # NCHW -> NCHW16c
+          if len(original_shape) == 4:
+            N, C, H, W = original_shape
+            C_ceil = tvm.tir.indexdiv(C + 15, 16)
+            new_shape = [N, C_ceil, H, W, 16]
+            new_dtype = original_dtype
+          else:
+            raise ValueError(f"Unsupported shape for vector layout: {original_shape}")
+        
+        elif layout_type == "qconv_input":
+          # NCHW -> [N, ceil(C/256), H, W, IB, 8] int32
+          if len(original_shape) == 4:
+            N, C, H, W = original_shape
+            C_ceil = tvm.tir.indexdiv(C + 255, 256)
+            IB = 32  # Fixed value for qconv_input
+            new_shape = [N, C_ceil, H, W, IB, 8]
+            new_dtype = "int32"
+          else:
+            raise ValueError(f"Unsupported shape for qconv_input layout: {original_shape}")
+        
+        elif layout_type == "qconv_output":
+          # NCHW -> [N, ceil(C/256), H, W, IB, 8] int32 (same as qconv_input for weights)
+          if len(original_shape) == 4:
+            N, C, H, W = original_shape
+            C_ceil = tvm.tir.indexdiv(C + 255, 256)
+            IB = 32  # Fixed value for qconv_output
+            new_shape = [N, C_ceil, H, W, IB, 8]
+            new_dtype = "int32"
+          else:
+            raise ValueError(f"Unsupported shape for qconv_output layout: {original_shape}")
+        
+        else:
+          raise ValueError(f"Unknown layout type: {layout_type}")
+        
+        # Create new variable with updated type
+        new_type = relay.TensorType(new_shape, new_dtype)
+        new_var = relay.Var(var.name_hint, new_type)
+        
+        return new_var
+      
+      def run(self, mod):
+        new_funcs = {}
+        for global_var, func in mod.functions.items():
+          if ("Compiler" in func.attrs and func.attrs["Compiler"] == "imcflow"):
+            print(f"Updating parameters of imcflow function: {global_var.name_hint}")
+            new_func = self.visit(func)
+            new_funcs[global_var] = new_func
+        for gv, nf in new_funcs.items():
+          mod[gv] = nf
+        return mod
+      
+      def visit_function(self, fn):
+        """
+        update the parameters of imcflow functions to match the packed layout
+        Scan function argument nodes and check layout.
+        if function param layout is different from argument node layout, update the function param layout
+        """
+        # First gather consumers for all parameters
+        self.gather_var_consumers(fn)
+        
+        # Update each parameter based on its consumers
+        new_params = []
+        param_map = {}  # Map from old var to new var
+        
+        for param in fn.params:
+          new_param = self.update_param(param)
+          new_params.append(new_param)
+          if new_param != param:
+            param_map[param] = new_param
+            print(f"  Updated parameter {param.name_hint}: {param.checked_type} -> {new_param.checked_type}")
+        
+        # If no parameters were updated, return original function
+        if len(param_map) == 0:
+          return fn
+        
+        # Update the function body with variable substitution
+        new_body = relay.bind(fn.body, param_map)
+        
+        # Create new function with updated parameters
+        new_func = relay.Function(
+          new_params,
+          new_body,
+          fn.ret_type,
+          fn.type_params,
+          fn.attrs
+        )
+        
+        return new_func
+    
+    # Step 1: Update imcflow function parameters to match packed layouts
+    param_updater = _ImcflowFunctionParamUpdater()
+    mod = param_updater.run(mod)
+
+    # Step 2: Insert layout transform nodes
     inserter = _LayoutTransformer(mod)
     new_main = inserter.visit(mod["main"])
     mod.update_func(mod.get_global_var("main"), new_main)
+    
+    # Step 3: Run InferType to get updated type information
+    mod = relay.transform.InferType()(mod)
+    
     return mod
+
 def constructDataBlockDict(mod):
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue

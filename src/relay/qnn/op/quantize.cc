@@ -238,7 +238,7 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   // assign output tensor type
   if(quantize_attrs->out_node) {
     IndexExpr c_group = ceildiv(ic,256);
-    Array<IndexExpr> oshape({batch, c_group, ih, iw, 8});
+    Array<IndexExpr> oshape({batch, c_group, ih, iw, 4, 8});
     DataType out_dtype = DataType::UInt(32);
     reporter->Assign(types[3], TensorType(oshape, out_dtype));
   } else {

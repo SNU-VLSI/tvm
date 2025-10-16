@@ -17,6 +17,7 @@ from tvm.relay.backend import Executor, Runtime
 from tvm.contrib.imcflow import DataBlock
 import os
 from tvm.relay.op.transform import imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
+import tvm.relay as relay
 
 from models import real_model, real_model2, test_models
 from models import small_model
@@ -163,7 +164,9 @@ def run_test_evl(test_name, mod, param_dict):
   # Use the new ImcflowBoundaryNodeMarker pass to automatically mark boundary nodes
   eval_mod = imcflow_transform.ImcflowBoundaryNodeMarker().transform_function(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out")
+  exit()
   eval_mod = transform.InferType()(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out_infer")
   
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
