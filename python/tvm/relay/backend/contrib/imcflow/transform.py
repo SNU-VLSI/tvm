@@ -3677,8 +3677,7 @@ class ImcflowLayoutLegalizer:
         
         # Step 2: Find consumers for each variable
         class _ConsumerFinder:
-          def __init__(self, parent, use_def_chain_parser):
-            self.parent = parent
+          def __init__(self, use_def_chain_parser):
             self.use_def_chain_parser = use_def_chain_parser
             self.element_wise_ops = [op.get("add"), op.get("multiply"), op.get("divide"), 
                                      op.get("subtract"), op.get("clip"), op.get("nn.relu")]
@@ -3697,6 +3696,7 @@ class ImcflowLayoutLegalizer:
           
           def _find_consumers_recursive(self, expr, consumers):
             """Recursively find consumers, skipping element-wise operations"""
+
             # Avoid infinite loops
             if expr in self.visited:
               return
@@ -3709,11 +3709,21 @@ class ImcflowLayoutLegalizer:
               if isinstance(user, relay.Call):
                 if self.is_element_wise_op(user):
                   # Element-wise op: skip and continue to its users
-                  self._find_consumers_recursive(user, consumers)
-                else:
-                  # Non-element-wise op: this is a final consumer
+                  # self._find_consumers_recursive(user, consumers)
                   tag = self._get_arg_tag(user, arg_index)
                   consumers.append((user, tag))
+                else:
+                  if isinstance(user.op, relay.Function):
+                    _recurse_use_def = _UseDefChainParser()
+                    _recurse_use_def.visit(user.op.body)
+                    recursive_consumer_finder = _ConsumerFinder(_recurse_use_def)
+                    param_var = user.op.params[arg_index]
+                    param_consumers = recursive_consumer_finder.find_consumers_for_var(param_var)
+                    for cons in param_consumers:
+                      consumers.append(cons)
+                  else:
+                    tag = self._get_arg_tag(user, arg_index)
+                    consumers.append((user, tag))
               elif isinstance(user, relay.TupleGetItem):
                 # TupleGetItem: continue following the chain
                 self._find_consumers_recursive(user, consumers)
@@ -3753,7 +3763,7 @@ class ImcflowLayoutLegalizer:
               return "input"  # Default tag
         
         # Step 3: Find consumers for each parameter
-        finder = _ConsumerFinder(self, use_def_parser)
+        finder = _ConsumerFinder(use_def_parser)
 
         for param in func.params:
           consumers = finder.find_consumers_for_var(param)
@@ -3794,12 +3804,12 @@ class ImcflowLayoutLegalizer:
             return ("vector", True)
           elif tag == "min" or tag == "max":
             return ("scalar", False)
+        elif consumer_node.op == op.get("add") or consumer_node.op == op.get("divide") or consumer_node.op == op.get("multiply"):
+          return ("vector", True)
         elif consumer_node.op == op.get("qnn.imcflow_nu_quantize"):
           raise ValueError("nu_quantize should not be consumer nodes of function parameters")
         elif consumer_node.op == op.get("nn.conv2d"):
           raise ValueError("conv2d should not be consumer nodes of function parameters")
-        elif consumer_node.op == op.get("add") or consumer_node.op == op.get("divide") or consumer_node.op == op.get("multiply"):
-          raise ValueError("Element-wise operations should not be consumer nodes of function parameters")
         else:
           raise ValueError(f"Unsupported operator detected: {consumer_node.op}. please check.")
       
@@ -3894,6 +3904,8 @@ class ImcflowLayoutLegalizer:
         update the parameters of imcflow functions to match the packed layout
         Scan function argument nodes and check layout.
         if function param layout is different from argument node layout, update the function param layout
+        
+        This also recursively updates local functions within the function body.
         """
         # First gather consumers for all parameters
         self.gather_var_consumers(fn)
@@ -3909,14 +3921,21 @@ class ImcflowLayoutLegalizer:
             param_map[param] = new_param
             print(f"  Updated parameter {param.name_hint}: {param.checked_type} -> {new_param.type_annotation}")
         
-        # If no parameters were updated, return original function
+        # Recursively visit the function body to update local functions
+        # This will also apply variable substitution if params were updated
         if len(param_map) == 0:
+          # No parameter updates, but still need to visit body for local functions
+          new_body = self.visit(fn.body)
+        else:
+          # Apply parameter substitution first, then visit for local functions
+          substituted_body = relay.bind(fn.body, param_map)
+          new_body = self.visit(substituted_body)
+        
+        # Check if anything changed (params or body)
+        if len(param_map) == 0 and new_body == fn.body:
           return fn
         
-        # Update the function body with variable substitution
-        new_body = relay.bind(fn.body, param_map)
-        
-        # Create temporary function with updated parameters (but old return type)
+        # Create temporary function with updated parameters and body (but old return type)
         temp_func = relay.Function(
           new_params,
           new_body,
@@ -3927,6 +3946,7 @@ class ImcflowLayoutLegalizer:
         
         # Wrap the function in an IRModule and run InferType to get the actual return type
         temp_mod = tvm.IRModule.from_expr(temp_func)
+        print(temp_mod)
         temp_mod = relay.transform.InferType()(temp_mod)
         
         # Get the inferred function with updated types
