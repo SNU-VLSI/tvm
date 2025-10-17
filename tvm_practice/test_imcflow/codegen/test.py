@@ -160,6 +160,7 @@ def run_test_evl(test_name, mod, param_dict):
 
   eval_mod = imcflow_transform.ImcflowLayoutLegalizer().transform_mod(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out")
+  return
   
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
