@@ -19,6 +19,7 @@ import os
 from tvm.relay.op.transform import imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 import tvm.relay as relay
 
+from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 from models import real_model, real_model2, test_models
 from models import small_model
 from models import resnet8_cifar
@@ -158,14 +159,19 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
 
-  eval_mod = imcflow_transform.ImcflowLayoutLegalizer().transform_mod(eval_mod)
+  layout_legalizer = imcflow_transform.ImcflowLayoutLegalizer()
+  eval_mod = layout_legalizer.transform_mod(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out")
-  return
   
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
+  imcflow_transform.constructImcflowFuncMap(eval_mod)
   print("-------------------- CustomID TO Name --------------------")
   print(imcflow.CustomIDToName())
+  print("-------------------- Node TO CustomID --------------------")
+  print(HashToCustomID())
+  print("-------------------- func map --------------------")
+  print(DevConfig().ImcflowFuncMap)
   printModel(eval_dir, eval_mod, eval_param_dict, "with_custom_id")
 
   imcflow_transform.NodeMapper().run(eval_mod)
@@ -178,6 +184,7 @@ def run_test_evl(test_name, mod, param_dict):
     print(key)
     for path in paths:
       print(path)
+  return
 
   imcflow_transform.constructActiveIMCEDict(eval_mod)
   print("------------------------------  Active IMCE list ---------------------- ")

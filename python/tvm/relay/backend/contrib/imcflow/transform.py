@@ -46,8 +46,15 @@ def getNodeID(node) -> int:
     return -1
 
 def getNodeDebugID(node):
-  if hasattr(node.op, "attrs"):
-    indicator = str(node.op.attrs["Composite"])
+  if isinstance(node, relay.Call):
+    if isinstance(node.op, tvm.ir.Op):
+      indicator = str(node.op.name)
+    elif isinstance(node.op, relay.Function) and "Composite" in node.op.attrs: # composite node
+      indicator = str(node.op.attrs["Composite"])
+    elif isinstance(node.op, relay.GlobalVar):
+      indicator = str(node.op.name_hint)
+    else:
+      indicator = "imcflow_func_impl"
   else:
     indicator = str(node.op)
   return indicator
@@ -1611,58 +1618,6 @@ def partitionRound(mod):
 
   return mod
 
-def quantizeWeight(weight, scale):
-  """
-  do 4bit quantization. but numpy's smallest data type is int8.
-  so sign extend to int8 and use only 16 values from -8 to 7.
-  """
-  data = weight.data.numpy()
-  quantized = np.round(data / scale).astype(np.int8)
-  quantized = np.clip(quantized, -8, 7)
-  quantized = tvm.nd.array(quantized)
-  return quantized
-
-def gatherQuantScaleFactors(min_max_quant_node):
-  """
-  gather conv2d weight scale and nn.bn's scale and bias.
-  traverse nodes until meet min_max_quant node.
-  From gathered scale and bias, calculate min and max values.
-  """
-  return None
-
-def calMinMaxParam(node):
-  """
-  calculate min and max values from scale and bias for this node
-  """
-  return None
-
-def insertMinMaxQuant(input):
-  """
-  quantize input activation to 4bit.
-  input relay expr is not constant, so just change dtype to int4.
-  no need to construct numpy array
-  """
-
-def quantizeConv2d(conv, weight_scale):
-  """
-  convert nn.conv2d to imcflow.qconv2d with quantized weight
-  1. quantize weight. int4 type but int8 sign extension
-  2. insert min_max_quant before conv2d input if already int4 type.
-  3. change conv2d to qconv2d
-  """
-  pass
-
-def quantizeBatchNorm(bn, scale, bias):
-  """
-  convert nn.batch_norm to imcflow.qbatch_norm with quantized scale and bias
-  1. quantize scale and bias. int16 type. 
-  2. change batch_norm to qbatch_norm
-  """
-  pass
-
-def quantizeImcflowFuncs(mod, scale_factor_dict):
-  pass
-
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
     def __init__(self):
@@ -1699,53 +1654,23 @@ class NodeMapper:
 
           #for debugging
           indicator = getNodeDebugID(call)
-          # if hasattr(call.op, "attrs"):
-          #   indicator = call.op.attrs["Composite"]
-          # else:
-          #   indicator = call.op
 
           # check if this node is
           IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
           IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
-          # IsPacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_packing"]
-          # IsUnpacking = isinstance(call.op, tvm.ir.Op) and call.op.name in ["imcflow_unpacking"]
           if IsConcat:
               if from_host is True:
                   raise ValueError("concatenate should have at least 1 child node")
               self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1].fields[-1])]
-              # self.MappingDict[getNodeID(call)] = (last_child_mapping, indicator)
           elif IsSplit:
               if from_host is True:
-                  # if this call receives tensor directly from host, map to arbitrary inode
                   self.MappingDict[getNodeID(call)] = NodeID.from_inode_coord(self.inode_index)
-                  # self.MappingDict[int(hash(call))] = (f"inode_{self.inode_index}", indicator)
                   self.inode_index -= 1
               else:
-                  # self.MappingDict[int(hash(call))] = (last_child_mapping, indicator)
                   self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
-          # elif IsPacking:
-          #   # map to child
-          #   self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
-          #   # # map to nearest inode of argument's hw node
-          #   # SrcHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call.args[-1])])[0]
-          #   # InodeID = NodeID.from_inode_coord(SrcHWNodeID)
-          #   # self.MappingDict[getNodeID(call)] = InodeID
-
-          # elif IsUnpacking:
-          #     # keep unpacking node and determine its NodeID in parent node
-          #     self.undetermined_callnode_exists = True
-          #     self.undetermined_callnode = getNodeID(call)
           else:
               self.MappingDict[getNodeID(call)] = NodeID.from_imce_coord(self.imce_index)
               self.imce_index -= 1
-              # self.MappingDict[int(hash(call))] = (f"imce_{self.imce_index}", indicator)
-
-          # # handle undetermined unpacking node
-          # if IsUnpacking is False and self.undetermined_callnode_exists is True:
-          #     DstHWNodeID = NodeID.to_coord(self.MappingDict[getNodeID(call)])[0]
-          #     InodeID = NodeID.from_inode_coord(DstHWNodeID)
-          #     self.MappingDict[self.undetermined_callnode] = InodeID # assign inode in a same row with parent node
-          #     self.undetermined_callnode_exists = False
 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
@@ -1753,14 +1678,14 @@ class NodeMapper:
         def visit_tuple(self, op):
           super().visit_tuple(op)
 
-      # self.MappingDict.update(_Nodemapper().traverse_func(func))
-
       return _Nodemapper().traverse_func(func)
     
     def run(self, mod):
+      imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
       for global_var, func in mod.functions.items():
         if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
-          mapping_dict = self.run_(func)
+          target_func = imcflow_func_map[global_var.name_hint]
+          mapping_dict = self.run_(target_func)
           ImcflowDeviceConfig().HWNodeMap.update(mapping_dict)
       return mod
 
@@ -2939,70 +2864,26 @@ def clearCompilerAttr(mod):
 
   return mod
 
-# @relay.transform.function_pass(opt_level=0)
-# class IDAssigner:
-#     def transform_function(self, func, mod, ctx):
-#       class _Visitor(tvm.relay.ExprMutator):
-#         def __init__(self):
-#           super().__init__()
-#           self.Cnt = 0
+def constructImcflowFuncMap(mod):
+  imcflow_func_map = {}
+  class FirstFuncVisitor(tvm.relay.ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.first_func = None
+    def visit_call(self, call):
+      if isinstance(call.op, relay.Function):
+        if self.first_func is None:
+          self.first_func = call.op
+      super().visit_call(call)
 
-#         def visit_call(self, call):
-#           NewAttr = {}
-#           if isinstance(call.op, Function):
-#             # new_fn.attrs["CustomID"] = self.Cnt
-#             for key in call.attrs.keys():
-#               NewAttr[key] = call.attrs.get_str(key)
-#             NewAttr["CustomID"] = self.Cnt
-#             dattr = tvm.ir.make_node("DictAttrs", **NewAttr)
-#             self.Cnt = self.Cnt + 1
-#             new_fn = FunctionWithFields(call.op, list(call.op.params), call.op.body, call.op.ret_type, call.op.ty_params, dattr)
-#             new_call_attrs = call.attrs
-#           elif isinstance(call.op, Op):
-#             # call.attrs["CustomID"] = self.Cnt
-#             if call.attrs is not None:
-#               for key in call.attrs.keys():
-#                 NewAttr[key] = call.attrs.get_str(key)
-#             NewAttr["CustomID"] = self.Cnt
-#             dattr = tvm.ir.make_node("DictAttrs", **NewAttr)
-#             new_fn = call.op
-#             new_call_attrs = dattr
-#             self.Cnt = self.Cnt + 1
+  for func_name in mod.functions:
+    if "imcflow" in func_name.name_hint:
+      wrap_func = mod[func_name.name_hint]
+      visitor = FirstFuncVisitor()
+      visitor.visit(wrap_func)
+      imcflow_func_map[func_name.name_hint] = visitor.first_func
 
-#           new_args = [self.visit(arg) for arg in call.args]
-
-#           return Call(new_fn, new_args, new_call_attrs, call.type_args, call.span)
-
-#       print("-----------------------func--------------------")
-#       print(func)
-#       # _Visitor().visit(func)
-
-#       return _Visitor().visit(func)
-
-# def assignID(mod):
-#   class _Visitor(tvm.relay.ExprMutator):
-#     def __init__(self):
-#       super().__init__()
-#       self.Cnt = 0
-
-#     def visit_call(self, call):
-#       setattr(call, "CustomID", self.Cnt)
-#       return call
-
-#   vis = _Visitor()
-#   for func_name in mod.functions:
-#     mod[func_name] = vis.visit(mod[func_name])
-#   return mod
-
-# def printID(mod):
-#   class _Visitor(tvm.relay.ExprVisitor):
-#     def visit_call(self, call):
-#       print(call.CustomID)
-#       super().visit_call(call)
-
-#   vis = _Visitor()
-#   for func_name in mod.functions:
-#     vis.visit(mod[func_name])
+  ImcflowDeviceConfig().ImcflowFuncMap = imcflow_func_map
 
 def constructUsefulMappings(mod):
   id_dict = HashToCustomID()
@@ -3762,7 +3643,6 @@ class ImcflowLayoutLegalizer:
   def __init__(self):
     self.input_call_dict = {}
     self.output_call_dict = {}
-    self.imcflow_func_map = {}
     
   def transform_mod(self, mod):
     """
@@ -3783,10 +3663,6 @@ class ImcflowLayoutLegalizer:
       if isImcflowFunc(mod[function_names[i]], mod):
         param_type, ret_type = calculate_imcflow_func_type(mod[function_names[i]])
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
-        # print(mod[function_names[i]])
-        # temp_mod = tvm.IRModule.from_expr(mod[function_names[i]])
-        # printModel(".", temp_mod, {}, "temp")
-        # exit()
         wrap_func = create_wrap_func(mod[function_names[i]], param_type, ret_type)
         old_gv = mod.get_global_var(function_names[i])
         func_type = relay.FuncType([x.type_annotation for x in wrap_func.params], wrap_func.ret_type)
@@ -3796,7 +3672,6 @@ class ImcflowLayoutLegalizer:
         new_gv_map[old_gv] = new_gv
     
     mod = self.replace_imcflow_gv(mod, new_gv_map)
-    print(mod)
     mod = self._insert_packing_unpacking(mod)
     
     # return transformed_func
@@ -4354,8 +4229,6 @@ class ImcflowLayoutLegalizer:
     layout transform is required only when the output node is used by CPU later.
     """
     print("=== Inserting packing/unpacking nodes around imcflow function calls ===")
-    print(mod)
-
     class _LayoutTransformer(relay.ExprMutator):
       def __init__(self, module):
         super().__init__()

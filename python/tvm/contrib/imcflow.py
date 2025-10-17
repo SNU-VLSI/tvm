@@ -388,6 +388,7 @@ class ImcflowDeviceConfig:
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
     self.DataBlocks = {}
+    self.ImcflowFuncMap = {}
 
   def clear(self):
     self._initialize()
