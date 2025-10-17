@@ -1884,10 +1884,12 @@ def constructTensorEdgeList(mod):
       self.visit(func)
       return self.TensorEdgeList
 
+  imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif func.attrs["Compiler"]=="imcflow":
-      ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint] = _Visitor().getTensorEdgeList(func_name_var, func)
+      target_func = imcflow_func_map[func_name_var.name_hint]
+      ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint] = _Visitor().getTensorEdgeList(func_name_var, target_func)
       ImcflowDeviceConfig().TensorEdgeList.extend(ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint])
 
 def constructActiveIMCEDict(mod):
@@ -2328,9 +2330,11 @@ class MemoryAllocator:
       return func
     
     def run(self, mod):
-      for _, func in mod.functions.items():
+      imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
+      for gv, func in mod.functions.items():
         if isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow":
-          self.run_(func)
+          target_func = imcflow_func_map[gv.name_hint]
+          self.run_(target_func)
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:

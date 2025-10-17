@@ -184,7 +184,6 @@ def run_test_evl(test_name, mod, param_dict):
     print(key)
     for path in paths:
       print(path)
-  return
 
   imcflow_transform.constructActiveIMCEDict(eval_mod)
   print("------------------------------  Active IMCE list ---------------------- ")
