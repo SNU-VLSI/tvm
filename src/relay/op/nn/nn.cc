@@ -1723,12 +1723,14 @@ bool ImcflowBatchNormRel(const Array<Type>& types, int num_inputs, const Attrs& 
     fields.push_back(TensorType({n,cg,h,w,16}, DataType::Int(16)));
     fields.push_back(vec_ty);
     fields.push_back(vec_ty);
+    reporter->Assign(types[3], TensorType({n,cg,h,w,16}, DataType::Int(16)));
   } else {
     fields.push_back(TensorType({n,c,h,w}, DataType::Int(16)));
     fields.push_back(vec_ty);
     fields.push_back(vec_ty);
+    reporter->Assign(types[3], TensorType({n,c,h,w}, DataType::Int(16)));
   }
-  reporter->Assign(types[3], TupleType(Array<Type>(fields)));
+  // reporter->Assign(types[3], TupleType(Array<Type>(fields)));
   return true;
 }
 

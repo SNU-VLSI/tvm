@@ -431,7 +431,8 @@ def makeBNPattern(data):
   imcflow_bn = is_op("imcflow.fused_batch_norm")(data, gamma, beta)
   nn_bn      = is_op("nn.batch_norm")(data, gamma, beta, moving_mean, moving_var)
 
-  return is_tuple_get_item(imcflow_bn | nn_bn, 0)
+  return imcflow_bn | is_tuple_get_item(nn_bn, 0)
+  # return is_tuple_get_item(imcflow_bn | nn_bn, 0)
 
 def makeAddPattern(data):
   return is_op("add")(data, wildcard())

@@ -78,4 +78,5 @@ def fused_batch_norm(
     out = data * fused_scale_rs + fused_bias_rs
 
     # placeholder reuse, we multiply by 1 and return them.
-    return [out, fused_scale_fp32, fused_bias_fp32]
+    # return [out, fused_scale_fp32, fused_bias_fp32]
+    return [out]

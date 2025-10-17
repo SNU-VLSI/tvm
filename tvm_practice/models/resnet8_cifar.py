@@ -200,23 +200,22 @@ def getModel_2(input_shape):
   
   y = y * relay.var("x_f_1", shape=(1,), dtype="float32")
   y = relay.cast(y, dtype="int16")
-  # y = relay.layout_transform(y, "NCHW", "NCHW16c")
 
   # basic block 1
   y = imcflow_min_max_quantize(y, relay.var("quant_min_1", shape=(), dtype="int16"), relay.var("quant_max_1", shape=(), dtype="int16"), axis=1, out_dtype="int4", channel=16)
-  # y = imcflow_qconv2d(
-  #   y,
-  #   relay.var("weight2_1", shape=(16,16,3,3), dtype="int8"),
-  #   in_channels=16,
-  #   channels=16,
-  #   kernel_size=(3, 3),
-  #   padding=(1, 1),
-  #   out_dtype="int16"
-  # )
-  # y = imcflow_batch_norm(y, relay.var("fused_scale1", shape=(16,), dtype="int16"), relay.var("fused_bias1", shape=(16,), dtype="int16"))[0]
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2_1", shape=(16,16,3,3), dtype="int8"),
+    in_channels=16,
+    channels=16,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  y = imcflow_batch_norm(y, relay.var("fused_scale1", shape=(16,), dtype="int16"), relay.var("fused_bias1", shape=(16,), dtype="int16"))
 
   # post process
-  # y = relay.cast(y,dtype="float32") / relay.var("post_f", shape=(1,), dtype="float32")
+  y = relay.cast(y,dtype="float32") / relay.var("post_f", shape=(1,), dtype="float32")
   # y = relay.nn.relu(y)
   # y = relay.nn.adaptive_avg_pool2d(y, output_size=(1,1))
   # y = relay.nn.batch_flatten(y) 

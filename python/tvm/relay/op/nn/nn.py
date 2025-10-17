@@ -3961,7 +3961,8 @@ def imcflow_batch_norm(
     result = _make.imcflow_fused_batch_norm(
         data, fused_scale, fused_bias, axis, in_channels
     )
-    return expr.TupleWrapper(result, 3)
+    return result
+    # return expr.TupleWrapper(result, 3)
 
 def imcflow_qconv2d(
     data,
