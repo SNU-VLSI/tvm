@@ -3635,13 +3635,19 @@ def calculate_imcflow_func_type(func):
       This uses InferType to get the accurate return type after parameter updates.
       """
       if isinstance(func.body, relay.Call):
-        producer = [func.body]
+        if isinstance(func.body.op, relay.Function):
+          producer = [func.body.op.body]
+        else:
+          producer = [func.body]
       elif isinstance(func.body, relay.TupleGetItem):
         producer = [func.body.tuple_value]
       elif isinstance(func.body, relay.Tuple):
         producer = []
         for field in func.body.fields:
-          producer.append(field)
+          if isinstance(field.op, relay.Function):
+            producer.append(field.op.body)
+          else:
+            producer.append(field)
       else:
         raise ValueError("Unsupported function body type for return type calculation")
       
@@ -3679,6 +3685,68 @@ def calculate_imcflow_func_type(func):
   updater = _ImcflowFunctionParamUpdater()
   return updater.run(func)
 
+def create_wrap_func(func, new_param_type, new_ret_type):
+    """
+    param_specs: [(name, shape, dtype), ...]
+    """
+    params = []
+    for i, typ in enumerate(new_param_type):
+        name  = f"var{i}"
+        shape = typ.shape
+        dtype = typ.dtype
+        params.append(relay.var(name, shape=shape, dtype=dtype))
+    
+    old_params = func.params
+    old_ret_type = func.ret_type
+
+    # check old param and new param shape.
+    # and make args
+    args = []
+    for i in range(len(old_params)):
+        old_type = old_params[i].checked_type
+        new_type = new_param_type[i]
+        # insert layout transform or bitpack
+        if len(new_type.shape) == 6: # qconv2d input
+            # bitunpack
+            arg = imcflow_mmquant_out_to_4d(params[i], old_type.shape[1])
+            args.append(arg)
+        elif len(new_type.shape) == 5: # vector input
+            # layout transform
+            arg = relay.op.layout_transform(params[i], "NCHW16c", "NCHW")
+            args.append(arg)
+        else:
+            raise ValueError("why imcflow function params is not 5D or 6D")
+    
+    body = func(*args)
+    
+    if isinstance(new_ret_type, relay.TupleType):
+      outs = []
+      for i, field_type in enumerate(new_ret_type.fields):
+        if len(field_type.shape) == 6:  # qconv2d output
+            # bitpack
+            gti = relay.TupleGetItem(body, i)
+            ret_field = imcflow_4d_to_qconv_input(gti)
+            outs.append(ret_field)
+        elif len(field_type.shape) == 5:  # vector output
+            # layout transform
+            gti = relay.TupleGetItem(body, i)
+            ret_field = relay.op.layout_transform(gti, "NCHW", "NCHW16c")
+            outs.append(ret_field)
+        else:
+            raise ValueError("why imcflow function return type is not 5D or 6D")
+      body = relay.Tuple(outs)
+    elif isinstance(new_ret_type, relay.TensorType):
+      if len(new_ret_type.shape) == 6:  # qconv2d output
+          # bitpack
+          body = imcflow_4d_to_qconv_input(body)
+      elif len(new_ret_type.shape) == 5:  # vector output
+          # layout transform
+          body = relay.op.layout_transform(body, "NCHW", "NCHW16c")
+      else:
+          raise ValueError("why imcflow function return type is not 5D or 6D")
+
+    return relay.Function(params, body, new_ret_type, attrs=func.attrs)
+
 class ImcflowLayoutLegalizer:
   """
   A pass that identifies boundary nodes between IMCFLOW and CPU execution domains.
@@ -3711,47 +3779,24 @@ class ImcflowLayoutLegalizer:
     num_func = len(function_names)
     new_gv_map = {}
 
-    def create_prototype(param_type, ret_type):
-        """
-        param_specs: [(name, shape, dtype), ...]
-        """
-        params = []
-        for i, typ in enumerate(param_type):
-            name  = f"var{i}"
-            shape = typ.shape
-            dtype = typ.dtype
-            params.append(relay.var(name, shape=shape, dtype=dtype))
-        
-        if isinstance(ret_type, relay.TupleType):
-            body_fields = []
-            for i, field_type in enumerate(ret_type.fields):
-                shape = [int(x) for x in field_type.shape]
-                body_fields.append(relay.const(np.zeros(shape, dtype=field_type.dtype)))
-            body = relay.Tuple(body_fields)
-        else:
-            shape = [int(x) for x in ret_type.shape]
-            body = relay.const(np.zeros(shape, dtype=ret_type.dtype))
-
-        return relay.Function(params, body, ret_type)
-
     for i in range(num_func):
       if isImcflowFunc(mod[function_names[i]], mod):
         param_type, ret_type = calculate_imcflow_func_type(mod[function_names[i]])
-        prototype_func = create_prototype(param_type, ret_type)
-        target_func = mod[function_names[i]]
-        mod[function_names[i]] = prototype_func
-        self.imcflow_func_map[function_names[i]] = target_func
-        # mod[function_names[i]] = self._mark_imcflow_function_boundaries(mod[function_names[i]])
-        # mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
-        # mod[function_names[i]] = self.update_imcflow_func_params(mod[function_names[i]])
+        mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
+        # print(mod[function_names[i]])
+        # temp_mod = tvm.IRModule.from_expr(mod[function_names[i]])
+        # printModel(".", temp_mod, {}, "temp")
+        # exit()
+        wrap_func = create_wrap_func(mod[function_names[i]], param_type, ret_type)
         old_gv = mod.get_global_var(function_names[i])
-        # del mod[old_gv]
-        func_type = relay.FuncType([x.type_annotation for x in prototype_func.params], prototype_func.ret_type)
+        func_type = relay.FuncType([x.type_annotation for x in wrap_func.params], wrap_func.ret_type)
         new_gv = relay.GlobalVar(function_names[i], type_annot=func_type)
+        del mod[old_gv]
+        mod[new_gv] = wrap_func
         new_gv_map[old_gv] = new_gv
-        # mod[new_gv] = target_func
     
     mod = self.replace_imcflow_gv(mod, new_gv_map)
+    print(mod)
     mod = self._insert_packing_unpacking(mod)
     
     # return transformed_func
@@ -4308,6 +4353,8 @@ class ImcflowLayoutLegalizer:
     If imcflow function call is last node of main function, we don't need to insert layout_transform.
     layout transform is required only when the output node is used by CPU later.
     """
+    print("=== Inserting packing/unpacking nodes around imcflow function calls ===")
+    print(mod)
 
     class _LayoutTransformer(relay.ExprMutator):
       def __init__(self, module):
@@ -4411,11 +4458,14 @@ class ImcflowLayoutLegalizer:
               # Check the shape of receiver_type to determine packing type
               receiver_shape = receiver_type.shape
 
-              if arg_type.shape != receiver_shape:
+              arg_type_shape_int = [int(dim) for dim in arg_type.shape]
+              receiver_shape_int = [int(dim) for dim in receiver_shape]
+              if arg_type_shape_int != receiver_shape_int:
                 if len(receiver_shape) == 6:
                   # Pattern 1: 6D tensor (qconv2d input) - bit packed
                   new_arg = imcflow_4d_to_qconv_input(arg)
                   print(f"  Pattern 1: Inserting imcflow_4d_to_qconv_input for 6D input")
+                  print(f"    arg shape: {arg_type.shape}, receiver shape: {receiver_shape}")
                 elif len(receiver_shape) == 5:
                   # Pattern 2: 5D tensor (NCHW16c) - vector layout
                   new_arg = relay.layout_transform(arg, "NCHW", "NCHW16c")
@@ -4465,53 +4515,7 @@ class ImcflowLayoutLegalizer:
         # Create the call with packed arguments
         new_op = self.visit(call.op)
         new_call = relay.Call(new_op, transformed_args, call.attrs)
-        print(f"  Created new Call: {new_call.op} with args {[str(arg) for arg in new_call.args]}")
-        transform.InferTypeLocal(new_call)
 
-            # # Step 2: Check if imcflow_call has any Call node consumers
-            # # If no Call consumers, it's the last node - no unpacking needed
-            # if not self.has_call_consumers(call):
-            #   print(f"  No Call consumers detected - skipping unpacking (last node)")
-            #   return imcflow_call
-            
-            # # Step 3: Insert unpacking nodes based on return type pattern
-            # # Pattern 3: imcflow output (6D tensor, min_max_quant) -> CPU call -> imcflow_mmquant_out_to_4d
-            # # Pattern 4: imcflow output (5D tensor, NCHW16c) -> CPU call -> layout_transform(NCHW16c->NCHW)
-            
-            # return_type = target_func.ret_type
-            
-            # if isinstance(return_type, relay.TupleType):
-            #   # Special case: Tuple return means chained imcflow functions
-            #   unpacked_result = imcflow_call
-            #   print(f"  Tuple return: No unpacking (chained imcflow functions)")
-            # elif isinstance(return_type, TensorType):
-            #   return_shape = return_type.shape
-              
-            #   if len(return_shape) == 6:
-            #     # Pattern 3: 6D tensor output (min_max_quant) - bit packed
-            #     if isinstance(target_func.body, relay.Call) and target_func.body.op == op.get("qnn.imcflow_min_max_quantize"):
-            #       channels = target_func.body.attrs["channel"]
-            #     elif isinstance(target_func.body, relay.Tuple) and all(isinstance(f, relay.Call) and f.op == op.get("qnn.imcflow_min_max_quantize") for f in target_func.body.fields):
-            #       channels = target_func.body.fields[0].attrs["channel"]
-            #     elif isinstance(target_func.body, relay.TupleGetItem) and isinstance(target_func.body.tuple_value, relay.Call) and target_func.body.tuple_value.op == op.get("qnn.imcflow_min_max_quantize"):
-            #       channels = target_func.body.tuple_value.attrs["channel"]
-            #     else:
-            #       raise ValueError("Unsupported function body for determining channels in min_max_quantize")
-            #     unpacked_result = imcflow_mmquant_out_to_4d(imcflow_call, channels)
-            #     print(f"  Pattern 3: Inserting imcflow_mmquant_out_to_4d for 6D output")
-            #   elif len(return_shape) == 5:
-            #     # Pattern 4: 5D tensor output (NCHW16c) - vector layout
-            #     unpacked_result = relay.layout_transform(imcflow_call, "NCHW16c", "NCHW")
-            #     print(f"  Pattern 4: Inserting layout_transform(NCHW16c->NCHW) for 5D output")
-            #   else:
-            #     # Fallback for other shapes
-            #     unpacked_result = imcflow_call
-            #     print(f"  Warning: Unsupported return shape {len(return_shape)}D, keeping original")
-            # else:
-            #   # Fallback for other return types
-            #   unpacked_result = imcflow_call
-            
-            # return unpacked_result
         return new_call
     
     # Step 1: Build use-def chain for main function to track consumers

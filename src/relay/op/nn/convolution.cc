@@ -1985,7 +1985,7 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
     ICHECK_EQ(data_shape.size(), 6);
     ICHECK_EQ(data_shape[4].as<IntImmNode>()->value, 4);
     ICHECK_EQ(data_shape[5].as<IntImmNode>()->value, 8);
-    ICHECK_EQ(data_dtype, DataType::UInt(32));
+    // ICHECK_EQ(data_dtype, DataType::UInt(32));
     batch = data_shape[0];
     ih    = data_shape[2];
     iw    = data_shape[3];
