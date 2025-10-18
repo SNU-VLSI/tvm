@@ -212,10 +212,12 @@ class MemoryRegion:
 
   def allocate(self, function_name, block: DataBlock):
     """Allocate a data block in the region sequentially, assuming they are not delocated"""
-    assert block.size + self._last_offset[function_name] <= self.size, "Data block size exceeds region size"
-    block.set_offset(self._last_offset[function_name])
-    block.set_base_address(self._last_offset[function_name] + self.base_address)
-    self._last_offset[function_name] += block.size
+    # find first 32B aligned free offset
+    aligned_offset = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address
+    assert block.size + aligned_offset <= self.size, "Data block size exceeds region size"
+    block.set_offset(aligned_offset)
+    block.set_base_address(aligned_offset + self.base_address)
+    self._last_offset[function_name] = aligned_offset + block.size
     if function_name not in self.blocks:
       self.blocks[function_name] = {}
     self.blocks[function_name][block.id] = block
@@ -224,11 +226,16 @@ class MemoryRegion:
     """Allocate a data block in the region, allowing overlapping in case of weight params."""
     if self.weight_allocated[function_name] is False:
       self.weight_allocated[function_name] = True
-      self.weight_offset[function_name] = self._last_offset[function_name]
-      self._last_offset[function_name] += block.size
-
-    block.set_offset(self.weight_offset[function_name])
-    block.set_base_address(self.weight_offset[function_name] + self.base_address)
+      # Align weight_offset to 32B boundary
+      self.weight_offset[function_name] = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address
+      self._last_offset[function_name] = self.weight_offset[function_name] + block.size
+    
+    # Align current weight_offset to 32B boundary
+    aligned_offset = math.ceil((self.base_address + self.weight_offset[function_name]) / 32) * 32 - self.base_address
+    assert block.size + aligned_offset <= self.size, "Data block size exceeds region size"
+    
+    block.set_offset(aligned_offset)
+    block.set_base_address(aligned_offset + self.base_address)
     if function_name not in self.blocks:
       self.blocks[function_name] = {}
     self.blocks[function_name][block.id] = block
