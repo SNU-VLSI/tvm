@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 import json
+import pprint
 
 
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
@@ -1690,6 +1691,14 @@ class NodeMapper:
       return mod
 
 def constructTensorEdgeList(mod):
+  """
+  make tensor edge list.
+  output edge -> (last_node, func_node). odata tag both
+    if last_node is tuple, go into each field recursively and find first call
+    if last_node is composite node, go into body and find first call. use (func_node, body_node) as dst_node
+  input edge -> (var_node, dst_node)
+                (const_node, dst_node)
+  """
   @dataclass
   class TensorIDPair:
     graph_node_id : int
@@ -1967,7 +1976,7 @@ def constructTensorIDToTensorEdgeDict():
     _add(DstID, tensor_edge)
 
 class MemoryAllocator:
-    def run_(self, func):
+    def run_(self, func, func_name, ttype_map):
       class _MemoryAllocator(tvm.relay.ExprVisitor):
         """
           Target Operators:
@@ -1988,7 +1997,12 @@ class MemoryAllocator:
             self.data = CustomIDToNode()
             self.hwnodemap = ImcflowDeviceConfig().HWNodeMap
 
-        def traverse_func(self, func):
+            self.func_name = None
+            self.ttype_map = None
+
+        def traverse_func(self, func, func_name, ttype_map):
+            self.func_name = func_name
+            self.ttype_map = ttype_map
             self.visit(func)
             self.allocate()
             return self.DataBlockDict
@@ -2018,6 +2032,7 @@ class MemoryAllocator:
           return is_inode, inode_tensorid
 
         def find_edge_from_list(self, call):
+          # call is dst node of the target edges
           # find edges that call node belongs, and find valid edge which has inode
           tensor_edge_list = self.TensorEdgeList
           graph_node_id = getNodeID(call)
@@ -2055,6 +2070,7 @@ class MemoryAllocator:
               ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(mem_block)
 
           return
+
         def get_size(self, edge, call):
             size = None
             arg_shape = None
@@ -2069,6 +2085,7 @@ class MemoryAllocator:
                   raise ValueError("CustomIDToName does not have this node id.")
 
             def get_arg_idx(edge, call):
+              # edge is input edge to call node
               # find arg index from call by comparing edge's tensorid
               idx = None
               shape = None
@@ -2104,29 +2121,41 @@ class MemoryAllocator:
 
               return idx, shape, arg_dtype
 
-            if isinstance(call, Function):
+            if isinstance(call, Function): # output edge of function
               size = None
               arg_node = call.body
               if isinstance(arg_node, Tuple):
                 # find field of current edge
+                target_idx = -1
                 for i, field in enumerate(arg_node.fields):
                   if isinstance(edge.src_id.graph_node_id, tuple):
                     if getNodeID(field) in edge.src_id.graph_node_id:
-                      arg_node = field
-                      func_ret_type = call.ret_type.fields[i]
+                      target_idx = i
+                      break
+                      # arg_node = field
+                      # func_ret_type = call.ret_type.fields[i]
                   else:
                     if getNodeID(field) == edge.src_id.graph_node_id:
-                      arg_node = field
-                      func_ret_type = call.ret_type.fields[i]
+                      target_idx = i
+                      break
+                      # arg_node = field
+                      # func_ret_type = call.ret_type.fields[i]
+                assert target_idx != -1, "Cannot find target field index in function return tuple."
+                arg_ttype = self.ttype_map[self.func_name][target_idx]
               else:
-                func_ret_type = call.ret_type
-              arg_shape = func_ret_type.shape
-              arg_dtype = func_ret_type.dtype
+                arg_ttype = self.ttype_map[self.func_name]
+              arg_shape = arg_ttype[0]
+              arg_dtype = arg_ttype[1]
             else:
               src_op = get_op_from_id(edge.src_id.graph_node_id)
 
               #find which argument index this edge correspond to find corresponding shape by type_args.shape
-              _, arg_shape, arg_dtype = get_arg_idx(edge, call)
+              src_node = self.data[getInnerNodeID(edge.src_id.graph_node_id)]
+              if isinstance(src_node, relay.Var):
+                arg_ttype = self.ttype_map[src_node.name_hint]
+                arg_shape, arg_dtype = arg_ttype[0], arg_ttype[1]
+              else:
+                _, arg_shape, arg_dtype = get_arg_idx(edge, call)
 
               if src_op == "Op(split)":
                 # when first node of subgraph is split, memoryblock is already allocated by (src: var -> dst: split) case.
@@ -2137,15 +2166,17 @@ class MemoryAllocator:
               size = -1
             else:
               size = math.prod(arg_shape)
-              if arg_dtype == "int32":
+              if arg_dtype == "int32" or arg_dtype == "uint32":
                 size = size * 32 // 8 # dtype is int32 and unit is byte
-              elif arg_dtype == "int16":
+              elif arg_dtype == "int16" or arg_dtype == "uint16":
                 size = size * 16 // 8 # dtype is int16 and unit is byte
+              elif arg_dtype == "int8" or arg_dtype == "uint8":
+                size = size * 8 // 8 # dtype is int8 and unit is byte
               elif arg_dtype == "uint4":
                 size = size * 4 // 8 # dtype is int4 and unit is byte
               else:
                 #sanity check
-                raise ValueError("Unsupported dtype in function return type.")
+                raise ValueError(f"Unsupported dtype {arg_dtype} in function return type.")
             
             if size is None:
               raise ValueError("Size cannot be none.")
@@ -2153,53 +2184,6 @@ class MemoryAllocator:
             return size
 
         def visit_function(self, fn):
-          # def get_size(edge, call):
-          #   size = None
-          #   op_found = False
-          #   arg_node = call.body
-          #   # arg_node_shape = call.body.type_args[0].shape
-          #   if isinstance(arg_node, Tuple):
-          #     # find field of current edge
-          #     for i, field in enumerate(arg_node.fields):
-          #       if isinstance(edge.src_id.graph_node_id, tuple):
-          #         if getNodeID(field) in edge.src_id.graph_node_id:
-          #           arg_node = field
-          #           func_ret_shape = call.ret_type.fields[i].shape
-          #       else:
-          #         if getNodeID(field) == edge.src_id.graph_node_id:
-          #           arg_node = field
-          #           func_ret_shape = call.ret_type.fields[i].shape
-          #   else:                                 
-          #     func_ret_shape = call.ret_type.shape
-          #   # traverse until we find the final operation
-          #   while op_found is False:
-          #     if isinstance(arg_node, Call):
-          #       arg_op = arg_node.op
-          #       if isinstance(arg_op, Function):
-          #         # if arg is Composite node
-          #         arg_node = arg_node.op.body
-          #       elif arg_op == op.get("qnn.imcflow_min_max_quantize") or arg_op == op.get("nn.imcflow_qconv"):
-          #         size = func_ret_shape[2] * func_ret_shape[3] * 4 #TODO: check again!
-          #         op_found = True
-          #       elif arg_op == op.get("concatenate"):
-          #         arg_node = arg_node.args[0]
-          #       elif arg_op in [op.get("multiply"), op.get("add"), op.get("nn.bias_add"), op.get("nn.relu"), op.get("imcflow.fused_batch_norm")]:
-          #         size = func_ret_shape[2] * func_ret_shape[3] * math.ceil(int(func_ret_shape[1])/16) #TODO: check again!
-          #         op_found = True
-          #       else:
-          #         raise ValueError("Undefined operation!")
-          #     elif isinstance(arg_node, Tuple):
-          #       arg_node = arg_node.fields[0]
-          #     elif isinstance(arg_node, Function):
-          #       arg_node = arg_node.body
-          #     else:
-          #       raise ValueError("Undefined operation!")
-
-          #   if size is not None:
-          #     # imcflow word width = 256 bit
-          #     size = int(size) * 256 / 8 #unit: bytes
-          #   return size
-
           super().visit_function(fn)
 
           if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
@@ -2215,103 +2199,14 @@ class MemoryAllocator:
                 raise ValueError("There should be at least one edge connected to function node.")
 
         def visit_call(self, call):
-          # def get_size(edge, call):
-          #   size = None
-
-          #   def get_op_from_id(node_id):
-          #       if isinstance(node_id, int):
-          #           return self.name_dict[node_id]
-          #       elif isinstance(node_id, tuple):
-          #           return self.name_dict[node_id[1]]
-          #       else:
-          #         raise ValueError("CustomIDToName does not have this node id.")
-
-          #   def get_arg_idx(edge, call):
-          #     # find arg index from call by comparing edge's tensorid
-          #     idx = None
-          #     shape = None
-          #     for i, arg in enumerate(call.args):
-          #       # Determine the source ID based on the type of `arg`
-          #       if isinstance(arg, TupleGetItem):
-          #           src_id = getNodeID(arg.tuple_value)
-          #       else:
-          #           src_id = getNodeID(arg)
-
-          #       dst_id = getNodeID(call)
-
-          #       # Check if `src_id` matches the source node in `edge`
-          #       if isinstance(edge.src_id.graph_node_id, tuple):
-          #         if src_id in edge.src_id.graph_node_id:
-          #           idx = i
-          #           shape = call.type_args[idx].shape
-          #       else:
-          #         if src_id == edge.src_id.graph_node_id:
-          #           idx = i
-          #           shape = call.type_args[idx].shape
-
-          #       # Check if `dst_id` matches the source node in `edge`
-          #       # this is only for the case where src node is Var node, because customID of Var node in subfunction is not the same one in tensoredge.
-          #       if isinstance(edge.dst_id.graph_node_id, tuple):
-          #         if dst_id in edge.dst_id.graph_node_id and isinstance(arg, Var):
-          #           idx = i
-          #           shape = call.type_args[idx].shape
-
-          #     return idx, shape
-
-          #   src_op = get_op_from_id(edge.src_id.graph_node_id)
-          #   dst_op = call.op
-
-          #   #find which argument index this edge correspond to find corresponding shape by type_args.shape
-          #   arg_idx, arg_shape = get_arg_idx(edge, call)
-
-          #   # calculate size for inode memory allocation
-          #   _, inode_id = self.is_inode_in_edge(edge)
-          #   IsSrcInode = True if edge.src_id == inode_id else False
-          #   IsDstInode = True if edge.dst_id == inode_id else False
-
-          #   if arg_idx is not None:
-          #       if src_op == "Op(split)":
-          #         # when first node of subgraph is split, memoryblock is already allocated by (src: var -> dst: split) case.
-          #         size = -1
-          #       elif dst_op == op.get("split"):
-          #         # if split, same as conv2d
-          #         if isinstance(call.args[arg_idx], Var):
-          #           size = arg_shape[2] * arg_shape[3] * 4 #TODO: check again!
-          #       elif dst_op in [op.get("multiply"), op.get("add"), op.get("nn.bias_add"), op.get("nn.relu"), op.get("imcflow.fused_batch_norm")]:
-          #         if isinstance(call.args[arg_idx], Constant):
-          #           size = math.ceil(int(arg_shape[0]) / 16)
-          #         elif isinstance(call.args[arg_idx], Var):
-          #           size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16)
-          #       elif dst_op == op.get("nn.imcflow_qconv"):
-          #         if isinstance(call.args[arg_idx], Var): # input var
-          #           size = arg_shape[2] * arg_shape[3] * 4 #TODO: check again!
-          #         elif isinstance(call.args[arg_idx], Constant):# const(weight)
-          #           size = 256 #TODO: check again!
-          #       elif dst_op == op.get("divide"):
-          #         if isinstance(call.args[arg_idx], Constant):
-          #           size = 1 # TODO: check again!
-          #       elif dst_op == op.get("qnn.imcflow_min_max_quantize"):
-          #         if isinstance(call.args[arg_idx], Constant):
-          #           size = 1
-          #         elif isinstance(call.args[arg_idx], Var):
-          #           size = arg_shape[2] * arg_shape[3] * math.ceil(int(arg_shape[1])/16) #TODO: check again!
-          #       else:
-          #         raise ValueError("Undefined oeration!")
-
-          #   if size is not None:
-          #     # imcflow word width = 256 bit
-          #     size = int(size) * 256 / 8 #unit: bytes
-          #   else:
-          #     raise ValueError("Size calculation error!")
-
-          #   return size
-
           super().visit_call(call)
 
           IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
 
           if IsSupportedOp:
             edges = self.find_edge_from_list(call)
+            print("-------------- Debug: Allocating memory for call node ----------------")
+            pprint.pprint(edges)
             for edge in edges:
               size = self.get_size(edge, call)
               if size > 0:
@@ -2326,15 +2221,15 @@ class MemoryAllocator:
         def visit_tuple(self, op):
           super().visit_tuple(op)
 
-      _MemoryAllocator().traverse_func(func)
+      _MemoryAllocator().traverse_func(func, func_name, ttype_map)
       return func
     
-    def run(self, mod):
+    def run(self, mod, ttype_map):
       imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
       for gv, func in mod.functions.items():
         if isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow":
           target_func = imcflow_func_map[gv.name_hint]
-          self.run_(target_func)
+          self.run_(target_func, gv.name_hint, ttype_map[gv.name_hint])
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
@@ -3570,10 +3465,11 @@ def calculate_imcflow_func_type(func):
   updater = _ImcflowFunctionParamUpdater()
   return updater.run(func)
 
-def create_wrap_func(func, new_param_type, new_ret_type):
+def create_wrap_func(func, func_name, new_param_type, new_ret_type):
     """
     param_specs: [(name, shape, dtype), ...]
     """
+    ttype_map = {}
     params = []
     for i, typ in enumerate(new_param_type):
         name  = f"var{i}"
@@ -3601,6 +3497,7 @@ def create_wrap_func(func, new_param_type, new_ret_type):
             args.append(arg)
         else:
             raise ValueError("why imcflow function params is not 5D or 6D")
+        ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype)
     
     body = func(*args)
     
@@ -3629,8 +3526,18 @@ def create_wrap_func(func, new_param_type, new_ret_type):
           body = relay.op.layout_transform(body, "NCHW", "NCHW16c")
       else:
           raise ValueError("why imcflow function return type is not 5D or 6D")
+    
+    if isinstance(old_ret_type, relay.TupleType):
+      temp = []
+      for i, field_type in enumerate(old_ret_type.fields):
+        old_type = field_type
+        new_type = new_ret_type.fields[i]
+        temp.append((new_type.shape, new_type.dtype))
+      ttype_map[func_name] = temp
+    else:
+      ttype_map[func_name] = (new_ret_type.shape, new_ret_type.dtype)
 
-    return relay.Function(params, body, new_ret_type, attrs=func.attrs)
+    return relay.Function(params, body, new_ret_type, attrs=func.attrs), ttype_map
 
 class ImcflowLayoutLegalizer:
   """
@@ -3663,11 +3570,14 @@ class ImcflowLayoutLegalizer:
     num_func = len(function_names)
     new_gv_map = {}
 
+    real_tensor_type_map = {}
+
     for i in range(num_func):
       if isImcflowFunc(mod[function_names[i]], mod):
         param_type, ret_type = calculate_imcflow_func_type(mod[function_names[i]])
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
-        wrap_func = create_wrap_func(mod[function_names[i]], param_type, ret_type)
+        wrap_func, ttype_map = create_wrap_func(mod[function_names[i]], function_names[i], param_type, ret_type)
+        real_tensor_type_map[function_names[i]] = ttype_map
         old_gv = mod.get_global_var(function_names[i])
         func_type = relay.FuncType([x.type_annotation for x in wrap_func.params], wrap_func.ret_type)
         new_gv = relay.GlobalVar(function_names[i], type_annot=func_type)
@@ -3679,7 +3589,7 @@ class ImcflowLayoutLegalizer:
     mod = self._insert_packing_unpacking(mod)
     
     # return transformed_func
-    return mod
+    return mod, real_tensor_type_map
 
   def replace_imcflow_gv(self, mod, new_gv_map):
     class _GVReplacer(tvm.relay.ExprMutator):
