@@ -205,6 +205,8 @@ def run_test_evl(test_name, mod, param_dict):
       print(k, v)
 
   imcflow_transform.MemoryAllocator().run(eval_mod, ttype_map)
+  print("------------------------------- Memory Layout ----------------------------------")
+  print(DevConfig().MemLayout)
 
   imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
 

@@ -17,6 +17,7 @@
 
 from typing import Tuple, List, Dict, Union
 from enum import Enum
+from collections import defaultdict
 
 import re
 import math
@@ -200,33 +201,37 @@ class MemoryRegion:
   def __init__(self, name: str, size: int):
     self.name = name
     self.size = size
-    self.blocks = {}
+    self.blocks = {} # {function : {data_block_name : DataBlock}}
     self.base_address = -1  # offset in the device memory
-    self._last_offset = 0
-    self.weight_offset = 0
-    self.weight_allocated = False
+    self._last_offset = defaultdict(int)  # {function_name : last_offset}
+    self.weight_offset = defaultdict(int)  # {function_name : weight_offset}
+    self.weight_allocated = defaultdict(bool)  # {function_name : weight_allocated}
 
   def __getitem__(self, id: Union[str, TensorID]):
     return self.blocks.get(id, None)
 
-  def allocate(self, block: DataBlock):
+  def allocate(self, function_name, block: DataBlock):
     """Allocate a data block in the region sequentially, assuming they are not delocated"""
-    assert block.size + self._last_offset <= self.size, "Data block size exceeds region size"
-    block.set_offset(self._last_offset)
-    block.set_base_address(self._last_offset + self.base_address)
-    self._last_offset += block.size
-    self.blocks[block.id] = block
+    assert block.size + self._last_offset[function_name] <= self.size, "Data block size exceeds region size"
+    block.set_offset(self._last_offset[function_name])
+    block.set_base_address(self._last_offset[function_name] + self.base_address)
+    self._last_offset[function_name] += block.size
+    if function_name not in self.blocks:
+      self.blocks[function_name] = {}
+    self.blocks[function_name][block.id] = block
 
-  def allocate_allow_overlap(self, block: DataBlock):
+  def allocate_allow_overlap(self, function_name, block: DataBlock):
     """Allocate a data block in the region, allowing overlapping in case of weight params."""
-    if self.weight_allocated is False:
-      self.weight_allocated = True
-      self.weight_offset = self._last_offset
-      self._last_offset += block.size
+    if self.weight_allocated[function_name] is False:
+      self.weight_allocated[function_name] = True
+      self.weight_offset[function_name] = self._last_offset[function_name]
+      self._last_offset[function_name] += block.size
 
-    block.set_offset(self.weight_offset)
-    block.set_base_address(self.weight_offset + self.base_address)
-    self.blocks[block.id] = block
+    block.set_offset(self.weight_offset[function_name])
+    block.set_base_address(self.weight_offset[function_name] + self.base_address)
+    if function_name not in self.blocks:
+      self.blocks[function_name] = {}
+    self.blocks[function_name][block.id] = block
 
   def set_base_address(self, address: int):
     self.base_address = int(address)
@@ -234,7 +239,10 @@ class MemoryRegion:
   def __str__(self):
     if not self.blocks:
       return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
-    blocks_str = ",\n      ".join(str(block) for block in self.blocks.values())
+    blocks_str=""
+    for function_name, blocks in self.blocks.items():
+      blocks_str += f"  {function_name}:\n"
+      blocks_str += ",\n      ".join(str(block) for block in blocks.values())
     return (f"MemoryRegion({self.name}, {self.size}, {self.base_address}, "
             f"blocks=[\n      {blocks_str}\n    ])")
 
