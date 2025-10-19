@@ -252,7 +252,8 @@ def getModel_2(input_shape):
   return out, var_info
 
 def getModel():
-  out, var_dict = getModel_([1, 3, 28, 28])
+  # out, var_dict = getModel_([1, 3, 28, 28])
+  out, var_dict = getModel_([1, 3, 8, 8])
 
   def _rand_tensor(dtype: str, shape):
     # Handle common dtypes with appropriate ranges

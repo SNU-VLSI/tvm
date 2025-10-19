@@ -2065,7 +2065,8 @@ class MemoryAllocator:
             inode_name = hw_node_id.name # ex) inode_3
 
             if inode_tensorid.tensor_type == "weight":
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(self.func_name, mem_block)
+              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(self.func_name, mem_block)
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(self.func_name, mem_block)
             else:
               ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(self.func_name, mem_block)
 

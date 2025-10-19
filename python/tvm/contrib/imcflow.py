@@ -214,7 +214,7 @@ class MemoryRegion:
     """Allocate a data block in the region sequentially, assuming they are not delocated"""
     # find first 32B aligned free offset
     aligned_offset = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address
-    assert block.size + aligned_offset <= self.size, "Data block size exceeds region size"
+    assert block.size + aligned_offset <= self.size, f"Data block size exceeds region size. {block.size} + {aligned_offset} > {self.size}"
     block.set_offset(aligned_offset)
     block.set_base_address(aligned_offset + self.base_address)
     self._last_offset[function_name] = aligned_offset + block.size
