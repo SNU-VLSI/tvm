@@ -2505,8 +2505,8 @@ class PolicyTableGenerator:
                       # 0: conv input
                       # 1: const (including weight)
                       # 2~6: rest
-                      edgeinfo = ImcflowDeviceConfig().get_tensor_edge_info(edge)
-                      edgeinfo.set_policy_info(router_entry_list)
+                      # edgeinfo = ImcflowDeviceConfig().get_tensor_edge_info(edge)
+                      # edgeinfo.set_policy_info(router_entry_list)
 
                       if edge.src_id.tensor_type == "odata":
                         # get src node name from CustomIDToName
@@ -2517,10 +2517,14 @@ class PolicyTableGenerator:
 
                         if dst_node_name == "Op(nn.imcflow_qconv)":
                           # if src is input of qconv, FIFO ID = 0
-                          edgeinfo.set_fifo_id(0)
+                          # edgeinfo.set_fifo_id(0)
+                          edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
+                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
                         else:
                           # if not, FIFO ID = 2~6
-                          edgeinfo.set_fifo_id(fifo_id_cnt[dest_node])
+                          # edgeinfo.set_fifo_id(fifo_id_cnt[dest_node])
+                          edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
+                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
 
                           fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
                           if fifo_id_cnt[dest_node] >= 8:
@@ -2538,7 +2542,7 @@ class PolicyTableGenerator:
                       edgeinfo = InstEdgeInfo(router_entry_list, None)
                       ImcflowDeviceConfig().add_inst_edge_info(edge, edgeinfo)
 
-        def allocate(self):
+        def allocate(self, func_name):
           # Allocate memory for policy tables
           for node_id, policy_table in self.Policytable.items():
             if len(policy_table) == 0:
@@ -2546,25 +2550,20 @@ class PolicyTableGenerator:
             mem_size = len(policy_table) * 32
             mem_block = DataBlock(f"{node_id.name}_policy", mem_size)
             inode_id = node_id.master() if node_id.is_imce() else node_id
-            ImcflowDeviceConfig().MemLayout[f"{inode_id.name}_data"].allocate(mem_block)
+            ImcflowDeviceConfig().MemLayout[f"{inode_id.name}_data"].allocate(func_name, mem_block)
 
-        def traverse_func(self, func):
+        def traverse_func(self, func_name):
             # traverse input function by visit() to make PathDict and generate policy table for it
             self.generate_policy_table()
             self.add_EdgeInfo()
-            self.allocate()
+            self.allocate(func_name)
             return self.Policytable
 
       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
-      items = mod.functions_items()
-      function_names = [item[0].name_hint for item in items]
-
-      num_func = len(function_names)
-      for i in range(num_func):
-        if function_names[i]=="main": continue
-        elif mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          self.PolicyTable_2D[function_names[i]] = _PolicyTableGenerator(self.NoCPaths[function_names[i]]).traverse_func(mod[function_names[i]])
-          for x in self.PolicyTable_2D[function_names[i]]:
+      for gv, func in mod.functions.items():
+        if isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow":
+          self.PolicyTable_2D[gv.name_hint] = _PolicyTableGenerator(self.NoCPaths[gv.name_hint]).traverse_func(mod[gv.name_hint])
+          for x in self.PolicyTable_2D[gv.name_hint]:
             print(x)
 
       return func
