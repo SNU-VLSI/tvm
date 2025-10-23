@@ -437,6 +437,9 @@ def makeBNPattern(data):
 def makeAddPattern(data):
   return is_op("add")(data, wildcard())
 
+def makeMulPattern(data):
+  return is_op("multiply")(data, wildcard())
+
 def makeBiasAddPattern(data):
   return is_op("nn.bias_add")(data, is_constant())
 
@@ -472,9 +475,9 @@ def pattern_table():
     def make_postop_pattern_start_with(conv_type):
       data1, weight = wildcard(), is_constant()
       data = is_op(conv_type)(data1, weight)
-      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data)
+      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
       for i in range(1, 10):
-        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out)
+        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
 
       return out
 

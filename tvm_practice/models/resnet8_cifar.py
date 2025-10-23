@@ -146,7 +146,7 @@ def getModel_(input_shape):
   y = y + y_residual
 
   # post process
-  y = relay.cast(y,dtype="float32") / relay.var("post_f", shape=(1,), dtype="float32")
+  y = relay.cast(y,dtype="float32") * relay.var("post_f_inv", shape=(1,), dtype="float32")
   y = relay.nn.relu(y)
   y = relay.nn.adaptive_avg_pool2d(y, output_size=(1,1))
   y = relay.nn.batch_flatten(y) 
