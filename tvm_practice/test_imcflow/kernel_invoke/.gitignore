@@ -1,0 +1,7 @@
+results/
+log
+*.pdf
+*.txt
+*.dump
+*.o
+*.cc

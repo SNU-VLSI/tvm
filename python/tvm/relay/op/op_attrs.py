@@ -19,6 +19,10 @@ from tvm.ir import Attrs
 import tvm._ffi
 
 
+@tvm._ffi.register_object("relay.attrs.BinaryOpAttrs")
+class BinaryOpAttrs(Attrs):
+    """Attributes for binary operations"""
+
 @tvm._ffi.register_object("relay.attrs.Conv1DAttrs")
 class Conv1DAttrs(Attrs):
     """Attributes for nn.conv1d"""
@@ -387,7 +391,9 @@ class AvgPool3DAttrs(Attrs):
 @tvm._ffi.register_object("relay.attrs.BitPackAttrs")
 class BitPackAttrs(Attrs):
     """Attributes used in bitpack operator"""
-
+@tvm._ffi.register_object("relay.attrs.BitUnpackAttrs")
+class BitUnpackAttrs(Attrs):
+    """Attributes used in unpackbits operator"""
 
 @tvm._ffi.register_object("relay.attrs.BinaryConv2DAttrs")
 class BinaryConv2DAttrs(Attrs):
@@ -667,3 +673,27 @@ class EinsumAttrs(Attrs):
 @tvm._ffi.register_object("relay.attrs.StftAttrs")
 class StftAttrs(Attrs):
     """Attributes used in stft operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowBatchNormAttrs")
+class ImcflowBatchNormAttrs(Attrs):
+    """Attributes for imcflow.batch_norm"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowMinMaxQuantizeAttrs")
+class ImcflowMinMaxQuantizeAttrs(Attrs):
+    """Attributes used in quantize operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowNUQuantizeAttrs")
+class ImcflowNUQuantizeAttrs(Attrs):
+    """Attributes used in quantize operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowQConv2DAttrs")
+class ImcflowQConv2DAttrs(Attrs):
+    """Attributes used in quantize operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowPackingAttrs")
+class ImcflowPackingAttrs(Attrs):
+    """Attributes used in quantize operators"""
+
+@tvm._ffi.register_object("relay.attrs.ImcflowUnPackingAttrs")
+class ImcflowUnPackingAttrs(Attrs):
+    """Attributes used in quantize operators"""

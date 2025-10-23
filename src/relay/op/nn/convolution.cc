@@ -149,7 +149,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.conv1d")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv1DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv1DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.conv1d");
     });
@@ -378,10 +378,10 @@ bool Conv2DRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
 
 TVM_REGISTER_GLOBAL("relay.op.nn._make.conv2d")
     .set_body_typed([](Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
-                       Array<IndexExpr> dilation, int groups, IndexExpr channels,
+                       Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels, in_channels,
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.conv2d");
     });
@@ -579,7 +579,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.conv3d")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv3DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv3DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.conv3d");
     });
@@ -1614,7 +1614,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.contrib_conv2d_NCHWc")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.contrib_conv2d_NCHWc");
     });
@@ -1642,7 +1642,7 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.contrib_depthwise_conv2d_NCHWc")
                        Array<IndexExpr> dilation, int groups, IndexExpr channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels,
+      return MakeConv<Conv2DAttrs>(data, weight, strides, padding, dilation, groups, channels, NullValue<IndexExpr>(),
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.contrib_depthwise_conv2d_NCHWc");
     });
@@ -1937,6 +1937,156 @@ given the original input data and the output gradient.
     .add_type_rel("Conv2DBackwardWeight", Conv2DBackwardWeightRel)
     .set_attr<FInferCorrectLayout>("FInferCorrectLayout", ConvInferCorrectLayout<Conv2DAttrs>)
     .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+
+// relay.nn.conv2d
+TVM_REGISTER_NODE_TYPE(ImcflowQConv2DAttrs);
+bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                       const TypeReporter& reporter) {
+  ICHECK_EQ(types.size(), 3);
+  const auto* data = types[0].as<TensorTypeNode>();
+  const auto* weight = types[1].as<TensorTypeNode>();
+  if (data == nullptr) return false;
+  if (weight == nullptr) return false;
+
+  const auto* param = attrs.as<ImcflowQConv2DAttrs>();
+  ICHECK(param != nullptr);
+
+  DataType out_dtype = DataType::Int(16);
+  // if (out_dtype.bits() == 0 || out_dtype != DataType::Int(16)) {
+  //   reporter->GetDiagCtx().Emit(
+  //       Diagnostic::Error(reporter->GetSpan())
+  //       << "qconv2d output type must be int16."
+  //       << " The provided type is: " << out_dtype);
+  //   return false;
+  // }
+
+  if (param->meta_schedule_original_shape.size() != 0) {
+    reporter->GetDiagCtx().Emit(
+        Diagnostic::Error(reporter->GetSpan())
+        << "qconv2d output type doesn't support meta scheduling.");
+    return false;
+  }
+
+  if (param->groups > 1) {
+    reporter->GetDiagCtx().Emit(
+        Diagnostic::Error(reporter->GetSpan())
+        << "qconv2d output type doesn't support grouped conv.");
+    return false;
+  }
+
+  Array<IndexExpr> data_shape = data->shape;
+  DataType data_dtype = data->dtype;
+  Array<IndexExpr> weight_shape = weight->shape;
+  DataType weight_dtype = weight->dtype;
+
+  // input type check
+  IndexExpr batch, ic, ih, iw;
+  if(param->in_node) {
+    ICHECK_EQ(data_shape.size(), 6);
+    ICHECK_EQ(data_shape[4].as<IntImmNode>()->value, 4);
+    ICHECK_EQ(data_shape[5].as<IntImmNode>()->value, 8);
+    // ICHECK_EQ(data_dtype, DataType::UInt(32));
+    batch = data_shape[0];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+    ic    = param->in_channels;
+    ICHECK(ic.as<IntImmNode>()->value > 0) << "in_channels must be specified when in_node is true";
+  } else {
+    ICHECK(data_shape.size() == 4) << "data should be 4D tensor when in_node is false";
+    batch = data_shape[0];
+    ic    = data_shape[1];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+  }
+
+  // weight type check
+  IndexExpr oc, kh, kw, ic_weight;
+  if(param->const_packed_node) {
+    ICHECK_EQ(weight_shape.size(), 4);
+    ICHECK_EQ(weight_shape[2].as<IntImmNode>()->value, 256);
+    ICHECK_EQ(weight_shape[3].as<IntImmNode>()->value, 8);
+    ICHECK_EQ(weight_dtype, DataType::UInt(32));
+    oc = param->channels;
+    ic_weight = param->in_channels;
+    kh = param->kernel_size[0];
+    kw = param->kernel_size[1];
+  } else {
+    ICHECK_EQ(weight_shape.size(), 4);
+    // ICHECK_EQ(weight_dtype, DataType::Int(4)) << "weight should be int4 tensor when const_packed_node is false";
+    oc = weight_shape[0];
+    ic_weight = weight_shape[1];
+    kh = weight_shape[2];
+    kw = weight_shape[3];
+  }
+
+  // consistency check
+  ICHECK_EQ(ic.as<IntImmNode>()->value, ic_weight.as<IntImmNode>()->value)
+      << "The input channels of data and weight should be equal, but got "
+      << data_shape[1] << " and " << weight_shape[0];
+  
+  // assign output shape
+  if(param->out_node) {
+    Array<IndexExpr> oshape({0,0,0,0,16});
+    IndexExpr pad_h, pad_w;
+    GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
+    oshape.Set(0, batch);
+    oshape.Set(1, ceildiv(oc, 16));
+    oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
+    oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
+    reporter->Assign(types[2], TensorType(oshape, out_dtype));
+  } else {
+    Array<IndexExpr> oshape({0,0,0,0});
+    IndexExpr pad_h, pad_w;
+    GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
+    oshape.Set(0, batch);
+    oshape.Set(1, oc);
+    oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
+    oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
+    reporter->Assign(types[2], TensorType(oshape, out_dtype));
+  }
+
+  return true;
+}
+
+inline Expr MakeImcflowQConv(Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
+                     Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
+                     Array<IndexExpr> kernel_size, std::string data_layout,
+                     std::string kernel_layout, std::string out_layout, DataType out_dtype,
+                     std::string op_name) {
+  auto attrs = make_object<ImcflowQConv2DAttrs>();
+  attrs->strides = std::move(strides);
+  attrs->padding = std::move(padding);
+  attrs->dilation = std::move(dilation);
+  attrs->groups = groups;
+  attrs->channels = std::move(channels);
+  attrs->in_channels = std::move(in_channels);
+  attrs->kernel_size = std::move(kernel_size);
+  attrs->data_layout = std::move(data_layout);
+  attrs->kernel_layout = std::move(kernel_layout);
+  attrs->out_layout = std::move(out_layout);
+  attrs->out_dtype = std::move(out_dtype);
+  const Op& op = Op::Get(op_name);
+  return Call(op, {data, weight}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qconv")
+    .set_body_typed([](Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
+                       Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
+                       Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
+                       String out_layout, DataType out_dtype) {
+      return MakeImcflowQConv(data, weight, strides, padding, dilation, groups, channels, in_channels,
+                                   kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
+                                   "nn.imcflow_qconv");
+    });
+
+RELAY_REGISTER_OP("nn.imcflow_qconv")
+    .describe(R"code()code" TVM_ADD_FILELINE)
+    .set_attrs_type<ImcflowQConv2DAttrs>()
+    .set_num_inputs(2)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .add_argument("weight", "Tensor", "The weight tensor.")
+    .set_support_level(2)
+    .add_type_rel("ImcflowQConv2D", ImcflowQConv2DRel);
 
 }  // namespace relay
 }  // namespace tvm

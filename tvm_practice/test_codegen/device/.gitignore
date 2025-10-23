@@ -1,0 +1,7 @@
+main
+*.ll
+*.o
+*.cpp
+*.so
+*.out
+*.bin

@@ -34,6 +34,20 @@
 namespace tvm {
 namespace relay {
 
+/*! \brief Attributes used for binary operators with boundary information */
+struct BinaryOpAttrs : public tvm::AttrsNode<BinaryOpAttrs> {
+  bool in_node;
+  bool out_node;
+  TVM_DECLARE_ATTRS(BinaryOpAttrs, "relay.attrs.BinaryOpAttrs") {
+    TVM_ATTR_FIELD(in_node)
+        .set_default(false)
+        .describe("Whether this node is an input boundary node");
+    TVM_ATTR_FIELD(out_node)
+        .set_default(false)
+        .describe("Whether this node is an output boundary node");
+  }
+};  // struct BinaryOpAttrs
+
 /*! \brief Attributes used for the sliding_window operator */
 struct SlidingWindowAttrs : public tvm::AttrsNode<SlidingWindowAttrs> {
   int axis;
@@ -608,6 +622,26 @@ struct TriluAttrs : public tvm::AttrsNode<TriluAttrs> {
         "Whether to keep the upper or lower half of the diagonal.");
   }
 };  // struct TriluAttrs
+
+struct ImcflowPackingAttrs : public tvm::AttrsNode<ImcflowPackingAttrs> {
+  Array<Integer> newshape;
+  DataType dtype;
+  TVM_DECLARE_ATTRS(ImcflowPackingAttrs, "relay.attrs.ImcflowPackingAttrs") {
+    TVM_ATTR_FIELD(newshape).describe(
+        "The new shape. Should be compatible with the original shape.");
+    TVM_ATTR_FIELD(dtype).describe("Target data type");
+  }
+};
+
+struct ImcflowUnPackingAttrs : public tvm::AttrsNode<ImcflowUnPackingAttrs> {
+  Array<Integer> newshape;
+  DataType dtype;
+  TVM_DECLARE_ATTRS(ImcflowUnPackingAttrs, "relay.attrs.ImcflowUnPackingAttrs") {
+    TVM_ATTR_FIELD(newshape).describe(
+        "The new shape. Should be compatible with the original shape.");
+    TVM_ATTR_FIELD(dtype).describe("Target data type");
+  }
+};
 
 }  // namespace relay
 }  // namespace tvm

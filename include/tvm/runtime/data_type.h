@@ -473,8 +473,15 @@ inline DLDataType String2DLDataType(std::string s) {
     LOG(FATAL) << "unknown type " << s;
   }
   char* xdelim;  // emulate sscanf("%ux%u", bits, lanes)
-  uint8_t bits = static_cast<uint8_t>(strtoul(scan, &xdelim, 10));
-  if (bits != 0) t.bits = bits;
+  uint16_t bits = static_cast<uint16_t>(strtoul(scan, &xdelim, 10));
+  if (bits != 0) {
+    if(bits == 256) {
+      t.bits = 255; // DLDataType.bits is uint8_t, use 255 to represent 256 bits
+    } else {
+      t.bits = bits;
+    }
+  }
+  // if (bits != 0) t.bits = bits;
   int scalable_multiplier = 1;
   if (strncmp(xdelim, "xvscale", 7) == 0) {
     scalable_multiplier = -1;

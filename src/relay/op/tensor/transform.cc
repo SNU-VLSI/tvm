@@ -4434,5 +4434,89 @@ RELAY_REGISTER_OP("fixed_point_multiply_per_axis")
     .set_attrs_type<FixedPointMultiplyPerAxisAttrs>()
     .set_support_level(10);
 
+
+TVM_REGISTER_NODE_TYPE(ImcflowPackingAttrs);
+bool ImcflowPackingRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                           const TypeReporter& reporter) {
+  // types: [data, result]
+  ICHECK_EQ(types.size(), 2);
+  const auto* data = types[0].as<TensorTypeNode>();
+  if (data == nullptr) {
+    ICHECK(types[0].as<IncompleteTypeNode>())
+        << "reshape: expect input type to be TensorType but get " << types[0];
+    return false;
+  }
+
+  auto attr = attrs.as<ImcflowPackingAttrs>();
+  auto& oshape_ = attr->newshape;
+  Array<PrimExpr> oshape(oshape_.begin(), oshape_.end());
+
+  // Verify that the sum of dimensions in the output shape is the sum of
+  // dimensions in the input shape
+  Array<IndexExpr> data_shape;
+  data_shape = data->shape;
+  reporter->Assign(types[1], TensorType(oshape, attr->dtype));
+  return true;
+}
+Expr MakeImcflowPacking(Expr data, Array<Integer> newshape, DataType dtype) {
+  auto attrs = make_object<ImcflowPackingAttrs>();
+  attrs->newshape = std::move(newshape);
+  attrs->dtype = dtype;
+  static const Op& op = Op::Get("imcflow_packing");
+  return Call(op, {data}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op._make.imcflow_packing").set_body_typed(MakeImcflowPacking);
+
+RELAY_REGISTER_OP("imcflow_packing")
+    .set_num_inputs(1)
+    .set_attrs_type<ImcflowPackingAttrs>()
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_support_level(3)
+    .add_type_rel("ImcflowPacking", ImcflowPackingRel)
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+
+TVM_REGISTER_NODE_TYPE(ImcflowUnPackingAttrs);
+bool ImcflowUnPackingRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                           const TypeReporter& reporter) {
+  // types: [data, result]
+  ICHECK_EQ(types.size(), 2);
+  const auto* data = types[0].as<TensorTypeNode>();
+  if (data == nullptr) {
+    ICHECK(types[0].as<IncompleteTypeNode>())
+        << "reshape: expect input type to be TensorType but get " << types[0];
+    return false;
+  }
+
+  auto attr = attrs.as<ImcflowUnPackingAttrs>();
+  auto& oshape_ = attr->newshape;
+  Array<PrimExpr> oshape(oshape_.begin(), oshape_.end());
+
+  // Verify that the sum of dimensions in the output shape is the sum of
+  // dimensions in the input shape
+  Array<IndexExpr> data_shape;
+  data_shape = data->shape;
+  reporter->Assign(types[1], TensorType(oshape, attr->dtype));
+  return true;
+}
+Expr MakeImcflowUnPacking(Expr data, Array<Integer> newshape, DataType dtype) {
+  auto attrs = make_object<ImcflowUnPackingAttrs>();
+  attrs->newshape = std::move(newshape);
+  attrs->dtype = dtype;
+  static const Op& op = Op::Get("imcflow_unpacking");
+  return Call(op, {data}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op._make.imcflow_unpacking").set_body_typed(MakeImcflowUnPacking);
+
+RELAY_REGISTER_OP("imcflow_unpacking")
+    .set_num_inputs(1)
+    .set_attrs_type<ImcflowUnPackingAttrs>()
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_support_level(3)
+    .add_type_rel("ImcflowUnPacking", ImcflowUnPackingRel)
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+
+
 }  // namespace relay
 }  // namespace tvm

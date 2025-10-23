@@ -28,6 +28,19 @@ from tvm import relay
 
 UNKNOWN_TYPE = "unknown"
 
+from tvm.relay.op.contrib.imcflow import HashToCustomID
+
+def addCustomID(node, node_detail):
+  id_dict = HashToCustomID()
+  if int(hash(node)) in id_dict:
+    if isinstance(node_detail, str):
+      node_detail += f"\nCustomID : {id_dict[int(hash(node))]}"
+    elif isinstance(node_detail, list):
+      node_detail.append(f"CustomID : {id_dict[int(hash(node))]}")
+    else:
+      raise ValueError("node_detail must be either str or list for custom ID")
+  return node_detail
+
 
 class VizNode:
     """VizNode carry node information for `VizGraph` interface.
@@ -202,6 +215,8 @@ class DefaultVizParser(VizParser):
             else:
                 node_detail = f"{node_detail}\ntype_annotation: {node.type_annotation}"
 
+        node_detail = addCustomID(node, node_detail)
+
         # only node
         viz_node = VizNode(node_id, node_type, node_detail)
         viz_edges = []
@@ -214,17 +229,23 @@ class DefaultVizParser(VizParser):
     ) -> Tuple[Union[VizNode, None], List[VizEdge]]:
         """Render rule for a relay function node"""
         func_attrs = node.attrs
-        node_details = [f"{k}: {func_attrs.get_str(k)}" for k in func_attrs.keys()]
+        node_detail = [f"{k}: {func_attrs.get_str(k)}" for k in func_attrs.keys()]
         # "Composite" might from relay.transform.MergeComposite
         if "Composite" in func_attrs.keys():
             name = func_attrs["Composite"]
         else:
             name = ""
 
+        node_detail = addCustomID(node, node_detail)
         node_id = node_to_id[node]
 
+        try:
+          node_detail.append(f"checked_type: {node.checked_type}")
+        except:
+          pass
+
         # Body -> FunctionNode
-        viz_node = VizNode(node_id, f"Func {name}", "\n".join(node_details))
+        viz_node = VizNode(node_id, f"Func {name}", "\n".join(node_detail))
         viz_edges = [VizEdge(node_to_id[node.body], node_id)]
         return viz_node, viz_edges
 
@@ -253,6 +274,12 @@ class DefaultVizParser(VizParser):
             node_detail = [f"GlobalVar.name_hint: {node.op.name_hint}"]
         else:
             op_name = str(type(node.op)).split(".")[-1].split("'")[0]
+
+        node_detail = addCustomID(node, node_detail)
+        try:
+          node_detail.append(f"checked_type: {node.checked_type}")
+        except:
+          pass
 
         # Arguments -> CallNode
         viz_node = VizNode(node_id, f"Call {op_name}", "\n".join(node_detail))
@@ -291,6 +318,8 @@ class DefaultVizParser(VizParser):
     ) -> Tuple[Union[VizNode, None], List[VizEdge]]:
         node_id = node_to_id[node]
         node_detail = f"shape: {node.data.shape}, dtype: {node.data.dtype}"
+
+        node_detail = addCustomID(node, node_detail)
 
         # only node
         viz_node = VizNode(node_id, "Const", node_detail)

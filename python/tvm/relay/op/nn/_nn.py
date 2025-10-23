@@ -937,11 +937,32 @@ def compute_bitpack(attrs, inputs, out_dtype):
     bit_axis = attrs.bit_axis
     pack_type = attrs.pack_type
     name = attrs.name
-    out = topi.nn.bitpack(inputs[0], bits, pack_axis, bit_axis, pack_type, name)
+    msb_first = attrs.msb_first
+    out = topi.nn.bitpack(inputs[0], bits, pack_axis, bit_axis, pack_type, name, msb_first)
     return [out]
 
 
 reg.register_schedule("nn.bitpack", strategy.schedule_bitpack)
+
+
+# bitunpack
+@reg.register_compute("nn.bitunpack")
+def compute_bitunpack(attrs, inputs, out_dtype):
+    """Compute definition for bitunpack"""
+    bits = attrs.bits
+    pack_axis = attrs.pack_axis
+    bit_axis = attrs.bit_axis
+    pack_type = attrs.pack_type
+    out_size = attrs.out_size.value if attrs.out_size else None
+    out_dtype_val = attrs.out_dtype
+    name = attrs.name
+    msb_first = attrs.msb_first
+    out = topi.nn.bitunpack(inputs[0], bits, pack_axis, bit_axis, pack_type, 
+                            out_size, out_dtype_val, name, msb_first)
+    return [out]
+
+
+reg.register_schedule("nn.bitunpack", strategy.schedule_bitpack)
 
 
 # bitserial_conv2d
@@ -1557,3 +1578,11 @@ reg.register_shape_func("nn.fast_softmax", False, elemwise_shape_func)
 reg.register_shape_func("nn.relu", False, elemwise_shape_func)
 reg.register_shape_func("nn.leaky_relu", False, elemwise_shape_func)
 reg.register_shape_func("nn.prelu", False, elemwise_shape_func)
+
+# test fused_batch_norm
+reg.register_strategy("imcflow.fused_batch_norm", strategy.fused_batch_norm_strategy)
+reg.register_strategy("nn.imcflow_qconv", strategy.imcflow_qconv2d_strategy)
+
+reg.register_strategy("qnn.imcflow_min_max_quantize", strategy.imcflow_min_max_quantize_strategy)
+
+reg.register_strategy("qnn.imcflow_nu_quantize", strategy.imcflow_nu_quantize_strategy)

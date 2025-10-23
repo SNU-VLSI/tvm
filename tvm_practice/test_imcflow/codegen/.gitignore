@@ -1,0 +1,5 @@
+*.pdf
+core*
+big/
+*_evl/
+*_ref/

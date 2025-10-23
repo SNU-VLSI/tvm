@@ -127,6 +127,57 @@ struct BroadcastAttrs : public tvm::AttrsNode<BroadcastAttrs> {
   }
 };
 
+struct ImcflowMinMaxQuantizeAttrs : public tvm::AttrsNode<ImcflowMinMaxQuantizeAttrs> {
+  DataType out_dtype;
+  DataType param_dtype;
+  int axis;
+  int channel;
+
+  TVM_DECLARE_ATTRS(ImcflowMinMaxQuantizeAttrs, "relay.attrs.ImcflowMinMaxQuantizeAttrs") {
+    TVM_ATTR_FIELD(out_dtype).describe("Output data type, always int4.").set_default(DataType::Float(32));
+    TVM_ATTR_FIELD(param_dtype).describe("Output data type, always int4.").set_default(DataType::Float(32));
+    TVM_ATTR_FIELD(axis)
+        .describe(
+            "The output channel axis for channel wise quantization. Default value is -1,"
+            "which corresponds to the last axis.")
+        .set_default(-1);
+    TVM_ATTR_FIELD(channel)
+        .describe(
+            "The number of channels. we need this retrieve the channel number after padding inserted")
+        .set_default(-1);
+  }
+};
+
+struct ImcflowNUQuantizeAttrs : public tvm::AttrsNode<ImcflowNUQuantizeAttrs> {
+  DataType out_dtype;
+  DataType param_dtype;
+  int axis;
+
+  TVM_DECLARE_ATTRS(ImcflowNUQuantizeAttrs, "relay.attrs.ImcflowNUQuantizeAttrs") {
+    TVM_ATTR_FIELD(out_dtype).describe("Output data type, always int4.").set_default(DataType::Float(32));
+    TVM_ATTR_FIELD(param_dtype).describe("Output data type, always int4.").set_default(DataType::Float(32));
+    TVM_ATTR_FIELD(axis)
+        .describe(
+            "The output channel axis for channel wise quantization. Default value is -1,"
+            "which corresponds to the last axis.")
+        .set_default(-1);
+  }
+};
+
+struct ImcflowQuantizeAttrs : public tvm::AttrsNode<ImcflowQuantizeAttrs> {
+  DataType out_dtype;
+  int axis;
+
+  TVM_DECLARE_ATTRS(ImcflowQuantizeAttrs, "relay.attrs.ImcflowQuantizeAttrs") {
+    TVM_ATTR_FIELD(out_dtype).describe("Output data type, can be one of [int4, uint4, int8 or uint8].");
+    TVM_ATTR_FIELD(axis)
+        .describe(
+            "The output channel axis for channel wise quantization. Default value is -1,"
+            "which corresponds to the last axis.")
+        .set_default(-1);
+  }
+};
+
 }  // namespace qnn
 }  // namespace relay
 }  // namespace tvm

@@ -1676,5 +1676,87 @@ Example::
     .set_attr<FTVMCompute>("FTVMCompute", BatchToSpaceNDCompute)
     .set_attr<TOpPattern>("TOpPattern", kInjective);
 
+
+TVM_REGISTER_NODE_TYPE(ImcflowBatchNormAttrs);
+bool ImcflowBatchNormRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                  const TypeReporter& reporter) {
+  ICHECK_EQ(types.size(), 4);
+  const auto* data = types[0].as<TensorTypeNode>();
+  const auto* scale = types[1].as<TensorTypeNode>();
+  const auto* bias = types[2].as<TensorTypeNode>();
+  if (data == nullptr) return false;
+
+  const ImcflowBatchNormAttrs* param = attrs.as<ImcflowBatchNormAttrs>();
+
+  IndexExpr n, c, h, w, cg;
+
+  // check input shapes
+  if(param->in_node) {
+    n = data->shape[0];
+    cg = data->shape[1];
+    if(param->in_channels > 0) {
+      c = param->in_channels;
+    } else {
+      c = data->shape[1]*16;
+    }
+    h = data->shape[2];
+    w = data->shape[3];
+
+    ICHECK(data->shape[4].as<IntImmNode>()->value == 16);
+  } else {
+    n = data->shape[0];
+    c = data->shape[1];
+    h = data->shape[2];
+    w = data->shape[3];
+  }
+
+  // check scale and bias shapes
+  ICHECK(scale->shape.size() == 1);
+  ICHECK(bias->shape.size() == 1);
+  ICHECK(scale->shape[0].as<IntImmNode>()->value == c.as<IntImmNode>()->value) << "ImcflowBatchNorm: scale shape inconsistent with data shape";
+  ICHECK(bias->shape[0].as<IntImmNode>()->value == c.as<IntImmNode>()->value) << "ImcflowBatchNorm: bias shape inconsistent with data shape";
+
+  // assign output types
+  std::vector<Type> fields;
+  auto vec_ty = TensorType(Array<IndexExpr>({c}), DataType::Int(16));
+  if(param->out_node) {
+    fields.push_back(TensorType({n,cg,h,w,16}, DataType::Int(16)));
+    fields.push_back(vec_ty);
+    fields.push_back(vec_ty);
+    reporter->Assign(types[3], TensorType({n,cg,h,w,16}, DataType::Int(16)));
+  } else {
+    fields.push_back(TensorType({n,c,h,w}, DataType::Int(16)));
+    fields.push_back(vec_ty);
+    fields.push_back(vec_ty);
+    reporter->Assign(types[3], TensorType({n,c,h,w}, DataType::Int(16)));
+  }
+  // reporter->Assign(types[3], TupleType(Array<Type>(fields)));
+  return true;
+}
+
+Expr MakeImcflowBatchNorm(Expr data, Expr fused_scale, Expr fused_bias, int axis, int in_channels) {
+  auto attrs = make_object<ImcflowBatchNormAttrs>();
+  attrs->axis = axis;
+  attrs->in_channels = in_channels;
+  static const Op& op = Op::Get("imcflow.fused_batch_norm");
+  return Call(op, {data, fused_scale, fused_bias}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_fused_batch_norm").set_body_typed(MakeImcflowBatchNorm);
+
+RELAY_REGISTER_OP("imcflow.fused_batch_norm")
+    .describe(R"code(Imcflow fused batch norm)code" TVM_ADD_FILELINE)
+    .set_attrs_type<ImcflowBatchNormAttrs>()
+    .set_num_inputs(3)
+    .add_argument("data", "Tensor", "Input to which batch_norm will be applied.")
+    .add_argument("fused_scale", "Tensor", "The scale factor.")
+    .add_argument("fused_bias", "Tensor", "The bias.")
+    .set_support_level(1)
+    .add_type_rel("ImcflowBatchNorm", ImcflowBatchNormRel)
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
+
+// .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BatchNormInferCorrectLayout)
+
+
 }  // namespace relay
 }  // namespace tvm

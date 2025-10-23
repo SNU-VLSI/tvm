@@ -24,6 +24,7 @@
 #include <tvm/relay/expr.h>
 #include <tvm/relay/op.h>
 #include <tvm/topi/broadcast.h>
+#include <tvm/relay/attrs/transform.h>
 
 #include "../op_common.h"
 #include "../type_relations.h"
@@ -38,11 +39,44 @@ namespace relay {
     return {FTOPI(inputs[0], inputs[1])};                 \
   }
 
-// Addition
-RELAY_REGISTER_BINARY_OP("add")
-    .describe("Elementwise add with broadcasting")
-    .set_support_level(1)
+TVM_REGISTER_NODE_TYPE(BinaryOpAttrs);
+TVM_REGISTER_GLOBAL("relay.op._make.add").set_body_typed([](Expr lhs, Expr rhs) {
+    auto attrs = make_object<BinaryOpAttrs>();
+    static const Op& op = Op::Get("add");
+    return Call(op, {lhs, rhs}, Attrs(attrs), {});
+});
+RELAY_REGISTER_OP("add")
+    .set_attrs_type<BinaryOpAttrs>()
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left hand side tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side tensor.")
+    .add_type_rel("Broadcast", BroadcastRel)
+    .set_attr<TOpPattern>("TOpPattern", kBroadcast)
+    .set_attr<TOpIsStateful>("TOpIsStateful", false)
+    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BinaryBroadcastLayout)
     .set_attr<FTVMCompute>("FTVMCompute", RELAY_BINARY_COMPUTE(topi::add));
+
+TVM_REGISTER_GLOBAL("relay.op._make.multiply").set_body_typed([](Expr lhs, Expr rhs) {
+    auto attrs = make_object<BinaryOpAttrs>();
+    static const Op& op = Op::Get("multiply");
+    return Call(op, {lhs, rhs}, Attrs(attrs), {});
+});
+RELAY_REGISTER_OP("multiply")
+    .set_attrs_type<BinaryOpAttrs>()
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left hand side tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side tensor.")
+    .add_type_rel("Broadcast", BroadcastRel)
+    .set_attr<TOpPattern>("TOpPattern", kBroadcast)
+    .set_attr<TOpIsStateful>("TOpIsStateful", false)
+    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", BinaryBroadcastLayout)
+    .set_attr<FTVMCompute>("FTVMCompute", RELAY_BINARY_COMPUTE(topi::multiply));
+
+// // Addition
+// RELAY_REGISTER_BINARY_OP("add")
+//     .describe("Elementwise add with broadcasting")
+//     .set_support_level(1)
+//     .set_attr<FTVMCompute>("FTVMCompute", RELAY_BINARY_COMPUTE(topi::add));
 
 // Subtraction
 RELAY_REGISTER_BINARY_OP("subtract")
@@ -86,10 +120,10 @@ RELAY_REGISTER_BINARY_OP("floor_divide")
     .set_support_level(1)
     .set_attr<FTVMCompute>("FTVMCompute", RELAY_BINARY_COMPUTE(topi::floor_divide));
 
-RELAY_REGISTER_BINARY_OP("multiply")
-    .describe("Elementwise multiply with broadcasting")
-    .set_support_level(1)
-    .set_attr<FTVMCompute>("FTVMCompute", RELAY_BINARY_COMPUTE(topi::multiply));
+// RELAY_REGISTER_BINARY_OP("multiply")
+//     .describe("Elementwise multiply with broadcasting")
+//     .set_support_level(1)
+//     .set_attr<FTVMCompute>("FTVMCompute", RELAY_BINARY_COMPUTE(topi::multiply));
 
 RELAY_REGISTER_BINARY_OP("power")
     .describe("Elementwise power with broadcasting")

@@ -1,0 +1,60 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python C++ Debug",
+      "type": "pythoncpp",
+      "request": "launch",
+      "pythonLaunchName": "Python: Current File",
+      "cppAttachName": "(gdb) Attach",
+    },
+    {
+      "name": "(gdb) Attach",
+      "type": "cppdbg",
+      "request": "attach",
+      "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
+      "processId": "${command:pickProcess}"
+    },
+    {
+      "name": "Python: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "/root/project/tvm/tvm_practice/test_imcflow/codegen/test.py",
+      "console": "integratedTerminal",
+      "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
+      "cwd": "/root/project/tvm/tvm_practice/test_imcflow/codegen",
+      "args": [
+        "-k",
+        "resnet",
+        "-s"
+      ]
+    },
+    {
+      "name": "gdb python",
+      "type": "cppdbg",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/tvm_practice",
+      "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
+      "args": [
+        "test.py",
+        "-k small_model",
+        "-s"
+      ],
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "gdb",
+    },
+    {
+      "name": "Python: Attach",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      }
+    }
+  ]
+}

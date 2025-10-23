@@ -20,11 +20,13 @@
 
 from typing import Optional
 
+import tvm
 from ...tir import expr as _expr
 from ..expr import Constant, Expr, Tuple, TupleWrapper, const
 from . import _make
 from .dyn import _make as _dyn_make
 from .tensor import shape_of
+from tvm import relay
 
 
 def sliding_window(data, axis, window_shape, strides):
@@ -2013,3 +2015,74 @@ def trilu(data, k, upper=True):
     if not isinstance(k, Expr):
         k = const(k, dtype="int32")
     return _make.trilu(data, k, upper)
+
+
+def imcflow_packing(data, newshape, out_dtype="float32"):
+    if isinstance(newshape, Constant):
+        newshape = list(newshape.data.numpy())
+    if isinstance(newshape, int):
+        newshape = [newshape]
+    if isinstance(newshape, tvm.ir.container.Array):
+        # Handle TensorType.shape which is of type tvm.ir.container.Array
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
+    if isinstance(newshape, (tuple, list)):
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
+    return _make.imcflow_packing(data, list(newshape), out_dtype)
+
+def imcflow_unpacking(data, newshape, out_dtype="float32"):
+    if isinstance(newshape, Constant):
+        newshape = list(newshape.data.numpy())
+    if isinstance(newshape, int):
+        newshape = [newshape]
+    if isinstance(newshape, tvm.ir.container.Array):
+        # Handle TensorType.shape which is of type tvm.ir.container.Array
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
+    if isinstance(newshape, (tuple, list)):
+        tempshape = []
+        for shape in newshape:
+            if isinstance(shape, _expr.IntImm):
+                tempshape.append(shape.value)
+            else:
+                try:
+                    tempshape.append(int(shape))
+                except ValueError as err:
+                    raise RuntimeError(f"Unrecognized shape type: {err}")
+        newshape = tempshape
+    return _make.imcflow_unpacking(data, list(newshape), out_dtype)
+
+def imcflow_4d_to_qconv_input(data):
+    out = relay.nn.bitpack(data, bits=4, pack_axis=1, bit_axis=4, pack_type="uint256", msb_first=False)
+    return out
+
+def imcflow_mmquant_out_to_4d(data, origin_ch_size):
+    unpacked = relay.nn.bitunpack(data, bits=4, pack_axis=1, bit_axis=4,
+                                   pack_type="uint256", out_size=origin_ch_size,
+                                   out_dtype="uint8", msb_first=False)
+    return unpacked
