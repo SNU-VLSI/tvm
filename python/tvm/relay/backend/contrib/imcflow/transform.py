@@ -1886,6 +1886,7 @@ def constructTensorEdgeList(mod):
           elif call.op == op.get("nn.imcflow_qconv"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
+            _processInputNode(call.args[2], "config", DstGraphNodeID, "config", None)
           elif call.op == op.get("imcflow.fused_batch_norm"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "fused_scale", DstGraphNodeID, "fused_scale", None)
