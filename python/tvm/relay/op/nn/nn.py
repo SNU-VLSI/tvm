@@ -3967,6 +3967,7 @@ def imcflow_batch_norm(
 def imcflow_qconv2d(
     data,
     weight,
+    config,
     channels,
     in_channels,
     strides=(1, 1),
@@ -3991,6 +3992,7 @@ def imcflow_qconv2d(
     return _make.imcflow_qconv(
         data,
         weight,
+        config,
         strides,
         padding,
         dilation,

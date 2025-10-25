@@ -1942,11 +1942,13 @@ given the original input data and the output gradient.
 TVM_REGISTER_NODE_TYPE(ImcflowQConv2DAttrs);
 bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
                        const TypeReporter& reporter) {
-  ICHECK_EQ(types.size(), 3);
+  ICHECK_EQ(types.size(), 4);
   const auto* data = types[0].as<TensorTypeNode>();
   const auto* weight = types[1].as<TensorTypeNode>();
+  const auto* config = types[2].as<TensorTypeNode>();
   if (data == nullptr) return false;
   if (weight == nullptr) return false;
+  if (config == nullptr) return false;
 
   const auto* param = attrs.as<ImcflowQConv2DAttrs>();
   ICHECK(param != nullptr);
@@ -2033,7 +2035,7 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
     oshape.Set(1, ceildiv(oc, 16));
     oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
     oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
-    reporter->Assign(types[2], TensorType(oshape, out_dtype));
+    reporter->Assign(types[3], TensorType(oshape, out_dtype));
   } else {
     Array<IndexExpr> oshape({0,0,0,0});
     IndexExpr pad_h, pad_w;
@@ -2042,13 +2044,13 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
     oshape.Set(1, oc);
     oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
     oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
-    reporter->Assign(types[2], TensorType(oshape, out_dtype));
+    reporter->Assign(types[3], TensorType(oshape, out_dtype));
   }
 
   return true;
 }
 
-inline Expr MakeImcflowQConv(Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
+inline Expr MakeImcflowQConv(Expr data, Expr weight, Expr config, Array<IndexExpr> strides, Array<IndexExpr> padding,
                      Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                      Array<IndexExpr> kernel_size, std::string data_layout,
                      std::string kernel_layout, std::string out_layout, DataType out_dtype,
@@ -2066,15 +2068,15 @@ inline Expr MakeImcflowQConv(Expr data, Expr weight, Array<IndexExpr> strides, A
   attrs->out_layout = std::move(out_layout);
   attrs->out_dtype = std::move(out_dtype);
   const Op& op = Op::Get(op_name);
-  return Call(op, {data, weight}, Attrs(attrs), {});
+  return Call(op, {data, weight, config}, Attrs(attrs), {});
 }
 
 TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qconv")
-    .set_body_typed([](Expr data, Expr weight, Array<IndexExpr> strides, Array<IndexExpr> padding,
+    .set_body_typed([](Expr data, Expr weight, Expr config, Array<IndexExpr> strides, Array<IndexExpr> padding,
                        Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
                        String out_layout, DataType out_dtype) {
-      return MakeImcflowQConv(data, weight, strides, padding, dilation, groups, channels, in_channels,
+      return MakeImcflowQConv(data, weight, config, strides, padding, dilation, groups, channels, in_channels,
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
                                    "nn.imcflow_qconv");
     });
@@ -2082,9 +2084,10 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qconv")
 RELAY_REGISTER_OP("nn.imcflow_qconv")
     .describe(R"code()code" TVM_ADD_FILELINE)
     .set_attrs_type<ImcflowQConv2DAttrs>()
-    .set_num_inputs(2)
+    .set_num_inputs(3)
     .add_argument("data", "Tensor", "The input tensor.")
     .add_argument("weight", "Tensor", "The weight tensor.")
+    .add_argument("config", "Tensor", "The config tensor.")
     .set_support_level(2)
     .add_type_rel("ImcflowQConv2D", ImcflowQConv2DRel);
 

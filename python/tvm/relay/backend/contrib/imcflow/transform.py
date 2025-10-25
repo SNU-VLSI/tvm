@@ -15,6 +15,7 @@ from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking, imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 import numpy as np
 from tvm.relay.op.contrib import imcflow
+from tvm.relay.backend.contrib.imcflow.acim_util import *
 
 import math
 from copy import deepcopy
@@ -245,7 +246,16 @@ class makeToQuantizedForm:
             # append new params to param_map
             param_map[args[0].name_hint] = input_new
 
-            return imcflow_qconv2d(input_new, weight_new, in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
+            # Create config data (FIXME: needs proper values)
+            from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
+            config_data = ConfigData(
+                data_shape=(1, in_channels, 1, 1),  # FIXME: use actual shape
+                weight_shape=(channels, in_channels, 1, 1),  # FIXME: use actual shape
+                padding=1,
+                stride=1
+            )
+
+            return imcflow_qconv2d(input_new, weight_new, config_data.get_as_const_tensor(), in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
 
           # TODO: Add batchnorm transform and insert quantize op      
           # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
@@ -622,9 +632,24 @@ def split_conv_to_atomic(mod, OldParamDict):
                 oc_size = out_ch_limit if (oc_id * out_ch_limit) + out_ch_limit - 1 < OC else OC % out_ch_limit
                 for ic_id in range(ic_split_num if not IsDepthWise else 1):
                     ic_size = in_ch_limit if (ic_id * in_ch_limit) + in_ch_limit - 1 < IC else IC % in_ch_limit
+                    
+                    # Get input shape for this slice
+                    input_node = split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id]
+                    N, IC_slice, IH_slice, IW_slice = _get_type(input_node)
+                    
+                    # Create config data
+                    from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
+                    config_data = ConfigData(
+                        data_shape=(N, IC_slice, IH_slice, IW_slice),
+                        weight_shape=(oc_size, ic_size, KH, KW),
+                        padding=padding[0] if isinstance(padding, (list, tuple)) else padding,
+                        stride=strides[0] if isinstance(strides, (list, tuple)) else strides
+                    )
+                    
                     conv_nodes[(oc_id, ic_id)] = imcflow_qconv2d(
-                      split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
+                      input_node,
                       split_conv_weights[oc_id][ic_id],
+                      config_data.get_as_const_tensor(),
                       in_channels=ic_size if not IsDepthWise else 1,
                       channels=oc_size,
                       kernel_size=(KH, KW),
@@ -2677,8 +2702,10 @@ class PackingInserter:
             NewWeight = imcflow_unpacking(Weight1D, OriginWeight.checked_type.shape, "float32")
             # NewInput = super().visit(call.args[0])
             NewInput = new_args[0]
+            # Config is the third argument
+            Config = new_args[2]
 
-            return imcflow_qconv2d(NewInput, NewWeight,
+            return imcflow_qconv2d(NewInput, NewWeight, Config,
                                    **call.attrs)
 
           if call.op == op.get("imcflow.fused_batch_norm"):
