@@ -20,10 +20,18 @@ import pdb
 # Ensure external codegen registration side-effects are loaded.
 from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 
-CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
+# CompositePat = wildcard().has_attr({"Composite": wildcard()})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
+
+# this function is used to mimic wildcard().has_attr({"Composite": wildcard()})(None) behavior
+# where wildcard() in the attribute does not work in original tvm.
+def is_any_composite(call):
+  if hasattr(call, 'op') and isinstance(call.op, relay.Function):
+    return "Composite" in call.op.attrs
+  else:
+    return False
 
 @util.create_imcflow_function_pass(opt_level=0)
 class CodegenSuite:
@@ -121,7 +129,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
 
   def add_edge(self, dst_tid, arg, split_idx=None):
     # pass arg in below cases
-    if CompositePat.match(arg):
+    if is_any_composite(arg):
       self.stack.append(arg)
       self.add_edge(dst_tid, arg.op.body)
       self.stack.pop()
@@ -155,7 +163,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     self.edges.add(TensorEdge(src_tid, dst_tid, split_idx)) # add edge to set
 
   def visit_call(self, call):
-    if CompositePat.match(call):
+    if is_any_composite(call):
       self.visit_composite_call(call)
     else:
       self.visit_regular_call(call)
