@@ -470,7 +470,21 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
 
   // Handle general call node.
   Type GeneralCall(const CallNode* call, Array<Type> arg_types) {
+    // DEBUG: Print call information
+    if (const OpNode* opnode = call->op.as<OpNode>()) {
+      LOG(INFO) << "[TYPE_INFER DEBUG] GeneralCall for Op: " << opnode->name;
+      LOG(INFO) << "  - Number of args provided: " << arg_types.size();
+    } else if (const GlobalVarNode* gvnode = call->op.as<GlobalVarNode>()) {
+      LOG(INFO) << "[TYPE_INFER DEBUG] GeneralCall for GlobalVar: " << gvnode->name_hint;
+      LOG(INFO) << "  - Number of args provided: " << arg_types.size();
+    } else {
+      LOG(INFO) << "[TYPE_INFER DEBUG] GeneralCall for unknown op type";
+      LOG(INFO) << "  - Number of args provided: " << arg_types.size();
+    }
+    
     Type ftype = GetType(call->op);
+    LOG(INFO) << "  - Function type: " << ftype;
+    
     auto* fn_ty_node = ftype.as<FuncTypeNode>();
     auto* inc_ty_node = ftype.as<IncompleteTypeNode>();
 
@@ -514,11 +528,25 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
       }
     }
 
+    // DEBUG: Print arg count comparison
+    LOG(INFO) << "  - Expected args (type_arity): " << type_arity;
+    LOG(INFO) << "  - Actual args (number_of_args): " << number_of_args;
+    LOG(INFO) << "  - is_variable: " << is_variable;
+    LOG(INFO) << "  - Function type signature:";
+    for (size_t i = 0; i < fn_ty->arg_types.size(); i++) {
+      LOG(INFO) << "    arg[" << i << "]: " << fn_ty->arg_types[i];
+    }
+    LOG(INFO) << "  - Provided arg types:";
+    for (size_t i = 0; i < arg_types.size(); i++) {
+      LOG(INFO) << "    arg[" << i << "]: " << arg_types[i];
+    }
+
     if ((type_arity < number_of_args) && !is_variable) {
       this->EmitFatal(Diagnostic::Error(call->span)
                       << "the function is provided too many arguments "
                       << "expected " << type_arity << ", found " << number_of_args);
     } else if (type_arity > number_of_args) {
+      LOG(INFO) << "[TYPE_INFER ERROR] Argument count mismatch!";
       this->EmitFatal(Diagnostic::Error(call->span)
                       << "the function is provided too few arguments "
                       << "expected " << type_arity << ", found " << number_of_args);
@@ -558,19 +586,37 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
   }
 
   Type VisitExpr_(const CallNode* call) final {
+    // DEBUG: Print initial call information
+    if (const OpNode* opnode = call->op.as<OpNode>()) {
+      LOG(INFO) << "\n[TYPE_INFER] VisitExpr_(CallNode) - Op: " << opnode->name;
+      LOG(INFO) << "  - Call args count: " << call->args.size();
+    } else if (const GlobalVarNode* gvnode = call->op.as<GlobalVarNode>()) {
+      LOG(INFO) << "\n[TYPE_INFER] VisitExpr_(CallNode) - GlobalVar: " << gvnode->name_hint;
+      LOG(INFO) << "  - Call args count: " << call->args.size();
+    } else {
+      LOG(INFO) << "\n[TYPE_INFER] VisitExpr_(CallNode) - Unknown op type";
+      LOG(INFO) << "  - Call args count: " << call->args.size();
+    }
+    
     Array<Type> arg_types;
-    for (Expr arg : call->args) {
-      arg_types.push_back(GetType(arg));
+    for (size_t i = 0; i < call->args.size(); i++) {
+      Type t = GetType(call->args[i]);
+      arg_types.push_back(t);
+      LOG(INFO) << "  - arg[" << i << "] type: " << t;
     }
 
     if (const OpNode* opnode = call->op.as<OpNode>()) {
+      LOG(INFO) << "  - Trying PrimitiveCall for op: " << opnode->name;
+      LOG(INFO) << "  - op_type: " << opnode->op_type;
       Type rtype =
           PrimitiveCall(opnode->op_type.as<FuncTypeNode>(), arg_types, call->attrs, call->span);
 
       if (rtype.defined()) {
+        LOG(INFO) << "  - PrimitiveCall succeeded, return type: " << rtype;
         AddTypeArgs(GetRef<Call>(call), arg_types);
         return rtype;
       }
+      LOG(INFO) << "  - PrimitiveCall returned undefined, falling back to GeneralCall";
     }
 
     solver_.Solve();

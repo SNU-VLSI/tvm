@@ -94,7 +94,7 @@ def run_test_ref(test_name, mod, param_dict):
   # Proceed with reference generation for clean models
   ref_mod["main"] = bind_params_by_name(ref_mod["main"], param_dict)
   ref_mod = transform.InferType()(ref_mod)
-  printModel(ref_dir, ref_mod, param_dict, "after_bind")
+  printModel(ref_dir, ref_mod, param_dict, "0_after_bind")
 
   # Apply only standard TVM optimizations (no IMCFLOW)
   with tvm.transform.PassContext(opt_level=3):
@@ -104,12 +104,12 @@ def run_test_ref(test_name, mod, param_dict):
     ref_mod = transform.SimplifyExpr()(ref_mod)
     ref_mod = transform.FoldConstant()(ref_mod)
 
-  printModel(ref_dir, ref_mod, param_dict, "after_std_optimization")
+  printModel(ref_dir, ref_mod, param_dict, "1_after_std_optimization")
 
   generate_graph_executor(ref_mod, param_dict, ref_dir)
 
   # Save final model state
-  printModel(ref_dir, ref_mod, param_dict, "final_ref_model")
+  printModel(ref_dir, ref_mod, param_dict, "2_final_ref_model")
 
   print(f"Reference generation completed for {test_name}")
   return ref_mod
@@ -128,41 +128,41 @@ def run_test_evl(test_name, mod, param_dict):
   DevConfig().clear()
 
   # origin
-  printModel(eval_dir, eval_mod, eval_param_dict, "origin")
+  printModel(eval_dir, eval_mod, eval_param_dict, "0_origin")
 
   # bind param
   eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
   eval_mod = transform.InferType()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_bind")
+  printModel(eval_dir, eval_mod, eval_param_dict, "1_after_bind")
 
   # first level imcflow graph partition
   eval_mod = imcflow_transform.partitionImcflowSubGraph(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_L1_partition")
+  printModel(eval_dir, eval_mod, eval_param_dict, "2_after_L1_partition")
 
   # split imcflow function conv to atomic ops
   eval_mod, eval_param_dict = imcflow_transform.split_conv_to_atomic(eval_mod, eval_param_dict)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_atom_split")
+  printModel(eval_dir, eval_mod, eval_param_dict, "2_after_atom_split")
 
   # merge composite OPs
   eval_mod = imcflow_transform.merge_composite_ops(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_merge")
+  printModel(eval_dir, eval_mod, eval_param_dict, "3_after_merge")
 
   # make split and concat super node
   eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_split_concat_partition")
+  printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_annot")
+  printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")
 
   eval_mod = imcflow.flattenImcflowTopFuncs(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_flatten")
+  printModel(eval_dir, eval_mod, eval_param_dict, "6_after_flatten")
 
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_prune_model")
+  printModel(eval_dir, eval_mod, eval_param_dict, "7_after_prune_model")
 
   layout_legalizer = imcflow_transform.ImcflowLayoutLegalizer()
   eval_mod, ttype_map = layout_legalizer.transform_mod(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "after_mark_in_out")
+  printModel(eval_dir, eval_mod, eval_param_dict, "8_after_mark_in_out")
   print("-------------------- Real Tensor Type Map --------------------")
   pprint.pprint(ttype_map)
   
@@ -175,7 +175,7 @@ def run_test_evl(test_name, mod, param_dict):
   print(HashToCustomID())
   print("-------------------- func map --------------------")
   print(DevConfig().ImcflowFuncMap)
-  printModel(eval_dir, eval_mod, eval_param_dict, "with_custom_id")
+  printModel(eval_dir, eval_mod, eval_param_dict, "9_with_custom_id")
 
   imcflow_transform.NodeMapper().run(eval_mod)
   print("------------------------------- HW MAP PASS 1----------------------------------")

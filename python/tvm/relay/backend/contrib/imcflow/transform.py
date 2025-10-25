@@ -3526,7 +3526,10 @@ def create_wrap_func(func, func_name, new_param_type, new_ret_type):
             raise ValueError("why imcflow function params is not 5D or 6D")
         ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype)
     
-    body = func(*args)
+    # func_no_global_symbol = func.without_attr("global_symbol")
+    new_attr = tvm.ir.make_node("DictAttrs", Composite=f"{func_name}_impl")
+    func_no_attr = relay.Function(func.params, func.body, func.ret_type, attrs=new_attr)
+    body = func_no_attr(*args)
     
     if isinstance(new_ret_type, relay.TupleType):
       outs = []
@@ -3611,6 +3614,8 @@ class ImcflowLayoutLegalizer:
         del mod[old_gv]
         mod[new_gv] = wrap_func
         new_gv_map[old_gv] = new_gv
+    
+    # printModel(".", mod, {}, "after_imcflow_layout_legalizer")
     
     mod = self.replace_imcflow_gv(mod, new_gv_map)
     mod = self._insert_packing_unpacking(mod)
@@ -3709,8 +3714,8 @@ class ImcflowLayoutLegalizer:
           Packed += ((ToPack[:, :, :, :, i].astype(np.uint32) & 0xF) << (i * 4))
         
         NewWeight = relay.Constant(tvm.nd.array(Packed))
-        new_args = [call.args[0], NewWeight]
-        new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "uint32")]
+        new_args = [call.args[0], NewWeight, call.args[2]]  # Include config as third argument
+        new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "uint32"), call.type_args[2]]
 
         return Call(call.op, new_args, call.attrs, new_type_args, call.span)
 
