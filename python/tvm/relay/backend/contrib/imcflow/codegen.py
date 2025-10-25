@@ -20,18 +20,10 @@ import pdb
 # Ensure external codegen registration side-effects are loaded.
 from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 
-# CompositePat = wildcard().has_attr({"Composite": wildcard()})(None)
+CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
-
-# this function is used to mimic wildcard().has_attr({"Composite": wildcard()})(None) behavior
-# where wildcard() in the attribute does not work in original tvm.
-def is_any_composite(call):
-  if hasattr(call, 'op') and isinstance(call.op, relay.Function):
-    return "Composite" in call.op.attrs
-  else:
-    return False
 
 @util.create_imcflow_function_pass(opt_level=0)
 class CodegenSuite:
@@ -51,12 +43,18 @@ class CodegenSuite:
 
 
   def transform_function(self, _, func):
-    func_name = func.attrs.global_symbol
+    # Note: the function name strips off the "_impl" suffix to match the original funcion name
+    # which is the parent func's global_symbol attribute (prior: func.attsr.global_symbol).
+    func_name = func.attrs["Composite"].strip("_impl")
 
     # annotate edges between (non-composite) calls,
     # while translating vars into corresponding calls
     annotator = InternalEdgeAnnotator()
     annotator.visit(func)
+
+    print(f"Annotated edges for function {func_name}:")
+    for edge in annotator.edges:
+      print(f"  {edge}")
 
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
@@ -129,7 +127,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
 
   def add_edge(self, dst_tid, arg, split_idx=None):
     # pass arg in below cases
-    if is_any_composite(arg):
+    if CompositePat.match(arg):
       self.stack.append(arg)
       self.add_edge(dst_tid, arg.op.body)
       self.stack.pop()
@@ -163,7 +161,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     self.edges.add(TensorEdge(src_tid, dst_tid, split_idx)) # add edge to set
 
   def visit_call(self, call):
-    if is_any_composite(call):
+    if CompositePat.match(call):
       self.visit_composite_call(call)
     else:
       self.visit_regular_call(call)
@@ -178,10 +176,12 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
       self.visit(a)
 
   def visit_regular_call(self, call):
+    self.visit(call.op)
     for idx, a in enumerate(call.args):
-      dst_tag = call.op.arguments[idx].name
-      dst_tid = self.get_tensor_id(call, dst_tag, self.composite_call)
-      self.add_edge(dst_tid, a)
+      if hasattr(call.op, "arguments"):
+        dst_tag = call.op.arguments[idx].name
+        dst_tid = self.get_tensor_id(call, dst_tag, self.composite_call)
+        self.add_edge(dst_tid, a)
       self.visit(a)
 
   def get_tensor_id(self, call, tag, composite=None):
