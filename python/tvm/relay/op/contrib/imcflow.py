@@ -474,7 +474,11 @@ def pattern_table():
 
     def make_postop_pattern_start_with(conv_type):
       data1, weight = wildcard(), is_constant()
-      data = is_op(conv_type)(data1, weight)
+      if conv_type == "nn.imcflow_qconv":
+        cfg = is_constant()
+        data = is_op(conv_type)(data1, weight, cfg)
+      else:
+        data = is_op(conv_type)(data1, weight)
       out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
       for i in range(1, 10):
         out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
