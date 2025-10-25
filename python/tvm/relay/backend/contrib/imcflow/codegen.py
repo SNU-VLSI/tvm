@@ -43,12 +43,18 @@ class CodegenSuite:
 
 
   def transform_function(self, _, func):
-    func_name = func.attrs.global_symbol
+    # Note: the function name strips off the "_impl" suffix to match the original funcion name
+    # which is the parent func's global_symbol attribute (prior: func.attsr.global_symbol).
+    func_name = func.attrs["Composite"].strip("_impl")
 
     # annotate edges between (non-composite) calls,
     # while translating vars into corresponding calls
     annotator = InternalEdgeAnnotator()
     annotator.visit(func)
+
+    print(f"Annotated edges for function {func_name}:")
+    for edge in annotator.edges:
+      print(f"  {edge}")
 
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
@@ -170,10 +176,12 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
       self.visit(a)
 
   def visit_regular_call(self, call):
+    self.visit(call.op)
     for idx, a in enumerate(call.args):
-      dst_tag = call.op.arguments[idx].name
-      dst_tid = self.get_tensor_id(call, dst_tag, self.composite_call)
-      self.add_edge(dst_tid, a)
+      if hasattr(call.op, "arguments"):
+        dst_tag = call.op.arguments[idx].name
+        dst_tid = self.get_tensor_id(call, dst_tag, self.composite_call)
+        self.add_edge(dst_tid, a)
       self.visit(a)
 
   def get_tensor_id(self, call, tag, composite=None):
