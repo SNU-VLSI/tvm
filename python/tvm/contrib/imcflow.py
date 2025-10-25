@@ -212,32 +212,53 @@ class MemoryRegion:
 
   def allocate(self, function_name, block: DataBlock):
     """Allocate a data block in the region sequentially, assuming they are not delocated"""
+    if function_name not in self.blocks:
+      self.blocks[function_name] = {}
+
     # find first 32B aligned free offset
+    if block.id in [x.id for x in self.blocks[function_name].values()]:
+      print(f"Trying allocate {block} but skipped @ {function_name}")
+      return
+
+    print(f"Trying allocate {block} @ {function_name}")
     aligned_offset = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address
-    assert block.size + aligned_offset <= self.size, f"Data block size exceeds region size. {block.size} + {aligned_offset} > {self.size}"
+    try:
+      assert block.size + aligned_offset <= self.size
+    except:
+      print(f"Data block size exceeds region size. {block.size} + {aligned_offset} > {self.size}")
+      print(self)
+      exit(0)
     block.set_offset(aligned_offset)
     block.set_base_address(aligned_offset + self.base_address)
     self._last_offset[function_name] = aligned_offset + block.size
-    if function_name not in self.blocks:
-      self.blocks[function_name] = {}
     self.blocks[function_name][block.id] = block
 
   def allocate_allow_overlap(self, function_name, block: DataBlock):
     """Allocate a data block in the region, allowing overlapping in case of weight params."""
+    if function_name not in self.blocks:
+      self.blocks[function_name] = {}
+
+    if block.id in [x.id for x in self.blocks[function_name].values()]:
+      print(f"Trying allocate_overlap {block} but skipped @ {function_name}")
+      return
+
+    print(f"Trying allocate_overlap {block}")
     if self.weight_allocated[function_name] is False:
       self.weight_allocated[function_name] = True
       # Align weight_offset to 32B boundary
-      self.weight_offset[function_name] = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address
-      self._last_offset[function_name] = self.weight_offset[function_name] + block.size
+      self.weight_offset[function_name] = math.ceil((self.base_address) / 32) * 32 - self.base_address
     
     # Align current weight_offset to 32B boundary
-    aligned_offset = math.ceil((self.base_address + self.weight_offset[function_name]) / 32) * 32 - self.base_address
-    assert block.size + aligned_offset <= self.size, "Data block size exceeds region size"
+    aligned_offset = self.weight_offset[function_name]
+    try:
+      assert block.size + aligned_offset <= self.size
+    except:
+      print("overlap Data block size exceeds region size")
+      print(self)
+      exit(0)
     
     block.set_offset(aligned_offset)
     block.set_base_address(aligned_offset + self.base_address)
-    if function_name not in self.blocks:
-      self.blocks[function_name] = {}
     self.blocks[function_name][block.id] = block
 
   def set_base_address(self, address: int):
@@ -248,7 +269,8 @@ class MemoryRegion:
       return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
     blocks_str=""
     for function_name, blocks in self.blocks.items():
-      blocks_str += f"  {function_name}:\n"
+      blocks_str += f"\n{function_name}:\n"
+      blocks_str += f"----------------------------------------------------------\n"
       blocks_str += ",\n      ".join(str(block) for block in blocks.values())
     return (f"MemoryRegion({self.name}, {self.size}, {self.base_address}, "
             f"blocks=[\n      {blocks_str}\n    ])")

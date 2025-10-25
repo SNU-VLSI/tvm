@@ -1873,6 +1873,7 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
             _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
           elif call.op == op.get("multiply"):
+            #TODO multiply input node can be constant.
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
           elif call.op == op.get("nn.conv2d"):
@@ -2091,8 +2092,8 @@ class MemoryAllocator:
             inode_name = hw_node_id.name # ex) inode_3
 
             if inode_tensorid.tensor_type == "weight":
-              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(self.func_name, mem_block)
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(self.func_name, mem_block)
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(self.func_name, mem_block)
+              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(self.func_name, mem_block)
             else:
               ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(self.func_name, mem_block)
 
@@ -2232,8 +2233,6 @@ class MemoryAllocator:
 
           if IsSupportedOp:
             edges = self.find_edge_from_list(call)
-            print("-------------- Debug: Allocating memory for call node ----------------")
-            pprint.pprint(edges)
             for edge in edges:
               size = self.get_size(edge, call)
               if size > 0:
