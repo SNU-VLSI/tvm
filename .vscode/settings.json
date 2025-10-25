@@ -84,5 +84,91 @@
   "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
   "python-envs.defaultEnvManager": "ms-python.python:venv",
   "python-envs.defaultPackageManager": "ms-python.python:pip",
-  "python-envs.pythonProjects": []
+  "python-envs.pythonProjects": [],
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "**/*.pyo": true,
+    "**/build": true,
+    "**/build-*": true,
+    "**/*.egg-info": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.hypothesis": true,
+    "**/*.so": true,
+    "**/*.o": true,
+    "**/*.obj": true,
+    "**/*.a": true,
+    "**/*.lib": true,
+    "**/*.dll": true,
+    "**/*.dylib": true
+  },
+  "files.watcherExclude": {
+    "**/__pycache__/**": true,
+    "**/build/**": true,
+    "**/build-*/**": true,
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/*.pyc": true,
+    "**/*.so": true,
+    "**/*.o": true,
+    "**/.pytest_cache/**": true,
+    "**/.mypy_cache/**": true,
+    "**/.tvm_test_data/**": true,
+    "**/htmlcov/**": true
+  },
+  "search.exclude": {
+    "**/__pycache__": true,
+    "**/build": true,
+    "**/build-*": true,
+    "**/*.egg-info": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.git": true,
+    "**/*.so": true,
+    "**/*.o": true,
+    "**/*.pyc": true,
+    "**/htmlcov": true,
+    "**/.tvm_test_data": true
+  },
+  "files.watcherInclude": [
+    "**/*.py",
+    "**/*.cpp",
+    "**/*.cc",
+    "**/*.h",
+    "**/*.hpp",
+    "**/*.c",
+    "**/*.rs",
+    "**/*.java",
+    "**/*.js",
+    "**/*.ts",
+    "**/*.json",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.md",
+    "**/*.cmake",
+    "**/CMakeLists.txt"
+  ],
+  "python.analysis.exclude": [
+    "**/build/**",
+    "**/build-*/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.tvm_test_data/**"
+  ],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportInvalidTypeForm": "none"
+  },
+  "C_Cpp.files.exclude": {
+    "**/build/**": true,
+    "**/build-*/**": true,
+    "**/__pycache__/**": true,
+    "**/*.pyc": true
+  },
+  "C_Cpp.workspaceSymbols": "Just My Code",
+  "C_Cpp.intelliSenseEngine": "default",
+  "python.analysis.indexing": true,
+  "files.maxMemoryForLargeFilesMB": 4096
 }

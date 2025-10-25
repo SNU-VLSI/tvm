@@ -15,10 +15,13 @@ from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
+from tvm.relay.backend.contrib.imcflow.operation_handlers import get_handler_registry
 import pdb
 
 # Ensure external codegen registration side-effects are loaded.
 from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
+# Load operation handlers (imports trigger registration via decorators)
+from . import imce_operation_handlers  # noqa: F401
 
 CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
@@ -192,16 +195,24 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
 
 
 class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
+  """Visitor that generates IMCE code blocks from relay operations.
+
+  This class uses a pluggable handler registry to process different operation types.
+  New operations can be supported by creating handler classes and registering them
+  with the @register_operation_handler decorator in imce_operation_handlers.py.
+
+  Handlers receive a BuilderContext that wraps each call with helper methods.
+  """
+
   def __init__(self, func_name, edges):
     super().__init__()
+    # Shared state accessed by handlers through BuilderContext
+    self.edges = edges
+    self.codeblocks = ImceCodeBlockManager(func_name)
     self.curr_composite_id = None
     self.curr_conv_block = None
     self.last_tuple_idx = None
-    # FIXME: stores the tuple index when taking a field from tuple.
-    # We use it to determine the qreg_start_idx for MinMaxQuantBlock but may not work
-    # when there is more tuples in a composite call.
-    self.edges = edges
-    self.codeblocks = ImceCodeBlockManager(func_name)
+    self._handler_registry = get_handler_registry()
 
   def visit_tuple(self, tup):
     for idx, x in enumerate(tup.fields):
@@ -209,254 +220,16 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit(x)
 
   def visit_call(self, call):
+    # Visit arguments first (post-order traversal)
     for idx, a in enumerate(call.args):
       self.visit(a)
 
-    IsComposite = isinstance(call.op, relay.Function) and \
-        "Composite" in call.op.attrs
+    # Dispatch to handler registry (automatically wraps call in BuilderContext)
+    handled = self._handler_registry.handle(call, self)
 
-    if IsComposite:
-      self.visit_composite_call(call)
-    elif call.op == op.get("nn.imcflow_qconv"):
-      self.visit_conv_call(call)
-    elif call.op == op.get("add"):
-      self.visit_add_call(call)
-    elif call.op == op.get("divide"):
-      self.visit_divide_call(call)
-    elif call.op == op.get("concatenate"):
-      self.visit_concat_call(call)
-    elif call.op == op.get("split"):
-      self.visit_split_call(call)
-    elif call.op == op.get("nn.bias_add"):
-      # self.visit_bias_add_call(call)
-      pass
-    elif call.op == op.get("imcflow.fused_batch_norm"):
-      # self.visit_batch_norm_call(call)
-      pass
-    elif call.op == op.get("nn.relu"):
-      self.visit_relu_call(call)
-    elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-      self.visit_min_max_quantize_call(call)
-    elif call.op == op.get("qnn.imcflow_nu_quantize"):
-      pass
-    else:
+    # Fallback for unhandled operations
+    if not handled:
       self.visit(call.op)
-
-  def visit_conv_call(self, call):
-    args = self.get_arg_dict(call)
-    shapes = self.get_arg_shape_dict(call)
-    shapes["output"] = infer_shape(call)
-
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-
-    for edge in in_edges:
-      if edge.src_id.tensor_type == "weight":
-        w_edge = edge
-    w_info = DevConfig().get_tensor_edge_info(w_edge)
-    w_tid = w_edge.src_id
-    hid = self.get_hid(call)
-
-    # scan reg
-    # TODO: add scan reg code block
-
-    # config reg
-    # TODO: add config reg code block
-
-    # write weights using recv
-    size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
-    # TODO: change to write weight block
-    block = LoadLBBlock(size, 1, w_info.fifo_id, "weight write")
-    self.codeblocks.append(hid, block, CodePhase.INIT)
-
-    block = ConvBlock(in_edges, out_edge, shapes, call.attrs, "conv exec")
-    # FIXME: this assumes that convblock is called first... we don't want that
-    self.curr_conv_block = block
-    self.codeblocks.append(hid, block, CodePhase.EXEC)
-
-  def visit_add_call(self, call):
-    assert self.curr_composite_id, "Add must be inside a composite function"
-    hid = self.get_hid(call)
-
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-    block = AddBlock(in_edges, out_edge, "add")
-    self.curr_conv_block.add_post_op(block)
-
-  def visit_divide_call(self, call):
-    # TODO: divide block should be replaced later
-    assert self.curr_composite_id, "Divide must be inside a composite function"
-    hid = self.get_hid(call)
-
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-    block = DivBlock(in_edges, out_edge, "div")
-    self.curr_conv_block.add_post_op(block)
-
-  def visit_concat_call(self, call):
-    hid = self.get_hid(call)
-    conv_block = self.get_conv_block_by_hid(hid)
-
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-
-    block = ConcatBlock(in_edges, out_edge, "concat")
-    conv_block.add_post_op(block)
-
-  def visit_split_call(self, call):
-    hid = self.get_hid(call)
-    if hid.is_imce():
-      conv_block = self.get_conv_block_by_hid(hid)
-
-      in_edge = self.get_input_edge(call)
-      out_edges = self.get_output_edges(call)
-
-      block = SplitBlock(in_edge, out_edges, "split")
-      conv_block.add_post_op(block)
-
-  def visit_min_max_quantize_call(self, call):
-    assert self.curr_composite_id, "MinMaxQuantize must be inside a composite function"
-    hid = self.get_hid(call)
-
-    for tag in ("min", "max"):
-      edge = self.get_tensor_edge_from_tag(call, tag)
-      # TODO: inode code block needs to put appropriate address for min/max reg.
-      # TODO: two ways to set min/max reg. RecvConst vs. ADDI
-      block = RecvConstBlock(edge, f"{tag} write")
-      self.codeblocks.append(hid, block, CodePhase.INIT)
-
-    # TODO: add reset qreg code block
-    # _edge = TensorEdge(TensorID(-1, "zero"), TensorID(getNodeID(call), "data"))
-    # block = RecvConstBlock(_edge, f"qreg reset")
-    # self.codeblocks.append(hid, block, CodePhase.INIT)
-
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-    # set o_split_idx to 0 when last_tupe_idx is None
-    block = MinmaxQuantBlock(in_edges, out_edge, self.last_tuple_idx or 0, "min_max_quantize")
-    self.curr_conv_block.add_post_op(block)
-
-  def visit_bias_add_call(self, call):
-    assert self.curr_composite_id, "BiasAdd must be inside a composite function"
-    hid = self.get_hid(call)
-
-    bias_edge = self.get_tensor_edge_from_tag(call, "bias")
-    block = RecvConstBlock(bias_edge, "bias write")
-    self.codeblocks.append(hid, block, CodePhase.INIT)
-
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-    block = AddBlock(in_edges, out_edge, "add_bias")
-    self.curr_conv_block.add_post_op(block)
-
-  def visit_batch_norm_call(self, call):
-    assert self.curr_composite_id, "BatchNorm must be inside a composite function"
-    hid = self.get_hid(call)
-    scale_edge = self.get_tensor_edge_from_tag(call, "fused_scale")
-    bias_edge = self.get_tensor_edge_from_tag(call, "fused_bias")
-
-    block = RecvConstBlock(scale_edge, "fused_scale write")
-    self.codeblocks.append(hid, block, CodePhase.INIT)
-    block = RecvConstBlock(bias_edge, "fused_bias write")
-    self.codeblocks.append(hid, block, CodePhase.INIT)
-
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-    # TODO: how to scale?
-    block = VecBlock(in_edges, out_edge, "batch_norm_scale")
-    self.curr_conv_block.add_post_op(block)
-    block = AddBlock(in_edges, out_edge, "batch_norm_bias")
-    self.curr_conv_block.add_post_op(block)
-
-  def visit_relu_call(self, call):
-    hid = self.get_hid(call)
-    in_edges = self.get_input_edges(call)
-    out_edge = self.get_output_edge(call)
-    block = ReLUBlock(in_edges, out_edge, "relu")
-    self.codeblocks.append(hid, block, CodePhase.EXEC)
-    # self.curr_conv_block.add_post_op(block)
-
-  def visit_composite_call(self, call):
-    self.curr_composite_id = getNodeID(call)
-    self.visit(call.op.body)
-    self.curr_composite_id = None
-    for idx, a in enumerate(call.args):
-      self.visit(a)
-
-  def get_hid(self, call):
-    node_id = self.curr_composite_id or getNodeID(call)
-    return DevConfig().get_hw_node(node_id)
-
-  def get_graph_node_id(self, call):
-    if self.curr_composite_id:
-      return (self.curr_composite_id, getNodeID(call))
-    else:
-      return getNodeID(call)
-
-  def get_tensor_id(self, call, tag):
-    return TensorID(self.get_graph_node_id(call), tag)
-
-  def get_conv_block_by_hid(self, hid):
-    for block in self.codeblocks.blocks[hid][CodePhase.EXEC]:
-      if isinstance(block, ConvBlock):
-        return block
-
-  def get_input_edge(self, call):
-    edges = self.get_input_edges(call)
-    assert len(edges) == 1, "Input edge must be unique"
-    return edges[0]
-
-  def get_input_edges(self, call):
-    return [edge for edge in self.edges if edge.dst_inner_gid_match(getNodeID(call))]
-
-  def get_output_edge(self, call):
-    edges = self.get_output_edges(call)
-    assert len(edges) == 1, "Output edge must be unique"
-    return edges[0]
-
-  def get_output_edges(self, call):
-    return [edge for edge in self.edges if edge.src_inner_gid_match(getNodeID(call))]
-
-  def get_tensor_edge_from_tag(self, call, tag):
-    tid = self.get_tensor_id(call, tag)
-    te = DevConfig().get_tensor_edge(tid)
-    return te
-
-  def inspect(self, tmp, graph_node_id):
-    if graph_node_id in DevConfig().HWNodeMap.keys():
-      hw_node_id = DevConfig().HWNodeMap[graph_node_id]
-    else:
-      hw_node_id = None
-    tid = DevConfig().get_tensor_ids_from_graph_node_id(graph_node_id)
-    print(f"{tmp.__class__} graph_node_id: {graph_node_id}, hw_node_id: {hw_node_id}, tid: {tid}")
-    print("----------------------")
-
-  def get_gid(self, call):
-    if hasattr(call, "op") and isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"]):
-      gid = (getNodeID(call), getNodeID(call.op.body))
-    else:
-      gid = getNodeID(call)
-    return gid
-
-  def get_arg_keys(self, call):
-    return [arg.name for arg in call.op.arguments]
-
-  def get_arg_dict(self, call):
-    args = {}
-    for idx, arg in enumerate(call.op.arguments):
-      args[arg.name] = call.args[idx]
-    return args
-
-  def get_arg_shape_dict(self, call):
-    args_shape = {}
-    for idx, arg in enumerate(call.op.arguments):
-      args_shape[arg.name] = tuple(call.type_args[idx].shape)
-    return args_shape
-
-  # def get_const_node(self, call):
-  #   for arg in call.args:
-  #     if isinstance(arg, relay.Constant):
-  #       return arg
 
 
 class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
