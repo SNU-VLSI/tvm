@@ -2556,7 +2556,7 @@ class PolicyTableGenerator:
                           if fifo_id_cnt[dest_node] >= 8:
                             raise ValueError("FIFO ID cannot be over 7!")
 
-                      elif edge.src_id.tensor_type in ["odata", "weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale"]:
+                      elif edge.src_id.tensor_type in ["odata", "weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]:
                         # if const, FIFO ID = 1
                         edgeinfo = TensorEdgeInfo(router_entry_list, None, 1)
                         ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
