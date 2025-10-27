@@ -267,7 +267,8 @@ def getModel():
     Input shape: (1, 1, 16000, 1) - batch=1, channels=1, time_samples=16000, width=1
     For td_samples feature type with raw audio input
     """
-    input_shape = (1, 1, 16000, 1)  # NCHW format for time-domain samples
+    # input_shape = (1, 1, 16000, 1)  # NCHW format for time-domain samples
+    input_shape = (1, 1, 4000, 1)  # NCHW format for time-domain samples
     out, var_dict = getModel_(input_shape)
     params_dict = {}
     for name in sorted(var_dict.keys()):

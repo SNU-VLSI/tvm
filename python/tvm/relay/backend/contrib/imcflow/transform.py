@@ -207,99 +207,99 @@ def getOutputTensorIDs(func):
 #   mod['main'] = _OpConverter().visit(mod['main'])
 #   return mod
 
-@relay.transform.function_pass(opt_level=0)
-class makeToQuantizedForm:
-    """
-    List of transformations:
-      1. convert Conv to ImcflowQConv2D
-      2. data type conversion to int form
-        conv2d input  : packed 1D int8
-        conv2d weight : packed 1D int8
-        bias, relu, etc -> int16 data type
-    """       
-    def transform_function(self, func, mod, ctx):
-      param_map = {}
-      class _OpConverter(tvm.relay.ExprMutator):
-        def __init__(self):
-          super().__init__()
-          self.NewParamDict = {}
+# @relay.transform.function_pass(opt_level=0)
+# class makeToQuantizedForm:
+#     """
+#     List of transformations:
+#       1. convert Conv to ImcflowQConv2D
+#       2. data type conversion to int form
+#         conv2d input  : packed 1D int8
+#         conv2d weight : packed 1D int8
+#         bias, relu, etc -> int16 data type
+#     """       
+#     def transform_function(self, func, mod, ctx):
+#       param_map = {}
+#       class _OpConverter(tvm.relay.ExprMutator):
+#         def __init__(self):
+#           super().__init__()
+#           self.NewParamDict = {}
 
-        def visit_call(self, call):
-          if call.op == op.get("nn.conv2d"):
-            args = [self.visit(arg) for arg in call.args]
+#         def visit_call(self, call):
+#           if call.op == op.get("nn.conv2d"):
+#             args = [self.visit(arg) for arg in call.args]
 
-            # TODO: add in_channels and channels to attribute of nn.conv2d and fix this
-            # TODO: Sanity check needed!!!!
-            in_channels = 0 # FIXME
-            channels = 0 # FIXME
+#             # TODO: add in_channels and channels to attribute of nn.conv2d and fix this
+#             # TODO: Sanity check needed!!!!
+#             in_channels = 0 # FIXME
+#             channels = 0 # FIXME
 
-            # input layout [ceil(IC/256), N, H, W, IB, 8] int32
-            input_shape_orig = args[0].type_annotation.shape # N ic H W
-            input_shape_new = [math.ceil(in_channels//256), input_shape_orig[0], input_shape_orig[2], input_shape_orig[3], 4, 8] # IB = 4
-            input_new = relay.Var(args[0].name_hint, relay.TensorType(input_shape_new, "int32"))
+#             # input layout [ceil(IC/256), N, H, W, IB, 8] int32
+#             input_shape_orig = args[0].type_annotation.shape # N ic H W
+#             input_shape_new = [math.ceil(in_channels//256), input_shape_orig[0], input_shape_orig[2], input_shape_orig[3], 4, 8] # IB = 4
+#             input_new = relay.Var(args[0].name_hint, relay.TensorType(input_shape_new, "int32"))
 
-            # weight layout [ceil(OC/64), ceil(IC/ic), 256, 8] int32
-            weight_shape_orig = args[1].data.shape # OC/64, ic, KH, KW
-            weight_numpy_array = np.zeros((weight_shape_orig[0], math.ceil(in_channels//weight_shape_orig[1]), 256, 8), dtype=np.int32) #TODO: this should be replaced with real weight tensor!!!!
-            weight_new = relay.Constant(tvm.nd.array(weight_numpy_array))
+#             # weight layout [ceil(OC/64), ceil(IC/ic), 256, 8] int32
+#             weight_shape_orig = args[1].data.shape # OC/64, ic, KH, KW
+#             weight_numpy_array = np.zeros((weight_shape_orig[0], math.ceil(in_channels//weight_shape_orig[1]), 256, 8), dtype=np.int32) #TODO: this should be replaced with real weight tensor!!!!
+#             weight_new = relay.Constant(tvm.nd.array(weight_numpy_array))
 
-            # append new params to param_map
-            param_map[args[0].name_hint] = input_new
+#             # append new params to param_map
+#             param_map[args[0].name_hint] = input_new
 
-            # Create config data (FIXME: needs proper values)
-            from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
-            config_data = ConfigData(
-                data_shape=(1, in_channels, 1, 1),  # FIXME: use actual shape
-                weight_shape=(channels, in_channels, 1, 1),  # FIXME: use actual shape
-                padding=1,
-                stride=1
-            )
+#             # Create config data (FIXME: needs proper values)
+#             from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
+#             config_data = ConfigData(
+#                 data_shape=(1, in_channels, 1, 1),  # FIXME: use actual shape
+#                 weight_shape=(channels, in_channels, 1, 1),  # FIXME: use actual shape
+#                 padding=1,
+#                 stride=1
+#             )
 
-            return imcflow_qconv2d(input_new, weight_new, config_data.get_as_const_tensor(), in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
+#             return imcflow_qconv2d(input_new, weight_new, config_data.get_as_const_tensor(), in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
 
-          # TODO: Add batchnorm transform and insert quantize op      
-          # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-          #   args = [self.visit(arg) for arg in call.args]
-          #   return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
+#           # TODO: Add batchnorm transform and insert quantize op      
+#           # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+#           #   args = [self.visit(arg) for arg in call.args]
+#           #   return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
 
-          else:
-            return super().visit_call(call)
+#           else:
+#             return super().visit_call(call)
 
-        # def visit_var(self, var):
-        #   # new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
-        #   # param_map[var.name_hint] = new_var
-        #   # return new_var
-        #   return var
+#         # def visit_var(self, var):
+#         #   # new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
+#         #   # param_map[var.name_hint] = new_var
+#         #   # return new_var
+#         #   return var
 
-        # def visit_constant(self, const):
-        #   Data = const.data.numpy().astype(np.int8)
-        #   return relay.const(Data, "int8")
+#         # def visit_constant(self, const):
+#         #   Data = const.data.numpy().astype(np.int8)
+#         #   return relay.const(Data, "int8")
 
-        def visit_function(self, func):
-          # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
-          # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
-          # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
-          # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
-          new_body = self.visit(func.body)
-          new_params = [param_map.get(p.name_hint, p) for p in func.params]
-          return relay.Function(new_params, new_body)
+#         def visit_function(self, func):
+#           # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
+#           # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
+#           # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
+#           # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#           new_body = self.visit(func.body)
+#           new_params = [param_map.get(p.name_hint, p) for p in func.params]
+#           return relay.Function(new_params, new_body)
         
-          # new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
-          # return relay.Function(new_params, new_body, new_ret_type)
+#           # new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#           # return relay.Function(new_params, new_body, new_ret_type)
 
-      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
-      items = mod.functions_items()
-      function_names = [item[0].name_hint for item in items]
+#       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
+#       items = mod.functions_items()
+#       function_names = [item[0].name_hint for item in items]
 
-      num_func = len(function_names)
-      for i in range(num_func):
-        if function_names[i]=="main": 
-          continue
-        elif "Compiler" in mod[function_names[i]].attrs and mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          print(f"Transforming imcflow function: {function_names[i]}")
-          mod[function_names[i]] = _OpConverter().visit(mod[function_names[i]])
+#       num_func = len(function_names)
+#       for i in range(num_func):
+#         if function_names[i]=="main": 
+#           continue
+#         elif "Compiler" in mod[function_names[i]].attrs and mod[function_names[i]].attrs["Compiler"]=="imcflow":
+#           print(f"Transforming imcflow function: {function_names[i]}")
+#           mod[function_names[i]] = _OpConverter().visit(mod[function_names[i]])
 
-      return func #TODO: returning func is right???
+#       return func #TODO: returning func is right???
 
 def isImcflowFunc(func, mod):
   if isinstance(func, relay.Function):
@@ -336,8 +336,10 @@ def get_imcflow_supported_regions(mod, include_first_conv=False):
   """
   # A set of imcflow-supported primitive operators.
   # This list should be updated based on the actual capabilities of the imcflow backend.
+  #TODO: do we need it seperately?
   _SUPPORTED_OPS = {
     "nn.imcflow_qconv",
+    'nn.imcflow_qdwconv',
     "qnn.imcflow_min_max_quantize",
     "imcflow.fused_batch_norm",
     "nn.relu",
@@ -1891,7 +1893,7 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
           elif call.op == op.get("nn.relu"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          elif call.op == op.get("nn.imcflow_qconv"):
+          elif call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
             _processInputNode(call.args[2], "config", DstGraphNodeID, "config", None)
@@ -3273,11 +3275,13 @@ def calculate_imcflow_func_type(func):
         
         def _get_arg_tag(self, call, arg_index):
           """Determine the tag (role) of an argument in a call"""
-          if call.op == op.get("nn.imcflow_qconv"):
+          if call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
             if arg_index == 0:
               return "input"
             elif arg_index == 1:
               return "weight"
+            elif arg_index == 3:
+              return "config"
           elif call.op == op.get("nn.bias_add"):
             if arg_index == 0:
               return "input"
@@ -3725,15 +3729,36 @@ class ImcflowLayoutLegalizer:
         new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "uint32"), call.type_args[2]]
 
         return Call(call.op, new_args, call.attrs, new_type_args, call.span)
+      elif call.op == op.get("nn.imcflow_qdwconv"):
+        OriginWeight = call.args[1].data.asnumpy()
+        out_channels, in_channels, kh, kw = OriginWeight.shape
+        new_weight = np.zeros((out_channels//16, 8, 8), dtype=np.uint32)
 
-      return call
+        for c in range(out_channels):
+          for kh_ in range(kh):
+            for kw_ in range(kw):
+              for wb in range(8):
+                oc_block = c // 16
+                oc_offset = c % 16
+                khkw_index = kh_ * kw + kw_
+                origin_val = OriginWeight[c, 0, kh_, kw_]
+                bit_val = (origin_val >> wb) & 0x1
+                word_idx = (oc_offset*16 + khkw_index) // 32
+                word_offset = (oc_offset*16 + khkw_index) % 32
+                new_weight[oc_block, wb, word_idx] |= (bit_val << word_offset)
+        NewWeight = relay.Constant(tvm.nd.array(new_weight))
+        new_args = [call.args[0], NewWeight, call.args[2]]
+        new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "uint32"), call.type_args[2]]
+        return Call(call.op, new_args, call.attrs, new_type_args, call.span)
+      else:
+        return call
 
     class _BoundaryMarker(relay.ExprMutator):
       def visit_call(self, call):
         new_call = super().visit_call(call)
         
         # Mark imcflow_qconv calls as both input and output nodes
-        if isinstance(call.op, tvm.ir.Op) and call.op == op.get("nn.imcflow_qconv"):
+        if isinstance(call.op, tvm.ir.Op) and (call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv")):
           # new_call = modify_call_node_attrs(new_call, const_packed_node=True, in_node=True, out_node=True)
           new_call = modify_call_node_attrs(new_call, const_packed_node=True)
           new_call = qconv_weight_transform(new_call)
@@ -3970,10 +3995,11 @@ class ImcflowLayoutLegalizer:
           return ("qconv_input", True)
         elif consumer_node.op == op.get("concatenate"):
           return ("vector", True)
-        elif consumer_node.op == op.get("nn.imcflow_qconv"):
+        elif consumer_node.op == op.get("nn.imcflow_qconv") or consumer_node.op == op.get("nn.imcflow_qdwconv"):
           if tag == "input":
             return ("qconv_input", True)
           elif tag == "weight":
+            #TODO: do we need it?
             return ("qconv_output", True)
         elif consumer_node.op == op.get("nn.bias_add"):
           if tag == "input":

@@ -477,11 +477,13 @@ def pattern_table():
         data1, weight = wildcard(), is_constant()
       else:
         data1, weight = preop, is_constant()
-      if conv_type == "nn.imcflow_qconv":
+
+      if conv_type == "nn.imcflow_qconv" or conv_type == "nn.imcflow_qdwconv":
         cfg = is_constant()
         data = is_op(conv_type)(data1, weight, cfg)
       else:
         data = is_op(conv_type)(data1, weight)
+
       out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
       for i in range(1, 10):
         out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
@@ -490,8 +492,10 @@ def pattern_table():
 
     imcflow_patterns.extend(
       [ 
-        ("imcflow.quant-qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv", makeMinMaxQauntPattern(wildcard()))),
+        # ("imcflow.quant-qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv", makeMinMaxQauntPattern(wildcard()))),
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
+        # ("imcflow.quant-qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv", makeMinMaxQauntPattern(wildcard()))),
+        ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d"))
       ]
     )
