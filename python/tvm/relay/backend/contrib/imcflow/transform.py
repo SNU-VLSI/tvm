@@ -1008,6 +1008,7 @@ def getSplitConcatDepsRegionsImpl(func):
 
     def visit_call(self, call):
       if call.op == op.get("split"):
+        print("split operation is detected. start collecting consumer of split node")
         # make dict entry if not exists
         if call not in Results:
           Results[call] = []
@@ -1075,6 +1076,7 @@ def getSplitConcatDepsRegionsImpl(func):
 
     def visit_call(self, call):
       if call.op == op.get("concatenate"):
+        print("concat operation is detected. start collecting producer of concat node")
         # make dict entry if not exists
         if call not in Results:
           Results[call] = []
@@ -1115,6 +1117,8 @@ def getSplitConcatDepsRegionsImpl(func):
         if v not in Region:
           Region.append(v)
     Regions.append(Region)
+  print(f"Split-Concate dependent regions:")
+  print(Regions)
 
   # merge region if intersection is not empty
   Changed=True
