@@ -472,8 +472,11 @@ def pattern_table():
     """
     imcflow_patterns = []
 
-    def make_postop_pattern_start_with(conv_type):
-      data1, weight = wildcard(), is_constant()
+    def make_postop_pattern_start_with(conv_type, preop=None):
+      if preop is None:
+        data1, weight = wildcard(), is_constant()
+      else:
+        data1, weight = preop, is_constant()
       if conv_type == "nn.imcflow_qconv":
         cfg = is_constant()
         data = is_op(conv_type)(data1, weight, cfg)
@@ -487,6 +490,7 @@ def pattern_table():
 
     imcflow_patterns.extend(
       [ 
+        ("imcflow.quant-qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv", makeMinMaxQauntPattern(wildcard()))),
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d"))
       ]

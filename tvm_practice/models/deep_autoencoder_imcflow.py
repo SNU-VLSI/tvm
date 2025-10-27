@@ -11,7 +11,7 @@ from tvm import relay
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
-
+from .utils import get_param_info_from_relay_func, _rand_tensor
 
 def get_height(H, KH, padding, stride):
     pad_h = padding
@@ -25,7 +25,7 @@ def get_width(W, KW, padding, stride):
     return out_w
 
 
-def getModel(input_shape):
+def getModel_(input_shape):
     """
     Define the IMCFlow version of deep autoencoder
     First dense layer uses CPU (float32), middle layers use IMCFlow ops as 1x1 conv,
@@ -181,21 +181,22 @@ def getModel(input_shape):
     
     # Final Dense layer (CPU) - output reconstruction
     y = relay.nn.dense(y, relay.var("dense_weight_final", shape=(inputDim, 128), dtype="float32"))
-    
-    return relay.Function(relay.analysis.free_vars(y), y)
+
+    var_info = get_param_info_from_relay_func(y)
+    out = tvm.IRModule.from_expr(y)
+
+    return out, var_info
 
 
-def getTestModel():
+def getModel():
     """
     Create a test model for IMCFlow deep autoencoder
     """
     input_shape = (1, 640)  # batch_size=1, inputDim=640
-    func = getModel(input_shape)
-    mod = tvm.IRModule.from_expr(func)
+    out, var_dict = getModel_(input_shape)
+    params_dict={}
+    for name in sorted(var_dict.keys()):
+      info = var_dict[name]
+      params_dict[name] = _rand_tensor(info["dtype"], info["shape"])
     
-    # Create dummy parameters
-    params = {}
-    # This would be populated with actual trained weights
-    
-    shape_dict = {"input": input_shape}
-    return mod, params, shape_dict
+    return out, params_dict

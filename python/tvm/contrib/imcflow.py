@@ -115,7 +115,7 @@ class TensorID:
     key = (graph_node_id, tensor_type)
     if tensor_type not in {"data", "odata", "weight",
                            "bias", "fused_scale", "fused_bias", "lhs", "rhs",
-                           "min", "max", "threshold", "zero"}:
+                           "min", "max", "threshold", "zero","config"}:
                            print("Invalid tensor type")
     if key not in cls._instances:
       instance = super(TensorID, cls).__new__(cls)

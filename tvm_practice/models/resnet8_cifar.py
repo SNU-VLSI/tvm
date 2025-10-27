@@ -23,6 +23,8 @@ from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 
+from .utils import get_param_info_from_relay_func
+
 def get_height(H, KH, padding, stride):
     pad_h = padding
     out_h = (H + 2 * pad_h - KH) // stride + 1

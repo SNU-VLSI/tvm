@@ -772,7 +772,7 @@ def split_conv_to_atomic(mod, OldParamDict):
                           nd_array = PostNode.args[i].data.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
                           SplitParam = relay.Constant(tvm.nd.array(nd_array))
                         NewParams.append(SplitParam)
-                      post_nodes[oc_id] = imcflow_batch_norm(post_nodes[oc_id], *NewParams)[0]
+                      post_nodes[oc_id] = imcflow_batch_norm(post_nodes[oc_id], *NewParams)
 
                 concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
             else:
@@ -791,7 +791,7 @@ def split_conv_to_atomic(mod, OldParamDict):
               self.PostProcess.append(call)
               NewCall = super().visit_call(call)
               if hasattr(call, "ShouldDelete"):
-                if call.op in [op.get("nn.batch_norm"), op.get("imcflow.fused_batch_norm")]:
+                if call.op == op.get("nn.batch_norm"):
                   return relay.Tuple([NewCall.args[0]]) 
                 else:
                   return NewCall.args[0]
@@ -1563,26 +1563,30 @@ class AnnotGenerator:
                     if in_region in recur_regions:
                       if in_region in candidate_regions:
                         candidate_regions.remove(in_region)
+                        print(f"cycle detected. current node {node}. cycle region : {in_region}")
 
                 # Capacity check
                 deletes = []
                 for cand in candidate_regions:
                   if self.getRegionSize(cand) + self.getCost(node) > ImcflowDeviceConfig.IMCE_NUM:
                     deletes.append(cand)
+                    print(f"candidate size : {self.getRegionSize(cand)}. current node size : {self.getCost(node)}. too big node!!")
                 for d in deletes:
                   if d in candidate_regions:
                     candidate_regions.remove(d)
 
-                # Selection policy: if multiple distinct input regions, create a new region
+                # Selection policy: if multiple distinct input regions, just use first one
                 uniq = list({id(r): r for r in candidate_regions}.values())
                 if len(uniq) == 1:
                   Region = uniq[0]
                   self.addToRegion(Region, node)
                 elif len(uniq) > 1:
-                  Region = self.createRegion()
+                  Region = uniq[0]
+                  # Region = self.createRegion()
                   self.addToRegion(Region, node)
                 else:
                   # No input region (inputs likely Var/Const). Prefer previous node's region if available.
+                  #TODO: just traverse call node..(?) no need to consider Var and Const node..
                   Region = None
                   if self.last_assigned_region is not None:
                     # Capacity gate when attaching to previous region
@@ -2717,7 +2721,7 @@ class PackingInserter:
             # NewBias = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
             NewScale = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
             NewBias = relay.Constant(tvm.nd.array(new_args[2].data.asnumpy().astype("int16")))
-            return imcflow_batch_norm(new_args[0], NewScale, NewBias,1).astuple()
+            return imcflow_batch_norm(new_args[0], NewScale, NewBias,1)
 
           if call.op == op.get("qnn.imcflow_min_max_quantize"):
             # convert dtype to int16
