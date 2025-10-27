@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 
+
 class KernelCodegen:
   def __init__(self, output_dir="/tmp"):
     self.output_dir = Path(output_dir)

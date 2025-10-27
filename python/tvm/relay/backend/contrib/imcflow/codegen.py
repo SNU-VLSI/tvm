@@ -23,10 +23,12 @@ from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 # Load operation handlers (imports trigger registration via decorators)
 from . import imce_operation_handlers  # noqa: F401
 
-CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
+CompositePat = wildcard().has_attr(
+    {"Composite": "imcflow.conv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
+
 
 @util.create_imcflow_function_pass(opt_level=0)
 class CodegenSuite:
@@ -43,7 +45,6 @@ class CodegenSuite:
     """
     with open(f"{build_dir}/common_decl.h", "w") as file:
       file.write(common_decl)
-
 
   def transform_function(self, _, func):
     # Note: the function name strips off the "_impl" suffix to match the original funcion name
@@ -62,20 +63,24 @@ class CodegenSuite:
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
-    DeviceCodegen("imce", self.build_dir).handle_code_generation(func_name, builder.codeblocks)
+    DeviceCodegen("imce", self.build_dir).handle_code_generation(
+        func_name, builder.codeblocks)
 
     builder = InodeCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
-    DeviceCodegen("inode", self.build_dir).handle_code_generation(func_name, builder.codeblocks)
+    DeviceCodegen("inode", self.build_dir).handle_code_generation(
+        func_name, builder.codeblocks)
 
     PolicyTableCodegen(func_name, self.build_dir).generate(func_name)
 
     return func
 
+
 class PolicyTableCodegen:
   """
   Write out a binary file for policy tables for each node.
   """
+
   def __init__(self, func_name, build_dir="/tmp"):
     super().__init__()
     self.func_name = func_name
@@ -83,7 +88,8 @@ class PolicyTableCodegen:
     self.func_dir = os.path.join(build_dir, func_name)
 
   def pack_to_bin(self, entry, endian):
-    assert set(entry.keys()) == {'Local', 'North', 'East', 'South', 'West'}, "Invalid policy table entry"
+    assert set(entry.keys()) == {
+        'Local', 'North', 'East', 'South', 'West'}, "Invalid policy table entry"
 
     def get_bits(val, num_bits):
       return (val & ((1 << num_bits) - 1)) if val is not None else 0
@@ -103,7 +109,8 @@ class PolicyTableCodegen:
 
   def generate(self, func_name):
     for node_name, entries in transform.ImcflowDeviceConfig().PolicyTableDict.items():
-      policytable_path = os.path.join(self.func_dir, f"{node_name.name}_policy")
+      policytable_path = os.path.join(
+          self.func_dir, f"{node_name.name}_policy")
       policytable_bin_file = f"{policytable_path}.bin"
       policytable_host_obj_file = f"{node_name.name}_policy.host.o"
       with open(policytable_bin_file, "wb") as file:
@@ -113,11 +120,13 @@ class PolicyTableCodegen:
       if ("inode" in node_name.name):
         DevCodegen = DeviceCodegen("inode", self.build_dir)
         DevCodegen.func_dir = self.func_dir
-        DevCodegen.create_host_object(f"{node_name.name}_policy.bin", policytable_host_obj_file)
+        DevCodegen.create_host_object(
+            f"{node_name.name}_policy.bin", policytable_host_obj_file)
       if ("imce" in node_name.name):
         DevCodegen = DeviceCodegen("inode", self.build_dir)
         DevCodegen.func_dir = self.func_dir
-        DevCodegen.create_host_object(f"{node_name.name}_policy.bin", policytable_host_obj_file)
+        DevCodegen.create_host_object(
+            f"{node_name.name}_policy.bin", policytable_host_obj_file)
     return
 
 
@@ -154,14 +163,15 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     src_composite = self.stack[-1] if self.stack else None
 
     # override src tag to const tag if dst tag is const tag
-    const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale"]
+    const_tags = ["weight", "bias", "fused_scale",
+                  "fused_bias", "min", "max", "threshold", "scale"]
     src_tag = "odata"
     if dst_tid.tensor_type in const_tags:
       src_tag = dst_tid.tensor_type
 
     src_tid = self.get_tensor_id(arg, src_tag, src_composite)
     # TODO: add split idx for split op
-    self.edges.add(TensorEdge(src_tid, dst_tid, split_idx)) # add edge to set
+    self.edges.add(TensorEdge(src_tid, dst_tid, split_idx))  # add edge to set
 
   def visit_call(self, call):
     if CompositePat.match(call):

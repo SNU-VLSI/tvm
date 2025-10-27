@@ -143,7 +143,7 @@ class SendBlock(InodeCodeBlock):
                       lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, 1, {self.fifo_id});")
 
     return code
-  
+
 class IMCEComputeBlock(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
 

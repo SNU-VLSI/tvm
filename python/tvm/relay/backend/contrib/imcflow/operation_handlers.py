@@ -15,153 +15,153 @@ from typing import Optional, TYPE_CHECKING
 from tvm import relay
 
 if TYPE_CHECKING:
-    from .codegen import ImceCodeBlockBuilder
-    from .builder_context import BuilderContext
+  from .codegen import ImceCodeBlockBuilder
+  from .builder_context import BuilderContext
 
 
 class OperationHandler(ABC):
-    """Base class for operation-specific code generators.
+  """Base class for operation-specific code generators.
 
-    Each handler encapsulates the logic for generating IMCFlow code blocks
-    from a specific type of relay operation.
+  Each handler encapsulates the logic for generating IMCFlow code blocks
+  from a specific type of relay operation.
 
-    Handlers receive a BuilderContext object that wraps the call and provides
-    all necessary helper methods and shared state. The builder reference is
-    stored in self.builder for special cases that need traversal.
+  Handlers receive a BuilderContext object that wraps the call and provides
+  all necessary helper methods and shared state. The builder reference is
+  stored in self.builder for special cases that need traversal.
+  """
+
+  def __init__(self):
+    """Initialize handler with no builder reference yet."""
+    self.builder: 'Optional[ImceCodeBlockBuilder]' = None
+
+  def set_builder(self, builder: 'ImceCodeBlockBuilder') -> None:
+    """Set the builder reference for this handler.
+
+    Called by the registry when a handler is about to be used.
+
+    Args:
+        builder: The ImceCodeBlockBuilder instance
     """
+    self.builder = builder
 
-    def __init__(self):
-        """Initialize handler with no builder reference yet."""
-        self.builder: 'Optional[ImceCodeBlockBuilder]' = None
+  @abstractmethod
+  def can_handle(self, call: relay.Call) -> bool:
+    """Check if this handler can process the given call.
 
-    def set_builder(self, builder: 'ImceCodeBlockBuilder') -> None:
-        """Set the builder reference for this handler.
+    Args:
+        call: The relay Call expression to check
 
-        Called by the registry when a handler is about to be used.
+    Returns:
+        True if this handler should process the call, False otherwise
+    """
+    pass
 
-        Args:
-            builder: The ImceCodeBlockBuilder instance
-        """
-        self.builder = builder
+  @abstractmethod
+  def handle(self, call_ctx: 'BuilderContext') -> None:
+    """Generate code blocks for the operation.
 
-    @abstractmethod
-    def can_handle(self, call: relay.Call) -> bool:
-        """Check if this handler can process the given call.
+    Args:
+        call_ctx: BuilderContext wrapping the call with helper methods
 
-        Args:
-            call: The relay Call expression to check
+    Note:
+        Access self.builder if you need to call builder.visit() or
+        check builder state (rare, mainly for CompositeHandler).
+    """
+    pass
 
-        Returns:
-            True if this handler should process the call, False otherwise
-        """
-        pass
+  @property
+  @abstractmethod
+  def priority(self) -> int:
+    """Handler priority (lower number = higher priority).
 
-    @abstractmethod
-    def handle(self, call_ctx: 'BuilderContext') -> None:
-        """Generate code blocks for the operation.
+    Priority determines the order in which handlers are checked.
+    Composite handlers should have priority 0 to be checked first.
+    Regular operation handlers typically use priority 10.
 
-        Args:
-            call_ctx: BuilderContext wrapping the call with helper methods
-
-        Note:
-            Access self.builder if you need to call builder.visit() or
-            check builder state (rare, mainly for CompositeHandler).
-        """
-        pass
-
-    @property
-    @abstractmethod
-    def priority(self) -> int:
-        """Handler priority (lower number = higher priority).
-
-        Priority determines the order in which handlers are checked.
-        Composite handlers should have priority 0 to be checked first.
-        Regular operation handlers typically use priority 10.
-
-        Returns:
-            Integer priority value
-        """
-        pass
+    Returns:
+        Integer priority value
+    """
+    pass
 
 
 class OperationHandlerRegistry:
-    """Registry for operation handlers with priority-based dispatch.
+  """Registry for operation handlers with priority-based dispatch.
 
-    Handlers are registered via the @register_operation_handler decorator
-    and are checked in priority order when dispatching operations.
+  Handlers are registered via the @register_operation_handler decorator
+  and are checked in priority order when dispatching operations.
 
-    This registry automatically wraps calls in BuilderContext before passing
-    to handlers.
+  This registry automatically wraps calls in BuilderContext before passing
+  to handlers.
+  """
+
+  def __init__(self):
+    self._handlers: list[OperationHandler] = []
+
+  def register(self, handler: OperationHandler) -> None:
+    """Register a handler and sort by priority.
+
+    Args:
+        handler: The OperationHandler instance to register
     """
+    self._handlers.append(handler)
+    self._handlers.sort(key=lambda h: h.priority)
 
-    def __init__(self):
-        self._handlers: list[OperationHandler] = []
+  def get_handler(self, call: relay.Call, builder: 'ImceCodeBlockBuilder') -> Optional[OperationHandler]:
+    """Find the first matching handler for a call.
 
-    def register(self, handler: OperationHandler) -> None:
-        """Register a handler and sort by priority.
+    Args:
+        call: The relay Call expression to find a handler for
+        builder: The ImceCodeBlockBuilder instance
 
-        Args:
-            handler: The OperationHandler instance to register
-        """
-        self._handlers.append(handler)
-        self._handlers.sort(key=lambda h: h.priority)
+    Returns:
+        The first matching OperationHandler, or None if no handler matches
+    """
+    for handler in self._handlers:
+      # Set builder reference before checking
+      handler.set_builder(builder)
+      if handler.can_handle(call):
+        return handler
+    return None
 
-    def get_handler(self, call: relay.Call, builder: 'ImceCodeBlockBuilder') -> Optional[OperationHandler]:
-        """Find the first matching handler for a call.
+  def handle(self, call: relay.Call, builder: 'ImceCodeBlockBuilder') -> bool:
+    """Dispatch call to appropriate handler with automatic wrapping.
 
-        Args:
-            call: The relay Call expression to find a handler for
-            builder: The ImceCodeBlockBuilder instance
+    This method automatically wraps the call in a BuilderContext before
+    passing it to the handler. The handler's builder reference is set
+    before calling can_handle.
 
-        Returns:
-            The first matching OperationHandler, or None if no handler matches
-        """
-        for handler in self._handlers:
-            # Set builder reference before checking
-            handler.set_builder(builder)
-            if handler.can_handle(call):
-                return handler
-        return None
+    Args:
+        call: The relay Call expression to dispatch
+        builder: The ImceCodeBlockBuilder instance
 
-    def handle(self, call: relay.Call, builder: 'ImceCodeBlockBuilder') -> bool:
-        """Dispatch call to appropriate handler with automatic wrapping.
+    Returns:
+        True if a handler processed the call, False otherwise
+    """
+    handler = self.get_handler(call, builder)
+    if handler:
+      # Import here to avoid circular dependency
+      from .builder_context import BuilderContext
 
-        This method automatically wraps the call in a BuilderContext before
-        passing it to the handler. The handler's builder reference is set
-        before calling can_handle.
+      # Wrap the call with builder's shared state
+      call_ctx = BuilderContext(
+          call=call,
+          edges=builder.edges,
+          codeblocks=builder.codeblocks,
+          curr_composite_id=builder.curr_composite_id,
+          curr_conv_block=builder.curr_conv_block,
+          last_tuple_idx=builder.last_tuple_idx
+      )
 
-        Args:
-            call: The relay Call expression to dispatch
-            builder: The ImceCodeBlockBuilder instance
+      # Call handler with wrapped context (builder already set)
+      handler.handle(call_ctx)
 
-        Returns:
-            True if a handler processed the call, False otherwise
-        """
-        handler = self.get_handler(call, builder)
-        if handler:
-            # Import here to avoid circular dependency
-            from .builder_context import BuilderContext
+      # Update builder state in case handler modified it
+      builder.curr_composite_id = call_ctx.curr_composite_id
+      builder.curr_conv_block = call_ctx.curr_conv_block
+      builder.last_tuple_idx = call_ctx.last_tuple_idx
 
-            # Wrap the call with builder's shared state
-            call_ctx = BuilderContext(
-                call=call,
-                edges=builder.edges,
-                codeblocks=builder.codeblocks,
-                curr_composite_id=builder.curr_composite_id,
-                curr_conv_block=builder.curr_conv_block,
-                last_tuple_idx=builder.last_tuple_idx
-            )
-
-            # Call handler with wrapped context (builder already set)
-            handler.handle(call_ctx)
-
-            # Update builder state in case handler modified it
-            builder.curr_composite_id = call_ctx.curr_composite_id
-            builder.curr_conv_block = call_ctx.curr_conv_block
-            builder.last_tuple_idx = call_ctx.last_tuple_idx
-
-            return True
-        return False
+      return True
+    return False
 
 
 # Global registry instance
@@ -169,35 +169,35 @@ _HANDLER_REGISTRY = OperationHandlerRegistry()
 
 
 def register_operation_handler(handler_class: type) -> type:
-    """Decorator to register an operation handler.
+  """Decorator to register an operation handler.
 
-    Usage:
-        @register_operation_handler
-        class MyOpHandler(OperationHandler):
-            def priority(self) -> int:
-                return 10
+  Usage:
+      @register_operation_handler
+      class MyOpHandler(OperationHandler):
+          def priority(self) -> int:
+              return 10
 
-            def can_handle(self, call, builder) -> bool:
-                return call.op == op.get("my_op")
+          def can_handle(self, call, builder) -> bool:
+              return call.op == op.get("my_op")
 
-            def handle(self, call, builder) -> None:
-                # Generate code blocks
-                pass
+          def handle(self, call, builder) -> None:
+              # Generate code blocks
+              pass
 
-    Args:
-        handler_class: The OperationHandler class to register
+  Args:
+      handler_class: The OperationHandler class to register
 
-    Returns:
-        The same handler class (allows normal use as a class)
-    """
-    _HANDLER_REGISTRY.register(handler_class())
-    return handler_class
+  Returns:
+      The same handler class (allows normal use as a class)
+  """
+  _HANDLER_REGISTRY.register(handler_class())
+  return handler_class
 
 
 def get_handler_registry() -> OperationHandlerRegistry:
-    """Get the global handler registry.
+  """Get the global handler registry.
 
-    Returns:
-        The global OperationHandlerRegistry instance
-    """
-    return _HANDLER_REGISTRY
+  Returns:
+      The global OperationHandlerRegistry instance
+  """
+  return _HANDLER_REGISTRY
