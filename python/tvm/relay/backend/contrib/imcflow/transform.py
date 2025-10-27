@@ -10,7 +10,7 @@ from tvm.relay.adt import Constructor, Match, Clause
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
-from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
+from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d, imcflow_qdwconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking, imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 import numpy as np
@@ -566,6 +566,7 @@ def split_conv_to_atomic(mod, OldParamDict):
             if not ImcflowDeviceConfig.is_supported_kernel(KH, KW):
               return expr
 
+            #TODO: add, multiply can be here. but one operand should constant (adjust scaling)
             for PostNode in PostProcess:
               assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("imcflow.fused_batch_norm"), op.get("divide"),
                                     op.get("qnn.imcflow_min_max_quantize"), op.get("qnn.imcflow_nu_quantize")], "Unsupported post process node"
@@ -646,30 +647,32 @@ def split_conv_to_atomic(mod, OldParamDict):
                         stride=strides[0] if isinstance(strides, (list, tuple)) else strides
                     )
                     
-                    conv_nodes[(oc_id, ic_id)] = imcflow_qconv2d(
-                      input_node,
-                      split_conv_weights[oc_id][ic_id],
-                      config_data.get_as_const_tensor(),
-                      in_channels=ic_size if not IsDepthWise else 1,
-                      channels=oc_size,
-                      kernel_size=(KH, KW),
-                      padding=padding,
-                      strides=strides,
-                      groups=1 if not IsDepthWise else oc_size,
-                      out_dtype="int16"
-                    )
-                    # conv_nodes[(oc_id, ic_id)] = relay.nn.conv2d(
-                    #     split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
-                    #     split_conv_weights[oc_id][ic_id],
-                    #     channels=oc_size,
-                    #     in_channels=IC, # in_channels should be the same as original conv2d for layout transform pass
-                    #     kernel_size=(KH, KW),
-                    #     strides=expr.attrs.strides,
-                    #     padding=expr.attrs.padding,
-                    #     data_layout=expr.attrs.data_layout,
-                    #     kernel_layout=expr.attrs.kernel_layout,
-                    #     groups=1 if not IsDepthWise else oc_size
-                    # )
+                    if not IsDepthWise:
+                      conv_nodes[(oc_id, ic_id)] = imcflow_qconv2d(
+                        input_node,
+                        split_conv_weights[oc_id][ic_id],
+                        config_data.get_as_const_tensor(),
+                        in_channels=ic_size,
+                        channels=oc_size,
+                        kernel_size=(KH, KW),
+                        padding=padding,
+                        strides=strides,
+                        groups=1,
+                        out_dtype="int16"
+                      )
+                    else:
+                      conv_nodes[(oc_id, ic_id)] = imcflow_qdwconv2d(
+                        input_node,
+                        split_conv_weights[oc_id][ic_id],
+                        config_data.get_as_const_tensor(),
+                        in_channels=1,
+                        channels=oc_size,
+                        kernel_size=(KH, KW),
+                        padding=padding,
+                        strides=strides,
+                        groups=oc_size,
+                        out_dtype="int16"
+                      )
 
             # If input channels were split, sum the resulting conv2d outputs for each out channel slice
             if IsICSplited and (not IsDepthWise):
@@ -778,7 +781,7 @@ def split_conv_to_atomic(mod, OldParamDict):
             return concat_node
 
           def visit_call(self, call):
-            if call.op == op.get("nn.imcflow_qconv"):
+            if call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
               PostProcess = self.PostProcess[:]
               self.PostProcess = []
               NewCall = super().visit_call(call)
