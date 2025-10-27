@@ -10,6 +10,7 @@ from tvm import relay
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d, imcflow_qdwconv2d
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
+from .utils import get_param_info_from_relay_func, _rand_tensor
 
 
 def get_height(H, KH, padding, stride):
@@ -24,7 +25,7 @@ def get_width(W, KW, padding, stride):
     return out_w
 
 
-def getModel(input_shape):
+def getModel_(input_shape):
     """
     Define the IMCFlow version of MobileNetV1
     First conv2d uses CPU (float32), middle layers use IMCFlow ops (depthwise + pointwise),
@@ -178,19 +179,22 @@ def getModel(input_shape):
     y = relay.nn.dense(y, relay.var("dense_weight", shape=(2, num_filters), dtype="float32"))
     y = relay.nn.bias_add(y, relay.var("dense_bias", shape=(2,), dtype="float32"))
     y = relay.nn.softmax(y)
-    
-    return relay.Function(relay.analysis.free_vars(y), y)
+
+    var_info = get_param_info_from_relay_func(y)
+    out = tvm.IRModule.from_expr(y)
+    return out, var_info
 
 
-def getTestModel():
+def getModel():
     """
     Create a test model for IMCFlow MobileNetV1
     Input shape: (1, 3, 96, 96) - batch=1, RGB channels=3, H=96, W=96
     """
     input_shape = (1, 3, 96, 96)  # NCHW format
-    func = getModel(input_shape)
-    mod = tvm.IRModule.from_expr(func)
+    out, var_dict = getModel_(input_shape)
+    params_dict={}
+    for name in sorted(var_dict.keys()):
+      info = var_dict[name]
+      params_dict[name] = _rand_tensor(info["dtype"], info["shape"])
     
-    params = {}
-    shape_dict = {"input": input_shape}
-    return mod, params, shape_dict
+    return out, params_dict
