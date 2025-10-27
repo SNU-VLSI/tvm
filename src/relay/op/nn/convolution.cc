@@ -2118,14 +2118,6 @@ bool ImcflowQDwConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& 
     return false;
   }
 
-  // For depthwise conv, groups should equal channels
-  if (param->groups <= 1) {
-    reporter->GetDiagCtx().Emit(
-        Diagnostic::Error(reporter->GetSpan())
-        << "qdwconv2d requires groups > 1 (depthwise convolution).");
-    return false;
-  }
-
   Array<IndexExpr> data_shape = data->shape;
   DataType data_dtype = data->dtype;
   Array<IndexExpr> weight_shape = weight->shape;
@@ -2153,9 +2145,9 @@ bool ImcflowQDwConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& 
   // weight type check
   IndexExpr oc, kh, kw, ic_weight;
   if(param->const_packed_node) {
-    ICHECK_EQ(weight_shape.size(), 4);
-    ICHECK_EQ(weight_shape[2].as<IntImmNode>()->value, 256);
-    ICHECK_EQ(weight_shape[3].as<IntImmNode>()->value, 8);
+    ICHECK_EQ(weight_shape.size(), 3);
+    ICHECK_EQ(weight_shape[1].as<IntImmNode>()->value, 8);
+    ICHECK_EQ(weight_shape[2].as<IntImmNode>()->value, 8);
     ICHECK_EQ(weight_dtype, DataType::UInt(32));
     oc = param->channels;
     ic_weight = param->in_channels;
@@ -2169,9 +2161,6 @@ bool ImcflowQDwConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& 
     kw = weight_shape[3];
   }
 
-  // TODO: Add depthwise-specific consistency checks here
-  // For depthwise conv: groups == in_channels == out_channels (typically)
-  
   // assign output shape
   if(param->out_node) {
     Array<IndexExpr> oshape({0,0,0,0,16});

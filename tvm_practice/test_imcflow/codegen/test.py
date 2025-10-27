@@ -23,7 +23,7 @@ import pprint
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 from models import real_model, real_model2, test_models
 from models import small_model
-from models import resnet8_cifar
+from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
@@ -279,6 +279,18 @@ def test_resnet8():
   mod, param_dict = resnet8_cifar.getModel()
   run_test_evl("resnet8", mod, param_dict)
 
+def test_mobilenet_imcflow():
+  mod, param_dict, _ = mobilenet_imcflow.getTestModel()
+  run_test_evl("mobilenet_imcflow", mod, param_dict)
+
+def test_deep_autoencoder_imcflow():
+  mod, param_dict, _ = deep_autoencoder_imcflow.getTestModel()
+  run_test_evl("deep_autoencoder_imcflow", mod, param_dict)
+
+def test_ds_cnn_imcflow():
+  mod, param_dict, _ = ds_cnn_imcflow.getTestModel()
+  run_test_evl("ds_cnn_imcflow", mod, param_dict)
+
 if __name__ == "__main__":
-  # tvm.testing.main()
-  test_resnet8()
+  tvm.testing.main()
+  # test_resnet8()
