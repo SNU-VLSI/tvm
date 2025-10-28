@@ -190,7 +190,8 @@ def getModel():
     Create a test model for IMCFlow MobileNetV1
     Input shape: (1, 3, 96, 96) - batch=1, RGB channels=3, H=96, W=96
     """
-    input_shape = (1, 3, 96, 96)  # NCHW format
+    # input_shape = (1, 3, 96, 96)  # NCHW format
+    input_shape = (1, 3, 32, 32)  # NCHW format
     out, var_dict = getModel_(input_shape)
     params_dict={}
     for name in sorted(var_dict.keys()):

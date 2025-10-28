@@ -26,6 +26,27 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 import pprint
+import os
+
+
+# Debug logging utility controlled by IMCFLOW_DEBUG environment variable
+# Usage:
+#   export IMCFLOW_DEBUG=1  # Enable all debug messages
+#   export IMCFLOW_DEBUG=0  # Disable all debug messages
+_DEBUG_ENABLED = None
+
+def _is_debug_enabled():
+    """Check if debug logging is enabled via IMCFLOW_DEBUG environment variable"""
+    global _DEBUG_ENABLED
+    if _DEBUG_ENABLED is None:
+        debug_var = os.environ.get('IMCFLOW_DEBUG', '0')
+        _DEBUG_ENABLED = debug_var == '1' or debug_var.lower() == 'true'
+    return _DEBUG_ENABLED
+
+def debug_print(*args, **kwargs):
+    """Print debug message only if IMCFLOW_DEBUG is enabled"""
+    if _is_debug_enabled():
+        print(*args, **kwargs)
 
 
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
@@ -76,7 +97,7 @@ def getOuterNodeID(node):
 
 def _get_type(parent_mod, node):
     """A method to infer the type of a relay expression."""
-    print(f"node: {node}")
+    debug_print(f"node: {node}")
 
     # mod = tvm.IRModule.from_expr(node)
     # mod = relay.transform.InferType()(mod)
@@ -121,9 +142,9 @@ def _get_type(parent_mod, node):
     # else:
     #     raise RuntimeError(f"Unsupported output type {type(out_type)} in operator {node.op.name}")
 
-    print("----------------------------------------------------")
-    print(f"node {node} -> out_type: {out_type}")
-    print("----------------------------------------------------")
+    debug_print("----------------------------------------------------")
+    debug_print(f"node {node} -> out_type: {out_type}")
+    debug_print("----------------------------------------------------")
     return out_type
 
 def getInputNodesOfFunc(func):
@@ -942,6 +963,7 @@ def makeSplitConcatDepsRegions(mod):
       func_attr = func.attrs
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
       target_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions, "split_concat_")(target_mod)
+      printModel(".", target_mod, {}, "split_concat_deps_before_partition")
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = convert_compiler_regions_to_composite(target_mod)
       transformed_func = target_mod.functions.items()[0][1]
@@ -962,185 +984,162 @@ def makeSplitConcatDepsRegions(mod):
 
 def getSplitConcatDepsRegionsImpl(func):
   """
-  Traverse the graph and find post dominate nodes ended with call for all split nodes
+  Traverse the graph and find split/concat dependent regions using Use-Def chain.
+  
+  For each split node, find all its consumers (nodes that use split outputs).
+  For each concat node, find all its producers (nodes that produce concat inputs).
+  Create regions containing these nodes and merge overlapping regions.
   """
-
-  Results = {}
-  OutNodes = []
-  InputNodes = []
-  class _SplitVisitor(tvm.relay.ExprVisitor):
-
-    # def visit(self, expr):
-    #     """Apply the visitor to an expression."""
-    #     if isinstance(expr, Function):
-    #         res = self.visit_function(expr)
-    #     elif isinstance(expr, Call):
-    #         res = self.visit_call(expr)
-    #     elif isinstance(expr, Let):
-    #         res = self.visit_let(expr)
-    #     elif isinstance(expr, Var):
-    #         res = self.visit_var(expr)
-    #     elif isinstance(expr, GlobalVar):
-    #         res = self.visit_global_var(expr)
-    #     elif isinstance(expr, If):
-    #         res = self.visit_if(expr)
-    #     elif isinstance(expr, Tuple):
-    #         res = self.visit_tuple(expr)
-    #     elif isinstance(expr, TupleGetItem):
-    #         res = self.visit_tuple_getitem(expr)
-    #     elif isinstance(expr, Constant):
-    #         res = self.visit_constant(expr)
-    #     elif isinstance(expr, Op):
-    #         res = self.visit_op(expr)
-    #     elif isinstance(expr, RefCreate):
-    #         res = self.visit_ref_create(expr)
-    #     elif isinstance(expr, RefRead):
-    #         res = self.visit_ref_read(expr)
-    #     elif isinstance(expr, RefWrite):
-    #         res = self.visit_ref_write(expr)
-    #     elif isinstance(expr, Constructor):
-    #         res = self.visit_constructor(expr)
-    #     elif isinstance(expr, Match):
-    #         res = self.visit_match(expr)
-    #     else:
-    #         raise Exception(f"warning unhandled case: {type(expr)}")
-
-    #     return res
-
+  
+  # Step 1: Build Use-Def chain (def -> users mapping)
+  class _UseDefChainBuilder(relay.ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.def_to_users = {}  # expr -> [users]
+      self.split_nodes = []
+      self.concat_nodes = []
+      
+    def add_user(self, definition, user):
+      """Add user to the definition's user list"""
+      if definition not in self.def_to_users:
+        self.def_to_users[definition] = []
+      if user not in self.def_to_users[definition]:
+        self.def_to_users[definition].append(user)
+    
     def visit_call(self, call):
+      # Check if this is split or concat
       if isinstance(call.op, tvm.ir.Op):
-        print(f"visiting call node {call.attrs['custom_id']} with op {call.op.name}")
-      elif isinstance(call.op, relay.Function) and "Composite" in call.op.attrs:
-        print(f"visiting call node {call.attrs['custom_id']} with composite function {call.op.attrs['Composite']}")
-      if isinstance(call.op, tvm.ir.Op) and call.op == op.get("split"):
-        print(f"split operation is detected. start collecting consumer of split node")
-        # make dict entry if not exists
-        if call not in Results:
-          Results[call] = []
-
-        # append OutNodes and flush
-        if len(OutNodes) > 0:
-          Results[call].append(OutNodes[:])
-          OutNodes.clear()
-
-        for a in call.args:
-            self.visit(a)
-      else:
-        # only track most recent call node
-        for a in call.args:
-          OutNodes.clear()
-          OutNodes.append(call)
-          self.visit(a)
-
+        if call.op == op.get("split"):
+          self.split_nodes.append(call)
+          debug_print(f"Split node detected: {getNodeID(call)}")
+        elif call.op == op.get("concatenate"):
+          self.concat_nodes.append(call)
+          debug_print(f"Concat node detected: {getNodeID(call)}")
+      
+      # Register all args as definitions used by this call
+      for arg in call.args:
+        self.add_user(arg, call)
+        self.visit(arg)
+    
     def visit_tuple(self, tup):
-      OutNodes.append(tup)
-      super().visit_tuple(tup)
-
-    def visit_tuple_getitem(self, t):
-      OutNodes.append(t)
-      super().visit_tuple_getitem(t)
-
-  class _ConcatVisitor(tvm.relay.ExprVisitor):
-
-    # def visit(self, expr):
-    #     """Apply the visitor to an expression."""
-    #     if isinstance(expr, Function):
-    #         res = self.visit_function(expr)
-    #     elif isinstance(expr, Call):
-    #         res = self.visit_call(expr)
-    #     elif isinstance(expr, Let):
-    #         res = self.visit_let(expr)
-    #     elif isinstance(expr, Var):
-    #         res = self.visit_var(expr)
-    #     elif isinstance(expr, GlobalVar):
-    #         res = self.visit_global_var(expr)
-    #     elif isinstance(expr, If):
-    #         res = self.visit_if(expr)
-    #     elif isinstance(expr, Tuple):
-    #         res = self.visit_tuple(expr)
-    #     elif isinstance(expr, TupleGetItem):
-    #         res = self.visit_tuple_getitem(expr)
-    #     elif isinstance(expr, Constant):
-    #         res = self.visit_constant(expr)
-    #     elif isinstance(expr, Op):
-    #         res = self.visit_op(expr)
-    #     elif isinstance(expr, RefCreate):
-    #         res = self.visit_ref_create(expr)
-    #     elif isinstance(expr, RefRead):
-    #         res = self.visit_ref_read(expr)
-    #     elif isinstance(expr, RefWrite):
-    #         res = self.visit_ref_write(expr)
-    #     elif isinstance(expr, Constructor):
-    #         res = self.visit_constructor(expr)
-    #     elif isinstance(expr, Match):
-    #         res = self.visit_match(expr)
-    #     else:
-    #         raise Exception(f"warning unhandled case: {type(expr)}")
-
-    #     return res
-
-    def visit_call(self, call):
-      if isinstance(call.op, tvm.ir.Op) and call.op == op.get("concatenate"):
-        print(f"concat operation is detected at node {getNodeID(call)}. start collecting producer of concat node")
-        # make dict entry if not exists
-        if call not in Results:
-          Results[call] = []
-
-        for a in call.args:
-          self.visit(a)
-          # append InputNodes and flush
-          if len(InputNodes) > 0:
-            Results[call].append(InputNodes[:])
-            InputNodes.clear()
-      else:
-        # only track most recent call node
-        for a in call.args:
-          self.visit(a)
-        InputNodes.clear()
-        InputNodes.append(call)
-
-    def visit_tuple(self, tup):
-      Nodes = []
-      for x in tup.fields:
-        self.visit(x)
-        Nodes.extend(InputNodes)
-      InputNodes.clear()
-      InputNodes.extend(Nodes)
-      InputNodes.append(tup)
-
-    def visit_tuple_getitem(self, t):
-      super().visit_tuple_getitem(t)
-      InputNodes.append(t)
-
-  print("start split detection")
-  _SplitVisitor().visit(func)
-  print("start concat detection")
-  _ConcatVisitor().visit(func)
+      # Register tuple fields as definitions used by the tuple
+      for field in tup.fields:
+        self.add_user(field, tup)
+        self.visit(field)
+    
+    def visit_tuple_getitem(self, tgi):
+      # Register the tuple as definition used by tuple_getitem
+      self.add_user(tgi.tuple_value, tgi)
+      self.visit(tgi.tuple_value)
+    
+    def get_users(self, expr):
+      """Get all users of an expression"""
+      return self.def_to_users.get(expr, [])
+  
+  # Build the Use-Def chain
+  debug_print("Building Use-Def chain...")
+  builder = _UseDefChainBuilder()
+  builder.visit(func)
+  
+  debug_print(f"Found {len(builder.split_nodes)} split nodes and {len(builder.concat_nodes)} concat nodes")
+  
+  # Step 2: For each split node, find all direct consumers (BFS from split node)
+  def find_consumers(start_node, def_to_users):
+    """Find direct Call consumers, skipping through Tuple/TupleGetItem"""
+    consumers = set()
+    queue = [start_node]
+    visited = {start_node}
+    
+    while queue:
+      current = queue.pop(0)
+      
+      # Get direct users of current node
+      users = def_to_users.get(current, [])
+      for user in users:
+        if user not in visited:
+          visited.add(user)
+          
+          if isinstance(user, relay.Call):
+            # Found a Call node - add it and STOP searching this branch
+            consumers.add(user)
+          else:
+            # Tuple or TupleGetItem - continue BFS through them
+            consumers.add(user)
+            queue.append(user)
+    
+    return consumers
+  
+  # Step 3: For each concat node, find all direct producers (traverse args)
+  def find_producers(concat_node):
+    """Find direct Call producers, skipping through Tuple/TupleGetItem"""
+    producers = set()
+    
+    def trace_back(expr):
+      """Trace back to find first Call nodes, stopping at them"""
+      if isinstance(expr, relay.Call):
+        # Found a Call node - add it and STOP searching this branch
+        producers.add(expr)
+      elif isinstance(expr, relay.Tuple):
+        # Trace through tuple fields
+        producers.add(expr)
+        for field in expr.fields:
+          trace_back(field)
+      elif isinstance(expr, relay.TupleGetItem):
+        producers.add(expr)
+        # Trace through the tuple source
+        trace_back(expr.tuple_value)
+      # Var and Constant are leaves, stop here
+    
+    # Concat typically has a single Tuple argument
+    for arg in concat_node.args:
+      trace_back(arg)
+    
+    return producers
+  
+  # Step 4: Build regions
+  Results = {}
+  
+  # Process split nodes
+  for split_node in builder.split_nodes:
+    consumers = find_consumers(split_node, builder.def_to_users)
+    if consumers:
+      Results[split_node] = list(consumers)
+      debug_print(f"Split node {getNodeID(split_node)} has {len(consumers)} consumers")
+  
+  # Process concat nodes  
+  for concat_node in builder.concat_nodes:
+    producers = find_producers(concat_node)
+    if producers:
+      Results[concat_node] = list(producers)
+      debug_print(f"Concat node {getNodeID(concat_node)} has {len(producers)} producers")
+  
+  # Step 5: Create regions (include the split/concat node itself and its related nodes)
   Regions = []
-  for key, value in Results.items():
-    Region = [key]
-    for path in value:
-      for v in path:
-        if v not in Region:
-          Region.append(v)
+  for key, related_nodes in Results.items():
+    Region = [key] + related_nodes
     Regions.append(Region)
-  print(f"Split-Concate dependent regions:")
-  print(Regions)
-
-  # merge region if intersection is not empty
-  Changed=True
+  
+  debug_print(f"Split-Concat dependent regions: {len(Regions)} regions created")
+  for i, region in enumerate(Regions):
+    debug_print(f"  Region {i}: {len(region)} nodes")
+  
+  # Step 6: Merge regions if they have any intersection
+  Changed = True
   while Changed:
     Changed = False
     for i in range(len(Regions)):
       for j in range(i+1, len(Regions)):
         if len(set(Regions[i]) & set(Regions[j])) > 0:
+          # Merge region j into region i
           Regions[i] = list(set(Regions[i]) | set(Regions[j]))
           Regions.pop(j)
           Changed = True
+          debug_print(f"Merged region {j} into region {i}")
           break
       if Changed:
         break
-
+  
+  debug_print(f"Final merged regions: {len(Regions)} regions")
   return Regions
 
 def getInputNodes(expr, recursive=False):
@@ -1301,7 +1300,7 @@ class AnnotGenerator:
             obj.visit(call.op.body)
             return obj.Cost
           
-          print(f"Warning: Unsupported node found in cost calculation: {call}")
+          debug_print(f"Warning: Unsupported node found in cost calculation: {call}")
           raise NotImplementedError()
 
         def visit_call(self, call):
@@ -1576,14 +1575,14 @@ class AnnotGenerator:
                     if in_region in recur_regions:
                       if in_region in candidate_regions:
                         candidate_regions.remove(in_region)
-                        print(f"cycle detected. current node {node}. cycle region : {in_region}")
+                        debug_print(f"cycle detected. current node {node}. cycle region : {in_region}")
 
                 # Capacity check
                 deletes = []
                 for cand in candidate_regions:
                   if self.getRegionSize(cand) + self.getCost(node) > ImcflowDeviceConfig.IMCE_NUM:
                     deletes.append(cand)
-                    print(f"candidate size : {self.getRegionSize(cand)}. current node size : {self.getCost(node)}. too big node!!")
+                    debug_print(f"candidate size : {self.getRegionSize(cand)}. current node size : {self.getCost(node)}. too big node!!")
                 for d in deletes:
                   if d in candidate_regions:
                     candidate_regions.remove(d)
@@ -1842,7 +1841,7 @@ def constructTensorEdgeList(mod):
         IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
 
         if not IsComposite and not IsSupportedOp:
-          print(call)
+          debug_print(call)
           raise ValueError("Unsupported operator detected. please check.")
 
         # visit composite function
@@ -2843,10 +2842,12 @@ def annotateCustomId(mod):
       origin_attrs = new_call.attrs
       if origin_attrs:
         new_attrs = {k:origin_attrs.get_str(k) for k in origin_attrs.keys()}
+        attr_type = str(origin_attrs).split("(")[0]
       else:
         new_attrs = {}
+        attr_type = "DictAttrs"
       new_attrs["custom_id"] = self.cnt
-      return _expr.CallWithFields(new_call, new_call.op, new_call.args, tvm.ir.make_node("DictAttrs", **new_attrs), new_call.type_args, new_call.span)
+      return _expr.CallWithFields(new_call, new_call.op, new_call.args, tvm.ir.make_node(attr_type, **new_attrs), new_call.type_args, new_call.span)
 
     def visit_function(self, fn):
       new_fn = super().visit_function(fn)
@@ -3573,10 +3574,14 @@ def create_wrap_func(func, func_name, new_param_type, new_ret_type):
         elif len(new_type.shape) == 5: # vector input
             # layout transform
             arg = relay.op.layout_transform(params[i], "NCHW16c", "NCHW")
+            N, CG, H, W, c = new_type.shape
+            c_converted = CG * 16
+            if c_converted > old_type.shape[1]:
+              arg = relay.op.strided_slice(arg, begin=[0,0,0,0], end=[N, old_type.shape[1], H, W])
             args.append(arg)
         else:
             raise ValueError("why imcflow function params is not 5D or 6D")
-        ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype)
+        ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype, old_type.shape, old_type.dtype)
     
     # func_no_global_symbol = func.without_attr("global_symbol")
     new_attr = tvm.ir.make_node("DictAttrs", Composite=f"{func_name}_impl")
@@ -3614,10 +3619,10 @@ def create_wrap_func(func, func_name, new_param_type, new_ret_type):
       for i, field_type in enumerate(old_ret_type.fields):
         old_type = field_type
         new_type = new_ret_type.fields[i]
-        temp.append((new_type.shape, new_type.dtype))
+        temp.append((new_type.shape, new_type.dtype, old_type.shape, old_type.dtype))
       ttype_map[func_name] = temp
     else:
-      ttype_map[func_name] = (new_ret_type.shape, new_ret_type.dtype)
+      ttype_map[func_name] = (new_ret_type.shape, new_ret_type.dtype, old_ret_type.shape, old_ret_type.dtype)
 
     return relay.Function(params, body, new_ret_type, attrs=func.attrs), ttype_map
 
@@ -3667,10 +3672,10 @@ class ImcflowLayoutLegalizer:
         mod[new_gv] = wrap_func
         new_gv_map[old_gv] = new_gv
     
-    # printModel(".", mod, {}, "after_imcflow_layout_legalizer")
+    printModel(".", mod, {}, "after_imcflow_layout_legalizer")
     
     mod = self.replace_imcflow_gv(mod, new_gv_map)
-    mod = self._insert_packing_unpacking(mod)
+    mod = self._insert_packing_unpacking(mod, real_tensor_type_map)
     
     # return transformed_func
     return mod, real_tensor_type_map
@@ -3773,7 +3778,7 @@ class ImcflowLayoutLegalizer:
       elif call.op == op.get("nn.imcflow_qdwconv"):
         OriginWeight = call.args[1].data.asnumpy()
         out_channels, in_channels, kh, kw = OriginWeight.shape
-        new_weight = np.zeros((out_channels//16, 8, 8), dtype=np.uint32)
+        new_weight = np.zeros((math.ceil(out_channels/16), 8, 8), dtype=np.uint32)
 
         for c in range(out_channels):
           for kh_ in range(kh):
@@ -4227,7 +4232,7 @@ class ImcflowLayoutLegalizer:
     updater = _ImcflowFunctionParamUpdater()
     return updater.run(func)
 
-  def _insert_packing_unpacking(self, mod):
+  def _insert_packing_unpacking(self, mod, real_tensor_type_map):
     """
     Insert packing nodes before imcflow function calls and unpacking nodes after.
     
@@ -4247,12 +4252,18 @@ class ImcflowLayoutLegalizer:
 
     If imcflow function call is last node of main function, we don't need to insert layout_transform.
     layout transform is required only when the output node is used by CPU later.
+    
+    Args:
+      mod: The module to transform
+      real_tensor_type_map: Dictionary mapping function names to their real (4D) tensor type info
+                            Format: {func_name: (shape, dtype)} or {func_name: [(shape, dtype), ...]} for tuple returns
     """
     print("=== Inserting packing/unpacking nodes around imcflow function calls ===")
     class _LayoutTransformer(relay.ExprMutator):
-      def __init__(self, module):
+      def __init__(self, module, ttype_map):
         super().__init__()
         self.module = module
+        self.ttype_map = ttype_map  # Store the ttype_map
         self.use_def_chain = None  # Will be set after parsing
         self.current_func = None
       
@@ -4390,8 +4401,44 @@ class ImcflowLayoutLegalizer:
                     channels = arg.tuple_value.attrs["channel"]
                   new_arg = imcflow_mmquant_out_to_4d(arg, channels)
                 elif len(arg_shape) == 5:
-                  # Pattern 2: 5D tensor (NCHW16c) - vector layout
+                  # Pattern 4: 5D tensor (NCHW16c) - vector layout
                   new_arg = relay.layout_transform(arg, "NCHW16c", "NCHW")
+                  
+                  # Use ttype_map to get the original 4D shape
+                  if isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
+                    func_name = arg.op.name_hint
+                    if func_name in self.ttype_map:
+                      ttype_info = self.ttype_map[func_name][func_name]
+                      
+                      # Handle both single tensor and tuple returns
+                      if isinstance(ttype_info, list):
+                        # Tuple return - need to determine which tuple element this is
+                        # For now, we'll use the first element's shape
+                        # TODO: If you need to handle specific tuple elements, track this
+                        real_shape, real_dtype, old_shape, old_dtype = ttype_info[i]
+                      else:
+                        # Single tensor return
+                        real_shape, real_dtype, old_shape, old_dtype = ttype_info
+                      
+                      # Get the original channel count from real_shape
+                      # real_shape is the 4D shape (N, C, H, W)
+                      original_channels = int(old_shape[1])
+                      
+                      # Get the current shape after layout_transform
+                      N, CG, H, W, _ = arg_type.shape
+                      
+                      debug_print(f"  Pattern 4: Converting NCHW16c->NCHW")
+                      debug_print(f"    Function: {func_name}")
+                      debug_print(f"    Original channels: {original_channels}, Current channels: {CG*16}")
+                      
+                      # If padding was added (current channels > original), slice it off
+                      if CG*16 > original_channels:
+                        new_arg = relay.op.strided_slice(
+                          new_arg, 
+                          begin=[0, 0, 0, 0], 
+                          end=[N, original_channels, H, W]
+                        )
+                        debug_print(f"    Removed padding: {CG*16} -> {original_channels} channels")
                 else:
                   print(f"  Skip: shape {len(arg_shape)}D is not need to transform")
                   new_arg = arg
@@ -4416,7 +4463,7 @@ class ImcflowLayoutLegalizer:
     use_def_parser.visit(mod["main"])
     
     # Step 2: Create layout transformer and set use-def chain
-    inserter = _LayoutTransformer(mod)
+    inserter = _LayoutTransformer(mod, real_tensor_type_map)
     inserter.set_use_def_chain(use_def_parser)
     new_main = inserter.visit(mod["main"])
     mod.update_func(mod.get_global_var("main"), new_main)

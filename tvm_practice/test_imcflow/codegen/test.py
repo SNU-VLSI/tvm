@@ -148,12 +148,11 @@ def run_test_evl(test_name, mod, param_dict):
   printModel(eval_dir, eval_mod, eval_param_dict, "3_after_merge")
 
   # make split and concat super node
-  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "3.1_after_split_concat_partition")
+  # eval_mod = imcflow_transform.annotateCustomId(eval_mod)
+  # printModel(eval_dir, eval_mod, eval_param_dict, "3.1_after_annotate_custom_id")
 
   eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
-  exit(1)
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")
@@ -222,16 +221,16 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"idtoedge: {config.TensorIDtoEdge}")
   print(f"policy_table: {config.PolicyTableDict}")
 
-  CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
-  CodegenSuite(eval_mod)
+  # CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
+  # CodegenSuite(eval_mod)
 
-  print(f"mem_layout: {config.MemLayout}")
-  print(f"Evaluation generation completed for {test_name}")
+  # print(f"mem_layout: {config.MemLayout}")
+  # print(f"Evaluation generation completed for {test_name}")
 
-  imcflow_transform.constructDataBlockDict(eval_mod)
-  print(f"data_blocks: {config.DataBlocks}")
+  # imcflow_transform.constructDataBlockDict(eval_mod)
+  # print(f"data_blocks: {config.DataBlocks}")
 
-  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
+  # generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():
