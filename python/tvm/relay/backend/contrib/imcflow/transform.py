@@ -67,7 +67,7 @@ def getNodeID(node) -> int:
   if int(hash(node)) in id_dict:
     return id_dict[int(hash(node))]
   else:
-    return -1
+    return None
 
 def getNodeDebugID(node):
   if isinstance(node, relay.Call):
@@ -963,7 +963,7 @@ def makeSplitConcatDepsRegions(mod):
       func_attr = func.attrs
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
       target_mod = imcflow.ImcflowAnnotationPass(SplitConcatRegions, "split_concat_")(target_mod)
-      printModel(".", target_mod, {}, "split_concat_deps_before_partition")
+      # printModel(".", target_mod, {}, "split_concat_deps_before_partition")
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = convert_compiler_regions_to_composite(target_mod)
       transformed_func = target_mod.functions.items()[0][1]
@@ -1733,6 +1733,129 @@ class NodeMapper:
           mapping_dict = self.run_(target_func)
           ImcflowDeviceConfig().HWNodeMap.update(mapping_dict)
       return mod
+
+class ConcatDistributor:
+  """
+  Distribute concat operations with more than max_inputs into a binary tree structure.
+  
+  Hardware constraint: Each IMCE can handle at most max_inputs inputs.
+  When a concat has more than max_inputs, we need to split it into a tree of smaller concats.
+  
+  This should run AFTER makeSplitConcatDepsRegions but BEFORE constructUsefulMappings.
+  At this point, CustomIDs are not yet assigned, so we can freely add new nodes.
+  
+  Example with max_inputs=8 and 12 inputs (a,b,c,d,e,f,g,h,i,j,k,l):
+    Original: concat(a,b,c,d,e,f,g,h,i,j,k,l)
+    Tree form: concat(
+                 concat(
+                   concat(a,b,c,d),
+                   concat(e,f,g,h)
+                 ),
+                 concat(i,j,k,l)
+               )
+  
+  Node mapping: After NodeMapper runs, each intermediate concat will be mapped
+  to the last input node's HW mapping (this happens automatically by NodeMapper logic).
+  """
+  def __init__(self, max_inputs=8):
+    self.max_inputs = max_inputs
+
+  def run(self, mod):
+    """
+    Transform the module by distributing large concat operations.
+    This should run after makeSplitConcatDepsRegions.
+    """
+    for global_var, func in mod.functions.items():
+      if isinstance(func, relay.Function) and "global_symbol" in func.attrs and "imcflow" in func.attrs["global_symbol"]:
+        # Transform the function
+        new_func = self._transform_function(func)
+        
+        # Update module if function changed
+        if new_func != func:
+          mod[global_var] = new_func
+          debug_print(f"ConcatDistributor: Transformed function {global_var.name_hint}")
+    
+    return mod
+  
+  def _transform_function(self, func):
+    """Transform a single function by distributing concat operations."""
+    mutator = self._ConcatMutator(self.max_inputs)
+    new_body = mutator.visit(func.body)
+    
+    if new_body == func.body:
+      return func
+    
+    return relay.Function(
+      func.params,
+      new_body,
+      func.ret_type,
+      func.type_params,
+      func.attrs
+    )
+  
+  class _ConcatMutator(relay.ExprMutator):
+    """Mutator that replaces large concat operations with binary trees."""
+    
+    def __init__(self, max_inputs):
+      super().__init__()
+      self.max_inputs = max_inputs
+    
+    def visit_call(self, call):
+      # First, recursively transform children
+      new_call = super().visit_call(call)
+      
+      # Check if this is a concat operation
+      if isinstance(new_call.op, tvm.ir.Op) and new_call.op.name == "concatenate":
+        # Get the tuple of inputs
+        if len(new_call.args) > 0 and isinstance(new_call.args[0], relay.Tuple):
+          inputs = new_call.args[0].fields
+          
+          # If we have more than max_inputs, we need to distribute
+          if len(inputs) > self.max_inputs:
+            debug_print(f"  ConcatDistributor: Found concat with {len(inputs)} inputs (max={self.max_inputs})")
+            
+            # Get concat attributes (axis, etc.)
+            attrs = new_call.attrs
+            
+            # Build binary tree of concats
+            new_concat = self._build_concat_tree(list(inputs), attrs)
+            debug_print(f"  ConcatDistributor: Distributed concat into tree structure")
+            
+            return new_concat
+      
+      return new_call
+    
+    def _build_concat_tree(self, inputs, attrs):
+      """
+      Build a binary tree of concat operations.
+      
+      Args:
+        inputs: List of input nodes
+        attrs: Concat attributes (axis, etc.)
+      
+      Returns:
+        A concat call node representing the tree
+      """
+      if len(inputs) <= self.max_inputs:
+        # Base case: small enough to fit in one concat
+        return relay.concatenate(relay.Tuple(inputs), axis=attrs.axis)
+      
+      # Recursive case: split into two halves
+      mid = len(inputs) // 2
+      
+      # Handle the case where mid == 0 (shouldn't happen, but be safe)
+      if mid == 0:
+        mid = 1
+      
+      left_inputs = inputs[:mid]
+      right_inputs = inputs[mid:]
+      
+      # Recursively build left and right subtrees
+      left_concat = self._build_concat_tree(left_inputs, attrs)
+      right_concat = self._build_concat_tree(right_inputs, attrs)
+      
+      # Combine them
+      return relay.concatenate(relay.Tuple([left_concat, right_concat]), axis=attrs.axis)
 
 def constructTensorEdgeList(mod):
   """
@@ -2835,31 +2958,49 @@ def annotateCustomId(mod):
     def __init__(self):
       super().__init__()
       self.cnt = 0
+    
+    def update_attrs(self, origin_attrs, updates):
+      new_attr_dict = {}
+      if origin_attrs is not None:
+        for key in origin_attrs.keys():
+          attr_value = origin_attrs[key]
+            
+          if isinstance(attr_value, tvm.ir.container.Array):
+            # Convert array to tuple for proper handling
+            new_attr_dict[str(key)] = tuple(attr_value)
+          else:
+            new_attr_dict[str(key)] = attr_value
+      
+      new_attr_dict.update(updates)
+      
+      if isinstance(origin_attrs, tvm.ir.attrs.DictAttrs):
+        attr_type = "DictAttrs"
+      elif origin_attrs is not None:
+        attr_type = str(origin_attrs).split("(")[0]
+      else:
+        attr_type = "DictAttrs"
+        # return None
+      
+      return tvm.ir.make_node(attr_type, **new_attr_dict)
 
     def visit_call(self, call):
       new_call = super().visit_call(call)
       self.cnt = self.cnt + 1
       origin_attrs = new_call.attrs
-      if origin_attrs:
-        new_attrs = {k:origin_attrs.get_str(k) for k in origin_attrs.keys()}
-        attr_type = str(origin_attrs).split("(")[0]
-      else:
-        new_attrs = {}
-        attr_type = "DictAttrs"
-      new_attrs["custom_id"] = self.cnt
-      return _expr.CallWithFields(new_call, new_call.op, new_call.args, tvm.ir.make_node(attr_type, **new_attrs), new_call.type_args, new_call.span)
+      new_attrs = self.update_attrs(origin_attrs, {"custom_id": self.cnt})
+      return _expr.CallWithFields(new_call, new_call.op, new_call.args, new_attrs, new_call.type_args, new_call.span)
 
     def visit_function(self, fn):
       new_fn = super().visit_function(fn)
       self.cnt = self.cnt + 1
       origin_attrs = new_fn.attrs
-      new_attrs = {k:origin_attrs.get_str(k) for k in origin_attrs.keys()}
-      new_attrs["custom_id"] = self.cnt
-      return FunctionWithFields(new_fn, list(new_fn.params), new_fn.body, new_fn.ret_type, new_fn.type_params, tvm.ir.make_node("DictAttrs", **new_attrs))
+      new_attrs = self.update_attrs(origin_attrs, {"custom_id": self.cnt})
+      return FunctionWithFields(new_fn, list(new_fn.params), new_fn.body, new_fn.ret_type, new_fn.type_params, new_attrs)
 
+  visitor = _Visitor()
   for func_name in mod.functions:
-    mod[func_name] = _Visitor().visit(mod[func_name])
-  
+    mod[func_name] = visitor.visit(mod[func_name])
+
   return mod
 
 def constructUsefulMappings(mod):
@@ -2869,34 +3010,56 @@ def constructUsefulMappings(mod):
   class _Visitor(tvm.relay.ExprVisitor):
     def __init__(self):
       super().__init__()
-      self.Cnt = 0
+      self.Cnt = -2
 
     def visit_call(self, call):
-      id_dict[int(hash(call))] = self.Cnt
-      name_dict[self.Cnt] = getNodeDebugID(call)
+      # id_dict[int(hash(call))] = self.Cnt
+      # name_dict[self.Cnt] = getNodeDebugID(call)
+      # data[id_dict[int(hash(call))]] = call
+      # self.Cnt = self.Cnt + 1
+
+      id_dict[int(hash(call))] = call.attrs["custom_id"]
+      name_dict[call.attrs["custom_id"]] = getNodeDebugID(call)
       data[id_dict[int(hash(call))]] = call
-      self.Cnt = self.Cnt + 1
+
       super().visit_call(call)
 
     def visit_function(self, call):
-      id_dict[int(hash(call))] = self.Cnt
-      name_dict[self.Cnt] = "Function"
+      id_dict[int(hash(call))] = call.attrs["custom_id"]
+      name_dict[call.attrs["custom_id"]] = "Function"
       data[id_dict[int(hash(call))]] = call
-      self.Cnt = self.Cnt + 1
+
+      # id_dict[int(hash(call))] = self.Cnt
+      # name_dict[self.Cnt] = "Function"
+      # data[id_dict[int(hash(call))]] = call
+      # self.Cnt = self.Cnt + 1
+
       super().visit_function(call)
 
     def visit_var(self, var):
+      # id_dict[int(hash(var))] = self.Cnt
+      # name_dict[self.Cnt] = var.name_hint
+      # data[id_dict[int(hash(var))]] = var
+      # self.Cnt = self.Cnt + 1
+
       id_dict[int(hash(var))] = self.Cnt
       name_dict[self.Cnt] = var.name_hint
       data[id_dict[int(hash(var))]] = var
-      self.Cnt = self.Cnt + 1
+      self.Cnt = self.Cnt - 1
+
       super().visit_var(var)
 
     def visit_constant(self, const):
+      # id_dict[int(hash(const))] = self.Cnt
+      # name_dict[self.Cnt] = "Const"
+      # data[id_dict[int(hash(const))]] = const
+      # self.Cnt = self.Cnt + 1
+
       id_dict[int(hash(const))] = self.Cnt
       name_dict[self.Cnt] = "Const"
       data[id_dict[int(hash(const))]] = const
-      self.Cnt = self.Cnt + 1
+      self.Cnt = self.Cnt - 1
+
       super().visit_constant(const)
 
   vis = _Visitor()
@@ -3672,7 +3835,7 @@ class ImcflowLayoutLegalizer:
         mod[new_gv] = wrap_func
         new_gv_map[old_gv] = new_gv
     
-    printModel(".", mod, {}, "after_imcflow_layout_legalizer")
+    # printModel(".", mod, {}, "after_imcflow_layout_legalizer")
     
     mod = self.replace_imcflow_gv(mod, new_gv_map)
     mod = self._insert_packing_unpacking(mod, real_tensor_type_map)

@@ -36,7 +36,7 @@ def getModel_(input_shape):
         input_shape: tuple (N, C, H, W) in NCHW format
                     For td_cnn: (N, 1, 16000, 1) - raw time-domain samples
     """
-    input = relay.var("input", shape=input_shape, dtype="float32")
+    input = relay.var("model_input", shape=input_shape, dtype="float32")
     N, IC, H, W = input_shape
     filters = 64
     
@@ -261,14 +261,16 @@ def getModel_(input_shape):
     return out, var_info
 
 
-def getModel():
+def getModel(small_debug=False):
     """
     Create a test model for IMCFlow DS-CNN (td_cnn variant)
     Input shape: (1, 1, 16000, 1) - batch=1, channels=1, time_samples=16000, width=1
     For td_samples feature type with raw audio input
     """
-    # input_shape = (1, 1, 16000, 1)  # NCHW format for time-domain samples
-    input_shape = (1, 1, 4000, 1)  # NCHW format for time-domain samples
+    if small_debug:
+      input_shape = (1, 1, 4000, 1)  # NCHW format for time-domain samples
+    else:
+      input_shape = (1, 1, 16000, 1)  # NCHW format for time-domain samples
     out, var_dict = getModel_(input_shape)
     params_dict = {}
     for name in sorted(var_dict.keys()):

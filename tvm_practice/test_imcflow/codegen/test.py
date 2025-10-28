@@ -148,11 +148,11 @@ def run_test_evl(test_name, mod, param_dict):
   printModel(eval_dir, eval_mod, eval_param_dict, "3_after_merge")
 
   # make split and concat super node
-  # eval_mod = imcflow_transform.annotateCustomId(eval_mod)
-  # printModel(eval_dir, eval_mod, eval_param_dict, "3.1_after_annotate_custom_id")
-
   eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
+
+  eval_mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "4.5_after_concat_distributor")
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")
@@ -168,21 +168,27 @@ def run_test_evl(test_name, mod, param_dict):
   printModel(eval_dir, eval_mod, eval_param_dict, "8_after_mark_in_out")
   print("-------------------- Real Tensor Type Map --------------------")
   pprint.pprint(ttype_map)
+
+  # -----------------------------------------------------------------
+  # annotate custom ID for debugging
+  # -----------------------------------------------------------------
+  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "8.5_after_annotate_custom_id")
   
   imcflow_transform.constructUsefulMappings(eval_mod)
   imcflow_transform.constructCustomIDInFunc(eval_mod)
   imcflow_transform.constructImcflowFuncMap(eval_mod)
   print("-------------------- CustomID TO Name --------------------")
-  print(imcflow.CustomIDToName())
+  pprint.pprint(imcflow.CustomIDToName())
   print("-------------------- Node TO CustomID --------------------")
-  print(HashToCustomID())
+  pprint.pprint(HashToCustomID())
   print("-------------------- func map --------------------")
-  print(DevConfig().ImcflowFuncMap)
+  pprint.pprint(DevConfig().ImcflowFuncMap)
   printModel(eval_dir, eval_mod, eval_param_dict, "9_with_custom_id")
 
   imcflow_transform.NodeMapper().run(eval_mod)
   print("------------------------------- HW MAP PASS 1----------------------------------")
-  print(DevConfig().HWNodeMap)
+  pprint.pprint(DevConfig().HWNodeMap)
 
   imcflow_transform.constructTensorEdgeList(eval_mod)
   print("------------------------------- Tensor Edge List --------------------------------------")
@@ -193,7 +199,7 @@ def run_test_evl(test_name, mod, param_dict):
 
   imcflow_transform.constructActiveIMCEDict(eval_mod)
   print("------------------------------  Active IMCE list ---------------------- ")
-  print(DevConfig().ActiveIMCEPerFunc)
+  pprint.pprint(DevConfig().ActiveIMCEPerFunc)
 
   imcflow_transform.constructTensorIDToTensorEdgeDict()
   print("Tensor ID to Tensor Edge")
@@ -209,17 +215,18 @@ def run_test_evl(test_name, mod, param_dict):
 
   imcflow_transform.MemoryAllocator().run(eval_mod, ttype_map)
   print("------------------------------- Memory Layout ----------------------------------")
-  print(DevConfig().MemLayout)
+  pprint.pprint(DevConfig().MemLayout)
 
   imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
 
   # get the config
   config = DevConfig()
 
-  print(f"nodemap: {config.HWNodeMap}")
-  print(f"edgeinfo: {config.TensorEdgetoInfo}")
-  print(f"idtoedge: {config.TensorIDtoEdge}")
-  print(f"policy_table: {config.PolicyTableDict}")
+  print("------------------------------- FE RESULTS ----------------------------------")
+  pprint.pprint(f"nodemap: {config.HWNodeMap}")
+  pprint.pprint(f"edgeinfo: {config.TensorEdgetoInfo}")
+  pprint.pprint(f"idtoedge: {config.TensorIDtoEdge}")
+  pprint.pprint(f"policy_table: {config.PolicyTableDict}")
 
   # CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
   # CodegenSuite(eval_mod)
@@ -282,20 +289,20 @@ def test_resnet8():
   mod, param_dict = resnet8_cifar.getModel()
   run_test_evl("resnet8", mod, param_dict)
 
-def test_resnet8_from_pretrained():
-  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight()
-  run_test_evl("resnet8", mod, param_dict)
+# def test_resnet8_from_pretrained():
+#   mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
+#   run_test_evl("resnet8", mod, param_dict)
 
 def test_mobilenet_imcflow():
-  mod, param_dict = mobilenet_imcflow.getModel()
+  mod, param_dict = mobilenet_imcflow.getModel(True)
   run_test_evl("mobilenet_imcflow", mod, param_dict)
 
 def test_deep_autoencoder_imcflow():
-  mod, param_dict = deep_autoencoder_imcflow.getModel()
+  mod, param_dict = deep_autoencoder_imcflow.getModel(True)
   run_test_evl("deep_autoencoder_imcflow", mod, param_dict)
 
 def test_ds_cnn_imcflow():
-  mod, param_dict = ds_cnn_imcflow.getModel()
+  mod, param_dict = ds_cnn_imcflow.getModel(True)
   run_test_evl("ds_cnn_imcflow", mod, param_dict)
 
 if __name__ == "__main__":

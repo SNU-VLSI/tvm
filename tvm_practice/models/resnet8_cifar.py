@@ -36,7 +36,7 @@ def get_width(W, KW, padding, stride):
     return out_w
 
 def getModel_(input_shape):
-  input = relay.var("input", shape=input_shape, dtype="float32")
+  input = relay.var("model_input", shape=input_shape, dtype="float32")
   N, IC, H, W = input_shape
 
   y = relay.nn.conv2d(
@@ -294,9 +294,11 @@ def getModel_2(input_shape):
 
   return out, var_info
 
-def getModel():
-  out, var_dict = getModel_([1, 3, 32, 32])
-  # out, var_dict = getModel_([1, 3, 8, 8])
+def getModel(small_debug=False):
+  if small_debug:
+    out, var_dict = getModel_([1, 3, 8, 8])
+  else:
+    out, var_dict = getModel_([1, 3, 32, 32])
 
   def _rand_tensor(dtype: str, shape):
     # Handle common dtypes with appropriate ranges
@@ -349,7 +351,7 @@ def getModel():
 
   return out, params_dict
 
-def getModel_from_pretrained_weight():
+def getModel_from_pretrained_weight(small_debug=False):
   import torch
   import sys
   import os
@@ -357,7 +359,10 @@ def getModel_from_pretrained_weight():
   sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
   from safe_convert import to_int16, to_int4
   
-  out, var_dict = getModel_([1, 3, 32, 32])
+  if small_debug:
+    out, var_dict = getModel_([1, 3, 8, 8])
+  else:
+    out, var_dict = getModel_([1, 3, 32, 32])
   
   # Load checkpoint
   checkpoint_path = '/root/project/tvm/tvm_practice/models/model_best.pth.tar'
