@@ -23,7 +23,7 @@ import pprint
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 from models import real_model, real_model2, test_models
 from models import small_model
-from models import resnet8_cifar
+from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
@@ -148,8 +148,12 @@ def run_test_evl(test_name, mod, param_dict):
   printModel(eval_dir, eval_mod, eval_param_dict, "3_after_merge")
 
   # make split and concat super node
+  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "3.1_after_split_concat_partition")
+
   eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
+  exit(1)
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")
@@ -279,6 +283,18 @@ def test_resnet8():
   mod, param_dict = resnet8_cifar.getModel()
   run_test_evl("resnet8", mod, param_dict)
 
+def test_mobilenet_imcflow():
+  mod, param_dict = mobilenet_imcflow.getModel()
+  run_test_evl("mobilenet_imcflow", mod, param_dict)
+
+def test_deep_autoencoder_imcflow():
+  mod, param_dict = deep_autoencoder_imcflow.getModel()
+  run_test_evl("deep_autoencoder_imcflow", mod, param_dict)
+
+def test_ds_cnn_imcflow():
+  mod, param_dict = ds_cnn_imcflow.getModel()
+  run_test_evl("ds_cnn_imcflow", mod, param_dict)
+
 if __name__ == "__main__":
-  # tvm.testing.main()
-  test_resnet8()
+  tvm.testing.main()
+  # test_resnet8()

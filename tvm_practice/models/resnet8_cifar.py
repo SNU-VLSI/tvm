@@ -23,6 +23,8 @@ from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 
+from .utils import get_param_info_from_relay_func
+
 def get_height(H, KH, padding, stride):
     pad_h = padding
     out_h = (H + 2 * pad_h - KH) // stride + 1
@@ -131,6 +133,7 @@ def getModel_(input_shape):
     strides=(2,2),
     out_dtype="int16"
   )
+  y_residual = imcflow_batch_norm(y_residual, relay.var("fused_scale4_2", shape=(32,), dtype="int16"), relay.var("fused_bias4_2", shape=(32,), dtype="int16"))
 
   y_residual = relay.var("bn_out_f_1", shape=(32,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_0", shape=(32,1,1), dtype="int16")
   y = y + y_residual
@@ -179,6 +182,7 @@ def getModel_(input_shape):
     strides=(2,2),
     out_dtype="int16"
   )
+  y_residual = imcflow_batch_norm(y_residual, relay.var("fused_scale6_2", shape=(64,), dtype="int16"), relay.var("fused_bias6_2", shape=(64,), dtype="int16"))
 
   y_residual = relay.var("bn_out_f_3", shape=(64,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_2", shape=(64,1,1), dtype="int16")
 
@@ -291,8 +295,8 @@ def getModel_2(input_shape):
   return out, var_info
 
 def getModel():
-  # out, var_dict = getModel_([1, 3, 32, 32])
-  out, var_dict = getModel_([1, 3, 8, 8])
+  out, var_dict = getModel_([1, 3, 32, 32])
+  # out, var_dict = getModel_([1, 3, 8, 8])
 
   def _rand_tensor(dtype: str, shape):
     # Handle common dtypes with appropriate ranges

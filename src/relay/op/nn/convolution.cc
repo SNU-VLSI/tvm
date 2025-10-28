@@ -2091,5 +2091,143 @@ RELAY_REGISTER_OP("nn.imcflow_qconv")
     .set_support_level(2)
     .add_type_rel("ImcflowQConv2D", ImcflowQConv2DRel);
 
+// relay.nn.imcflow_qdwconv
+TVM_REGISTER_NODE_TYPE(ImcflowQDwConv2DAttrs);
+
+// TODO: Update this type relation for depthwise convolution characteristics
+bool ImcflowQDwConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
+                         const TypeReporter& reporter) {
+  // This is a placeholder - you should modify this to match depthwise conv requirements
+  ICHECK_EQ(types.size(), 4);
+  const auto* data = types[0].as<TensorTypeNode>();
+  const auto* weight = types[1].as<TensorTypeNode>();
+  const auto* config = types[2].as<TensorTypeNode>();
+  if (data == nullptr) return false;
+  if (weight == nullptr) return false;
+  if (config == nullptr) return false;
+
+  const auto* param = attrs.as<ImcflowQDwConv2DAttrs>();
+  ICHECK(param != nullptr);
+
+  DataType out_dtype = DataType::Int(16);
+
+  if (param->meta_schedule_original_shape.size() != 0) {
+    reporter->GetDiagCtx().Emit(
+        Diagnostic::Error(reporter->GetSpan())
+        << "qdwconv2d output type doesn't support meta scheduling.");
+    return false;
+  }
+
+  Array<IndexExpr> data_shape = data->shape;
+  DataType data_dtype = data->dtype;
+  Array<IndexExpr> weight_shape = weight->shape;
+  DataType weight_dtype = weight->dtype;
+
+  // input type check
+  IndexExpr batch, ic, ih, iw;
+  if(param->in_node) {
+    ICHECK_EQ(data_shape.size(), 6);
+    ICHECK_EQ(data_shape[4].as<IntImmNode>()->value, 4);
+    ICHECK_EQ(data_shape[5].as<IntImmNode>()->value, 8);
+    batch = data_shape[0];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+    ic    = param->in_channels;
+    ICHECK(ic.as<IntImmNode>()->value > 0) << "in_channels must be specified when in_node is true";
+  } else {
+    ICHECK(data_shape.size() == 4) << "data should be 4D tensor when in_node is false";
+    batch = data_shape[0];
+    ic    = data_shape[1];
+    ih    = data_shape[2];
+    iw    = data_shape[3];
+  }
+
+  // weight type check
+  IndexExpr oc, kh, kw, ic_weight;
+  if(param->const_packed_node) {
+    ICHECK_EQ(weight_shape.size(), 3);
+    ICHECK_EQ(weight_shape[1].as<IntImmNode>()->value, 8);
+    ICHECK_EQ(weight_shape[2].as<IntImmNode>()->value, 8);
+    ICHECK_EQ(weight_dtype, DataType::UInt(32));
+    oc = param->channels;
+    ic_weight = param->in_channels;
+    kh = param->kernel_size[0];
+    kw = param->kernel_size[1];
+  } else {
+    ICHECK_EQ(weight_shape.size(), 4);
+    oc = weight_shape[0];
+    ic_weight = weight_shape[1];
+    kh = weight_shape[2];
+    kw = weight_shape[3];
+  }
+
+  // assign output shape
+  if(param->out_node) {
+    Array<IndexExpr> oshape({0,0,0,0,16});
+    IndexExpr pad_h, pad_w;
+    GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
+    oshape.Set(0, batch);
+    oshape.Set(1, ceildiv(oc, 16));
+    oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
+    oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
+    reporter->Assign(types[3], TensorType(oshape, out_dtype));
+  } else {
+    Array<IndexExpr> oshape({0,0,0,0});
+    IndexExpr pad_h, pad_w;
+    GetPaddingHeightWidth(param->padding, &pad_h, &pad_w);
+    oshape.Set(0, batch);
+    oshape.Set(1, oc);
+    oshape.Set(2, indexdiv(ih + pad_h - kh, param->strides[0]) + 1);
+    oshape.Set(3, indexdiv(iw + pad_w - kw, param->strides[1]) + 1);
+    reporter->Assign(types[3], TensorType(oshape, out_dtype));
+  }
+
+  return true;
+}
+
+inline Expr MakeImcflowQDwConv(Expr data, Expr weight, Expr config, Array<IndexExpr> strides, Array<IndexExpr> padding,
+                               Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
+                               Array<IndexExpr> kernel_size, std::string data_layout,
+                               std::string kernel_layout, std::string out_layout, DataType out_dtype,
+                               std::string op_name) {
+  auto attrs = make_object<ImcflowQDwConv2DAttrs>();
+  attrs->strides = std::move(strides);
+  attrs->padding = std::move(padding);
+  attrs->dilation = std::move(dilation);
+  attrs->groups = groups;
+  attrs->channels = std::move(channels);
+  attrs->in_channels = std::move(in_channels);
+  attrs->kernel_size = std::move(kernel_size);
+  attrs->data_layout = std::move(data_layout);
+  attrs->kernel_layout = std::move(kernel_layout);
+  attrs->out_layout = std::move(out_layout);
+  attrs->out_dtype = std::move(out_dtype);
+  const Op& op = Op::Get(op_name);
+  return Call(op, {data, weight, config}, Attrs(attrs), {});
+}
+
+TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qdwconv")
+    .set_body_typed([](Expr data, Expr weight, Expr config, Array<IndexExpr> strides, Array<IndexExpr> padding,
+                       Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
+                       Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
+                       String out_layout, DataType out_dtype) {
+      return MakeImcflowQDwConv(data, weight, config, strides, padding, dilation, groups, channels, in_channels,
+                                kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
+                                "nn.imcflow_qdwconv");
+    });
+
+RELAY_REGISTER_OP("nn.imcflow_qdwconv")
+    .describe(R"code(Depthwise quantized convolution for IMCFlow.
+
+This operator performs depthwise convolution optimized for IMCFlow hardware.
+)code" TVM_ADD_FILELINE)
+    .set_attrs_type<ImcflowQDwConv2DAttrs>()
+    .set_num_inputs(3)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .add_argument("weight", "Tensor", "The weight tensor.")
+    .add_argument("config", "Tensor", "The config tensor.")
+    .set_support_level(2)
+    .add_type_rel("ImcflowQDwConv2D", ImcflowQDwConv2DRel);
+
 }  // namespace relay
 }  // namespace tvm
