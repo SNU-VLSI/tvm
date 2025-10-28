@@ -279,6 +279,10 @@ def test_resnet8():
   mod, param_dict = resnet8_cifar.getModel()
   run_test_evl("resnet8", mod, param_dict)
 
+def test_resnet8_from_pretrained():
+  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight()
+  run_test_evl("resnet8", mod, param_dict)
+
 if __name__ == "__main__":
   # tvm.testing.main()
   test_resnet8()
