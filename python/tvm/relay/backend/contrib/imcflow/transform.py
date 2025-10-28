@@ -5,12 +5,13 @@ from tvm.relay.ty import TupleType, TensorType
 from tvm.relay.expr_functor import ExprMutator, ExprVisitor
 from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
+from tvm.relay import expr as _expr
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
-from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
+from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d, imcflow_qdwconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking, imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 import numpy as np
@@ -207,99 +208,99 @@ def getOutputTensorIDs(func):
 #   mod['main'] = _OpConverter().visit(mod['main'])
 #   return mod
 
-@relay.transform.function_pass(opt_level=0)
-class makeToQuantizedForm:
-    """
-    List of transformations:
-      1. convert Conv to ImcflowQConv2D
-      2. data type conversion to int form
-        conv2d input  : packed 1D int8
-        conv2d weight : packed 1D int8
-        bias, relu, etc -> int16 data type
-    """       
-    def transform_function(self, func, mod, ctx):
-      param_map = {}
-      class _OpConverter(tvm.relay.ExprMutator):
-        def __init__(self):
-          super().__init__()
-          self.NewParamDict = {}
+# @relay.transform.function_pass(opt_level=0)
+# class makeToQuantizedForm:
+#     """
+#     List of transformations:
+#       1. convert Conv to ImcflowQConv2D
+#       2. data type conversion to int form
+#         conv2d input  : packed 1D int8
+#         conv2d weight : packed 1D int8
+#         bias, relu, etc -> int16 data type
+#     """       
+#     def transform_function(self, func, mod, ctx):
+#       param_map = {}
+#       class _OpConverter(tvm.relay.ExprMutator):
+#         def __init__(self):
+#           super().__init__()
+#           self.NewParamDict = {}
 
-        def visit_call(self, call):
-          if call.op == op.get("nn.conv2d"):
-            args = [self.visit(arg) for arg in call.args]
+#         def visit_call(self, call):
+#           if call.op == op.get("nn.conv2d"):
+#             args = [self.visit(arg) for arg in call.args]
 
-            # TODO: add in_channels and channels to attribute of nn.conv2d and fix this
-            # TODO: Sanity check needed!!!!
-            in_channels = 0 # FIXME
-            channels = 0 # FIXME
+#             # TODO: add in_channels and channels to attribute of nn.conv2d and fix this
+#             # TODO: Sanity check needed!!!!
+#             in_channels = 0 # FIXME
+#             channels = 0 # FIXME
 
-            # input layout [ceil(IC/256), N, H, W, IB, 8] int32
-            input_shape_orig = args[0].type_annotation.shape # N ic H W
-            input_shape_new = [math.ceil(in_channels//256), input_shape_orig[0], input_shape_orig[2], input_shape_orig[3], 4, 8] # IB = 4
-            input_new = relay.Var(args[0].name_hint, relay.TensorType(input_shape_new, "int32"))
+#             # input layout [ceil(IC/256), N, H, W, IB, 8] int32
+#             input_shape_orig = args[0].type_annotation.shape # N ic H W
+#             input_shape_new = [math.ceil(in_channels//256), input_shape_orig[0], input_shape_orig[2], input_shape_orig[3], 4, 8] # IB = 4
+#             input_new = relay.Var(args[0].name_hint, relay.TensorType(input_shape_new, "int32"))
 
-            # weight layout [ceil(OC/64), ceil(IC/ic), 256, 8] int32
-            weight_shape_orig = args[1].data.shape # OC/64, ic, KH, KW
-            weight_numpy_array = np.zeros((weight_shape_orig[0], math.ceil(in_channels//weight_shape_orig[1]), 256, 8), dtype=np.int32) #TODO: this should be replaced with real weight tensor!!!!
-            weight_new = relay.Constant(tvm.nd.array(weight_numpy_array))
+#             # weight layout [ceil(OC/64), ceil(IC/ic), 256, 8] int32
+#             weight_shape_orig = args[1].data.shape # OC/64, ic, KH, KW
+#             weight_numpy_array = np.zeros((weight_shape_orig[0], math.ceil(in_channels//weight_shape_orig[1]), 256, 8), dtype=np.int32) #TODO: this should be replaced with real weight tensor!!!!
+#             weight_new = relay.Constant(tvm.nd.array(weight_numpy_array))
 
-            # append new params to param_map
-            param_map[args[0].name_hint] = input_new
+#             # append new params to param_map
+#             param_map[args[0].name_hint] = input_new
 
-            # Create config data (FIXME: needs proper values)
-            from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
-            config_data = ConfigData(
-                data_shape=(1, in_channels, 1, 1),  # FIXME: use actual shape
-                weight_shape=(channels, in_channels, 1, 1),  # FIXME: use actual shape
-                padding=1,
-                stride=1
-            )
+#             # Create config data (FIXME: needs proper values)
+#             from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
+#             config_data = ConfigData(
+#                 data_shape=(1, in_channels, 1, 1),  # FIXME: use actual shape
+#                 weight_shape=(channels, in_channels, 1, 1),  # FIXME: use actual shape
+#                 padding=1,
+#                 stride=1
+#             )
 
-            return imcflow_qconv2d(input_new, weight_new, config_data.get_as_const_tensor(), in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
+#             return imcflow_qconv2d(input_new, weight_new, config_data.get_as_const_tensor(), in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
 
-          # TODO: Add batchnorm transform and insert quantize op      
-          # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-          #   args = [self.visit(arg) for arg in call.args]
-          #   return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
+#           # TODO: Add batchnorm transform and insert quantize op      
+#           # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+#           #   args = [self.visit(arg) for arg in call.args]
+#           #   return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
 
-          else:
-            return super().visit_call(call)
+#           else:
+#             return super().visit_call(call)
 
-        # def visit_var(self, var):
-        #   # new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
-        #   # param_map[var.name_hint] = new_var
-        #   # return new_var
-        #   return var
+#         # def visit_var(self, var):
+#         #   # new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
+#         #   # param_map[var.name_hint] = new_var
+#         #   # return new_var
+#         #   return var
 
-        # def visit_constant(self, const):
-        #   Data = const.data.numpy().astype(np.int8)
-        #   return relay.const(Data, "int8")
+#         # def visit_constant(self, const):
+#         #   Data = const.data.numpy().astype(np.int8)
+#         #   return relay.const(Data, "int8")
 
-        def visit_function(self, func):
-          # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
-          # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
-          # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
-          # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
-          new_body = self.visit(func.body)
-          new_params = [param_map.get(p.name_hint, p) for p in func.params]
-          return relay.Function(new_params, new_body)
+#         def visit_function(self, func):
+#           # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
+#           # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
+#           # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
+#           # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#           new_body = self.visit(func.body)
+#           new_params = [param_map.get(p.name_hint, p) for p in func.params]
+#           return relay.Function(new_params, new_body)
         
-          # new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
-          # return relay.Function(new_params, new_body, new_ret_type)
+#           # new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
+#           # return relay.Function(new_params, new_body, new_ret_type)
 
-      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
-      items = mod.functions_items()
-      function_names = [item[0].name_hint for item in items]
+#       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
+#       items = mod.functions_items()
+#       function_names = [item[0].name_hint for item in items]
 
-      num_func = len(function_names)
-      for i in range(num_func):
-        if function_names[i]=="main": 
-          continue
-        elif "Compiler" in mod[function_names[i]].attrs and mod[function_names[i]].attrs["Compiler"]=="imcflow":
-          print(f"Transforming imcflow function: {function_names[i]}")
-          mod[function_names[i]] = _OpConverter().visit(mod[function_names[i]])
+#       num_func = len(function_names)
+#       for i in range(num_func):
+#         if function_names[i]=="main": 
+#           continue
+#         elif "Compiler" in mod[function_names[i]].attrs and mod[function_names[i]].attrs["Compiler"]=="imcflow":
+#           print(f"Transforming imcflow function: {function_names[i]}")
+#           mod[function_names[i]] = _OpConverter().visit(mod[function_names[i]])
 
-      return func #TODO: returning func is right???
+#       return func #TODO: returning func is right???
 
 def isImcflowFunc(func, mod):
   if isinstance(func, relay.Function):
@@ -336,8 +337,10 @@ def get_imcflow_supported_regions(mod, include_first_conv=False):
   """
   # A set of imcflow-supported primitive operators.
   # This list should be updated based on the actual capabilities of the imcflow backend.
+  #TODO: do we need it seperately?
   _SUPPORTED_OPS = {
     "nn.imcflow_qconv",
+    'nn.imcflow_qdwconv',
     "qnn.imcflow_min_max_quantize",
     "imcflow.fused_batch_norm",
     "nn.relu",
@@ -566,6 +569,7 @@ def split_conv_to_atomic(mod, OldParamDict):
             if not ImcflowDeviceConfig.is_supported_kernel(KH, KW):
               return expr
 
+            #TODO: add, multiply can be here. but one operand should constant (adjust scaling)
             for PostNode in PostProcess:
               assert PostNode.op in [op.get("nn.bias_add"), op.get("nn.relu"), op.get("imcflow.fused_batch_norm"), op.get("divide"),
                                     op.get("qnn.imcflow_min_max_quantize"), op.get("qnn.imcflow_nu_quantize")], "Unsupported post process node"
@@ -646,30 +650,32 @@ def split_conv_to_atomic(mod, OldParamDict):
                         stride=strides[0] if isinstance(strides, (list, tuple)) else strides
                     )
                     
-                    conv_nodes[(oc_id, ic_id)] = imcflow_qconv2d(
-                      input_node,
-                      split_conv_weights[oc_id][ic_id],
-                      config_data.get_as_const_tensor(),
-                      in_channels=ic_size if not IsDepthWise else 1,
-                      channels=oc_size,
-                      kernel_size=(KH, KW),
-                      padding=padding,
-                      strides=strides,
-                      groups=1 if not IsDepthWise else oc_size,
-                      out_dtype="int16"
-                    )
-                    # conv_nodes[(oc_id, ic_id)] = relay.nn.conv2d(
-                    #     split_inputs[ic_id] if (not IsDepthWise) else split_inputs[oc_id],
-                    #     split_conv_weights[oc_id][ic_id],
-                    #     channels=oc_size,
-                    #     in_channels=IC, # in_channels should be the same as original conv2d for layout transform pass
-                    #     kernel_size=(KH, KW),
-                    #     strides=expr.attrs.strides,
-                    #     padding=expr.attrs.padding,
-                    #     data_layout=expr.attrs.data_layout,
-                    #     kernel_layout=expr.attrs.kernel_layout,
-                    #     groups=1 if not IsDepthWise else oc_size
-                    # )
+                    if not IsDepthWise:
+                      conv_nodes[(oc_id, ic_id)] = imcflow_qconv2d(
+                        input_node,
+                        split_conv_weights[oc_id][ic_id],
+                        config_data.get_as_const_tensor(),
+                        in_channels=ic_size,
+                        channels=oc_size,
+                        kernel_size=(KH, KW),
+                        padding=padding,
+                        strides=strides,
+                        groups=1,
+                        out_dtype="int16"
+                      )
+                    else:
+                      conv_nodes[(oc_id, ic_id)] = imcflow_qdwconv2d(
+                        input_node,
+                        split_conv_weights[oc_id][ic_id],
+                        config_data.get_as_const_tensor(),
+                        in_channels=1,
+                        channels=oc_size,
+                        kernel_size=(KH, KW),
+                        padding=padding,
+                        strides=strides,
+                        groups=oc_size,
+                        out_dtype="int16"
+                      )
 
             # If input channels were split, sum the resulting conv2d outputs for each out channel slice
             if IsICSplited and (not IsDepthWise):
@@ -769,7 +775,7 @@ def split_conv_to_atomic(mod, OldParamDict):
                           nd_array = PostNode.args[i].data.numpy()[oc_id*out_ch_limit:(oc_id*out_ch_limit)+oc_size]
                           SplitParam = relay.Constant(tvm.nd.array(nd_array))
                         NewParams.append(SplitParam)
-                      post_nodes[oc_id] = imcflow_batch_norm(post_nodes[oc_id], *NewParams)[0]
+                      post_nodes[oc_id] = imcflow_batch_norm(post_nodes[oc_id], *NewParams)
 
                 concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
             else:
@@ -778,7 +784,7 @@ def split_conv_to_atomic(mod, OldParamDict):
             return concat_node
 
           def visit_call(self, call):
-            if call.op == op.get("nn.imcflow_qconv"):
+            if call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
               PostProcess = self.PostProcess[:]
               self.PostProcess = []
               NewCall = super().visit_call(call)
@@ -788,7 +794,7 @@ def split_conv_to_atomic(mod, OldParamDict):
               self.PostProcess.append(call)
               NewCall = super().visit_call(call)
               if hasattr(call, "ShouldDelete"):
-                if call.op in [op.get("nn.batch_norm"), op.get("imcflow.fused_batch_norm")]:
+                if call.op == op.get("nn.batch_norm"):
                   return relay.Tuple([NewCall.args[0]]) 
                 else:
                   return NewCall.args[0]
@@ -964,45 +970,50 @@ def getSplitConcatDepsRegionsImpl(func):
   InputNodes = []
   class _SplitVisitor(tvm.relay.ExprVisitor):
 
-    def visit(self, expr):
-        """Apply the visitor to an expression."""
-        if isinstance(expr, Function):
-            res = self.visit_function(expr)
-        elif isinstance(expr, Call):
-            res = self.visit_call(expr)
-        elif isinstance(expr, Let):
-            res = self.visit_let(expr)
-        elif isinstance(expr, Var):
-            res = self.visit_var(expr)
-        elif isinstance(expr, GlobalVar):
-            res = self.visit_global_var(expr)
-        elif isinstance(expr, If):
-            res = self.visit_if(expr)
-        elif isinstance(expr, Tuple):
-            res = self.visit_tuple(expr)
-        elif isinstance(expr, TupleGetItem):
-            res = self.visit_tuple_getitem(expr)
-        elif isinstance(expr, Constant):
-            res = self.visit_constant(expr)
-        elif isinstance(expr, Op):
-            res = self.visit_op(expr)
-        elif isinstance(expr, RefCreate):
-            res = self.visit_ref_create(expr)
-        elif isinstance(expr, RefRead):
-            res = self.visit_ref_read(expr)
-        elif isinstance(expr, RefWrite):
-            res = self.visit_ref_write(expr)
-        elif isinstance(expr, Constructor):
-            res = self.visit_constructor(expr)
-        elif isinstance(expr, Match):
-            res = self.visit_match(expr)
-        else:
-            raise Exception(f"warning unhandled case: {type(expr)}")
+    # def visit(self, expr):
+    #     """Apply the visitor to an expression."""
+    #     if isinstance(expr, Function):
+    #         res = self.visit_function(expr)
+    #     elif isinstance(expr, Call):
+    #         res = self.visit_call(expr)
+    #     elif isinstance(expr, Let):
+    #         res = self.visit_let(expr)
+    #     elif isinstance(expr, Var):
+    #         res = self.visit_var(expr)
+    #     elif isinstance(expr, GlobalVar):
+    #         res = self.visit_global_var(expr)
+    #     elif isinstance(expr, If):
+    #         res = self.visit_if(expr)
+    #     elif isinstance(expr, Tuple):
+    #         res = self.visit_tuple(expr)
+    #     elif isinstance(expr, TupleGetItem):
+    #         res = self.visit_tuple_getitem(expr)
+    #     elif isinstance(expr, Constant):
+    #         res = self.visit_constant(expr)
+    #     elif isinstance(expr, Op):
+    #         res = self.visit_op(expr)
+    #     elif isinstance(expr, RefCreate):
+    #         res = self.visit_ref_create(expr)
+    #     elif isinstance(expr, RefRead):
+    #         res = self.visit_ref_read(expr)
+    #     elif isinstance(expr, RefWrite):
+    #         res = self.visit_ref_write(expr)
+    #     elif isinstance(expr, Constructor):
+    #         res = self.visit_constructor(expr)
+    #     elif isinstance(expr, Match):
+    #         res = self.visit_match(expr)
+    #     else:
+    #         raise Exception(f"warning unhandled case: {type(expr)}")
 
-        return res
+    #     return res
 
     def visit_call(self, call):
-      if call.op == op.get("split"):
+      if isinstance(call.op, tvm.ir.Op):
+        print(f"visiting call node {call.attrs['custom_id']} with op {call.op.name}")
+      elif isinstance(call.op, relay.Function) and "Composite" in call.op.attrs:
+        print(f"visiting call node {call.attrs['custom_id']} with composite function {call.op.attrs['Composite']}")
+      if isinstance(call.op, tvm.ir.Op) and call.op == op.get("split"):
+        print(f"split operation is detected. start collecting consumer of split node")
         # make dict entry if not exists
         if call not in Results:
           Results[call] = []
@@ -1031,45 +1042,46 @@ def getSplitConcatDepsRegionsImpl(func):
 
   class _ConcatVisitor(tvm.relay.ExprVisitor):
 
-    def visit(self, expr):
-        """Apply the visitor to an expression."""
-        if isinstance(expr, Function):
-            res = self.visit_function(expr)
-        elif isinstance(expr, Call):
-            res = self.visit_call(expr)
-        elif isinstance(expr, Let):
-            res = self.visit_let(expr)
-        elif isinstance(expr, Var):
-            res = self.visit_var(expr)
-        elif isinstance(expr, GlobalVar):
-            res = self.visit_global_var(expr)
-        elif isinstance(expr, If):
-            res = self.visit_if(expr)
-        elif isinstance(expr, Tuple):
-            res = self.visit_tuple(expr)
-        elif isinstance(expr, TupleGetItem):
-            res = self.visit_tuple_getitem(expr)
-        elif isinstance(expr, Constant):
-            res = self.visit_constant(expr)
-        elif isinstance(expr, Op):
-            res = self.visit_op(expr)
-        elif isinstance(expr, RefCreate):
-            res = self.visit_ref_create(expr)
-        elif isinstance(expr, RefRead):
-            res = self.visit_ref_read(expr)
-        elif isinstance(expr, RefWrite):
-            res = self.visit_ref_write(expr)
-        elif isinstance(expr, Constructor):
-            res = self.visit_constructor(expr)
-        elif isinstance(expr, Match):
-            res = self.visit_match(expr)
-        else:
-            raise Exception(f"warning unhandled case: {type(expr)}")
+    # def visit(self, expr):
+    #     """Apply the visitor to an expression."""
+    #     if isinstance(expr, Function):
+    #         res = self.visit_function(expr)
+    #     elif isinstance(expr, Call):
+    #         res = self.visit_call(expr)
+    #     elif isinstance(expr, Let):
+    #         res = self.visit_let(expr)
+    #     elif isinstance(expr, Var):
+    #         res = self.visit_var(expr)
+    #     elif isinstance(expr, GlobalVar):
+    #         res = self.visit_global_var(expr)
+    #     elif isinstance(expr, If):
+    #         res = self.visit_if(expr)
+    #     elif isinstance(expr, Tuple):
+    #         res = self.visit_tuple(expr)
+    #     elif isinstance(expr, TupleGetItem):
+    #         res = self.visit_tuple_getitem(expr)
+    #     elif isinstance(expr, Constant):
+    #         res = self.visit_constant(expr)
+    #     elif isinstance(expr, Op):
+    #         res = self.visit_op(expr)
+    #     elif isinstance(expr, RefCreate):
+    #         res = self.visit_ref_create(expr)
+    #     elif isinstance(expr, RefRead):
+    #         res = self.visit_ref_read(expr)
+    #     elif isinstance(expr, RefWrite):
+    #         res = self.visit_ref_write(expr)
+    #     elif isinstance(expr, Constructor):
+    #         res = self.visit_constructor(expr)
+    #     elif isinstance(expr, Match):
+    #         res = self.visit_match(expr)
+    #     else:
+    #         raise Exception(f"warning unhandled case: {type(expr)}")
 
-        return res
+    #     return res
 
     def visit_call(self, call):
-      if call.op == op.get("concatenate"):
+      if isinstance(call.op, tvm.ir.Op) and call.op == op.get("concatenate"):
+        print(f"concat operation is detected at node {getNodeID(call)}. start collecting producer of concat node")
         # make dict entry if not exists
         if call not in Results:
           Results[call] = []
@@ -1100,7 +1112,9 @@ def getSplitConcatDepsRegionsImpl(func):
       super().visit_tuple_getitem(t)
       InputNodes.append(t)
 
+  print("start split detection")
   _SplitVisitor().visit(func)
+  print("start concat detection")
   _ConcatVisitor().visit(func)
   Regions = []
   for key, value in Results.items():
@@ -1110,6 +1124,8 @@ def getSplitConcatDepsRegionsImpl(func):
         if v not in Region:
           Region.append(v)
     Regions.append(Region)
+  print(f"Split-Concate dependent regions:")
+  print(Regions)
 
   # merge region if intersection is not empty
   Changed=True
@@ -1560,26 +1576,30 @@ class AnnotGenerator:
                     if in_region in recur_regions:
                       if in_region in candidate_regions:
                         candidate_regions.remove(in_region)
+                        print(f"cycle detected. current node {node}. cycle region : {in_region}")
 
                 # Capacity check
                 deletes = []
                 for cand in candidate_regions:
                   if self.getRegionSize(cand) + self.getCost(node) > ImcflowDeviceConfig.IMCE_NUM:
                     deletes.append(cand)
+                    print(f"candidate size : {self.getRegionSize(cand)}. current node size : {self.getCost(node)}. too big node!!")
                 for d in deletes:
                   if d in candidate_regions:
                     candidate_regions.remove(d)
 
-                # Selection policy: if multiple distinct input regions, create a new region
+                # Selection policy: if multiple distinct input regions, just use first one
                 uniq = list({id(r): r for r in candidate_regions}.values())
                 if len(uniq) == 1:
                   Region = uniq[0]
                   self.addToRegion(Region, node)
                 elif len(uniq) > 1:
-                  Region = self.createRegion()
+                  Region = uniq[0]
+                  # Region = self.createRegion()
                   self.addToRegion(Region, node)
                 else:
                   # No input region (inputs likely Var/Const). Prefer previous node's region if available.
+                  #TODO: just traverse call node..(?) no need to consider Var and Const node..
                   Region = None
                   if self.last_assigned_region is not None:
                     # Capacity gate when attaching to previous region
@@ -1884,7 +1904,7 @@ def constructTensorEdgeList(mod):
             _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
           elif call.op == op.get("nn.relu"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          elif call.op == op.get("nn.imcflow_qconv"):
+          elif call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
             _processInputNode(call.args[2], "config", DstGraphNodeID, "config", None)
@@ -2714,7 +2734,7 @@ class PackingInserter:
             # NewBias = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
             NewScale = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
             NewBias = relay.Constant(tvm.nd.array(new_args[2].data.asnumpy().astype("int16")))
-            return imcflow_batch_norm(new_args[0], NewScale, NewBias,1).astuple()
+            return imcflow_batch_norm(new_args[0], NewScale, NewBias,1)
 
           if call.op == op.get("qnn.imcflow_min_max_quantize"):
             # convert dtype to int16
@@ -2810,6 +2830,36 @@ def constructImcflowFuncMap(mod):
       imcflow_func_map[func_name.name_hint] = visitor.first_func
 
   ImcflowDeviceConfig().ImcflowFuncMap = imcflow_func_map
+
+def annotateCustomId(mod):
+  class _Visitor(tvm.relay.ExprMutator):
+    def __init__(self):
+      super().__init__()
+      self.cnt = 0
+
+    def visit_call(self, call):
+      new_call = super().visit_call(call)
+      self.cnt = self.cnt + 1
+      origin_attrs = new_call.attrs
+      if origin_attrs:
+        new_attrs = {k:origin_attrs.get_str(k) for k in origin_attrs.keys()}
+      else:
+        new_attrs = {}
+      new_attrs["custom_id"] = self.cnt
+      return _expr.CallWithFields(new_call, new_call.op, new_call.args, tvm.ir.make_node("DictAttrs", **new_attrs), new_call.type_args, new_call.span)
+
+    def visit_function(self, fn):
+      new_fn = super().visit_function(fn)
+      self.cnt = self.cnt + 1
+      origin_attrs = new_fn.attrs
+      new_attrs = {k:origin_attrs.get_str(k) for k in origin_attrs.keys()}
+      new_attrs["custom_id"] = self.cnt
+      return FunctionWithFields(new_fn, list(new_fn.params), new_fn.body, new_fn.ret_type, new_fn.type_params, tvm.ir.make_node("DictAttrs", **new_attrs))
+
+  for func_name in mod.functions:
+    mod[func_name] = _Visitor().visit(mod[func_name])
+  
+  return mod
 
 def constructUsefulMappings(mod):
   id_dict = HashToCustomID()
@@ -3266,11 +3316,13 @@ def calculate_imcflow_func_type(func):
         
         def _get_arg_tag(self, call, arg_index):
           """Determine the tag (role) of an argument in a call"""
-          if call.op == op.get("nn.imcflow_qconv"):
+          if call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
             if arg_index == 0:
               return "input"
             elif arg_index == 1:
               return "weight"
+            elif arg_index == 3:
+              return "config"
           elif call.op == op.get("nn.bias_add"):
             if arg_index == 0:
               return "input"
@@ -3718,15 +3770,36 @@ class ImcflowLayoutLegalizer:
         new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "uint32"), call.type_args[2]]
 
         return Call(call.op, new_args, call.attrs, new_type_args, call.span)
+      elif call.op == op.get("nn.imcflow_qdwconv"):
+        OriginWeight = call.args[1].data.asnumpy()
+        out_channels, in_channels, kh, kw = OriginWeight.shape
+        new_weight = np.zeros((out_channels//16, 8, 8), dtype=np.uint32)
 
-      return call
+        for c in range(out_channels):
+          for kh_ in range(kh):
+            for kw_ in range(kw):
+              for wb in range(8):
+                oc_block = c // 16
+                oc_offset = c % 16
+                khkw_index = kh_ * kw + kw_
+                origin_val = OriginWeight[c, 0, kh_, kw_]
+                bit_val = (origin_val >> wb) & 0x1
+                word_idx = (oc_offset*16 + khkw_index) // 32
+                word_offset = (oc_offset*16 + khkw_index) % 32
+                new_weight[oc_block, wb, word_idx] |= (bit_val << word_offset)
+        NewWeight = relay.Constant(tvm.nd.array(new_weight))
+        new_args = [call.args[0], NewWeight, call.args[2]]
+        new_type_args = [call.type_args[0], relay.TensorType(NewWeight.data.shape, "uint32"), call.type_args[2]]
+        return Call(call.op, new_args, call.attrs, new_type_args, call.span)
+      else:
+        return call
 
     class _BoundaryMarker(relay.ExprMutator):
       def visit_call(self, call):
         new_call = super().visit_call(call)
         
         # Mark imcflow_qconv calls as both input and output nodes
-        if isinstance(call.op, tvm.ir.Op) and call.op == op.get("nn.imcflow_qconv"):
+        if isinstance(call.op, tvm.ir.Op) and (call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv")):
           # new_call = modify_call_node_attrs(new_call, const_packed_node=True, in_node=True, out_node=True)
           new_call = modify_call_node_attrs(new_call, const_packed_node=True)
           new_call = qconv_weight_transform(new_call)
@@ -3963,10 +4036,11 @@ class ImcflowLayoutLegalizer:
           return ("qconv_input", True)
         elif consumer_node.op == op.get("concatenate"):
           return ("vector", True)
-        elif consumer_node.op == op.get("nn.imcflow_qconv"):
+        elif consumer_node.op == op.get("nn.imcflow_qconv") or consumer_node.op == op.get("nn.imcflow_qdwconv"):
           if tag == "input":
             return ("qconv_input", True)
           elif tag == "weight":
+            #TODO: do we need it?
             return ("qconv_output", True)
         elif consumer_node.op == op.get("nn.bias_add"):
           if tag == "input":

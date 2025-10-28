@@ -115,7 +115,7 @@ class TensorID:
     key = (graph_node_id, tensor_type)
     if tensor_type not in {"data", "odata", "weight",
                            "bias", "fused_scale", "fused_bias", "lhs", "rhs",
-                           "min", "max", "threshold", "zero"}:
+                           "min", "max", "threshold", "zero","config"}:
                            print("Invalid tensor type")
     if key not in cls._instances:
       instance = super(TensorID, cls).__new__(cls)
@@ -390,7 +390,7 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 
-  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.bias_add", "imcflow.fused_batch_norm", 
+  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.bias_add", "imcflow.fused_batch_norm", 
                    "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", 
                    "qnn.imcflow_nu_quantize", "divide", "imcflow_packing", "imcflow_unpacking",
                    "nn.conv2d", "nn.batch_norm","multiply"]

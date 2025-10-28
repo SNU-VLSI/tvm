@@ -690,6 +690,10 @@ class ImcflowNUQuantizeAttrs(Attrs):
 class ImcflowQConv2DAttrs(Attrs):
     """Attributes used in quantize operators"""
 
+@tvm._ffi.register_object("relay.attrs.ImcflowQDwConv2DAttrs")
+class ImcflowQDwConv2DAttrs(Attrs):
+    """Attributes used in quantize operators"""
+
 @tvm._ffi.register_object("relay.attrs.ImcflowPackingAttrs")
 class ImcflowPackingAttrs(Attrs):
     """Attributes used in quantize operators"""

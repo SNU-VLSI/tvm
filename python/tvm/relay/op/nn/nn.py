@@ -4005,3 +4005,100 @@ def imcflow_qconv2d(
         out_layout,
         out_dtype,
     )
+
+
+def imcflow_qdwconv2d(
+    data,
+    weight,
+    config,
+    channels,
+    in_channels,
+    strides=(1, 1),
+    padding=(0, 0),
+    dilation=(1, 1),
+    groups=1,
+    kernel_size=None,
+    data_layout="NCHW",
+    kernel_layout="OIHW",
+    out_layout="",
+    out_dtype="",
+):
+    """Depthwise quantized 2D convolution for IMCFlow.
+
+    This operator is similar to imcflow_qconv2d but optimized for depthwise convolution.
+
+    Parameters
+    ----------
+    data : tvm.relay.Expr
+        The input data to the operator.
+
+    weight : tvm.relay.Expr
+        The weight expressions.
+
+    config : tvm.relay.Expr
+        The hardware configuration tensor.
+
+    channels : int
+        Number of output channels of this convolution.
+
+    in_channels : int
+        Number of input channels of this convolution.
+
+    strides : tuple of int, optional
+        The strides of convolution.
+
+    padding : tuple of int, optional
+        The padding of convolution on both sides of inputs before convolution.
+
+    dilation : tuple of int, optional
+        Specifies the dilation rate to be used for dilated convolution.
+
+    groups : int, optional
+        Number of groups for grouped convolution (should equal in_channels for depthwise).
+
+    kernel_size : tuple of int, optional
+        The spatial dimensions of the convolution kernel.
+
+    data_layout : str, optional
+        Layout of the input.
+
+    kernel_layout : str, optional
+        Layout of the weight.
+
+    out_layout : str, optional
+        Layout of the output. (default is same as data_layout)
+
+    out_dtype : str, optional
+        Specifies the output data type.
+
+    Returns
+    -------
+    result : tvm.relay.Expr
+        The computed result.
+    """
+    if isinstance(kernel_size, int):
+        kernel_size = (kernel_size, kernel_size)
+    if isinstance(strides, int):
+        strides = (strides, strides)
+    if isinstance(dilation, int):
+        dilation = (dilation, dilation)
+    # TODO enforce 4-way padding in topi/nn/conv2d after #4644 merged
+    # convert 2-way padding to 4-way padding
+    padding = get_pad_tuple2d(padding)
+    return _make.imcflow_qdwconv(
+        data,
+        weight,
+        config,
+        strides,
+        padding,
+        dilation,
+        groups,
+        channels,
+        in_channels,
+        kernel_size,
+        data_layout,
+        kernel_layout,
+        out_layout,
+        out_dtype,
+    )
+
