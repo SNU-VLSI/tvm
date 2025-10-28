@@ -148,8 +148,12 @@ def run_test_evl(test_name, mod, param_dict):
   printModel(eval_dir, eval_mod, eval_param_dict, "3_after_merge")
 
   # make split and concat super node
+  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "3.1_after_split_concat_partition")
+
   eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
+  exit(1)
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")

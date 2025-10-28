@@ -145,6 +145,8 @@ class BaseAttrsNode : public Object {
   bool in_node{false};
   /*! \brief flag indicating if this node is an output node */  
   bool out_node{false};
+  /*! \brief custom ID for this node */
+  int custom_id{-1};
   
   /*! \brief virtual destructor */
   virtual ~BaseAttrsNode() {}
@@ -152,6 +154,7 @@ class BaseAttrsNode : public Object {
   virtual void VisitAttrs(AttrVisitor* v) {
     v->Visit("in_node", &in_node);
     v->Visit("out_node", &out_node);
+    v->Visit("custom_id", &custom_id);
   }
   /*!
    * \brief Initialize the attributes by sequence of arguments
@@ -920,6 +923,10 @@ class AttrsNode : public BaseAttrsNode {
         ::tvm::detail::SetValue(&this->out_node, temp_val);
         ++vis.hit_count_;
       }
+      if (ffind("custom_id", &temp_val)) {
+        ::tvm::detail::SetValue(&this->custom_id, temp_val);
+        ++vis.hit_count_;
+      }
       
       // Then visit derived class attributes
       self()->_tvm_VisitAttrs(vis);
@@ -951,6 +958,10 @@ class AttrsNode : public BaseAttrsNode {
         ::tvm::detail::SetValue(&this->out_node, temp_val);
         ++vis.hit_count_;
       }
+      if (ffind("custom_id", &temp_val)) {
+        ::tvm::detail::SetValue(&this->custom_id, temp_val);
+        ++vis.hit_count_;
+      }
       
       // Then visit derived class attributes  
       self()->_tvm_VisitAttrs(vis);
@@ -960,7 +971,7 @@ class AttrsNode : public BaseAttrsNode {
     if (hit_count * 2 != args.size() && !allow_unknown) {
       for (int i = 0; i < args.size(); i += 2) {
         std::string key_str = args[i].operator std::string();
-        bool is_base_attr = (key_str == "in_node" || key_str == "out_node");
+        bool is_base_attr = (key_str == "in_node" || key_str == "out_node" || key_str == "custom_id");
         
         if (!is_base_attr) {
           ::tvm::detail::AttrExistVisitor visitor;
@@ -1009,6 +1020,9 @@ class AttrsNode : public BaseAttrsNode {
     visitor.fields_.push_back(make_field_info(
         "out_node", "bool, default=false", 
         "Flag indicating if this node is an output node."));
+    visitor.fields_.push_back(make_field_info(
+        "custom_id", "int, default=-1", 
+        "Custom ID for this node."));
     
     // Then add derived class fields
     self()->_tvm_VisitAttrs(visitor);

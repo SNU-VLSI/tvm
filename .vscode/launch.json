@@ -28,7 +28,7 @@
       "cwd": "/root/project/tvm/tvm_practice/test_imcflow/codegen",
       "args": [
         "-k",
-        "resnet",
+        "mobilenet",
         "-s"
       ]
     },

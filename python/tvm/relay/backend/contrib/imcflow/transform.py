@@ -5,6 +5,7 @@ from tvm.relay.ty import TupleType, TensorType
 from tvm.relay.expr_functor import ExprMutator, ExprVisitor
 from tvm.relay.function import Function, FunctionWithFields
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
+from tvm.relay import expr as _expr
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion
@@ -969,46 +970,50 @@ def getSplitConcatDepsRegionsImpl(func):
   InputNodes = []
   class _SplitVisitor(tvm.relay.ExprVisitor):
 
-    def visit(self, expr):
-        """Apply the visitor to an expression."""
-        if isinstance(expr, Function):
-            res = self.visit_function(expr)
-        elif isinstance(expr, Call):
-            res = self.visit_call(expr)
-        elif isinstance(expr, Let):
-            res = self.visit_let(expr)
-        elif isinstance(expr, Var):
-            res = self.visit_var(expr)
-        elif isinstance(expr, GlobalVar):
-            res = self.visit_global_var(expr)
-        elif isinstance(expr, If):
-            res = self.visit_if(expr)
-        elif isinstance(expr, Tuple):
-            res = self.visit_tuple(expr)
-        elif isinstance(expr, TupleGetItem):
-            res = self.visit_tuple_getitem(expr)
-        elif isinstance(expr, Constant):
-            res = self.visit_constant(expr)
-        elif isinstance(expr, Op):
-            res = self.visit_op(expr)
-        elif isinstance(expr, RefCreate):
-            res = self.visit_ref_create(expr)
-        elif isinstance(expr, RefRead):
-            res = self.visit_ref_read(expr)
-        elif isinstance(expr, RefWrite):
-            res = self.visit_ref_write(expr)
-        elif isinstance(expr, Constructor):
-            res = self.visit_constructor(expr)
-        elif isinstance(expr, Match):
-            res = self.visit_match(expr)
-        else:
-            raise Exception(f"warning unhandled case: {type(expr)}")
+    # def visit(self, expr):
+    #     """Apply the visitor to an expression."""
+    #     if isinstance(expr, Function):
+    #         res = self.visit_function(expr)
+    #     elif isinstance(expr, Call):
+    #         res = self.visit_call(expr)
+    #     elif isinstance(expr, Let):
+    #         res = self.visit_let(expr)
+    #     elif isinstance(expr, Var):
+    #         res = self.visit_var(expr)
+    #     elif isinstance(expr, GlobalVar):
+    #         res = self.visit_global_var(expr)
+    #     elif isinstance(expr, If):
+    #         res = self.visit_if(expr)
+    #     elif isinstance(expr, Tuple):
+    #         res = self.visit_tuple(expr)
+    #     elif isinstance(expr, TupleGetItem):
+    #         res = self.visit_tuple_getitem(expr)
+    #     elif isinstance(expr, Constant):
+    #         res = self.visit_constant(expr)
+    #     elif isinstance(expr, Op):
+    #         res = self.visit_op(expr)
+    #     elif isinstance(expr, RefCreate):
+    #         res = self.visit_ref_create(expr)
+    #     elif isinstance(expr, RefRead):
+    #         res = self.visit_ref_read(expr)
+    #     elif isinstance(expr, RefWrite):
+    #         res = self.visit_ref_write(expr)
+    #     elif isinstance(expr, Constructor):
+    #         res = self.visit_constructor(expr)
+    #     elif isinstance(expr, Match):
+    #         res = self.visit_match(expr)
+    #     else:
+    #         raise Exception(f"warning unhandled case: {type(expr)}")
 
-        return res
+    #     return res
 
     def visit_call(self, call):
-      if call.op == op.get("split"):
-        print("split operation is detected. start collecting consumer of split node")
+      if isinstance(call.op, tvm.ir.Op):
+        print(f"visiting call node {call.attrs['custom_id']} with op {call.op.name}")
+      elif isinstance(call.op, relay.Function) and "Composite" in call.op.attrs:
+        print(f"visiting call node {call.attrs['custom_id']} with composite function {call.op.attrs['Composite']}")
+      if isinstance(call.op, tvm.ir.Op) and call.op == op.get("split"):
+        print(f"split operation is detected. start collecting consumer of split node")
         # make dict entry if not exists
         if call not in Results:
           Results[call] = []
@@ -1037,46 +1042,46 @@ def getSplitConcatDepsRegionsImpl(func):
 
   class _ConcatVisitor(tvm.relay.ExprVisitor):
 
-    def visit(self, expr):
-        """Apply the visitor to an expression."""
-        if isinstance(expr, Function):
-            res = self.visit_function(expr)
-        elif isinstance(expr, Call):
-            res = self.visit_call(expr)
-        elif isinstance(expr, Let):
-            res = self.visit_let(expr)
-        elif isinstance(expr, Var):
-            res = self.visit_var(expr)
-        elif isinstance(expr, GlobalVar):
-            res = self.visit_global_var(expr)
-        elif isinstance(expr, If):
-            res = self.visit_if(expr)
-        elif isinstance(expr, Tuple):
-            res = self.visit_tuple(expr)
-        elif isinstance(expr, TupleGetItem):
-            res = self.visit_tuple_getitem(expr)
-        elif isinstance(expr, Constant):
-            res = self.visit_constant(expr)
-        elif isinstance(expr, Op):
-            res = self.visit_op(expr)
-        elif isinstance(expr, RefCreate):
-            res = self.visit_ref_create(expr)
-        elif isinstance(expr, RefRead):
-            res = self.visit_ref_read(expr)
-        elif isinstance(expr, RefWrite):
-            res = self.visit_ref_write(expr)
-        elif isinstance(expr, Constructor):
-            res = self.visit_constructor(expr)
-        elif isinstance(expr, Match):
-            res = self.visit_match(expr)
-        else:
-            raise Exception(f"warning unhandled case: {type(expr)}")
+    # def visit(self, expr):
+    #     """Apply the visitor to an expression."""
+    #     if isinstance(expr, Function):
+    #         res = self.visit_function(expr)
+    #     elif isinstance(expr, Call):
+    #         res = self.visit_call(expr)
+    #     elif isinstance(expr, Let):
+    #         res = self.visit_let(expr)
+    #     elif isinstance(expr, Var):
+    #         res = self.visit_var(expr)
+    #     elif isinstance(expr, GlobalVar):
+    #         res = self.visit_global_var(expr)
+    #     elif isinstance(expr, If):
+    #         res = self.visit_if(expr)
+    #     elif isinstance(expr, Tuple):
+    #         res = self.visit_tuple(expr)
+    #     elif isinstance(expr, TupleGetItem):
+    #         res = self.visit_tuple_getitem(expr)
+    #     elif isinstance(expr, Constant):
+    #         res = self.visit_constant(expr)
+    #     elif isinstance(expr, Op):
+    #         res = self.visit_op(expr)
+    #     elif isinstance(expr, RefCreate):
+    #         res = self.visit_ref_create(expr)
+    #     elif isinstance(expr, RefRead):
+    #         res = self.visit_ref_read(expr)
+    #     elif isinstance(expr, RefWrite):
+    #         res = self.visit_ref_write(expr)
+    #     elif isinstance(expr, Constructor):
+    #         res = self.visit_constructor(expr)
+    #     elif isinstance(expr, Match):
+    #         res = self.visit_match(expr)
+    #     else:
+    #         raise Exception(f"warning unhandled case: {type(expr)}")
 
-        return res
+    #     return res
 
     def visit_call(self, call):
-      if call.op == op.get("concatenate"):
-        print("concat operation is detected. start collecting producer of concat node")
+      if isinstance(call.op, tvm.ir.Op) and call.op == op.get("concatenate"):
+        print(f"concat operation is detected at node {getNodeID(call)}. start collecting producer of concat node")
         # make dict entry if not exists
         if call not in Results:
           Results[call] = []
@@ -1107,7 +1112,9 @@ def getSplitConcatDepsRegionsImpl(func):
       super().visit_tuple_getitem(t)
       InputNodes.append(t)
 
+  print("start split detection")
   _SplitVisitor().visit(func)
+  print("start concat detection")
   _ConcatVisitor().visit(func)
   Regions = []
   for key, value in Results.items():
@@ -2823,6 +2830,36 @@ def constructImcflowFuncMap(mod):
       imcflow_func_map[func_name.name_hint] = visitor.first_func
 
   ImcflowDeviceConfig().ImcflowFuncMap = imcflow_func_map
+
+def annotateCustomId(mod):
+  class _Visitor(tvm.relay.ExprMutator):
+    def __init__(self):
+      super().__init__()
+      self.cnt = 0
+
+    def visit_call(self, call):
+      new_call = super().visit_call(call)
+      self.cnt = self.cnt + 1
+      origin_attrs = new_call.attrs
+      if origin_attrs:
+        new_attrs = {k:origin_attrs.get_str(k) for k in origin_attrs.keys()}
+      else:
+        new_attrs = {}
+      new_attrs["custom_id"] = self.cnt
+      return _expr.CallWithFields(new_call, new_call.op, new_call.args, tvm.ir.make_node("DictAttrs", **new_attrs), new_call.type_args, new_call.span)
+
+    def visit_function(self, fn):
+      new_fn = super().visit_function(fn)
+      self.cnt = self.cnt + 1
+      origin_attrs = new_fn.attrs
+      new_attrs = {k:origin_attrs.get_str(k) for k in origin_attrs.keys()}
+      new_attrs["custom_id"] = self.cnt
+      return FunctionWithFields(new_fn, list(new_fn.params), new_fn.body, new_fn.ret_type, new_fn.type_params, tvm.ir.make_node("DictAttrs", **new_attrs))
+
+  for func_name in mod.functions:
+    mod[func_name] = _Visitor().visit(mod[func_name])
+  
+  return mod
 
 def constructUsefulMappings(mod):
   id_dict = HashToCustomID()
