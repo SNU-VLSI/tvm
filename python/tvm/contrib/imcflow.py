@@ -208,7 +208,14 @@ class MemoryRegion:
     self.weight_allocated = defaultdict(bool)  # {function_name : weight_allocated}
 
   def __getitem__(self, id: Union[str, TensorID]):
-    return self.blocks.get(id, None)
+    """
+    WARNING!!!!! Note that the id based retrieval have some caveats:
+    It searches for the whole functions in the region and returns the first match
+    """
+    for blocks in self.blocks.values():
+      block = blocks.get(id, None)
+      if block is not None:
+        return block
 
   def allocate(self, function_name, block: DataBlock):
     """Allocate a data block in the region sequentially, assuming they are not delocated"""
@@ -247,7 +254,7 @@ class MemoryRegion:
       self.weight_allocated[function_name] = True
       # Align weight_offset to 32B boundary
       self.weight_offset[function_name] = math.ceil((self.base_address) / 32) * 32 - self.base_address
-    
+
     # Align current weight_offset to 32B boundary
     aligned_offset = self.weight_offset[function_name]
     try:
@@ -256,7 +263,7 @@ class MemoryRegion:
       print("overlap Data block size exceeds region size")
       print(self)
       exit(0)
-    
+
     block.set_offset(aligned_offset)
     block.set_base_address(aligned_offset + self.base_address)
     self.blocks[function_name][block.id] = block
@@ -269,6 +276,8 @@ class MemoryRegion:
       return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
     blocks_str=""
     for function_name, blocks in self.blocks.items():
+      if hasattr(function_name, 'attrs') and hasattr(function_name.attrs, 'global_symbol'):
+        function_name = function_name.attrs.global_symbol
       blocks_str += f"\n{function_name}:\n"
       blocks_str += f"----------------------------------------------------------\n"
       blocks_str += ",\n      ".join(str(block) for block in blocks.values())
@@ -390,8 +399,8 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
 
-  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.bias_add", "imcflow.fused_batch_norm", 
-                   "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize", 
+  SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.bias_add", "imcflow.fused_batch_norm",
+                   "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize",
                    "qnn.imcflow_nu_quantize", "divide", "imcflow_packing", "imcflow_unpacking",
                    "nn.conv2d", "nn.batch_norm","multiply"]
   NO_COST_OPS = ["split", "concatenate", "imcflow_packing", "imcflow_unpacking"]
