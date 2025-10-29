@@ -204,7 +204,8 @@ class MinMaxQuantizeHandler(OperationHandler):
   """Handles qnn.imcflow_min_max_quantize operations.
 
   Generates RecvConstBlock for min/max parameters and MinmaxQuantBlock
-  as a post-op to the current convolution.
+  as a post-op to the current convolution OR as a standalone operation
+  depending on the self.curr_composite_id
   """
 
   @property
@@ -215,8 +216,6 @@ class MinMaxQuantizeHandler(OperationHandler):
     return call.op == op.get("qnn.imcflow_min_max_quantize")
 
   def handle(self, call) -> None:
-    assert call.curr_composite_id, \
-        f"MinMaxQuantize must be inside a composite function, got gid: {call.get_gid()}"
     hid = call.get_hid()
 
     # Generate RecvConst blocks for min/max parameters
@@ -237,7 +236,11 @@ class MinMaxQuantizeHandler(OperationHandler):
     # set o_split_idx to 0 when last_tuple_idx is None
     block = MinmaxQuantBlock(
         in_edges, out_edge, call.last_tuple_idx or 0, "min_max_quantize")
-    call.curr_conv_block.add_post_op(block)
+    if call.curr_composite_id is not None:
+      call.curr_conv_block.add_post_op(block)
+    else:
+      call.codeblocks.append(hid, block, CodePhase.EXEC)
+
 
 
 @register_operation_handler
