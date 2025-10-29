@@ -35,7 +35,7 @@ def getModel_(input_shape):
         input_shape: tuple (N, C, H, W) in NCHW format
                     e.g., (1, 3, 96, 96) for person detection
     """
-    input = relay.var("input", shape=input_shape, dtype="float32")
+    input = relay.var("model_input", shape=input_shape, dtype="float32")
     N, IC, H, W = input_shape
     num_filters = 8  # alpha=0.25 per EEMBC requirement (normally 32)
     
@@ -185,12 +185,15 @@ def getModel_(input_shape):
     return out, var_info
 
 
-def getModel():
+def getModel(small_debug=False):
     """
     Create a test model for IMCFlow MobileNetV1
     Input shape: (1, 3, 96, 96) - batch=1, RGB channels=3, H=96, W=96
     """
-    input_shape = (1, 3, 96, 96)  # NCHW format
+    if small_debug:
+      input_shape = (1, 3, 32, 32)  # NCHW format
+    else:
+      input_shape = (1, 3, 96, 96)  # NCHW format
     out, var_dict = getModel_(input_shape)
     params_dict={}
     for name in sorted(var_dict.keys()):

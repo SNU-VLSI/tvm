@@ -34,7 +34,7 @@ def getModel_(input_shape):
     
     Dense layers are represented as 1x1 convolutions by reshaping input to (N, C, 1, 1)
     """
-    input = relay.var("input", shape=input_shape, dtype="float32")
+    input = relay.var("model_input", shape=input_shape, dtype="float32")
     N, inputDim = input_shape
     
     # First Dense layer (CPU) - keep as float32
@@ -188,11 +188,14 @@ def getModel_(input_shape):
     return out, var_info
 
 
-def getModel():
+def getModel(small_debug=False):
     """
     Create a test model for IMCFlow deep autoencoder
     """
-    input_shape = (1, 640)  # batch_size=1, inputDim=640
+    if small_debug:
+      input_shape = (1, 640)  # batch_size=1, inputDim=640
+    else:
+      input_shape = (1, 640)  # batch_size=1, inputDim=640
     out, var_dict = getModel_(input_shape)
     params_dict={}
     for name in sorted(var_dict.keys()):
