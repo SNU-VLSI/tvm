@@ -168,6 +168,16 @@ class TensorEdge:
     return self.__str__()
 
 
+class FunctionInfo:
+  """Information about an IMCFlow function"""
+  def __init__(self, func_node, tiling_factor=1):
+    self.func_node = func_node          # relay.Function object
+    self.tiling_factor = tiling_factor  # int: tiling factor for memory optimization
+
+  def __repr__(self):
+    return f"FunctionInfo(tiling_factor={self.tiling_factor})"
+
+
 class DataBlock:
   def __init__(self, id: Union[str, TensorID], size: int):
     self.id = id
@@ -451,7 +461,7 @@ class ImcflowDeviceConfig:
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
     self.DataBlocks = {}
-    self.ImcflowFuncMap = {}
+    self.ImcflowFuncMap = {}  # {func_name: FunctionInfo}
 
   def clear(self):
     self._initialize()

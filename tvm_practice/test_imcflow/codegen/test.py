@@ -286,23 +286,23 @@ def test_model_1():
   run_test_evl("model_1", mod, param_dict)
 
 def test_resnet8():
-  mod, param_dict = resnet8_cifar.getModel()
+  mod, param_dict = resnet8_cifar.getModel(False)
   run_test_evl("resnet8", mod, param_dict)
 
 def test_resnet8_from_pretrained():
-  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
+  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(False)
   run_test_evl("resnet8", mod, param_dict)
 
 def test_mobilenet_imcflow():
-  mod, param_dict = mobilenet_imcflow.getModel(True)
+  mod, param_dict = mobilenet_imcflow.getModel(False)
   run_test_evl("mobilenet_imcflow", mod, param_dict)
 
 def test_deep_autoencoder_imcflow():
-  mod, param_dict = deep_autoencoder_imcflow.getModel(True)
+  mod, param_dict = deep_autoencoder_imcflow.getModel(False)
   run_test_evl("deep_autoencoder_imcflow", mod, param_dict)
 
 def test_ds_cnn_imcflow():
-  mod, param_dict = ds_cnn_imcflow.getModel(True)
+  mod, param_dict = ds_cnn_imcflow.getModel(False)
   run_test_evl("ds_cnn_imcflow", mod, param_dict)
 
 if __name__ == "__main__":
