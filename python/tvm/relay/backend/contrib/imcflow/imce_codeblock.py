@@ -46,6 +46,7 @@ class LoadLBBlock(ImceCodeBlock):
       code += f"__builtin_IMCE_LOAD_LB({self.fifo_id});"
     return SimpleFor(self.count, code, "load_block")
 
+
 class RecvConstBlock(ImceCodeBlock):
   """ Code block for receiving constant from given fifo id into a variable """
   # FIXME: Add support for initializing QREGs to zero
@@ -61,8 +62,10 @@ class RecvConstBlock(ImceCodeBlock):
     assert te_info, "Tensor edge info not found"
 
     size = DevConfig().MemLayout.get_data_block_by_id(self.in_edge.src_id).size
+    if (size % 32 != 0):
+      pass
     assert size % 32 == 0, "Size must be a multiple of 32"
-    recv_count = int(size / 32) # recv operates on 32-byte word
+    recv_count = int(size / 32)  # recv operates on 32-byte word
 
     for i in range(recv_count):
       var = UniqueVar((self.in_edge, i))
@@ -84,17 +87,17 @@ class RecvConstBlock(ImceCodeBlock):
 class VecBlock(ImceCodeBlock):
   """
   VecBlock is base class for implementing R,I type vector operations.
+  Only generates computation. RECV/SEND handled by wrapper or ConvBlock.
   """
   num_in_edges = 2
 
-  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
-    """ Code block for adding two tensors """
+  def __init__(self, in_edges: List[TensorEdge], annotation: str = ""):
+    """ Code block for vector operations """
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
     self.op_name = self._op_name()
     self.imm_value = self._get_imm_value()
     self.in_edges = in_edges
-    self.out_edge = out_edge
     self.post_op = None
 
   @abstractmethod
@@ -106,98 +109,97 @@ class VecBlock(ImceCodeBlock):
     pass
 
   def _content(self) -> CodeBlock:
-
+    """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
-    # a hack to get the tensor edge info for each input edge
-    te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") for edge in self.in_edges]
-    te_out_info = DevConfig().get_tensor_edge_info_with_id_dir(self.out_edge.src_id, "out")
-
     num_blocks = 4 if self.post_op else 1
+
     for i in range(num_blocks):
       # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
       var_ins = [UniqueVar((edge, i)) for edge in self.in_edges]
-      var_o = UniqueVar((self.out_edge, i))
-
-      # te info is None for composite internal tensors
-      for var_i, te_info in zip(var_ins, te_in_infos):
-        if te_info and not var_i.static:
-          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
-
+      var_o = UniqueVar((self, i))
       var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
-      code += f"{var_o} = __builtin_IMCE_{self.op_name}({var_in_str}, {self.imm_value});" # e.g. __builtin_IMCE_ADD(a, b, 15);
+      # e.g. __builtin_IMCE_ADD(a, b, 15);
+      code += f"{var_o} = __builtin_IMCE_{self.op_name}({var_in_str}, {self.imm_value});"
 
-      if te_out_info:
-        code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
+    return code
 
-    if self.post_op:
-      return code
-    else:
-      # FIXME: this can be problematic for >1 input edges
-      count = te_in_infos[0].data_block.size // 32
-      return SimpleFor(count, code, self.__class__.__name__)
 
 class AddBlock(VecBlock):
   def _get_imm_value(self) -> int:
-    return 15 # src_mask
+    return 15  # src_mask
 
   def _op_name(self) -> str:
     return "ADD"
 
+
 class DivBlock(VecBlock):
   def _get_imm_value(self) -> int:
-    return 15 # src_mask
+    return 15  # src_mask
 
   def _op_name(self) -> str:
     return "DIV"
 
+
 class MultlBlock(VecBlock):
   def _get_imm_value(self) -> int:
-    return 15 # src_mask
+    return 15  # src_mask
 
   def _op_name(self) -> str:
     return "MULTL"
 
+
 class MulthBlock(VecBlock):
   def _get_imm_value(self) -> int:
-    return 15 # src_mask
+    return 15  # src_mask
 
   def _op_name(self) -> str:
     return "MULTH"
 
+
 class ReLUBlock(VecBlock):
   num_in_edges = 1
+
   def _get_imm_value(self) -> int:
-    return 0 # immediate value for MAXI
+    return 0  # immediate value for MAXI
 
   def _op_name(self) -> str:
     return "MAXI"
 
+
 class MinmaxQuantBlock(ImceCodeBlock):
+  """
+  MinmaxQuantBlock for min/max quantization operations.
+  Only generates computation. RECV/SEND handled by wrapper or ConvBlock.
+  """
   num_in_edges = 3
 
-  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, o_split_idx: int, annotation: str = ""):
+  def __init__(self, in_edges: List[TensorEdge], o_split_idx: int, annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
     for edge in in_edges:
       if edge.dst_id.tensor_type == "data":
         self.in_edge = edge
-    self.out_edge = out_edge
+    self.in_edges = in_edges
     self.o_split_idx = o_split_idx
+    self.post_op = None
 
   def _content(self) -> CodeBlock:
-    num_blocks = 4
+    """Generate only computation, no RECV/SEND."""
+    num_blocks = 4 if self.post_op else 1
     src_mask = 15
 
     code = TextBlock("")
 
     for i in range(num_blocks):
       var_i = UniqueVar((self.in_edge, i))
-      var_o = UniqueVar((self.out_edge, i))
 
       qreg_start_idx = i + 4 * self.o_split_idx
       # min max quantization does not require $rs2
       code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
+
+      # Get QREG result for this block
+      var_o = UniqueVar((self, i))
       code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
 
     return code
@@ -206,13 +208,17 @@ class MinmaxQuantBlock(ImceCodeBlock):
 class ConcatBlock(ImceCodeBlock):
   min_in_edges = 2
 
-  """ Code block for concatenating multiple tensors """
-  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
+  """
+  Code block for concatenating multiple tensors
+  FIXME: needs to look upon, since concat can happen not only in bitplanes...
+  """
+
+  def __init__(self, in_edges: List[TensorEdge], annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(annotation)
-    assert len(in_edges) >= self.min_in_edges, "At least two input edges are required"
+    assert len(
+        in_edges) >= self.min_in_edges, "At least two input edges are required"
     self.in_edges = in_edges
-    self.out_edge = out_edge
 
   def _content(self) -> CodeBlock:
     num_bitplanes = 4
@@ -220,12 +226,13 @@ class ConcatBlock(ImceCodeBlock):
 
     code = TextBlock("")
 
-    external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
+    external_in_edges = [
+        e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
     internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
 
     for i in range(num_bitplanes):
       var_i = UniqueVar((internal_in_edge, i))
-      var_o = UniqueVar((self.out_edge, i))
+      var_o = UniqueVar((self, i))
       for ext_edge in external_in_edges:
         var_e = UniqueVar((ext_edge, i))
         fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
@@ -240,14 +247,18 @@ class SplitBlock(ImceCodeBlock):
   num_in_edges = 1
 
   """ Code block for splitting a tensor into multiple tensors """
+
   def __init__(self, in_edge: TensorEdge, out_edges: List[TensorEdge], annotation: str = ""):
     super().__init__(annotation)
     self.in_edge = in_edge
-    first_policies = [DevConfig().get_tensor_edge_info(out_edge).policy_info[0] for out_edge in out_edges]
-    fifo_ids = [DevConfig().get_tensor_edge_info(out_edge).fifo_id for out_edge in out_edges]
-    assert all(policy == first_policies[0] for policy in first_policies), "All output edges must have the same first policy info"
-    assert all(fid == fifo_ids[0] for fid in fifo_ids), "All output edges must have the same fifo id"
-    self.out_edge = out_edges[0]
+    first_policies = [DevConfig().get_tensor_edge_info(
+        out_edge).policy_info[0] for out_edge in out_edges]
+    fifo_ids = [DevConfig().get_tensor_edge_info(
+        out_edge).fifo_id for out_edge in out_edges]
+    assert all(policy == first_policies[0]
+               for policy in first_policies), "All output edges must have the same first policy info"
+    assert all(fid == fifo_ids[0]
+               for fid in fifo_ids), "All output edges must have the same fifo id"
 
   def _content(self) -> CodeBlock:
     return TextBlock("")
@@ -257,14 +268,13 @@ class ConvBlock(ImceCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
   num_in_edges = 3
 
-  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, shapes: dict, conv_attrs: Conv2DAttrs,
+  def __init__(self, in_edges: List[TensorEdge], shapes: dict, conv_attrs: Conv2DAttrs,
                annotation: str = ""):
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
     for edge in in_edges:
       if edge.dst_id.tensor_type == "data":
         self.in_edge = edge
-    self.out_edge = out_edge
     self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
@@ -275,12 +285,13 @@ class ConvBlock(ImceCodeBlock):
     self.post_ops.append(code)
 
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
-    num_blocks = 4
+    num_blocks = 4  # FIXED in ConvBlock
     fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(
         self.in_edge.dst_id, "in").fifo_id
     if fifo_id_i != 0:
       logging.warning(f"conv block data fifo_id_i is not 0, but {fifo_id_i}")
 
+    """
     # hack to get the last tensor edge
     last_out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
     out_edge_info = DevConfig().get_tensor_edge_info(last_out_edge)
@@ -292,13 +303,14 @@ class ConvBlock(ImceCodeBlock):
       logging.warning(f"Output edge info not found for {last_out_edge}")
       fifo_id_o = -1
       policy_addr_o = -1
+    """
 
     code = TextBlock("")
     code += LoadLBBlock(recv_count, num_blocks, fifo_id_i)
     code += "__builtin_IMCE_STEP();\n"
 
     for i in range(num_blocks):
-      var_creg = UniqueVar((self.out_edge, i))
+      var_creg = UniqueVar((self, i))
       code += f"{var_creg} = __builtin_IMCE_GET_CREG((short){i});"
 
     for op in self.post_ops:
@@ -307,8 +319,8 @@ class ConvBlock(ImceCodeBlock):
 
     code += "\n"
     for i in range(num_blocks):
-      var_o = UniqueVar((last_out_edge, i))
-      code += f"__builtin_IMCE_SEND({policy_addr_o}, {var_o}, {fifo_id_o}, 0);"
+      var_o = UniqueVar(("DEADBEEF", i)) # FIXME: we need the last_post_op's out_edge here (maybe deal with this in the wrapper?)
+      code += f"__builtin_IMCE_SEND({-1}, {var_o}, {-1}, 0);"
 
     code += "\n"
 
@@ -332,26 +344,26 @@ class ConvBlock(ImceCodeBlock):
 
     return code
 
+
 class BatchNormBlock(ImceCodeBlock):
   """
-  BatchNormBlock is base class for implementing R,I type vector operations.
+  BatchNormBlock for batch normalization operations.
+  Only generates computation. RECV/SEND handled by wrapper or ConvBlock.
   """
   num_in_edges = 3
 
-  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
-    """ Code block for adding two tensors """
+  def __init__(self, in_edges: List[TensorEdge], annotation: str = ""):
+    """ Code block for batch normalization """
     super().__init__(annotation)
     assert len(in_edges) == self.num_in_edges
     self.in_edges = in_edges
-    self.out_edge = out_edge
+    self.post_op = None
 
   def _content(self) -> CodeBlock:
-
+    """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
-    # a hack to get the tensor edge info for each input edge
-    te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") for edge in self.in_edges]
-    te_out_info = DevConfig().get_tensor_edge_info_with_id_dir(self.out_edge.src_id, "out")
 
+    # Identify edges by tensor type
     for edge in self.in_edges:
       if edge.dst_id.tensor_type == "fused_scale":
         scale_edge = edge
@@ -360,31 +372,90 @@ class BatchNormBlock(ImceCodeBlock):
       elif edge.dst_id.tensor_type == "data":
         data_edge = edge
 
-    num_blocks = 4
+    num_blocks = 4 if self.post_op else 1
 
     for i in range(num_blocks):
-      # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
-      var_ins = [UniqueVar((edge, i)) for edge in self.in_edges]
-
       var_data = UniqueVar((data_edge, i))
       var_scale = UniqueVar((scale_edge, i))
       var_bias = UniqueVar((bias_edge, i))
+      var_o = UniqueVar((self, i))
 
-      var_o = UniqueVar((self.out_edge, i))
-
-      # te info is None for composite internal tensors
-      for var_i, te_info in zip(var_ins, te_in_infos):
-        if te_info and not var_i.static:
-          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
-
-      code += f"{var_o} = __builtin_IMCE_MULTL({var_data}, {var_scale}, 15);" # e.g. __builtin_IMCE_MULTL(data, scale, 15);
-      code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);" # e.g. __builtin_IMCE_ADD(out, bias, 15);
-
-      # TODO: SEND to output fifo may not be needed here, depending on the usage of BatchNorm
-      if te_out_info:
-        code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
+      # e.g. __builtin_IMCE_MULTL(data, scale, 15);
+      code += f"{var_o} = __builtin_IMCE_MULTL({var_data}, {var_scale}, 15);"
+      # e.g. __builtin_IMCE_ADD(out, bias, 15);
+      code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);"
 
     return code
+
+
+class RecvSendWrapper(ImceCodeBlock):
+  """
+  Wrapper that adds RECV and SEND operations around a computation block.
+  Used for standalone (non-composite) operations that need data transfer.
+  Supports multiple input and output edges.
+  """
+
+  def __init__(self, inner_block: ImceCodeBlock, annotation: str = ""):
+    """Wrap a computation block with RECV/SEND operations.
+
+    Args:
+        inner_block: The computation block to wrap (VecBlock, BatchNormBlock, etc.)
+        annotation: Optional annotation string
+    """
+    super().__init__(annotation)
+    self.inner_block = inner_block
+    self.in_edges = inner_block.in_edges
+    # Support both single output edge and multiple output edges
+    if hasattr(inner_block, 'out_edges'):
+      self.out_edges = inner_block.out_edges
+    elif hasattr(inner_block, 'out_edge'):
+      self.out_edges = [inner_block.out_edge]
+    else:
+      self.out_edges = []
+
+  def _content(self) -> CodeBlock:
+    """Generate RECV, computation, and SEND for standalone operations."""
+    # Constant tags that should not generate RECV/SEND
+    const_tags = ["weight", "bias", "fused_scale", "fused_bias",
+                  "min", "max", "threshold", "scale", "config"]
+
+    code = TextBlock("")
+
+    # Get tensor edge info for inputs and outputs
+    te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
+        edge.dst_id, "in") for edge in self.in_edges]
+    te_out_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
+        edge.src_id, "out") for edge in self.out_edges]
+
+    # Determine number of bitplanes to process based on inner block's post_op flag
+    # When post_op is True, blocks process 4 bitplanes at once
+    # When post_op is False (standalone), blocks process 1 bitplane at a time
+    # Note: inner_block should have post_op=False since this wrapper is only for standalone ops
+    num_blocks = 4 if (hasattr(self.inner_block, 'post_op')
+                       and self.inner_block.post_op) else 1
+
+    # Generate RECV for non-constant input edges
+    for i in range(num_blocks):
+      for edge, te_info in zip(self.in_edges, te_in_infos):
+        var_i = UniqueVar((edge, i))
+        if te_info and not var_i.static and edge.dst_id.tensor_type not in const_tags:
+          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
+
+    # Add the inner block's computation
+    code += copy(self.inner_block)
+
+    # Generate SEND for all output edges
+    for i in range(num_blocks):
+      for te_out_info in te_out_infos:
+        var_o = UniqueVar((self.inner_block, i))
+        if te_out_info:
+          code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
+
+    # Wrap in a loop based on data size
+    # FIXME: this can be problematic for >1 input edges
+    count = te_in_infos[0].data_block.size // 32
+    return SimpleFor(count, code, f"{self.inner_block.__class__.__name__}_with_IO")
+
 
 class ImceCodeBlockManager(NodeCodeBlockManager):
   """A class that manages and generates code blocks for imces."""
@@ -403,11 +474,11 @@ class ImceCodeBlockManager(NodeCodeBlockManager):
 
   def start_block(self) -> str:
     code = (
-      "#include \"../common_decl.h\"\n"
-      f"void {self.func_name}() {{\n"
-      "  int hid = __builtin_IMCE_GET_CORE_HID();\n"
-      "  int wid = __builtin_IMCE_GET_CORE_WID();\n"
-      f"{indent(UniqueVar.get_decls_str(), '  ')}\n"
+        "#include \"../common_decl.h\"\n"
+        f"void {self.func_name}() {{\n"
+        "  int hid = __builtin_IMCE_GET_CORE_HID();\n"
+        "  int wid = __builtin_IMCE_GET_CORE_WID();\n"
+        f"{indent(UniqueVar.get_decls_str(), '  ')}\n"
     )
     return code
 

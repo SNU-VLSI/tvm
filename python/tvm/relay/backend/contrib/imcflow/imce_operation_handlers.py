@@ -75,7 +75,6 @@ class ConvHandler(OperationHandler):
 
     # Get input/output edges
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
 
     # Find weight edge
     w_edge = None
@@ -102,7 +101,7 @@ class ConvHandler(OperationHandler):
 
     # write weights => on INODE
 
-    block = ConvBlock(in_edges, out_edge, shapes, call.call.attrs, "conv exec")
+    block = ConvBlock(in_edges, shapes, call.call.attrs, "conv exec")
     # FIXME: this assumes that convblock is called first... we don't want that
     call.curr_conv_block = block
     call.codeblocks.append(hid, block, CodePhase.EXEC)
@@ -126,9 +125,8 @@ class AddHandler(OperationHandler):
     assert call.curr_composite_id, "Add must be inside a composite function"
 
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
 
-    block = AddBlock(in_edges, out_edge, "add")
+    block = AddBlock(in_edges, "add")
     call.curr_conv_block.add_post_op(block)
 
 
@@ -151,8 +149,7 @@ class DivideHandler(OperationHandler):
     assert call.curr_composite_id, "Divide must be inside a composite function"
 
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
-    block = DivBlock(in_edges, out_edge, "div")
+    block = DivBlock(in_edges, "div")
     call.curr_conv_block.add_post_op(block)
 
 
@@ -175,9 +172,8 @@ class ConcatHandler(OperationHandler):
     conv_block = call.get_conv_block_by_hid(hid)
 
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
 
-    block = ConcatBlock(in_edges, out_edge, "concat")
+    block = ConcatBlock(in_edges, "concat")
     conv_block.add_post_op(block)
 
 
@@ -196,6 +192,7 @@ class SplitHandler(OperationHandler):
     return call.op == op.get("split")
 
   def handle(self, call) -> None:
+    return
     hid = call.get_hid()
     if hid.is_imce():
       conv_block = call.get_conv_block_by_hid(hid)
@@ -240,15 +237,16 @@ class MinMaxQuantizeHandler(OperationHandler):
     # call.codeblocks.append(hid, block, CodePhase.INIT)
 
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
     # set o_split_idx to 0 when last_tuple_idx is None
     block = MinmaxQuantBlock(
-        in_edges, out_edge, call.last_tuple_idx or 0, "min_max_quantize")
+        in_edges, call.last_tuple_idx or 0, "min_max_quantize")
     if call.curr_composite_id is not None:
+      block.post_op = True
       call.curr_conv_block.add_post_op(block)
     else:
-      call.codeblocks.append(hid, block, CodePhase.EXEC)
-
+      # Standalone minmax quantize needs RECV/SEND wrapper
+      wrapped_block = RecvSendWrapper(block, "min_max_quantize_standalone")
+      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
 @register_operation_handler
@@ -268,10 +266,18 @@ class ReLUHandler(OperationHandler):
   def handle(self, call) -> None:
     hid = call.get_hid()
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
-    block = ReLUBlock(in_edges, out_edge, "relu")
-    call.codeblocks.append(hid, block, CodePhase.EXEC)
-    # call.curr_conv_block.add_post_op(block)
+
+    # Create ReLU computation block
+    block = ReLUBlock(in_edges, "relu")
+
+    # Wrap with RECV/SEND if standalone, or add as post-op if in composite
+    if call.curr_composite_id is not None:
+      block.post_op = True
+      call.curr_conv_block.add_post_op(block)
+    else:
+      # Standalone ReLU needs RECV/SEND wrapper
+      wrapped_block = RecvSendWrapper(block, "relu_standalone")
+      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
 @register_operation_handler
@@ -301,8 +307,7 @@ class BiasAddHandler(OperationHandler):
     call.codeblocks.append(hid, block, CodePhase.INIT)
 
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
-    block = AddBlock(in_edges, out_edge, "add_bias")
+    block = AddBlock(in_edges, "add_bias")
     call.curr_conv_block.add_post_op(block)
 
 
@@ -333,9 +338,8 @@ class BatchNormHandler(OperationHandler):
     call.codeblocks.append(hid, block, CodePhase.INIT)
 
     in_edges = call.get_input_edges()
-    out_edge = call.get_output_edge()
     # TODO: how to scale?
-    block = BatchNormBlock(in_edges, out_edge, "batch_norm")
+    block = BatchNormBlock(in_edges, "batch_norm")
     call.curr_conv_block.add_post_op(block)
 
 
