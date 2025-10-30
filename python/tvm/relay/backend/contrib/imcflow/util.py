@@ -104,6 +104,10 @@ def create_imcflow_function_pass(opt_level: int, name: str = ""):
       def transform_module(self, mod: tvm.ir.IRModule, _) -> tvm.ir.IRModule:
         imcflow_functions = filter(
             lambda x: is_imcflow_func(x[1]), mod.functions.items())
+        # Sort by global_symbol to ensure deterministic ordering
+        imcflow_functions = sorted(
+            imcflow_functions,
+            key=lambda x: x[1].attrs.get("global_symbol", str(x[0])))
         for global_var, func in imcflow_functions:
           # Extract the inner composite function from the imcflow function
           composite_func = extract_composite_function(func)
