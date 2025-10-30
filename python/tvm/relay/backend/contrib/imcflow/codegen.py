@@ -20,7 +20,7 @@ import pdb
 # Ensure external codegen registration side-effects are loaded.
 from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 
-CompositePat = wildcard().has_attr({"Composite": "imcflow.conv2d-with-postop"})(None)
+CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
@@ -151,7 +151,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     src_composite = self.stack[-1] if self.stack else None
 
     # override src tag to const tag if dst tag is const tag
-    const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale"]
+    const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
     src_tag = "odata"
     if dst_tid.tensor_type in const_tags:
       src_tag = dst_tid.tensor_type
@@ -172,6 +172,11 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     self.visit(call.op.body)
     self.composite_call = None
     self.stack.pop()
+    #if len(self.stack) == 0:
+    #  dst_tid = self.get_tensor_id(call, "data")
+    #  out_edges = [edge for edge in self.edges if edge.src_inner_gid_match(getNodeID(call.op.body))]
+    #  if len(out_edges) == 0:
+    #    self.add_edge(dst_tid, call.op.body)
     for a in call.args:
       self.visit(a)
 
@@ -226,16 +231,18 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     elif call.op == op.get("concatenate"):
       self.visit_concat_call(call)
     elif call.op == op.get("split"):
+      ## pass
       self.visit_split_call(call)
     elif call.op == op.get("nn.bias_add"):
-      # self.visit_bias_add_call(call)
-      pass
+      self.visit_bias_add_call(call)
+      # pass
     elif call.op == op.get("imcflow.fused_batch_norm"):
-      # self.visit_batch_norm_call(call)
-      pass
+      self.visit_batch_norm_call(call)
+      # pass
     elif call.op == op.get("nn.relu"):
       self.visit_relu_call(call)
     elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+      # pass
       self.visit_min_max_quantize_call(call)
     elif call.op == op.get("qnn.imcflow_nu_quantize"):
       pass
@@ -259,15 +266,21 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # scan reg
     # TODO: add scan reg code block
+    # edge = self.get_tensor_edge_from_tag(call, "scan")
+    # block = RecvConstBlock(edge, f"scan write")
+    # self.codeblocks.append(hid, block, CodePhase.INIT) 
 
     # config reg
     # TODO: add config reg code block
-
-    # write weights using recv
-    size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
-    # TODO: change to write weight block
-    block = LoadLBBlock(size, 1, w_info.fifo_id, "weight write")
+    edge = self.get_tensor_edge_from_tag(call, "config")
+    block = RecvConstBlock(edge, f"config write")
     self.codeblocks.append(hid, block, CodePhase.INIT)
+
+    # write weights => on INODE
+    # size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
+    # TODO: change to write weight block
+    # block = LoadLBBlock(size, 1, w_info.fifo_id, "weight write")
+    # self.codeblocks.append(hid, block, CodePhase.INIT)
 
     block = ConvBlock(in_edges, out_edge, shapes, call.attrs, "conv exec")
     # FIXME: this assumes that convblock is called first... we don't want that
@@ -363,9 +376,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     in_edges = self.get_input_edges(call)
     out_edge = self.get_output_edge(call)
     # TODO: how to scale?
-    block = VecBlock(in_edges, out_edge, "batch_norm_scale")
-    self.curr_conv_block.add_post_op(block)
-    block = AddBlock(in_edges, out_edge, "batch_norm_bias")
+    block = BatchNormBlock(in_edges, out_edge, "batch_norm")
     self.curr_conv_block.add_post_op(block)
 
   def visit_relu_call(self, call):
@@ -411,7 +422,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def get_output_edge(self, call):
     edges = self.get_output_edges(call)
-    assert len(edges) == 1, "Output edge must be unique"
+    # TODO: need to fix for multiple output edges
+    # assert len(edges) == 1, "Output edge must be unique"
     return edges[0]
 
   def get_output_edges(self, call):
@@ -464,6 +476,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     super().__init__()
     self.edges = edges
     self.codeblocks = InodeCodeBlockManager(func_name)
+    # Track which hardware nodes already have an IMCE compute block added
+    self._imce_compute_added = set()
     self.initialize()
     self.curr_composite_id = None
     self.finalize()
@@ -532,8 +546,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     tid = out_edge.src_id
     hid = self.get_hid(node)
 
-    block = IMCEComputeBlock(f"imce compute start")
-    self.codeblocks.append(hid, block, CodePhase.EXEC)
+    if hid not in self._imce_compute_added:
+      block = IMCEComputeBlock(f"imce compute start")
+      self.codeblocks.append(hid, block, CodePhase.EXEC)
+      self._imce_compute_added.add(hid)
 
     db = DevConfig().MemLayout.get_data_block_by_id(tid)
 

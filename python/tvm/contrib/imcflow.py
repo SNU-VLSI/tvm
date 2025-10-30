@@ -291,9 +291,10 @@ class MemoryLayout:
 
   def get_data_block_by_id(self, id: Union[str, TensorID]):
     for region in self.regions.values():
-      block = region[id]
-      if block is not None:
-        return block
+      for func_name in region.blocks:
+        block = region[func_name].get(id)
+        if block is not None:
+          return block
     return None
 
   def __getitem__(self, region_name: str):
