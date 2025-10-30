@@ -67,7 +67,17 @@ class RecvConstBlock(ImceCodeBlock):
     for i in range(recv_count):
       var = UniqueVar((self.in_edge, i))
       var.set_static()
-      code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id});"
+      if self.annotation == "min write":
+        code += f"{var} = __builtin_IMCE_RECV_MIN({te_info.fifo_id});"
+      elif self.annotation == "max write":
+        code += f"{var} = __builtin_IMCE_RECV_MAX({te_info.fifo_id});"
+      elif self.annotation == "config write":
+        code += f"{var} = __builtin_IMCE_RECV_CFG({te_info.fifo_id});"
+      elif self.annotation == "scan write":
+        code += f"{var} = __builtin_IMCE_RECV_SREG{i}({te_info.fifo_id});"
+        code += f"{var} = __builtin_IMCE_SCAN_RW({var});"
+      else:
+        code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id});"
     return code
 
 
@@ -245,7 +255,7 @@ class SplitBlock(ImceCodeBlock):
 
 class ConvBlock(ImceCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
-  num_in_edges = 2
+  num_in_edges = 3
 
   def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, shapes: dict, conv_attrs: Conv2DAttrs,
                annotation: str = ""):
@@ -322,6 +332,59 @@ class ConvBlock(ImceCodeBlock):
 
     return code
 
+class BatchNormBlock(ImceCodeBlock):
+  """
+  BatchNormBlock is base class for implementing R,I type vector operations.
+  """
+  num_in_edges = 3
+
+  def __init__(self, in_edges: List[TensorEdge], out_edge: TensorEdge, annotation: str = ""):
+    """ Code block for adding two tensors """
+    super().__init__(annotation)
+    assert len(in_edges) == self.num_in_edges
+    self.in_edges = in_edges
+    self.out_edge = out_edge
+
+  def _content(self) -> CodeBlock:
+
+    code = TextBlock("")
+    # a hack to get the tensor edge info for each input edge
+    te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") for edge in self.in_edges]
+    te_out_info = DevConfig().get_tensor_edge_info_with_id_dir(self.out_edge.src_id, "out")
+
+    for edge in self.in_edges:
+      if edge.dst_id.tensor_type == "fused_scale":
+        scale_edge = edge
+      elif edge.dst_id.tensor_type == "fused_bias":
+        bias_edge = edge
+      elif edge.dst_id.tensor_type == "data":
+        data_edge = edge
+
+    num_blocks = 4
+
+    for i in range(num_blocks):
+      # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
+      var_ins = [UniqueVar((edge, i)) for edge in self.in_edges]
+
+      var_data = UniqueVar((data_edge, i))
+      var_scale = UniqueVar((scale_edge, i))
+      var_bias = UniqueVar((bias_edge, i))
+
+      var_o = UniqueVar((self.out_edge, i))
+
+      # te info is None for composite internal tensors
+      for var_i, te_info in zip(var_ins, te_in_infos):
+        if te_info and not var_i.static:
+          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
+
+      code += f"{var_o} = __builtin_IMCE_MULTL({var_data}, {var_scale}, 15);" # e.g. __builtin_IMCE_MULTL(data, scale, 15);
+      code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);" # e.g. __builtin_IMCE_ADD(out, bias, 15);
+
+      # TODO: SEND to output fifo may not be needed here, depending on the usage of BatchNorm
+      if te_out_info:
+        code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
+
+    return code
 
 class ImceCodeBlockManager(NodeCodeBlockManager):
   """A class that manages and generates code blocks for imces."""
@@ -383,6 +446,11 @@ class ImceCodeBlockManager(NodeCodeBlockManager):
   short16 var26 = __builtin_IMCE_DWCONV(var25, 1, 0, 1, 1);
   __builtin_IMCE_SEND(1, var26, 2, 3);
   short16 var27 = __builtin_IMCE_RECV(0);
+  short16 var_min = __builtin_IMCE_RECV_MIN(0);
+  short16 var_max = __builtin_IMCE_RECV_MAX(0);
+  short16 var_cfg = __builtin_IMCE_RECV_CFG(0);
+  short16 var_scan0 = __builtin_IMCE_RECV_SREG0(0);
+  short16 var_scan1 = __builtin_IMCE_RECV_SREG1(0);
   __builtin_IMCE_SETFLAG(1);
   __builtin_IMCE_STANDBY(1, 2);
 

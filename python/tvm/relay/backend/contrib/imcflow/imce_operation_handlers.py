@@ -35,12 +35,18 @@ class CompositeHandler(OperationHandler):
             "Composite" in call.op.attrs)
 
   def handle(self, call) -> None:
-    # Set composite context
-    call.curr_composite_id = getNodeID(call.call)
+    # Set composite context on both BuilderContext and builder
+    composite_id = getNodeID(call.call)
+    call.curr_composite_id = composite_id
+    self.builder.curr_composite_id = composite_id
+
     # Visit the body of the composite function using self.builder
     self.builder.visit(call.call.op.body)
-    # Clear composite context
+
+    # Clear composite context on both BuilderContext and builder
     call.curr_composite_id = None
+    self.builder.curr_composite_id = None
+
     # Visit arguments
     for a in call.call.args:
       self.builder.visit(a)
@@ -84,15 +90,17 @@ class ConvHandler(OperationHandler):
 
     # scan reg
     # TODO: add scan reg code block
+    # edge = call.get_tensor_edge_from_tag("scan")
+    # block = RecvConstBlock(edge, f"scan write")
+    # self.codeblocks.append(hid, block, CodePhase.INIT)
 
     # config reg
     # TODO: add config reg code block
-
-    # write weights using recv
-    size = DevConfig().MemLayout.get_data_block_by_id(w_tid).size
-    # TODO: change to write weight block
-    block = LoadLBBlock(size, 1, w_info.fifo_id, "weight write")
+    edge = call.get_tensor_edge_from_tag("config")
+    block = RecvConstBlock(edge, f"config write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
+
+    # write weights => on INODE
 
     block = ConvBlock(in_edges, out_edge, shapes, call.call.attrs, "conv exec")
     # FIXME: this assumes that convblock is called first... we don't want that
@@ -310,10 +318,7 @@ class BatchNormHandler(OperationHandler):
     return 10
 
   def can_handle(self, call: relay.Call) -> bool:
-    # Currently disabled - return False to skip
-    return False
-    # Uncomment to enable:
-    # return call.op == op.get("imcflow.fused_batch_norm")
+    return call.op == op.get("imcflow.fused_batch_norm")
 
   def handle(self, call) -> None:
     assert call.curr_composite_id, \
@@ -330,9 +335,7 @@ class BatchNormHandler(OperationHandler):
     in_edges = call.get_input_edges()
     out_edge = call.get_output_edge()
     # TODO: how to scale?
-    block = VecBlock(in_edges, out_edge, "batch_norm_scale")
-    call.curr_conv_block.add_post_op(block)
-    block = AddBlock(in_edges, out_edge, "batch_norm_bias")
+    block = BatchNormBlock(in_edges, out_edge, "batch_norm")
     call.curr_conv_block.add_post_op(block)
 
 

@@ -23,8 +23,7 @@ from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 # Load operation handlers (imports trigger registration via decorators)
 from . import imce_operation_handlers  # noqa: F401
 
-CompositePat = wildcard().has_attr(
-    {"Composite": "imcflow.conv2d-with-postop"})(None)
+CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
@@ -163,8 +162,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     src_composite = self.stack[-1] if self.stack else None
 
     # override src tag to const tag if dst tag is const tag
-    const_tags = ["weight", "bias", "fused_scale",
-                  "fused_bias", "min", "max", "threshold", "scale"]
+    const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
     src_tag = "odata"
     if dst_tid.tensor_type in const_tags:
       src_tag = dst_tid.tensor_type
@@ -247,6 +245,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     super().__init__()
     self.edges = edges
     self.codeblocks = InodeCodeBlockManager(func_name)
+    # Track which hardware nodes already have an IMCE compute block added
+    self._imce_compute_added = set()
     self.initialize()
     self.curr_composite_id = None
     self.finalize()
@@ -315,8 +315,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     tid = out_edge.src_id
     hid = self.get_hid(node)
 
-    block = IMCEComputeBlock(f"imce compute start")
-    self.codeblocks.append(hid, block, CodePhase.EXEC)
+    if hid not in self._imce_compute_added:
+      block = IMCEComputeBlock(f"imce compute start")
+      self.codeblocks.append(hid, block, CodePhase.EXEC)
+      self._imce_compute_added.add(hid)
 
     db = DevConfig().MemLayout.get_data_block_by_id(tid)
 

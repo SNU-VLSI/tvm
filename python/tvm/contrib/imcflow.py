@@ -207,15 +207,26 @@ class MemoryRegion:
     self.weight_offset = defaultdict(int)  # {function_name : weight_offset}
     self.weight_allocated = defaultdict(bool)  # {function_name : weight_allocated}
 
-  def __getitem__(self, id: Union[str, TensorID]):
+  def __getitem__(self, function_name: str):
     """
-    WARNING!!!!! Note that the id based retrieval have some caveats:
-    It searches for the whole functions in the region and returns the first match
+    Gets blocks with specific function_name specified in {data_block_name : DataBlock}
     """
-    for blocks in self.blocks.values():
-      block = blocks.get(id, None)
-      if block is not None:
-        return block
+    return self.blocks.get(function_name, None)
+
+  def get_data_block_by_id(self, id, function_name=None):
+    """
+    Gets data_block by id, where an optional function_name is given.
+    Caveats: if no function_name is given, it returns the first match if same id exists.
+    """
+    if function_name:
+      f_blocks = self.blocks[function_name]
+      return f_blocks.get(id, None)
+    else:
+      for f_blocks in self.blocks.values():
+        block = f_blocks.get(id, None)
+        if block is not None:
+          return block
+    return None
 
   def allocate(self, function_name, block: DataBlock):
     """Allocate a data block in the region sequentially, assuming they are not delocated"""
@@ -276,8 +287,6 @@ class MemoryRegion:
       return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
     blocks_str=""
     for function_name, blocks in self.blocks.items():
-      if hasattr(function_name, 'attrs') and hasattr(function_name.attrs, 'global_symbol'):
-        function_name = function_name.attrs.global_symbol
       blocks_str += f"\n{function_name}:\n"
       blocks_str += f"----------------------------------------------------------\n"
       blocks_str += ",\n      ".join(str(block) for block in blocks.values())
@@ -298,11 +307,19 @@ class MemoryLayout:
       region.set_base_address(_last_end_address)
       _last_end_address += region.size
 
-  def get_data_block_by_id(self, id: Union[str, TensorID]):
-    for region in self.regions.values():
-      block = region[id]
-      if block is not None:
-        return block
+  def get_data_block_by_id(self, id: Union[str, TensorID], func_name=None, region_name=None):
+    """
+    Gets data_block by id, where an optional function_name and region_name is given.
+    Caveats: if no function_name / region_name is given, it returns the first match in the given hierarchy
+    """
+    if region_name:
+      region = self.regions[region_name]
+      return region.get_data_block_by_id(id, func_name)
+    else:
+      for region in self.regions.values():
+        block = region.get_data_block_by_id(id, func_name)
+        if block is not None:
+          return block
     return None
 
   def __getitem__(self, region_name: str):
