@@ -1931,6 +1931,7 @@ def constructTensorEdgeList(mod):
     def visit_function(self, fn):
       # append to TensorEdgeList if fn is the entrance node of whole subgraph function
       if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
+        #TODO: if fn.body is tuple, custom id will return list. it is not intuitivie..
         InputGraphNodeID = self.getCustomID(fn.body)
         DstGraphNodeID = self.getCustomID(fn)
         SrcTag = "odata"
@@ -3747,7 +3748,7 @@ def create_wrap_func(func, func_name, new_param_type, new_ret_type):
         ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype, old_type.shape, old_type.dtype)
     
     # func_no_global_symbol = func.without_attr("global_symbol")
-    new_attr = tvm.ir.make_node("DictAttrs", Composite=f"{func_name}_impl")
+    new_attr = tvm.ir.make_node("DictAttrs", Composite=f"{func_name}_impl", Compiler="imcflow")
     func_no_attr = relay.Function(func.params, func.body, func.ret_type, attrs=new_attr)
     body = func_no_attr(*args)
     

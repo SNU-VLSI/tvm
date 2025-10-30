@@ -228,16 +228,16 @@ def run_test_evl(test_name, mod, param_dict):
   pprint.pprint(f"idtoedge: {config.TensorIDtoEdge}")
   pprint.pprint(f"policy_table: {config.PolicyTableDict}")
 
-  # CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
-  # CodegenSuite(eval_mod)
+  CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
+  CodegenSuite(eval_mod)
 
-  # print(f"mem_layout: {config.MemLayout}")
-  # print(f"Evaluation generation completed for {test_name}")
+  print(f"mem_layout: {config.MemLayout}")
+  print(f"Evaluation generation completed for {test_name}")
 
-  # imcflow_transform.constructDataBlockDict(eval_mod)
-  # print(f"data_blocks: {config.DataBlocks}")
+  imcflow_transform.constructDataBlockDict(eval_mod)
+  print(f"data_blocks: {config.DataBlocks}")
 
-  # generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
+  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
 
 
 def test_big_ref():
@@ -289,9 +289,9 @@ def test_resnet8():
   mod, param_dict = resnet8_cifar.getModel()
   run_test_evl("resnet8", mod, param_dict)
 
-# def test_resnet8_from_pretrained():
-#   mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
-#   run_test_evl("resnet8", mod, param_dict)
+def test_resnet8_from_pretrained():
+  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
+  run_test_evl("resnet8", mod, param_dict)
 
 def test_mobilenet_imcflow():
   mod, param_dict = mobilenet_imcflow.getModel(True)

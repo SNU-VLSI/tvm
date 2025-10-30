@@ -353,352 +353,217 @@ def getModel(small_debug=False):
 
 def getModel_from_pretrained_weight(small_debug=False):
   import torch
-  import sys
-  import os
-  # Add the models directory to path to import safe_convert
-  sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-  from safe_convert import to_int16, to_int4
+  import re
   
-  if small_debug:
-    out, var_dict = getModel_([1, 3, 8, 8])
-  else:
-    out, var_dict = getModel_([1, 3, 32, 32])
+  out, var_dict = getModel_([1, 3, 32, 32])
   
   # Load checkpoint
-  checkpoint_path = '/root/project/tvm/tvm_practice/models/model_best.pth.tar'
+  checkpoint_path = '/root/project/tvm/tvm_practice/models/checkpoint.pth.tar' # with int16 conversion, CIM/tree/deploy/models_checkpoint/A4W4%2BPS6/2025-Sep-24-01-20-40/imcflow/2025-Oct-28-17-49-32
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
   model_dict = checkpoint['state_dict']
+  adjust_factors = checkpoint['adjust_factors']
   
-  # Define adjustment factors (same as in main.py)
-  adjust_factors = {
-      'x_f_1': 36.0,
-      'bn1_f_1': 72.0,
-      'bn2_f_1': 36.0,
-      'x_f_2': 36.0,  # needs to be the same with bn2_f_1
-      'bn1_f_2': 150.0,
-      'bn2_f_2': 15.0,
-      'x_f_3': 10.0,
-      'bn1_f_3': 50.0,
-      'bn2_f_3': 500.0,
-  }
-
-  def _get_pretrained_weight(name, dtype: str, shape):
+  def _get_tensor_from_checkpoint(name, dtype, shape):
     """
-    Map TVM Relay parameter names to PyTorch checkpoint weights.
-    Applies necessary transformations for quantization and batch norm fusion.
+    Get parameter tensor from checkpoint matching the given name.
+    
+    Args:
+        name: TVM Relay parameter name
+        dtype: Expected dtype (e.g., 'float32', 'int8', 'int16')
+        shape: Expected shape tuple
+        
+    Returns:
+        numpy.ndarray with the parameter data
+        
+    Raises:
+        ValueError: If no matching parameter found in checkpoint
     """
-    # Helper function to extract layer state similar to make_layer_state_dict
-    def get_layer_components(layer_idx):
-      s_dict = model_dict
-      layer_key = f"module.layer{layer_idx}.0"
-      
-      # Get conv weights and scales
-      conv1_weight = s_dict[f"{layer_key}.conv1.weight"].cpu()
-      conv1_weight_s = s_dict[f"{layer_key}.conv1.quant_func.s"].cpu()
-      conv2_weight = s_dict[f"{layer_key}.conv2.weight"].cpu()
-      conv2_weight_s = s_dict[f"{layer_key}.conv2.quant_func.s"].cpu()
-      
-      # Get batch norm parameters
-      bn1_var = s_dict[f"{layer_key}.bn1.running_var"].cpu()
-      bn1_gamma = s_dict[f"{layer_key}.bn1.weight"].cpu()
-      bn1_mean = s_dict[f"{layer_key}.bn1.running_mean"].cpu()
-      bn1_beta = s_dict[f"{layer_key}.bn1.bias"].cpu()
-      bn2_var = s_dict[f"{layer_key}.bn2.running_var"].cpu()
-      bn2_gamma = s_dict[f"{layer_key}.bn2.weight"].cpu()
-      bn2_mean = s_dict[f"{layer_key}.bn2.running_mean"].cpu()
-      bn2_beta = s_dict[f"{layer_key}.bn2.bias"].cpu()
-      
-      # Get activation scales
-      act1_s = s_dict[f"{layer_key}.act1.s"].cpu()
-      act2_s = s_dict[f"{layer_key}.act2.s"].cpu()
-      
-      # Compute fused batch norm parameters
-      bn1_scale = bn1_gamma / torch.sqrt(bn1_var)
-      bn1_bias = bn1_beta - bn1_gamma * bn1_mean / torch.sqrt(bn1_var)
-      bn2_scale = bn2_gamma / torch.sqrt(bn2_var)
-      bn2_bias = bn2_beta - bn2_gamma * bn2_mean / torch.sqrt(bn2_var)
-      
-      # Check for downsample
-      downsample_key = f"{layer_key}.downsample.1.weight"
-      has_downsample = downsample_key in s_dict
-      
-      if has_downsample:
-        downsample_weight = s_dict[downsample_key].cpu()
-        downsample_weight_s = s_dict[f"{layer_key}.downsample.1.quant_func.s"].cpu()
-        downsample_act_s = s_dict[f"{layer_key}.downsample.0.s"].cpu()
+    # Direct mappings for initial conv and bn layers
+    direct_mappings = {
+        'weight1': 'conv1.weight',
+        'bn_gamma': 'bn1.weight',
+        'bn_beta': 'bn1.bias',
+        'bn_moving_mean': 'bn1.running_mean',
+        'bn_moving_var': 'bn1.running_var',
+        'dense_weight': 'fc.weight',
+        'dense_bias': 'fc.bias',
+    }
+    
+    if name in direct_mappings:
+      key = direct_mappings[name]
+      if key in model_dict:
+        tensor = model_dict[key].cpu().numpy().astype(dtype)
+        if tensor.shape != shape:
+          raise ValueError(f"Shape mismatch for {name}: expected {shape}, got {tensor.shape}")
+        return tensor
       else:
-        downsample_weight = None
-        downsample_weight_s = None
-        downsample_act_s = None
+        raise ValueError(f"Key {key} not found in checkpoint for parameter {name}")
+    
+    # Handle scaling factors from adjust_factors
+    if name == 'x_f_1':
+      return np.array([adjust_factors['x_f_1']], dtype=dtype)
+    
+    if name == 'post_f_inv':
+      # post_f_inv = 1.0 / bn2_f_3
+      return np.array([1.0 / adjust_factors['bn2_f_3']], dtype=dtype)
+    
+    # Handle layer-specific parameters using regex patterns
+    # Pattern for weight{2,3,4}_{0,1,2}
+    weight_pattern = re.match(r'weight(\d)_(\d)', name)
+    if weight_pattern:
+      block_num = int(weight_pattern.group(1)) - 1  # weight2->layer1, weight3->layer2, weight4->layer3
+      conv_idx = int(weight_pattern.group(2))
       
-      return {
-        'conv1_weight': conv1_weight,
-        'conv1_weight_s': conv1_weight_s,
-        'conv2_weight': conv2_weight,
-        'conv2_weight_s': conv2_weight_s,
-        'bn1_scale': bn1_scale,
-        'bn1_bias': bn1_bias,
-        'bn2_scale': bn2_scale,
-        'bn2_bias': bn2_bias,
-        'act1_s': act1_s,
-        'act2_s': act2_s,
-        'downsample_weight': downsample_weight,
-        'downsample_weight_s': downsample_weight_s,
-        'downsample_act_s': downsample_act_s,
+      layer_name = f"layer{block_num}"
+      if conv_idx == 0:
+        # Downsample conv
+        key = f"{layer_name}.block_int16.downsample.1.weight"
+      else:
+        # Regular conv
+        key = f"{layer_name}.block_int16.conv{conv_idx}.weight"
+      
+      if key in model_dict:
+        tensor = model_dict[key].cpu().numpy().astype(dtype)
+        if tensor.shape != shape:
+          raise ValueError(f"Shape mismatch for {name}: expected {shape}, got {tensor.shape}")
+        return tensor
+      else:
+        raise ValueError(f"Key {key} not found in checkpoint for parameter {name}")
+    
+    # Pattern for fused_scale{1-6} and fused_bias{1-6}
+    fused_pattern = re.match(r'fused_(scale|bias)(\d+)(_2)?', name)
+    if fused_pattern:
+      param_type = fused_pattern.group(1)  # 'scale' or 'bias'
+      idx = int(fused_pattern.group(2))
+      is_downsample = fused_pattern.group(3) is not None
+      
+      # Map index to layer and bn
+      # fused_scale1/bias1 -> layer1.bn1
+      # fused_scale2/bias2 -> layer1.bn2
+      # fused_scale3/bias3 -> layer2.bn1
+      # fused_scale4/bias4 -> layer2.bn2
+      # fused_scale5/bias5 -> layer3.bn1
+      # fused_scale6/bias6 -> layer3.bn2
+      mapping = {
+          1: ('layer1', 'bn1'),
+          2: ('layer1', 'bn2'),
+          3: ('layer2', 'bn1'),
+          4: ('layer2', 'bn2'),
+          5: ('layer3', 'bn1'),
+          6: ('layer3', 'bn2'),
       }
-    
-    # ========== Conv1 and BN1 (first layer, not quantized) ==========
-    if name == "weight1":
-      return model_dict["module.conv1.weight"].cpu().numpy()
-    elif name == "bn_gamma":
-      return model_dict["module.bn1.weight"].cpu().numpy()
-    elif name == "bn_beta":
-      return model_dict["module.bn1.bias"].cpu().numpy()
-    elif name == "bn_moving_mean":
-      return model_dict["module.bn1.running_mean"].cpu().numpy()
-    elif name == "bn_moving_var":
-      return model_dict["module.bn1.running_var"].cpu().numpy()
-    elif name == "x_f_1":
-      return np.array([adjust_factors['x_f_1']], dtype=np.float32)
-    
-    # ========== Layer 1 (Basic Block 1) ==========
-    elif name.startswith("weight2_") or name.startswith("fused_scale1") or name.startswith("fused_bias1") or name.startswith("quant_min_1") or name.startswith("quant_max_1") or name.startswith("quant_min_2") or name.startswith("quant_max_2") or name.startswith("fused_scale2") or name.startswith("fused_bias2") or name == "y_f_1":
-      layer1 = get_layer_components(1)
       
-      if name == "weight2_1":
-        # Quantize conv1 weight to int8
-        weight_q = torch.round(torch.clamp(
-            layer1['conv1_weight'] / layer1['conv1_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "weight2_2":
-        # Quantize conv2 weight to int8
-        weight_q = torch.round(torch.clamp(
-            layer1['conv2_weight'] / layer1['conv2_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "fused_scale1":
-        # Fused scale for BN1: act1_s * conv1_weight_s * bn1_scale * bn1_f
-        fused = layer1['act1_s'] * layer1['conv1_weight_s'] * layer1['bn1_scale'] * adjust_factors['bn1_f_1']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias1":
-        # Fused bias for BN1: bn1_bias * bn1_f
-        fused = layer1['bn1_bias'] * adjust_factors['bn1_f_1']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_scale2":
-        # Fused scale for BN2: act2_s * conv2_weight_s * bn2_scale * bn2_f
-        fused = layer1['act2_s'] * layer1['conv2_weight_s'] * layer1['bn2_scale'] * adjust_factors['bn2_f_1']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias2":
-        # Fused bias for BN2: bn2_bias * bn2_f
-        fused = layer1['bn2_bias'] * adjust_factors['bn2_f_1']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_1":
-        # Min for act1: -0.5 * act1_s * x_f
-        val = -0.5 * layer1['act1_s'] * adjust_factors['x_f_1']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_1":
-        # Max for act1: 15.5 * act1_s * x_f
-        val = 15.5 * layer1['act1_s'] * adjust_factors['x_f_1']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_2":
-        # Min for act2: -0.5 * act2_s * bn1_f
-        val = -0.5 * layer1['act2_s'] * adjust_factors['bn1_f_1']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_2":
-        # Max for act2: 15.5 * act2_s * bn1_f
-        val = 15.5 * layer1['act2_s'] * adjust_factors['bn1_f_1']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "y_f_1":
-        # Residual scaling factor: bn2_f / x_f
-        val = adjust_factors['bn2_f_1'] / adjust_factors['x_f_1']
-        return np.array([to_int16(val, assert_range=True).numpy().astype(np.int16)], dtype=np.int16)
-    
-    # ========== Layer 2 (Basic Block 2) ==========
-    elif name.startswith("weight3_") or name.startswith("fused_scale3") or name.startswith("fused_bias3") or name.startswith("quant_min_3") or name.startswith("quant_max_3") or name.startswith("quant_min_4") or name.startswith("quant_max_4") or name.startswith("fused_scale4") or name.startswith("fused_bias4") or name.startswith("bn_out_f_0") or name.startswith("bn_out_f_1") or name.startswith("quant_min_4_2") or name.startswith("quant_max_4_2") or name.startswith("fused_scale4_2") or name.startswith("fused_bias4_2"):
-      layer2 = get_layer_components(2)
+      layer, bn = mapping[idx]
+      if is_downsample:
+        key = f"{layer}.block_int16.downsample.2.{param_type}"
+      else:
+        key = f"{layer}.block_int16.{bn}.{param_type}"
       
-      if name == "weight3_0":
-        # Downsample weight (1x1 conv)
-        weight_q = torch.round(torch.clamp(
-            layer2['downsample_weight'] / layer2['downsample_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "weight3_1":
-        # Conv1 weight
-        weight_q = torch.round(torch.clamp(
-            layer2['conv1_weight'] / layer2['conv1_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "weight3_2":
-        # Conv2 weight
-        weight_q = torch.round(torch.clamp(
-            layer2['conv2_weight'] / layer2['conv2_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "fused_scale3":
-        fused = layer2['act1_s'] * layer2['conv1_weight_s'] * layer2['bn1_scale'] * adjust_factors['bn1_f_2']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias3":
-        fused = layer2['bn1_bias'] * adjust_factors['bn1_f_2']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_scale4":
-        fused = layer2['act2_s'] * layer2['conv2_weight_s'] * layer2['bn2_scale'] * adjust_factors['bn2_f_2']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias4":
-        fused = layer2['bn2_bias'] * adjust_factors['bn2_f_2']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_scale4_2":
-        # Downsample batch norm scale
-        if layer2['downsample_weight_s'] is not None and layer2['downsample_act_s'] is not None:
-          downsample_scale = torch.ones_like(layer2['bn1_scale']) * layer2['downsample_weight_s'] * layer2['downsample_act_s'] * adjust_factors['bn2_f_2']
+      if key in model_dict:
+        tensor = model_dict[key].cpu().numpy().astype(dtype)
+        if tensor.shape != shape:
+          raise ValueError(f"Shape mismatch for {name}: expected {shape}, got {tensor.shape}")
+        return tensor
+      else:
+        raise ValueError(f"Key {key} not found in checkpoint for parameter {name}")
+    
+    # Pattern for quant_min_{1-6} and quant_max_{1-6}
+    quant_pattern = re.match(r'quant_(min|max)_(\d+)(_2)?', name)
+    if quant_pattern:
+      param_type = quant_pattern.group(1)  # 'min' or 'max'
+      idx = int(quant_pattern.group(2))
+      is_downsample = quant_pattern.group(3) is not None
+      
+      # Map index to layer and act
+      # quant_min_1/max_1 -> layer1.act1
+      # quant_min_2/max_2 -> layer1.act2
+      # quant_min_3/max_3 -> layer2.act1
+      # quant_min_4/max_4 -> layer2.act2
+      # quant_min_5/max_5 -> layer3.act1
+      # quant_min_6/max_6 -> layer3.act2
+      mapping = {
+          1: ('layer1', 'act1'),
+          2: ('layer1', 'act2'),
+          3: ('layer2', 'act1'),
+          4: ('layer2', 'act2'),
+          5: ('layer3', 'act1'),
+          6: ('layer3', 'act2'),
+      }
+      
+      layer, act = mapping[idx]
+      if is_downsample:
+        key = f"{layer}.block_int16.downsample.0.{param_type}"
+      else:
+        key = f"{layer}.block_int16.{act}.{param_type}"
+      
+      if key in model_dict:
+        tensor = model_dict[key].cpu().numpy()
+        # Scalar values need to be converted to proper shape
+        if shape == ():
+          # Scalar
+          return tensor.astype(dtype) if tensor.shape == () else np.array(tensor.item(), dtype=dtype)
+        elif shape == (1,):
+          # Single-element array
+          return np.array([tensor.item()], dtype=dtype) if tensor.shape == () else tensor.astype(dtype)
         else:
-          # If no downsample, use ones
-          downsample_scale = torch.ones(32)
-        return to_int16(downsample_scale, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias4_2":
-        # Downsample batch norm bias (zeros)
-        downsample_bias = torch.zeros(32)
-        return to_int16(downsample_bias, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_3":
-        val = -0.5 * layer2['act1_s'] * adjust_factors['x_f_2']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_3":
-        val = 15.5 * layer2['act1_s'] * adjust_factors['x_f_2']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_4":
-        val = -0.5 * layer2['act2_s'] * adjust_factors['bn1_f_2']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_4":
-        val = 15.5 * layer2['act2_s'] * adjust_factors['bn1_f_2']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_4_2":
-        # Downsample activation min
-        val = -0.5 * layer2['downsample_act_s'] * adjust_factors['x_f_2']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_4_2":
-        # Downsample activation max
-        val = 15.5 * layer2['downsample_act_s'] * adjust_factors['x_f_2']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "bn_out_f_0":
-        # Constant term for residual adjustment (zeros with shape matching output channels)
-        return np.zeros((32, 1, 1), dtype=np.int16)
-      elif name == "bn_out_f_1":
-        # Scale term for residual adjustment (ones)
-        return np.ones((32, 1, 1), dtype=np.int16)
+          raise ValueError(f"Unexpected shape {shape} for scalar parameter {name}")
+      else:
+        raise ValueError(f"Key {key} not found in checkpoint for parameter {name}")
     
-    # ========== Layer 3 (Basic Block 3) ==========
-    elif name.startswith("weight4_") or name.startswith("fused_scale5") or name.startswith("fused_bias5") or name.startswith("quant_min_5") or name.startswith("quant_max_5") or name.startswith("quant_min_6") or name.startswith("quant_max_6") or name.startswith("fused_scale6") or name.startswith("fused_bias6") or name.startswith("bn_out_f_2") or name.startswith("bn_out_f_3") or name.startswith("quant_min_6_2") or name.startswith("quant_max_6_2") or name.startswith("fused_scale6_2") or name.startswith("fused_bias6_2"):
-      layer3 = get_layer_components(3)
+    # Pattern for y_f_{1,2,3}
+    y_f_pattern = re.match(r'y_f_(\d+)', name)
+    if y_f_pattern:
+      idx = int(y_f_pattern.group(1))
+      # y_f_1 = bn2_f_1 / x_f_1
+      # Based on the adjust_factors structure
+      x_f_key = f'x_f_{idx}'
+      bn2_f_key = f'bn2_f_{idx}'
       
-      if name == "weight4_0":
-        # Downsample weight (1x1 conv)
-        weight_q = torch.round(torch.clamp(
-            layer3['downsample_weight'] / layer3['downsample_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "weight4_1":
-        # Conv1 weight
-        weight_q = torch.round(torch.clamp(
-            layer3['conv1_weight'] / layer3['conv1_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "weight4_2":
-        # Conv2 weight
-        weight_q = torch.round(torch.clamp(
-            layer3['conv2_weight'] / layer3['conv2_weight_s'], -8, 7))
-        return to_int4(weight_q).numpy().astype(np.int8)
-      elif name == "fused_scale5":
-        fused = layer3['act1_s'] * layer3['conv1_weight_s'] * layer3['bn1_scale'] * adjust_factors['bn1_f_3']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias5":
-        fused = layer3['bn1_bias'] * adjust_factors['bn1_f_3']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_scale6":
-        fused = layer3['act2_s'] * layer3['conv2_weight_s'] * layer3['bn2_scale'] * adjust_factors['bn2_f_3']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias6":
-        fused = layer3['bn2_bias'] * adjust_factors['bn2_f_3']
-        return to_int16(fused, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_scale6_2":
-        # Downsample batch norm scale
-        if layer3['downsample_weight_s'] is not None and layer3['downsample_act_s'] is not None:
-          downsample_scale = torch.ones_like(layer3['bn1_scale']) * layer3['downsample_weight_s'] * layer3['downsample_act_s'] * adjust_factors['bn2_f_3']
+      if x_f_key in adjust_factors and bn2_f_key in adjust_factors:
+        value = adjust_factors[bn2_f_key] / adjust_factors[x_f_key]
+        if dtype.startswith('int'):
+          value = int(round(value))
+        if shape == (1,):
+          return np.array([value], dtype=dtype)
         else:
-          downsample_scale = torch.ones(64)
-        return to_int16(downsample_scale, assert_range=True).numpy().astype(np.int16)
-      elif name == "fused_bias6_2":
-        # Downsample batch norm bias (zeros)
-        downsample_bias = torch.zeros(64)
-        return to_int16(downsample_bias, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_5":
-        val = -0.5 * layer3['act1_s'] * adjust_factors['x_f_3']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_5":
-        val = 15.5 * layer3['act1_s'] * adjust_factors['x_f_3']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_6":
-        val = -0.5 * layer3['act2_s'] * adjust_factors['bn1_f_3']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_6":
-        val = 15.5 * layer3['act2_s'] * adjust_factors['bn1_f_3']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_min_6_2":
-        # Downsample activation min
-        val = -0.5 * layer3['downsample_act_s'] * adjust_factors['x_f_3']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "quant_max_6_2":
-        # Downsample activation max
-        val = 15.5 * layer3['downsample_act_s'] * adjust_factors['x_f_3']
-        return to_int16(val, assert_range=True).numpy().astype(np.int16)
-      elif name == "bn_out_f_2":
-        # Constant term for residual adjustment (zeros with shape matching output channels)
-        return np.zeros((64, 1, 1), dtype=np.int16)
-      elif name == "bn_out_f_3":
-        # Scale term for residual adjustment (ones)
-        return np.ones((64, 1, 1), dtype=np.int16)
+          return np.array(value, dtype=dtype)
+      else:
+        raise ValueError(f"Missing adjust_factors for computing {name}")
     
-    # ========== Post-processing and FC layer ==========
-    elif name == "post_f_inv":
-      # Inverse of bn2_f_3 for dequantization
-      return np.array([1.0 / adjust_factors['bn2_f_3']], dtype=np.float32)
-    elif name == "dense_weight":
-      return model_dict["module.fc.weight"].cpu().numpy()
-    elif name == "dense_bias":
-      return model_dict["module.fc.bias"].cpu().numpy()
+    # Pattern for bn_out_f_{0,1,2,3}
+    bn_out_f_pattern = re.match(r'bn_out_f_(\d+)', name)
+    if bn_out_f_pattern:
+      idx = int(bn_out_f_pattern.group(1))
+      # These are used for downsample residual adjustment
+      # Based on the code in deploy_modules.py line 129-130:
+      # y_residual = bn_out_f_1 * y_residual + bn_out_f_0
+      # This suggests bn_out_f_0 should be 0 and bn_out_f_1 should be 1 (or appropriate scaling)
+      # However, looking at the model definition in resnet8_cifar.py, these are used as:
+      # y_residual = relay.var("bn_out_f_1", shape=(32,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_0", shape=(32,1,1), dtype="int16")
+      
+      # For proper implementation, we need to compute the adjustment between main path and downsample path
+      # For now, using zeros for bn_out_f_0 (bias term) and computing scale from adjust_factors
+      if idx % 2 == 0:
+        # bn_out_f_0, bn_out_f_2 (bias terms) -> zeros
+        return np.zeros(shape, dtype=dtype)
+      else:
+        # bn_out_f_1, bn_out_f_3 (scale terms)
+        # Need to compute the ratio between downsample path and main path output scales
+        # For simplicity, using ones (identity scaling)
+        # A more accurate implementation would compute: downsample_output_scale / main_path_output_scale
+        return np.ones(shape, dtype=dtype)
     
-    else:
-      raise ValueError(f"Unknown parameter name: {name} with dtype={dtype}, shape={shape}")
-
+    # If no pattern matched, raise an error
+    raise ValueError(f"No mapping found for parameter: {name} with dtype={dtype}, shape={shape}")
+    
+    
   params_dict = {}
   # Sort by name for determinism
   for name in sorted(var_dict.keys()):
-    # Skip the input variable - it's not a parameter
-    if name == "input":
+    if name == "model_input":
       continue
     info = var_dict[name]
-    param = _get_pretrained_weight(name, info["dtype"], info["shape"])
-    
-    # Sanity check: verify shape and dtype
-    expected_shape = info["shape"]
-    expected_dtype = info["dtype"]
-    
-    if not isinstance(param, np.ndarray):
-      raise TypeError(f"Parameter '{name}' should be numpy array, got {type(param)}")
-    
-    if param.shape != expected_shape:
-      raise ValueError(f"Parameter '{name}' shape mismatch: expected {expected_shape}, got {param.shape}")
-    
-    # Check dtype compatibility (handle numpy dtype naming variations)
-    param_dtype_str = str(param.dtype)
-    if expected_dtype.startswith("int") or expected_dtype.startswith("uint"):
-      # For integer types, check the base type matches
-      if not param_dtype_str.startswith(expected_dtype.split("int")[0] + "int"):
-        raise TypeError(f"Parameter '{name}' dtype mismatch: expected {expected_dtype}, got {param_dtype_str}")
-    elif expected_dtype.startswith("float"):
-      # For float types, check the base type matches
-      if not param_dtype_str.startswith("float"):
-        raise TypeError(f"Parameter '{name}' dtype mismatch: expected {expected_dtype}, got {param_dtype_str}")
-    else:
-      # Exact match for other types
-      if param_dtype_str != expected_dtype:
-        raise TypeError(f"Parameter '{name}' dtype mismatch: expected {expected_dtype}, got {param_dtype_str}")
-    
-    params_dict[name] = param
+    params_dict[name] = _get_tensor_from_checkpoint(name, info["dtype"], info["shape"])
 
   return out, params_dict
-
   
