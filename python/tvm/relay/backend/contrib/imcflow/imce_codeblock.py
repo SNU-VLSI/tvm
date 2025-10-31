@@ -319,19 +319,8 @@ class ConvBlock(ImceCallCodeBlock):
     if fifo_id_i != 0:
       logging.warning(f"conv block data fifo_id_i is not 0, but {fifo_id_i}")
 
-    """
-    # hack to get the last tensor edge
-    last_out_edge = self.post_op_chain[-1].out_edge if self.post_op_chain else self.out_edge
-    out_edge_info = DevConfig().get_tensor_edge_info(last_out_edge)
-
-    if out_edge_info:
-      fifo_id_o = out_edge_info.fifo_id
-      policy_addr_o = out_edge_info.policy_info[0].address
-    else:
-      logging.warning(f"Output edge info not found for {last_out_edge}")
-      fifo_id_o = -1
-      policy_addr_o = -1
-    """
+    last_out_edges = self.post_op_chain[-1].out_edges if self.post_op_chain else self.out_edges
+    out_edge_infos = [DevConfig().get_tensor_edge_info_with_id_dir(edge.src_id, "out") for edge in last_out_edges]
 
     code = TextBlock("")
     code += LoadLBBlock(recv_count, num_blocks, fifo_id_i)
@@ -349,8 +338,14 @@ class ConvBlock(ImceCallCodeBlock):
     for i in range(num_blocks):
       # FIXME: we need the last_post_op's out_edge here (maybe deal with this in the wrapper?)
       # probably we can composite node's edges
-      var_o = UniqueVar(("DEADBEEF", i))
-      code += f"__builtin_IMCE_SEND({-1}, {var_o}, {-1}, 0);"
+      if self.post_op_chain:
+        var_o = UniqueVar((self.post_op_chain[-1], i))
+      else:
+        var_o = UniqueVar((self, i))
+
+      for te_out_info in out_edge_infos:
+        if te_out_info:
+          code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
 
     code += "\n"
 
