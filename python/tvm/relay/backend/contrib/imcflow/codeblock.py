@@ -14,9 +14,12 @@ class UniqueVar:
 
   def __new__(cls, obj, dtype="short16"):
     """Ensure only one instance per unique obj and dtype combination."""
-    if obj not in cls._instances:
+    # Normalize the key: use _original for CodeBlock instances in tuples
+    key = cls._normalize_key(obj)
+
+    if key not in cls._instances:
       instance = super(UniqueVar, cls).__new__(cls)
-      cls._instances[obj] = instance
+      cls._instances[key] = instance
       cls._counter += 1
 
       # set the instance variables
@@ -24,10 +27,23 @@ class UniqueVar:
       instance.dtype = dtype
       instance.static = False
 
-    assert cls._instances[obj].dtype == dtype, \
-        f"UniqueVar {obj} already exists with dtype {cls._instances[obj].dtype}"
+    assert cls._instances[key].dtype == dtype, \
+        f"UniqueVar {obj} already exists with dtype {cls._instances[key].dtype}"
 
-    return cls._instances[obj]
+    return cls._instances[key]
+
+  @staticmethod
+  def _normalize_key(obj):
+    """Normalize key by using _original reference for CodeBlock instances."""
+    # Handle tuple keys like (CodeBlock, index) or (TensorEdge, index)
+    if isinstance(obj, tuple):
+      normalized = tuple(
+        elem._original if hasattr(elem, '_original') else elem
+        for elem in obj
+      )
+      return normalized
+    # Handle direct object keys
+    return getattr(obj, '_original', obj)
 
   def set_static(self):
     # FIXME: we don't know if set_static is always done prior to another variable use
@@ -60,6 +76,16 @@ class CodePhase(Enum):
 class CodeBlock(metaclass=ABCMeta):
   def __init__(self):
     self.next = None
+    self._original = self  # Track original object for UniqueVar
+
+  def __copy__(self):
+    """Shallow copy that preserves reference to original object."""
+    cls = self.__class__
+    new_obj = cls.__new__(cls)
+    new_obj.__dict__.update(self.__dict__)
+    new_obj._original = self._original  # Keep reference to original
+    # Don't reset next - preserve the linked list chain
+    return new_obj
 
   @abstractmethod
   def content(self) -> str:
