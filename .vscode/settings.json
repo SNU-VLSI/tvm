@@ -101,7 +101,8 @@
     "**/*.a": true,
     "**/*.lib": true,
     "**/*.dll": true,
-    "**/*.dylib": true
+    "**/*.dylib": true,
+    "**/3rdparty": true
   },
   "files.watcherExclude": {
     "**/__pycache__/**": true,
@@ -116,7 +117,8 @@
     "**/.pytest_cache/**": true,
     "**/.mypy_cache/**": true,
     "**/.tvm_test_data/**": true,
-    "**/htmlcov/**": true
+    "**/htmlcov/**": true,
+    "**/3rdparty/**": true
   },
   "search.exclude": {
     "**/__pycache__": true,
@@ -130,7 +132,8 @@
     "**/*.o": true,
     "**/*.pyc": true,
     "**/htmlcov": true,
-    "**/.tvm_test_data": true
+    "**/.tvm_test_data": true,
+    "**/3rdparty": true
   },
   "files.watcherInclude": [
     "**/*.py",
@@ -156,11 +159,28 @@
     "**/__pycache__/**",
     "**/.pytest_cache/**",
     "**/.mypy_cache/**",
-    "**/.tvm_test_data/**"
+    "**/.tvm_test_data/**",
+    "**/3rdparty/**",
+    "**/docs/**",
+    "**/*.so",
+    "**/*.egg-info/**",
+    "**/htmlcov/**",
+    "**/vta/**",
+    "**/rust/**",
+    "**/golang/**",
+    "**/jvm/**",
+    "**/web/**",
+    "**/apps/**"
   ],
   "python.analysis.diagnosticSeverityOverrides": {
     "reportInvalidTypeForm": "none"
   },
+  "python.analysis.autoSearchPaths": false,
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/python"
+  ],
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.useLibraryCodeForTypes": false,
   "C_Cpp.files.exclude": {
     "**/build/**": true,
     "**/build-*/**": true,
