@@ -28,6 +28,9 @@ import json
 import pprint
 import os
 
+#TODO:
+# 1. memory allocation is not optimal. we can split tensor to multiple inode. current implementation assign only one inode for entire tensor.
+
 
 # Debug logging utility controlled by IMCFLOW_DEBUG environment variable
 # Usage:
@@ -1729,8 +1732,8 @@ class NodeMapper:
       imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
       for global_var, func in mod.functions.items():
         if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
-          target_func = imcflow_func_map[global_var.name_hint]
-          mapping_dict = self.run_(target_func)
+          func_info = imcflow_func_map[global_var.name_hint]
+          mapping_dict = self.run_(func_info.func_node)
           ImcflowDeviceConfig().HWNodeMap.update(mapping_dict)
       return mod
 
@@ -2067,8 +2070,8 @@ def constructTensorEdgeList(mod):
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif func.attrs["Compiler"]=="imcflow":
-      target_func = imcflow_func_map[func_name_var.name_hint]
-      ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint] = _Visitor().getTensorEdgeList(func_name_var, target_func)
+      func_info = imcflow_func_map[func_name_var.name_hint]
+      ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint] = _Visitor().getTensorEdgeList(func_name_var, func_info.func_node)
       ImcflowDeviceConfig().TensorEdgeList.extend(ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint])
 
 def constructActiveIMCEDict(mod):
@@ -2222,23 +2225,124 @@ class MemoryAllocator:
           return edges
 
         def allocate(self):
+          """
+          Two-phase memory allocation:
+          Phase 1: Collect information about input/output tensors per inode
+          Phase 2: Calculate tiling factor and perform actual allocation
+          """
+          # Phase 1: Collect information
+          # {inode_name: {'input': [], 'output': [], 'weight': [], 'other': []}}
+          inode_tensors = {}
+          
           for edge, mem_block in self.DataBlockDict.items():
             if mem_block.size is None:
               raise ValueError("Memory size cannot be none.")
 
-            # add tensor edge info to ImcflowDeviceConfig, but as a placeholder for now.
-            # the policy info and fifo id will be set later in PolicyTableGenerator.
-            ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
-            inode_name = hw_node_id.name # ex) inode_3
-
-            if inode_tensorid.tensor_type == "weight":
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(self.func_name, mem_block)
-              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(self.func_name, mem_block)
+            inode_name = hw_node_id.name  # ex) inode_3
+            
+            if inode_name not in inode_tensors:
+              inode_tensors[inode_name] = {
+                'input': [],
+                'output': [],
+                'weight': [],
+                'other': []
+              }
+            
+            # Classify tensor type
+            tensor_type = inode_tensorid.tensor_type
+            
+            if tensor_type == "weight":
+              inode_tensors[inode_name]['weight'].append((edge, mem_block, inode_tensorid))
+            elif tensor_type == "data" or tensor_type == "odata":
+              # Check if this is function input or output
+              src_node = self.data.get(getInnerNodeID(edge.src_id.graph_node_id))
+              dst_node = self.data.get(getInnerNodeID(edge.dst_id.graph_node_id))
+              
+              if isinstance(src_node, relay.Var):
+                # Function input
+                inode_tensors[inode_name]['input'].append((edge, mem_block, inode_tensorid))
+              elif isinstance(dst_node, relay.Function):
+                # Function output
+                inode_tensors[inode_name]['output'].append((edge, mem_block, inode_tensorid))
+              else:
+                # Intermediate tensor
+                inode_tensors[inode_name]['other'].append((edge, mem_block, inode_tensorid))
             else:
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(self.func_name, mem_block)
+              # Other types (bias, min, max, etc.)
+              inode_tensors[inode_name]['other'].append((edge, mem_block, inode_tensorid))
+          
+          # Phase 2: Calculate tiling factor for this function
+          tiling_factor = 1
+          
+          for inode_name, tensors in inode_tensors.items():
+            # Calculate total size of input/output tensors for this inode
+            input_output_total = 0
+            
+            for edge, mem_block, _ in tensors['input']:
+              input_output_total += mem_block.size
+            
+            for edge, mem_block, _ in tensors['output']:
+              input_output_total += mem_block.size
+            
+            # Check if tiling is needed
+            if input_output_total > ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
+              required_factor = math.ceil(input_output_total / ImcflowDeviceConfig.INODE_DATA_MEM_SIZE)
+              tiling_factor = max(tiling_factor, required_factor)
+              debug_print(f"  [{self.func_name}] {inode_name}: input/output total = {input_output_total} bytes")
+              debug_print(f"    > Memory capacity = {ImcflowDeviceConfig.INODE_DATA_MEM_SIZE} bytes")
+              debug_print(f"    > Required tiling factor = {required_factor}")
+          
+          # Store tiling factor in FunctionInfo
+          func_info = ImcflowDeviceConfig().ImcflowFuncMap[self.func_name]
+          func_info.tiling_factor = tiling_factor
+          
+          if tiling_factor > 1:
+            debug_print(f"  [{self.func_name}] Tiling factor = {tiling_factor}")
+          
+          # Phase 3: Perform actual allocation with tiling
+          for inode_name, tensors in inode_tensors.items():
+            # Allocate weight tensors (no tiling, allow overlap)
+            for edge, mem_block, inode_tensorid in tensors['weight']:
+              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(
+                self.func_name, mem_block
+              )
+            
+            # Allocate input tensors (with tiling if needed)
+            for edge, mem_block, inode_tensorid in tensors['input']:
+              if tiling_factor > 1:
+                # Apply tiling: divide size by tiling factor
+                # This represents height-wise tiling (axis=2)
+                tiled_size = math.ceil(mem_block.size / tiling_factor)
+                mem_block.set_size(tiled_size)
+                debug_print(f"    Input tensor tiled: {mem_block.size} -> {tiled_size} bytes")
+              
+              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
+                self.func_name, mem_block
+              )
+            
+            # Allocate output tensors (with tiling if needed)
+            for edge, mem_block, inode_tensorid in tensors['output']:
+              if tiling_factor > 1:
+                # Apply tiling: divide size by tiling factor
+                tiled_size = math.ceil(mem_block.size / tiling_factor)
+                mem_block.set_size(tiled_size)
+                debug_print(f"    Output tensor tiled: {mem_block.size} -> {tiled_size} bytes")
+              
+              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
+                self.func_name, mem_block
+              )
+            
+            # Allocate other tensors (no tiling)
+            for edge, mem_block, inode_tensorid in tensors['other']:
+              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
+                self.func_name, mem_block
+              )
 
           return
 
@@ -2397,8 +2501,8 @@ class MemoryAllocator:
       imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
       for gv, func in mod.functions.items():
         if isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow":
-          target_func = imcflow_func_map[gv.name_hint]
-          self.run_(target_func, gv.name_hint, ttype_map[gv.name_hint])
+          func_info = imcflow_func_map[gv.name_hint]
+          self.run_(func_info.func_node, gv.name_hint, ttype_map[gv.name_hint])
 
 @relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
@@ -2934,6 +3038,8 @@ def clearCompilerAttr(mod):
   return mod
 
 def constructImcflowFuncMap(mod):
+  from tvm.contrib.imcflow import FunctionInfo
+  
   imcflow_func_map = {}
   class FirstFuncVisitor(tvm.relay.ExprVisitor):
     def __init__(self):
@@ -2950,7 +3056,10 @@ def constructImcflowFuncMap(mod):
       wrap_func = mod[func_name.name_hint]
       visitor = FirstFuncVisitor()
       visitor.visit(wrap_func)
-      imcflow_func_map[func_name.name_hint] = visitor.first_func
+      imcflow_func_map[func_name.name_hint] = FunctionInfo(
+        func_node=visitor.first_func,
+        tiling_factor=1  # Initial value
+      )
 
   ImcflowDeviceConfig().ImcflowFuncMap = imcflow_func_map
 
