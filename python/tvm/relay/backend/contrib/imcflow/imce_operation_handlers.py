@@ -119,6 +119,32 @@ class AddHandler(OperationHandler):
 
 
 @register_operation_handler
+class MultHandler(OperationHandler):
+  """Handles multiply operations.
+  FIXME: uses MULTL for now
+
+  Adds as a post-op to the current convolution block when inside a composite.
+  """
+
+  @property
+  def priority(self) -> int:
+    return 10
+
+  def can_handle(self, call: relay.Call) -> bool:
+    return call.op == op.get("multiply")
+
+  def handle(self, call: 'BuilderContext') -> None:
+    hid = call.get_hid()
+    block = MultlBlock(call, "multl")
+
+    if call.curr_composite_id is not None:
+      call.curr_conv_block.add_post_op(block)
+    else:
+      wrapped_block = RecvSendWrapper(block, "multiply standalone")
+      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
+
+
+@register_operation_handler
 class DivideHandler(OperationHandler):
   """Handles divide operations.
 
@@ -223,7 +249,6 @@ class MinMaxQuantizeHandler(OperationHandler):
     # set o_split_idx to 0 when last_tuple_idx is None
     block = MinmaxQuantBlock(call, call.last_tuple_idx or 0, "min_max_quantize")
     if call.curr_composite_id is not None:
-      block.post_op = True
       call.curr_conv_block.add_post_op(block)
     else:
       # Standalone minmax quantize needs RECV/SEND wrapper
@@ -253,7 +278,6 @@ class ReLUHandler(OperationHandler):
 
     # Wrap with RECV/SEND if standalone, or add as post-op if in composite
     if call.curr_composite_id is not None:
-      block.post_op = True
       call.curr_conv_block.add_post_op(block)
     else:
       # Standalone ReLU needs RECV/SEND wrapper

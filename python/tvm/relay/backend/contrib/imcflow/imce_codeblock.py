@@ -46,6 +46,7 @@ class ImceCallCodeBlock(ImceCodeBlock):
     self.call = call
     self.in_edges = call.get_input_edges()
     self.out_edges = call.get_output_edges()
+    self.prev_op = None
     if self.num_in_edges is not None:
       assert len(self.in_edges) == self.num_in_edges
 
@@ -116,7 +117,6 @@ class VecBlock(ImceCallCodeBlock):
     super().__init__(call, annotation)
     self.op_name = self._op_name()
     self.imm_value = self._get_imm_value()
-    self.post_op = None
 
   @abstractmethod
   def _get_imm_value(self) -> int:
@@ -129,11 +129,19 @@ class VecBlock(ImceCallCodeBlock):
   def _content(self) -> CodeBlock:
     """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
-    num_blocks = 4 if self.post_op else 1
+    num_blocks = 4 if self.prev_op else 1
 
     for i in range(num_blocks):
       # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
-      var_ins = [UniqueVar((edge, i)) for edge in self.in_edges]
+      var_ins = []
+      for edge in self.in_edges:
+        if self.prev_op and (edge in self.prev_op.out_edges):
+          # replace the var with var_o of the prev_block if matches
+          var_ins.append(UniqueVar((self.prev_op, i)))
+        else:
+          # else create a new variable using edge
+          var_ins.append(UniqueVar((edge, i)))
+
       var_o = UniqueVar((self, i))
       var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
       # e.g. __builtin_IMCE_ADD(a, b, 15);
@@ -194,21 +202,24 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', o_split_idx: int, annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
-    for edge in self.in_edges:
-      if edge.dst_id.tensor_type == "data":
-        self.data_edge = edge
     self.o_split_idx = o_split_idx
-    self.post_op = None
 
   def _content(self) -> CodeBlock:
     """Generate only computation, no RECV/SEND."""
-    num_blocks = 4 if self.post_op else 1
+    num_blocks = 4 if self.prev_op else 1
     src_mask = 15
+
+    data_edge = None
+    for edge in self.in_edges:
+      if self.prev_op and (edge in self.prev_op.out_edges):
+        data_edge = self.prev_op
+      elif edge.dst_id.tensor_type == "data":
+        data_edge = edge
 
     code = TextBlock("")
 
     for i in range(num_blocks):
-      var_i = UniqueVar((self.data_edge, i))
+      var_i = UniqueVar((data_edge, i))
 
       qreg_start_idx = i + 4 * self.o_split_idx
       # min max quantization does not require $rs2
@@ -285,28 +296,32 @@ class ConvBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', shapes: dict, conv_attrs: Conv2DAttrs,
                annotation: str = ""):
     super().__init__(call, annotation)
-    for edge in self.in_edges:
-      if edge.dst_id.tensor_type == "data":
-        self.data_edge = edge
     self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
-    self.post_ops = []
+    self.post_op_chain = []
 
-  def add_post_op(self, code: CodeBlock):
-    code.post_op = True
-    self.post_ops.append(code)
+  def add_post_op(self, code: ImceCallCodeBlock):
+    if self.post_op_chain:
+      code.prev_op = self.post_op_chain[-1]
+    else:
+      code.prev_op = self
+    self.post_op_chain.append(code)
 
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
     num_blocks = 4  # FIXED in ConvBlock
+    for edge in self.in_edges:
+      if edge.dst_id.tensor_type == "data":
+        data_edge = edge
+
     fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(
-        self.data_edge.dst_id, "in").fifo_id
+        data_edge.dst_id, "in").fifo_id
     if fifo_id_i != 0:
       logging.warning(f"conv block data fifo_id_i is not 0, but {fifo_id_i}")
 
     """
     # hack to get the last tensor edge
-    last_out_edge = self.post_ops[-1].out_edge if self.post_ops else self.out_edge
+    last_out_edge = self.post_op_chain[-1].out_edge if self.post_op_chain else self.out_edge
     out_edge_info = DevConfig().get_tensor_edge_info(last_out_edge)
 
     if out_edge_info:
@@ -326,7 +341,7 @@ class ConvBlock(ImceCallCodeBlock):
       var_creg = UniqueVar((self, i))
       code += f"{var_creg} = __builtin_IMCE_GET_CREG((short){i});"
 
-    for op in self.post_ops:
+    for op in self.post_op_chain:
       code += "\n"
       code += copy(op)
 
@@ -370,7 +385,6 @@ class BatchNormBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for batch normalization """
     super().__init__(call, annotation)
-    self.post_op = None
 
   def _content(self) -> CodeBlock:
     """Generate only computation, no RECV/SEND."""
@@ -385,9 +399,11 @@ class BatchNormBlock(ImceCallCodeBlock):
       elif edge.dst_id.tensor_type == "data":
         data_edge = edge
 
-    num_blocks = 4 if self.post_op else 1
+    num_blocks = 4 if self.prev_op else 1
 
     for i in range(num_blocks):
+      if self.prev_op and (data_edge in self.prev_op.out_edges):
+        data_edge = self.prev_op
       var_data = UniqueVar((data_edge, i))
       var_scale = UniqueVar((scale_edge, i))
       var_bias = UniqueVar((bias_edge, i))
@@ -433,12 +449,13 @@ class RecvSendWrapper(ImceCodeBlock):
     te_out_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
         edge.src_id, "out") for edge in self.out_edges]
 
-    # Determine number of bitplanes to process based on inner block's post_op flag
-    # When post_op is True, blocks process 4 bitplanes at once
-    # When post_op is False (standalone), blocks process 1 bitplane at a time
-    # Note: inner_block should have post_op=False since this wrapper is only for standalone ops
-    num_blocks = 4 if (hasattr(self.inner_block, 'post_op')
-                       and self.inner_block.post_op) else 1
+    # Determine number of bitplanes to process based on inner block's prev_op flag
+    # When prev_op exists, blocks process 4 bitplanes at once
+    # When prev_op is None (standalone), blocks process 1 bitplane at a time
+    # Note: inner_block should have prev_op=None since this wrapper is only for standalone ops
+    # CHECK THIS!
+    num_blocks = 4 if (hasattr(self.inner_block, 'prev_op')
+                       and self.inner_block.prev_op) else 1
 
     # Generate RECV for non-constant input edges
     for i in range(num_blocks):
@@ -457,7 +474,7 @@ class RecvSendWrapper(ImceCodeBlock):
         if te_out_info:
           code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
 
-    # Wrap in a loop based on data size
+    # Wrap in a loop based on calls' type_args
     edge_shape = None
     for idx, arg in enumerate(self.call.args):
       if ConstPat.match(arg):
