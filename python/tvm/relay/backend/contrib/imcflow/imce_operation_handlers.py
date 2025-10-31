@@ -16,6 +16,10 @@ from tvm.relay.backend.contrib.imcflow.operation_handlers import (
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from .builder_context import BuilderContext
 
 
 @register_operation_handler
@@ -34,7 +38,7 @@ class CompositeHandler(OperationHandler):
     return (isinstance(call.op, relay.Function) and
             "Composite" in call.op.attrs)
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     # Set composite context on both BuilderContext and builder
     composite_id = getNodeID(call.call)
     call.curr_composite_id = composite_id
@@ -67,25 +71,11 @@ class ConvHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("nn.imcflow_qconv")
 
-  def handle(self, call) -> None:
-    # Get argument dictionaries and shapes
-    args = call.get_arg_dict()
+  def handle(self, call: 'BuilderContext') -> None:
+    # Get hid and shapes
+    hid = call.get_hid()
     shapes = call.get_arg_shape_dict()
     shapes["output"] = infer_shape(call.call)
-
-    # Get input/output edges
-    in_edges = call.get_input_edges()
-
-    # Find weight edge
-    w_edge = None
-    for edge in in_edges:
-      if edge.src_id.tensor_type == "weight":
-        w_edge = edge
-        break
-
-    w_info = DevConfig().get_tensor_edge_info(w_edge)
-    w_tid = w_edge.src_id
-    hid = call.get_hid()
 
     # scan reg
     # TODO: add scan reg code block
@@ -101,7 +91,7 @@ class ConvHandler(OperationHandler):
 
     # write weights => on INODE
 
-    block = ConvBlock(in_edges, shapes, call.call.attrs, "conv exec")
+    block = ConvBlock(call, shapes, call.call.attrs, "conv exec")
     # FIXME: this assumes that convblock is called first... we don't want that
     call.curr_conv_block = block
     call.codeblocks.append(hid, block, CodePhase.EXEC)
@@ -121,12 +111,10 @@ class AddHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("add")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     assert call.curr_composite_id, "Add must be inside a composite function"
 
-    in_edges = call.get_input_edges()
-
-    block = AddBlock(in_edges, "add")
+    block = AddBlock(call, "add")
     call.curr_conv_block.add_post_op(block)
 
 
@@ -144,12 +132,10 @@ class DivideHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("divide")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     # TODO: divide block should be replaced later
     assert call.curr_composite_id, "Divide must be inside a composite function"
-
-    in_edges = call.get_input_edges()
-    block = DivBlock(in_edges, "div")
+    block = DivBlock(call, "div")
     call.curr_conv_block.add_post_op(block)
 
 
@@ -167,13 +153,11 @@ class ConcatHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("concatenate")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     hid = call.get_hid()
     conv_block = call.get_conv_block_by_hid(hid)
 
-    in_edges = call.get_input_edges()
-
-    block = ConcatBlock(in_edges, "concat")
+    block = ConcatBlock(call, "concat")
     conv_block.add_post_op(block)
 
 
@@ -191,7 +175,7 @@ class SplitHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("split")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     return
     hid = call.get_hid()
     if hid.is_imce():
@@ -220,7 +204,7 @@ class MinMaxQuantizeHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("qnn.imcflow_min_max_quantize")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     hid = call.get_hid()
 
     # Generate RecvConst blocks for min/max parameters
@@ -236,10 +220,8 @@ class MinMaxQuantizeHandler(OperationHandler):
     # block = RecvConstBlock(_edge, f"qreg reset")
     # call.codeblocks.append(hid, block, CodePhase.INIT)
 
-    in_edges = call.get_input_edges()
     # set o_split_idx to 0 when last_tuple_idx is None
-    block = MinmaxQuantBlock(
-        in_edges, call.last_tuple_idx or 0, "min_max_quantize")
+    block = MinmaxQuantBlock(call, call.last_tuple_idx or 0, "min_max_quantize")
     if call.curr_composite_id is not None:
       block.post_op = True
       call.curr_conv_block.add_post_op(block)
@@ -263,12 +245,11 @@ class ReLUHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("nn.relu")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     hid = call.get_hid()
-    in_edges = call.get_input_edges()
 
     # Create ReLU computation block
-    block = ReLUBlock(in_edges, "relu")
+    block = ReLUBlock(call, "relu")
 
     # Wrap with RECV/SEND if standalone, or add as post-op if in composite
     if call.curr_composite_id is not None:
@@ -297,7 +278,7 @@ class BiasAddHandler(OperationHandler):
     # Uncomment to enable:
     # return call.op == op.get("nn.bias_add")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     assert call.curr_composite_id, \
         f"BiasAdd must be inside a composite function, got gid: {call.get_gid()}"
     hid = call.get_hid()
@@ -306,8 +287,7 @@ class BiasAddHandler(OperationHandler):
     block = RecvConstBlock(bias_edge, "bias write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
 
-    in_edges = call.get_input_edges()
-    block = AddBlock(in_edges, "add_bias")
+    block = AddBlock(call, "add_bias")
     call.curr_conv_block.add_post_op(block)
 
 
@@ -325,7 +305,7 @@ class BatchNormHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("imcflow.fused_batch_norm")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     assert call.curr_composite_id, \
         f"BatchNorm must be inside a composite function, got gid: {call.get_gid()}"
     hid = call.get_hid()
@@ -337,9 +317,8 @@ class BatchNormHandler(OperationHandler):
     block = RecvConstBlock(bias_edge, "fused_bias write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
 
-    in_edges = call.get_input_edges()
     # TODO: how to scale?
-    block = BatchNormBlock(in_edges, "batch_norm")
+    block = BatchNormBlock(call, "batch_norm")
     call.curr_conv_block.add_post_op(block)
 
 
@@ -357,6 +336,6 @@ class NuQuantizeHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("qnn.imcflow_nu_quantize")
 
-  def handle(self, call) -> None:
+  def handle(self, call: 'BuilderContext') -> None:
     # Currently does nothing
     pass

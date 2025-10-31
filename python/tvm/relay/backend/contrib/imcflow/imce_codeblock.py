@@ -1,14 +1,21 @@
 from abc import *
 from typing import *
 from copy import copy
+import math
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import *
+from tvm.relay.dataflow_pattern import *
 from textwrap import indent
 import logging
 import pdb
+
+if TYPE_CHECKING:
+  from .builder_context import BuilderContext
+
+ConstPat = is_constant()
 
 
 class ImceCodeBlock(CodeBlock):
@@ -31,6 +38,18 @@ class ImceCodeBlock(CodeBlock):
     pass
 
 
+class ImceCallCodeBlock(ImceCodeBlock):
+  num_in_edges = None
+
+  def __init__(self, call: 'BuilderContext', annotation: str = ""):
+    super().__init__(annotation)
+    self.call = call
+    self.in_edges = call.get_input_edges()
+    self.out_edges = call.get_output_edges()
+    if self.num_in_edges is not None:
+      assert len(self.in_edges) == self.num_in_edges
+
+
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
 
@@ -50,6 +69,7 @@ class LoadLBBlock(ImceCodeBlock):
 class RecvConstBlock(ImceCodeBlock):
   """ Code block for receiving constant from given fifo id into a variable """
   # FIXME: Add support for initializing QREGs to zero
+  num_in_edges = 1
 
   def __init__(self, in_edge: TensorEdge, annotation: str = ""):
     super().__init__(annotation)
@@ -62,10 +82,10 @@ class RecvConstBlock(ImceCodeBlock):
     assert te_info, "Tensor edge info not found"
 
     size = DevConfig().MemLayout.get_data_block_by_id(self.in_edge.src_id).size
-    if (size % 32 != 0):
-      pass
-    assert size % 32 == 0, "Size must be a multiple of 32"
-    recv_count = int(size / 32)  # recv operates on 32-byte word
+    base_addr = DevConfig().MemLayout.get_data_block_by_id(
+        self.in_edge.src_id).base_address
+    assert base_addr % 32 == 0, "Base address must be a multiple of 32"
+    recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
     for i in range(recv_count):
       var = UniqueVar((self.in_edge, i))
@@ -84,20 +104,18 @@ class RecvConstBlock(ImceCodeBlock):
     return code
 
 
-class VecBlock(ImceCodeBlock):
+class VecBlock(ImceCallCodeBlock):
   """
   VecBlock is base class for implementing R,I type vector operations.
   Only generates computation. RECV/SEND handled by wrapper or ConvBlock.
   """
   num_in_edges = 2
 
-  def __init__(self, in_edges: List[TensorEdge], annotation: str = ""):
+  def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for vector operations """
-    super().__init__(annotation)
-    assert len(in_edges) == self.num_in_edges
+    super().__init__(call, annotation)
     self.op_name = self._op_name()
     self.imm_value = self._get_imm_value()
-    self.in_edges = in_edges
     self.post_op = None
 
   @abstractmethod
@@ -166,21 +184,19 @@ class ReLUBlock(VecBlock):
     return "MAXI"
 
 
-class MinmaxQuantBlock(ImceCodeBlock):
+class MinmaxQuantBlock(ImceCallCodeBlock):
   """
   MinmaxQuantBlock for min/max quantization operations.
   Only generates computation. RECV/SEND handled by wrapper or ConvBlock.
   """
   num_in_edges = 3
 
-  def __init__(self, in_edges: List[TensorEdge], o_split_idx: int, annotation: str = ""):
+  def __init__(self, call: 'BuilderContext', o_split_idx: int, annotation: str = ""):
     """ Code block for min/max quantization """
-    super().__init__(annotation)
-    assert len(in_edges) == self.num_in_edges
-    for edge in in_edges:
+    super().__init__(call, annotation)
+    for edge in self.in_edges:
       if edge.dst_id.tensor_type == "data":
-        self.in_edge = edge
-    self.in_edges = in_edges
+        self.data_edge = edge
     self.o_split_idx = o_split_idx
     self.post_op = None
 
@@ -192,7 +208,7 @@ class MinmaxQuantBlock(ImceCodeBlock):
     code = TextBlock("")
 
     for i in range(num_blocks):
-      var_i = UniqueVar((self.in_edge, i))
+      var_i = UniqueVar((self.data_edge, i))
 
       qreg_start_idx = i + 4 * self.o_split_idx
       # min max quantization does not require $rs2
@@ -205,7 +221,7 @@ class MinmaxQuantBlock(ImceCodeBlock):
     return code
 
 
-class ConcatBlock(ImceCodeBlock):
+class ConcatBlock(ImceCallCodeBlock):
   min_in_edges = 2
 
   """
@@ -213,12 +229,11 @@ class ConcatBlock(ImceCodeBlock):
   FIXME: needs to look upon, since concat can happen not only in bitplanes...
   """
 
-  def __init__(self, in_edges: List[TensorEdge], annotation: str = ""):
+  def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for min/max quantization """
-    super().__init__(annotation)
+    super().__init__(call, annotation)
     assert len(
-        in_edges) >= self.min_in_edges, "At least two input edges are required"
-    self.in_edges = in_edges
+        self.in_edges) >= self.min_in_edges, "At least two input edges are required"
 
   def _content(self) -> CodeBlock:
     num_bitplanes = 4
@@ -243,18 +258,17 @@ class ConcatBlock(ImceCodeBlock):
     return code
 
 
-class SplitBlock(ImceCodeBlock):
+class SplitBlock(ImceCallCodeBlock):
   num_in_edges = 1
 
   """ Code block for splitting a tensor into multiple tensors """
 
-  def __init__(self, in_edge: TensorEdge, out_edges: List[TensorEdge], annotation: str = ""):
-    super().__init__(annotation)
-    self.in_edge = in_edge
+  def __init__(self, call: 'BuilderContext', annotation: str = ""):
+    super().__init__(call, annotation)
     first_policies = [DevConfig().get_tensor_edge_info(
-        out_edge).policy_info[0] for out_edge in out_edges]
+        out_edge).policy_info[0] for out_edge in self.out_edges]
     fifo_ids = [DevConfig().get_tensor_edge_info(
-        out_edge).fifo_id for out_edge in out_edges]
+        out_edge).fifo_id for out_edge in self.out_edges]
     assert all(policy == first_policies[0]
                for policy in first_policies), "All output edges must have the same first policy info"
     assert all(fid == fifo_ids[0]
@@ -264,17 +278,16 @@ class SplitBlock(ImceCodeBlock):
     return TextBlock("")
 
 
-class ConvBlock(ImceCodeBlock):
+class ConvBlock(ImceCallCodeBlock):
   """ Code block for receiving conv input data from given fifo id """
   num_in_edges = 3
 
-  def __init__(self, in_edges: List[TensorEdge], shapes: dict, conv_attrs: Conv2DAttrs,
+  def __init__(self, call: 'BuilderContext', shapes: dict, conv_attrs: Conv2DAttrs,
                annotation: str = ""):
-    super().__init__(annotation)
-    assert len(in_edges) == self.num_in_edges
-    for edge in in_edges:
+    super().__init__(call, annotation)
+    for edge in self.in_edges:
       if edge.dst_id.tensor_type == "data":
-        self.in_edge = edge
+        self.data_edge = edge
     self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
@@ -287,7 +300,7 @@ class ConvBlock(ImceCodeBlock):
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
     num_blocks = 4  # FIXED in ConvBlock
     fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(
-        self.in_edge.dst_id, "in").fifo_id
+        self.data_edge.dst_id, "in").fifo_id
     if fifo_id_i != 0:
       logging.warning(f"conv block data fifo_id_i is not 0, but {fifo_id_i}")
 
@@ -319,7 +332,9 @@ class ConvBlock(ImceCodeBlock):
 
     code += "\n"
     for i in range(num_blocks):
-      var_o = UniqueVar(("DEADBEEF", i)) # FIXME: we need the last_post_op's out_edge here (maybe deal with this in the wrapper?)
+      # FIXME: we need the last_post_op's out_edge here (maybe deal with this in the wrapper?)
+      # probably we can composite node's edges
+      var_o = UniqueVar(("DEADBEEF", i))
       code += f"__builtin_IMCE_SEND({-1}, {var_o}, {-1}, 0);"
 
     code += "\n"
@@ -345,18 +360,16 @@ class ConvBlock(ImceCodeBlock):
     return code
 
 
-class BatchNormBlock(ImceCodeBlock):
+class BatchNormBlock(ImceCallCodeBlock):
   """
   BatchNormBlock for batch normalization operations.
   Only generates computation. RECV/SEND handled by wrapper or ConvBlock.
   """
   num_in_edges = 3
 
-  def __init__(self, in_edges: List[TensorEdge], annotation: str = ""):
+  def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for batch normalization """
-    super().__init__(annotation)
-    assert len(in_edges) == self.num_in_edges
-    self.in_edges = in_edges
+    super().__init__(call, annotation)
     self.post_op = None
 
   def _content(self) -> CodeBlock:
@@ -391,11 +404,9 @@ class BatchNormBlock(ImceCodeBlock):
 class RecvSendWrapper(ImceCodeBlock):
   """
   Wrapper that adds RECV and SEND operations around a computation block.
-  Used for standalone (non-composite) operations that need data transfer.
-  Supports multiple input and output edges.
   """
 
-  def __init__(self, inner_block: ImceCodeBlock, annotation: str = ""):
+  def __init__(self, inner_block: ImceCallCodeBlock, annotation: str = ""):
     """Wrap a computation block with RECV/SEND operations.
 
     Args:
@@ -404,14 +415,9 @@ class RecvSendWrapper(ImceCodeBlock):
     """
     super().__init__(annotation)
     self.inner_block = inner_block
+    self.call = inner_block.call.call
     self.in_edges = inner_block.in_edges
-    # Support both single output edge and multiple output edges
-    if hasattr(inner_block, 'out_edges'):
-      self.out_edges = inner_block.out_edges
-    elif hasattr(inner_block, 'out_edge'):
-      self.out_edges = [inner_block.out_edge]
-    else:
-      self.out_edges = []
+    self.out_edges = inner_block.out_edges
 
   def _content(self) -> CodeBlock:
     """Generate RECV, computation, and SEND for standalone operations."""
@@ -452,8 +458,18 @@ class RecvSendWrapper(ImceCodeBlock):
           code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
 
     # Wrap in a loop based on data size
-    # FIXME: this can be problematic for >1 input edges
-    count = te_in_infos[0].data_block.size // 32
+    edge_shape = None
+    for idx, arg in enumerate(self.call.args):
+      if ConstPat.match(arg):
+        continue
+      else:
+        if edge_shape is not None:
+          assert (edge_shape == self.call.type_args[idx].shape), "all input args should have the same shape"
+        else:
+          edge_shape = self.call.type_args[idx].shape
+
+    count = edge_shape[-1] * edge_shape[-2]
+
     return SimpleFor(count, code, f"{self.inner_block.__class__.__name__}_with_IO")
 
 
