@@ -82,15 +82,16 @@ class WriteIMEMBlock(InodeCodeBlock):
 class WriteIMCUBlock(InodeCodeBlock):
   """ Code block for writing IMCU weights given the master inode's hid  """
 
-  def __init__(self, node_id: NodeID, annotation: str = ""):
+  def __init__(self, node_id: NodeID, annotation: str = "", func_name: str = ""):
     super().__init__(annotation)
     assert node_id.is_inode(), "WriteIMCUBlock can only be used for inode"
     self.node_id = node_id
+    self.func_name = func_name
 
   def _content(self) -> Union[str, CodeBlock]:
     code = TextBlock("")
     region = DevConfig().MemLayout[f"{self.node_id.name}_data"]
-    for db in region.blocks.values():
+    for db in region.blocks[self.func_name].values():
       if isinstance(db.id, TensorID) and "weight" == db.id.tensor_type:
         info = DevConfig().get_tensor_edge_info_with_id_dir(db.id, "out")
         assert len(info) == 1, "Tensor edge info not found for weight tensor"
@@ -114,8 +115,8 @@ class RecvBlock(InodeCodeBlock):
     self.fifo_id = fifo_id
 
   def _content(self) -> Union[str, CodeBlock]:
-    assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
-    recv_count = self.block.size // 32
+    # assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
+    recv_count = math.ceil(self.block.size / 32)
     code = TextBlock("")
 
     var = UniqueVar("recv_data_base_address", dtype="int")
@@ -135,8 +136,8 @@ class SendBlock(InodeCodeBlock):
     self.fifo_id = fifo_id
 
   def _content(self) -> Union[str, CodeBlock]:
-    assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
-    recv_count = self.block.size // 32
+    # assert self.block.size % 32 == 0, "DataBlock size must be multiple of 32"
+    recv_count = math.ceil(self.block.size / 32)
     code = TextBlock("")
 
     var = UniqueVar("send_data_base_address", dtype="int")

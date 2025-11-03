@@ -275,7 +275,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # imcu write
     for node in NodeID.inodes():
-      block = WriteIMCUBlock(node, "imcu write")
+      block = WriteIMCUBlock(node, "imcu write", self.codeblocks.func_name)
       self.codeblocks.append(node, block, CodePhase.INIT)
 
   def finalize(self):
@@ -291,29 +291,31 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for inode_slv in inode_slaves:
       self.codeblocks.append(inode_slv, block, CodePhase.END)
 
-  def visit_call(self, call):
-    IsComposite = isinstance(call.op, relay.Function) and \
-        "Composite" in call.op.attrs
-    for idx, a in enumerate(call.args):
-      self.visit(a)
-    if IsComposite:
-      self.visit_composite_call(call)
-    else:
-      pass
-
   def visit_function(self, fn):
+    # constant tensor tags except "weight" (IMCU weights are handled separately)
+    const_tags = ["bias", "fused_scale", "fused_bias",
+                  "min", "max", "threshold", "scale", "config"]
     for x in fn.params:
-      self.visit(x)
-    self.visit(fn.body)
+      # self.visit(x)
+      param_id = getNodeID(x)
+      param_edge = self.get_output_edges_from_id(param_id)[0]
+      self.add_send_block(param_edge)
+    #self.visit(fn.body)
+    # traverse constant nodes
+    const_edges = [edge for edge in self.edges if edge.src_id.tensor_type in const_tags]
+    for edge in const_edges:
+      self.add_send_block(edge)
 
     # Add Recv Block
-    self.add_recv_block(fn)
+    fn_id = getNodeID(fn)
+    fn_edges = self.get_input_edges_from_id(fn_id)
+    for last_edge in fn_edges:
+      self.add_recv_block(last_edge)
 
-  def add_send_block(self, node):
-    out_edge = self.get_output_edges(node)[0]
-    out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
-    tid = out_edge.src_id
-    hid = self.get_hid(node)
+  def add_send_block(self, edge):
+    out_edge_info = DevConfig().get_tensor_edge_info(edge)
+    tid = edge.src_id
+    hid = self.get_hid(tid)
 
     if hid not in self._imce_compute_added:
       block = IMCEComputeBlock(f"imce compute start")
@@ -322,31 +324,17 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     db = DevConfig().MemLayout.get_data_block_by_id(tid)
 
-    block = SendBlock(db, out_edge_info.fifo_id, "send")
+    block = SendBlock(db, out_edge_info.fifo_id, f"send: {tid}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
 
-  def add_recv_block(self, node):
-    in_edge = self.get_input_edges(node)[0]
-    in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
-    in_tid = in_edge.dst_id
-    hid = self.get_hid(node)
+  def add_recv_block(self, edge):
+    in_edge_info = DevConfig().get_tensor_edge_info(edge)
+    in_tid = edge.dst_id
+    hid = self.get_hid(in_tid)
     db = DevConfig().MemLayout.get_data_block_by_id(in_tid)
 
-    block = RecvBlock(db, in_edge_info.fifo_id, "recv")
+    block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
-
-  def visit_var(self, var):
-    self.add_send_block(var)
-
-  def visit_constant(self, const):
-    self.add_send_block(const)
-
-  def visit_composite_call(self, call):
-    self.curr_composite_id = getNodeID(call)
-    self.visit(call.op.body)
-    self.curr_composite_id = None
-    for idx, a in enumerate(call.args):
-      self.visit(a)
 
   def get_graph_node_id(self, call):
     if self.curr_composite_id:
@@ -354,12 +342,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     else:
       return getNodeID(call)
 
-  def get_input_edges(self, call):
-    return [edge for edge in self.edges if edge.dst_inner_gid_match(getNodeID(call))]
+  def get_input_edges_from_id(self, id):
+    return [edge for edge in self.edges if edge.dst_inner_gid_match(id)]
 
-  def get_output_edges(self, call):
-    return [edge for edge in self.edges if edge.src_inner_gid_match(getNodeID(call))]
+  def get_output_edges_from_id(self, id):
+    return [edge for edge in self.edges if edge.src_inner_gid_match(id)]
 
-  def get_hid(self, call):
-    node_id = self.get_graph_node_id(call)
-    return DevConfig().get_hw_node(node_id)
+  def get_hid(self, tensor_id):
+    return DevConfig().get_hw_node(tensor_id.graph_node_id)
