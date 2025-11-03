@@ -461,7 +461,7 @@ class RecvSendWrapper(ImceCodeBlock):
     # Get tensor edge info for inputs and outputs
     if self.in_edges:
       te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
-          edge.dst_id, "in")[0] for edge in self.in_edges 
+          edge.dst_id, "in")[0] for edge in self.in_edges
           if DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") != []]
       # Generate RECV for non-constant input edges
       for i in range(self.num_blocks):
@@ -522,83 +522,6 @@ class RecvSendWrapper(ImceCodeBlock):
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")
 
     return self
-
-
-class RecvSendWrapper_deprecated(ImceCodeBlock):
-  """
-  Wrapper that adds RECV and SEND operations around a computation block.
-  """
-
-  def __init__(self, inner_block: ImceCallCodeBlock, annotation: str = ""):
-    """Wrap a computation block with RECV/SEND operations.
-
-    Args:
-        inner_block: The computation block to wrap (VecBlock, BatchNormBlock, etc.)
-        annotation: Optional annotation string
-    """
-    super().__init__(annotation)
-    self.inner_block = inner_block
-    self.call = inner_block.call.call
-    self.in_edges = inner_block.in_edges
-    self.out_edges = inner_block.out_edges
-
-  def _content(self) -> CodeBlock:
-    """Generate RECV, computation, and SEND for standalone operations."""
-    # Constant tags that should not generate RECV/SEND
-    const_tags = ["weight", "bias", "fused_scale", "fused_bias",
-                  "min", "max", "threshold", "scale", "config"]
-
-    code = TextBlock("")
-
-    # Get tensor edge info for inputs and outputs
-    te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
-        edge.dst_id, "in") for edge in self.in_edges]
-    te_out_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
-        edge.src_id, "out") for edge in self.out_edges]
-
-    # Determine number of bitplanes to process based on inner block's prev_op flag
-    # When prev_op exists, blocks process 4 bitplanes at once
-    # When prev_op is None (standalone), blocks process 1 bitplane at a time
-    # Note: inner_block should have prev_op=None since this wrapper is only for standalone ops
-    # CHECK THIS!
-    num_blocks = self.inner_block.num_blocks
-
-    # Generate RECV for non-constant input edges
-    for i in range(num_blocks):
-      for edge, te_info in zip(self.in_edges, te_in_infos):
-        var_i = UniqueVar((edge, i))
-        if te_info and not var_i.static and edge.dst_id.tensor_type not in const_tags:
-          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
-
-    # Add the inner block's computation
-    code += copy(self.inner_block)
-
-    # Generate SEND for all output edges
-    for i in range(num_blocks):
-      for te_out_info in te_out_infos:
-        var_o = UniqueVar((self.inner_block, i))
-        if te_out_info:
-          code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
-
-    return code
-
-  def _loop_standalone(self) -> CodeBlock:
-    # Wrap in a loop based on calls' type_args
-    code = self._content()
-    edge_shape = None
-    for idx, arg in enumerate(self.call.args):
-      if ConstPat.match(arg):
-        continue
-      else:
-        if edge_shape is not None:
-          assert (
-              edge_shape == self.call.type_args[idx].shape), "all input args should have the same shape"
-        else:
-          edge_shape = self.call.type_args[idx].shape
-
-    count = edge_shape[-1] * edge_shape[-2]
-
-    return SimpleFor(count, code, f"{self.inner_block.__class__.__name__}_with_IO")
 
 
 class ImceCodeBlockManager(NodeCodeBlockManager):
