@@ -225,6 +225,20 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
       # min max quantization does not require $rs2
       code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
+    # NOTE: currently, it is not possible to have consequtive 4*(MM_QUANT -> QREG)s.
+    # Instead of the below code,
+    #  __builtin_IMCE_MM_QUANT(var267, 0, 15, 0);
+    #  var274 = __builtin_IMCE_GET_QREG(0);
+    #  __builtin_IMCE_MM_QUANT(var269, 0, 15, 1);
+    #  var275 = __builtin_IMCE_GET_QREG(1);
+    #  __builtin_IMCE_MM_QUANT(var271, 0, 15, 2);
+    #  var276 = __builtin_IMCE_GET_QREG(2);
+    #  __builtin_IMCE_MM_QUANT(var273, 0, 15, 3);
+    #  var277 = __builtin_IMCE_GET_QREG(3);
+    # We put MM_QUANTs block first, then GET_QREGS.
+    # Otherwise, it results in llvm artifact of moving qregs into vector registers.
+    # e.g. vaddi %v3 %qreg2 0
+    for i in range(self.num_blocks):
       # Get QREG result for this block
       var_o = UniqueVar((self, i))
       code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
