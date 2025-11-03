@@ -211,6 +211,10 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     super().__init__(call, annotation)
     self.o_split_idx = o_split_idx
 
+  @property
+  def num_blocks(self) -> int:
+    return 4  # FIXED in MinmaxQuantBlock
+
   def _content(self) -> CodeBlock:
     """Generate only computation, no RECV/SEND."""
     src_mask = 15
@@ -530,7 +534,8 @@ class RecvSendWrapper(ImceCodeBlock):
         else:
           edge_shape = call.type_args[idx].shape
 
-    count = edge_shape[-1] * edge_shape[-2]
+    # FIXME: we don't like how count also has to take num_blocks into account as well...
+    count = edge_shape[-1] * edge_shape[-2] // self.num_blocks
 
     # Store the loop-wrapped content in the _loop_wrapper attribute
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")
