@@ -140,7 +140,7 @@ class MultHandler(OperationHandler):
     if call.curr_composite_id is not None:
       call.curr_conv_block.add_post_op(block)
     else:
-      wrapped_block = RecvSendWrapper(block, "multiply standalone")
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone").create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
@@ -252,7 +252,7 @@ class MinMaxQuantizeHandler(OperationHandler):
       call.curr_conv_block.add_post_op(block)
     else:
       # Standalone minmax quantize needs RECV/SEND wrapper
-      wrapped_block = RecvSendWrapper(block, "min_max_quantize_standalone")
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "min_max_quantize_standalone").create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
@@ -281,7 +281,7 @@ class ReLUHandler(OperationHandler):
       call.curr_conv_block.add_post_op(block)
     else:
       # Standalone ReLU needs RECV/SEND wrapper
-      wrapped_block = RecvSendWrapper(block, "relu_standalone")
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "relu_standalone").create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
