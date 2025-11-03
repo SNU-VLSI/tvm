@@ -489,14 +489,17 @@ class ImcflowDeviceConfig:
     return self.TensorEdgetoInfo.get(tensor_edge, None)
 
   def get_tensor_edge_info_with_id_dir(self, tensor_id: TensorID, dir: str):
+    edges = []
     if dir == "in":
       for edge in self.TensorEdgetoInfo.keys():
         if edge.dst_id == tensor_id:
-          return self.TensorEdgetoInfo[edge]
+          edges.append(self.TensorEdgetoInfo[edge])
+      return edges
     elif dir == "out":
       for edge in self.TensorEdgetoInfo.keys():
         if edge.src_id == tensor_id:
-          return self.TensorEdgetoInfo[edge]
+          edges.append(self.TensorEdgetoInfo[edge])
+      return edges
     else:
       raise ValueError("Invalid direction")
 

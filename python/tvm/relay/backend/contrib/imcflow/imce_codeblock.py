@@ -94,6 +94,9 @@ class RecvConstBlock(ImceCodeBlock):
         self.in_edge.dst_id, "in")  # a hack to get the tensor edge info
     assert te_info, "Tensor edge info not found"
 
+    assert len(te_info) == 1, "Multiple tensor edge infos found for the given edge"
+    te_info = te_info[0]
+
     size = DevConfig().MemLayout.get_data_block_by_id(self.in_edge.src_id).size
     base_addr = DevConfig().MemLayout.get_data_block_by_id(
         self.in_edge.src_id).base_address
@@ -315,7 +318,7 @@ class ConvBlock(ImceCallCodeBlock):
         data_edge = edge
 
     fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(
-        data_edge.dst_id, "in").fifo_id
+        data_edge.dst_id, "in")[0].fifo_id
     if fifo_id_i != 0:
       logging.warning(f"conv block data fifo_id_i is not 0, but {fifo_id_i}")
 
@@ -458,7 +461,8 @@ class RecvSendWrapper(ImceCodeBlock):
     # Get tensor edge info for inputs and outputs
     if self.in_edges:
       te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
-          edge.dst_id, "in") for edge in self.in_edges]
+          edge.dst_id, "in")[0] for edge in self.in_edges 
+          if DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") != []]
       # Generate RECV for non-constant input edges
       for i in range(self.num_blocks):
         for edge, te_info in zip(self.in_edges, te_in_infos):
@@ -470,9 +474,20 @@ class RecvSendWrapper(ImceCodeBlock):
     code += str(self.body)
 
     if self.out_edges:
-      te_out_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
-          edge.src_id, "out") for edge in self.out_edges]
-      # Generate SEND for all output edges (currently only support single SEND codeblock)
+      out_edge_src_ids = {edge.src_id for edge in self.out_edges}
+      assert len(out_edge_src_ids) == 1, "out_edge_src_ids should have only one element"
+
+      te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(
+          out_edge_src_ids.pop(), "out")
+      # If all policy addresses are identical, merge into a single SEND (dedupe)
+      if te_out_infos:
+        addresses = {info.policy_info[0].address for info in te_out_infos}
+        if len(addresses) == 1:
+          fifo_ids = {info.fifo_id for info in te_out_infos}
+          assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
+          te_out_infos = [te_out_infos[0]]
+
+      # Generate SEND for all output edges (supports merged case above)
       for i in range(self.num_blocks):
         for te_out_info in te_out_infos:
           var_o = UniqueVar((self.send_block, i))

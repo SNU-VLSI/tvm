@@ -93,6 +93,8 @@ class WriteIMCUBlock(InodeCodeBlock):
     for db in region.blocks.values():
       if isinstance(db.id, TensorID) and "weight" == db.id.tensor_type:
         info = DevConfig().get_tensor_edge_info_with_id_dir(db.id, "out")
+        assert len(info) == 1, "Tensor edge info not found for weight tensor"
+        info = info[0]
         assert info.fifo_id == 1, f"IMCU fifo id should be set to 1 (although not used), but got {info.fifo_id} for {db.id}"
         var = UniqueVar("imcu_start_address", dtype="int")
         code += f"{var} = {db.base_address};"
