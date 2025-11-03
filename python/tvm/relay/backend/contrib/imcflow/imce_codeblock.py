@@ -62,6 +62,9 @@ class ImceCallCodeBlock(ImceCodeBlock):
   def num_blocks(self) -> int:
     return 4 if self.prev_op else 1
 
+  def __repr__(self):
+    return f"{self.__class__.__name__}(gid: {self.call.get_gid()})"
+
 
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
@@ -360,7 +363,7 @@ class ConvBlock(ImceCallCodeBlock):
       for op in self.post_op_chain:
         all_in_edges += op.in_edges
         all_out_edges += op.out_edges
-      recv_edges = list(set(all_in_edges) - set(all_out_edges) - set([data_edge]))
+      recv_edges = list(set(all_in_edges) - set(all_out_edges) - set(self.out_edges))
       send_edges = list(set(all_out_edges) - set(all_in_edges))
       last_out_edges = self.post_op_chain[-1].out_edges
       assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
