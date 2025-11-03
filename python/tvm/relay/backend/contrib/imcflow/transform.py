@@ -2211,7 +2211,8 @@ class MemoryAllocator:
           graph_node_id = getNodeID(call)
 
           def matches_node_id(node_id):
-            if isinstance(node_id, int):
+            import tvm
+            if isinstance(node_id, (int, tvm.tir.expr.IntImm)):
               return node_id == graph_node_id
             elif isinstance(node_id, tuple):
               return graph_node_id in node_id

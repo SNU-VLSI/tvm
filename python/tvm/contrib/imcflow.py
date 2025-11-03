@@ -126,10 +126,13 @@ class TensorID:
     return cls._instances[key]
 
   def inner_gid_match(self, graph_node_id: Union[int, Tuple]):
-    if isinstance(self.graph_node_id, int):
+    import tvm
+    if isinstance(self.graph_node_id, (int, tvm.tir.expr.IntImm)):
       return self.graph_node_id == graph_node_id
-    if isinstance(self.graph_node_id, tuple):
+    if isinstance(self.graph_node_id, (tuple, )):
       return graph_node_id == self.graph_node_id[1]
+    print("Error in inner_gid_match")
+    return False
 
   def __str__(self):
     return f"TensorID({self.graph_node_id}, {self.tensor_type})"
