@@ -129,7 +129,7 @@ class TensorID:
     import tvm
     if isinstance(self.graph_node_id, (int, tvm.tir.expr.IntImm)):
       return self.graph_node_id == graph_node_id
-    if isinstance(self.graph_node_id, (tuple, )):
+    if isinstance(self.graph_node_id, tuple):
       return graph_node_id == self.graph_node_id[1]
     print("Error in inner_gid_match")
     return False
