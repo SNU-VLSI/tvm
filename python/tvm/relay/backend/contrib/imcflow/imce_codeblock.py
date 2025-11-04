@@ -100,9 +100,9 @@ class RecvConstBlock(ImceCodeBlock):
     assert len(te_info) == 1, "Multiple tensor edge infos found for the given edge"
     te_info = te_info[0]
 
-    size = DevConfig().MemLayout.get_data_block_by_id(self.in_edge.src_id).size
+    size = DevConfig().MemLayout.get_data_block_by_id(self.in_edge).size
     base_addr = DevConfig().MemLayout.get_data_block_by_id(
-        self.in_edge.src_id).base_address
+        self.in_edge).base_address
     assert base_addr % 32 == 0, "Base address must be a multiple of 32"
     recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 

@@ -182,7 +182,7 @@ class FunctionInfo:
 
 
 class DataBlock:
-  def __init__(self, id: Union[str, TensorID], size: int):
+  def __init__(self, id: Union[str, TensorEdge], size: int):
     self.id = id
     self.size = size
     self.offset = -1  # offset in the region
@@ -236,7 +236,12 @@ class MemoryRegion:
       return f_blocks.get(id, None)
     else:
       for f_blocks in self.blocks.values():
-        block = f_blocks.get(id, None)
+        if isinstance(id, TensorEdge) and id.src_id in [x.id.src_id for x in f_blocks.values() if isinstance(x.id, TensorEdge)]:
+          for f_block in f_blocks.values():
+            if isinstance(f_block.id, TensorEdge) and f_block.id.src_id == id.src_id:
+              block = f_block
+        else :
+          block = f_blocks.get(id, None)
         if block is not None:
           return block
     return None
@@ -249,6 +254,11 @@ class MemoryRegion:
     # find first 32B aligned free offset
     if block.id in [x.id for x in self.blocks[function_name].values()]:
       print(f"Trying allocate {block} but skipped @ {function_name}")
+      return
+    
+    # skip reddundant allocation for Datablock which already allocated with same src_id (same data)
+    if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks[function_name].values() if isinstance(x.id, TensorEdge)]:
+      print(f"Trying allocate {block} but skipped due to src_id overlap @ {function_name}")
       return
 
     print(f"Trying allocate {block} @ {function_name}")
@@ -320,7 +330,7 @@ class MemoryLayout:
       region.set_base_address(_last_end_address)
       _last_end_address += region.size
 
-  def get_data_block_by_id(self, id: Union[str, TensorID], func_name=None, region_name=None):
+  def get_data_block_by_id(self, id: Union[str, TensorEdge], func_name=None, region_name=None):
     """
     Gets data_block by id, where an optional function_name and region_name is given.
     Caveats: if no function_name / region_name is given, it returns the first match in the given hierarchy
@@ -525,30 +535,34 @@ class ImcflowDeviceConfig:
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
     return self.InstEdgeInfoDict.get(imce_id, None)
 
-  def get_data_block_dict(self, func):
+  def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None):
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
     compiled_blocks, input_data_blocks, output_data_blocks = [], [], []
 
-    # get input/output node ID
-    input_node_ids = [imcflow_transform.getNodeID(
-        n) for n in imcflow_transform.getInputNodesOfFunc(func)]
-    output_node_id = imcflow_transform.getNodeID(func)
-
     for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
-      for block_name, block in memory_region.blocks.items():
-        # get compiled data blocks
-        if isinstance(block_name, str):
-          compiled_blocks.append(block)
-        # get input & output data blocks
-        if isinstance(block_name, TensorID):
-          # get input data blocks
-          if any([input_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id) for input_node_id in input_node_ids]):
-            input_data_blocks.append(block)
-          # get output data blocks
-          if output_node_id == imcflow_transform.getInnerNodeID(block_name.graph_node_id):
-            output_data_blocks.append(block)
+      if memory_region.blocks:
+        for block_name, block in memory_region.blocks[func_name].items():
+          # get compiled data blocks
+          if isinstance(block_name, str):
+            compiled_blocks.append(block)
+          # get input & output data blocks
+          if isinstance(block_name, TensorEdge):
+            # get input data blocks
+            if isinstance(block_name.src_id.graph_node_id, Tuple):
+              src_gid = block_name.src_id.graph_node_id[1]
+            else:
+              src_gid = block_name.src_id.graph_node_id
+            if any([input_node_id == imcflow_transform.getInnerNodeID(src_gid) for input_node_id in input_node_ids]):
+              input_data_blocks.append(block)
+            # get output data blocks
+            if isinstance(block_name.dst_id.graph_node_id, Tuple):
+              dst_gid = block_name.dst_id.graph_node_id[1]
+            else:
+              dst_gid = block_name.dst_id.graph_node_id
+            if output_node_id == imcflow_transform.getInnerNodeID(dst_gid):
+              output_data_blocks.append(block)
 
-    self.DataBlocks = {
+    self.DataBlocks[func_name] = {
         "compiled": compiled_blocks,
         "input": input_data_blocks,
         "output": output_data_blocks,

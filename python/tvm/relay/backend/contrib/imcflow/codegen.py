@@ -322,7 +322,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.codeblocks.append(hid, block, CodePhase.EXEC)
       self._imce_compute_added.add(hid)
 
-    db = DevConfig().MemLayout.get_data_block_by_id(tid)
+    db = DevConfig().MemLayout.get_data_block_by_id(edge)
+    assert db is not None, f"Data block not found for edge: {edge}"
 
     block = SendBlock(db, out_edge_info.fifo_id, f"send: {tid}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
@@ -331,7 +332,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
     in_tid = edge.dst_id
     hid = self.get_hid(in_tid)
-    db = DevConfig().MemLayout.get_data_block_by_id(in_tid)
+    db = DevConfig().MemLayout.get_data_block_by_id(edge)
 
     block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)

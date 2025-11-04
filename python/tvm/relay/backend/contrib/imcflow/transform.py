@@ -2211,7 +2211,6 @@ class MemoryAllocator:
           graph_node_id = getNodeID(call)
 
           def matches_node_id(node_id):
-            import tvm
             if isinstance(node_id, (int, tvm.tir.expr.IntImm)):
               return node_id == graph_node_id
             elif isinstance(node_id, tuple):
@@ -2353,7 +2352,7 @@ class MemoryAllocator:
             arg_dtype = None
 
             def get_op_from_id(node_id):
-                if isinstance(node_id, int):
+                if isinstance(node_id, (int, tvm.tir.expr.IntImm)):
                     return self.name_dict[node_id]
                 elif isinstance(node_id, tuple):
                     return self.name_dict[node_id[1]]
@@ -2468,7 +2467,7 @@ class MemoryAllocator:
               size = self.get_size(edge, fn)
               if size > 0:
                 inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
-                datablock = DataBlock(inode_tensorid[1], None)
+                datablock = DataBlock(edge, None)
                 datablock.set_size(size)
                 self.DataBlockDict[edge] = datablock
               else:
@@ -2485,7 +2484,7 @@ class MemoryAllocator:
               size = self.get_size(edge, call)
               if size > 0:
                 inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
-                datablock = DataBlock(inode_tensorid[1], None)
+                datablock = DataBlock(edge, None)
                 datablock.set_size(size)
                 self.DataBlockDict[edge] = datablock
 
@@ -4749,7 +4748,11 @@ class ImcflowLayoutLegalizer:
     return mod
 
 def constructDataBlockDict(mod):
+  imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
-    elif func.attrs["Compiler"]=="imcflow":
-      ImcflowDeviceConfig().get_data_block_dict(func)
+    elif isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow" :
+      target_func = imcflow_func_map[func_name_var.name_hint]
+      input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(func)]
+      output_node_id = getNodeID(target_func.func_node)
+      ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id)

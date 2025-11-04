@@ -4,7 +4,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import DataBlock
 from tvm.relay.ty import TensorType
 from . import transform as imcflow_transform
-from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock
+from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, TensorEdge
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.expr import (Var, Constant)
 import math
@@ -64,8 +64,13 @@ class CodeWriter:
       return self
 
 def makeBaseAddrName(block):
-  if isinstance(block.id, TensorID):
-    return f"{block.id.tensor_type.upper()}_{imcflow_transform.getInnerNodeID(block.id.graph_node_id)}_BASE_ADDR"
+  const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
+  # FIXME: maybe error in src/dst check
+  if isinstance(block.id, TensorEdge):
+    if block.id.src_id.tensor_type in const_tags:
+      return f"{block.id.src_id.tensor_type.upper()}_{imcflow_transform.getInnerNodeID(block.id.src_id.graph_node_id)}_BASE_ADDR"
+    else:
+      return f"{block.id.dst_id.tensor_type.upper()}_{imcflow_transform.getInnerNodeID(block.id.dst_id.graph_node_id)}_BASE_ADDR"
   elif isinstance(block.id, str):
     return f"{block.id.upper()}_BASE_ADDR"
   else:
@@ -91,9 +96,15 @@ def getConstantIdx(func, node_id):
 
 def getCInputVarName(func, func_name, data_block):
   node_map = CustomIDToNode()
-  assert isinstance(data_block.id, TensorID), "data_block.id must be TensorID to get C input var name"
-  graph_node_inner_id = imcflow_transform.getInnerNodeID(
-      data_block.id.graph_node_id)
+  const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
+  # FIXME: maybe error in src/dst check
+  assert isinstance(data_block.id, TensorEdge), "data_block.id must be TensorEdge to get C input var name"
+  if data_block.id.src_id.tensor_type in const_tags:
+    graph_node_inner_id = imcflow_transform.getInnerNodeID(
+        data_block.id.src_id.graph_node_id)
+  else:
+    graph_node_inner_id = imcflow_transform.getInnerNodeID(
+        data_block.id.dst_id.graph_node_id)
   node_type = node_map[graph_node_inner_id]
   if isinstance(node_type, Var):
     return node_type.name_hint
@@ -258,8 +269,8 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
 
 
 def makeKernelStartCode(func_name, func):
-  compiled_blocks = ImcflowDeviceConfig().DataBlocks["compiled"]
-  data_blocks = ImcflowDeviceConfig().DataBlocks["input"], ImcflowDeviceConfig().DataBlocks["output"]
+  compiled_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["compiled"]
+  data_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["input"], ImcflowDeviceConfig().DataBlocks[func_name]["output"]
   kernel_def = makeKernelDef(func_name, func, compiled_blocks, data_blocks)
   code = kernel_def
 

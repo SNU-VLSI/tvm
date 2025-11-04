@@ -1,5 +1,5 @@
 from tvm.relay.backend.contrib.imcflow.codeblock import *
-from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID
+from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID, TensorEdge
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from textwrap import indent
 import math
@@ -92,8 +92,8 @@ class WriteIMCUBlock(InodeCodeBlock):
     code = TextBlock("")
     region = DevConfig().MemLayout[f"{self.node_id.name}_data"]
     for db in region.blocks[self.func_name].values():
-      if isinstance(db.id, TensorID) and "weight" == db.id.tensor_type:
-        info = DevConfig().get_tensor_edge_info_with_id_dir(db.id, "out")
+      if isinstance(db.id, TensorEdge) and "weight" == db.id.src_id.tensor_type:
+        info = DevConfig().get_tensor_edge_info_with_id_dir(db.id.src_id, "out")
         assert len(info) == 1, "Tensor edge info not found for weight tensor"
         info = info[0]
         assert info.fifo_id == 1, f"IMCU fifo id should be set to 1 (although not used), but got {info.fifo_id} for {db.id}"
