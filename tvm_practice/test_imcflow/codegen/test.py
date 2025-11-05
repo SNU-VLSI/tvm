@@ -219,6 +219,8 @@ def run_test_evl(test_name, mod, param_dict):
 
   imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
 
+  imcflow_transform.generateNoCVisualizations(eval_mod, eval_dir + "/noc_visualizations")
+
   # get the config
   config = DevConfig()
 
