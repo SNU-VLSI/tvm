@@ -2,6 +2,7 @@ from abc import *
 from typing import *
 from copy import copy
 import math
+from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
 from tvm.relay.op.op_attrs import Conv2DAttrs
@@ -473,10 +474,6 @@ class RecvSendWrapper(ImceCodeBlock):
     if self._loop_wrapper is not None:
       return self._loop_wrapper
 
-    # Constant tags that should not generate RECV/SEND
-    const_tags = ["weight", "bias", "fused_scale", "fused_bias",
-                  "min", "max", "threshold", "scale", "config"]
-
     code = TextBlock("")
 
     # Get tensor edge info for inputs and outputs
@@ -487,9 +484,16 @@ class RecvSendWrapper(ImceCodeBlock):
       # Generate RECV for non-constant input edges
       for i in range(self.num_blocks):
         for edge, te_info in zip(self.in_edges, te_in_infos):
+          try:
+            if ConstPat.match(CustomIDToNode()[edge.src_id.graph_node_id]):
+              continue
+          except KeyError:
+            # If the node is not found in CustomIDToNode, treat it as non-constant
+            pass
           var_i = UniqueVar((edge, i))
-          if te_info and not var_i.static and edge.dst_id.tensor_type not in const_tags:
-            code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
+          if not te_info or var_i.static:
+            continue
+          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
 
     # Add the inner block's computation
     code += str(self.body)
