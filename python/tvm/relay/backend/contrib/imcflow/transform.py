@@ -2787,7 +2787,7 @@ class PolicyTableGenerator:
                         else:
                           dst_node_name = ID_dict[edge.dst_id.graph_node_id]
 
-                        if dst_node_name == "Op(nn.imcflow_qconv)":
+                        if dst_node_name == "nn.imcflow_qconv":
                           # if src is input of qconv, FIFO ID = 0
                           # edgeinfo.set_fifo_id(0)
                           edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
