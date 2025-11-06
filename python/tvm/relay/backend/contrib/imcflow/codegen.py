@@ -317,7 +317,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     out_edge_info = DevConfig().get_tensor_edge_info(edge)
     tid = edge.src_id
     hid = self.get_hid(tid)
-    if hid == None and self.get_hid(edge.dst_id) != None:
+    if hid == None and CustomIDToNode()[edge.dst_id.graph_node_id].op.name == "split":
       inner_node = CustomIDToNode()[edge.dst_id.graph_node_id]
       for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
         self.add_send_block(inner_edge)
