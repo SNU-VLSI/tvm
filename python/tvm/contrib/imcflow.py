@@ -236,12 +236,19 @@ class MemoryRegion:
       return f_blocks.get(id, None)
     else:
       for f_blocks in self.blocks.values():
-        if isinstance(id, TensorEdge) and id.src_id in [x.id.src_id for x in f_blocks.values() if isinstance(x.id, TensorEdge)]:
-          for f_block in f_blocks.values():
-            if isinstance(f_block.id, TensorEdge) and f_block.id.src_id == id.src_id:
-              block = f_block
-        else :
-          block = f_blocks.get(id, None)
+        for f_block in f_blocks.values():
+          if isinstance(id, TensorEdge):
+            if isinstance(f_block.id, TensorEdge): 
+              # if node is not split => search by src_id (same output)
+              if id.split_idx is None and f_block.id.src_id == id.src_id:
+                return f_block
+              # if node is split => search by TensorEdge (different output)
+              elif id.split_idx is not None and f_block.id == id:
+                return f_block
+            else:
+              block = None    # continue searching (type mismatch)
+          else:
+            block = f_blocks.get(id, None)
         if block is not None:
           return block
     return None
@@ -258,8 +265,9 @@ class MemoryRegion:
     
     # skip reddundant allocation for Datablock which already allocated with same src_id (same data)
     if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks[function_name].values() if isinstance(x.id, TensorEdge)]:
-      print(f"Trying allocate {block} but skipped due to src_id overlap @ {function_name}")
-      return
+      if block.id.split_idx is None:
+        print(f"Trying allocate {block} but skipped due to src_id overlap @ {function_name}")
+        return
 
     print(f"Trying allocate {block} @ {function_name}")
     aligned_offset = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address

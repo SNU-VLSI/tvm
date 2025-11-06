@@ -299,6 +299,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for x in fn.params:
       # self.visit(x)
       param_id = getNodeID(x)
+      # The input variable will go to the same router entry => only need one send block
       param_edge = self.get_output_edges_from_id(param_id)[0]
       self.add_send_block(param_edge)
     #self.visit(fn.body)
@@ -317,6 +318,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     out_edge_info = DevConfig().get_tensor_edge_info(edge)
     tid = edge.src_id
     hid = self.get_hid(tid)
+    # split op handling => pass down to inner edges from input var node
     if hid == None and CustomIDToNode()[edge.dst_id.graph_node_id].op.name == "split":
       inner_node = CustomIDToNode()[edge.dst_id.graph_node_id]
       for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
@@ -331,7 +333,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     db = DevConfig().MemLayout.get_data_block_by_id(edge)
     assert db is not None, f"Data block not found for edge: {edge}"
 
-    block = SendBlock(db, out_edge_info.fifo_id, f"send: {tid}")
+    block = SendBlock(db, out_edge_info.fifo_id, f"send: {edge}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
 
   def add_recv_block(self, edge):

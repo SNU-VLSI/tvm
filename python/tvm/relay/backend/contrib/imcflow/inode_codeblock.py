@@ -93,9 +93,7 @@ class WriteIMCUBlock(InodeCodeBlock):
     region = DevConfig().MemLayout[f"{self.node_id.name}_data"]
     for db in region.blocks[self.func_name].values():
       if isinstance(db.id, TensorEdge) and "weight" == db.id.src_id.tensor_type:
-        info = DevConfig().get_tensor_edge_info_with_id_dir(db.id.src_id, "out")
-        assert len(info) == 1, "Tensor edge info not found for weight tensor"
-        info = info[0]
+        info = DevConfig().get_tensor_edge_info(db.id)
         assert info.fifo_id == 1, f"IMCU fifo id should be set to 1 (although not used), but got {info.fifo_id} for {db.id}"
         var = UniqueVar("imcu_start_address", dtype="int")
         code += f"{var} = {db.base_address};"
