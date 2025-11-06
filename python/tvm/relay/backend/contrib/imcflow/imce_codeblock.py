@@ -335,17 +335,33 @@ class ConvBlock(ImceCallCodeBlock):
     return 4  # FIXED in ConvBlock
 
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
-    for edge in self.in_edges:
-      if edge.dst_id.tensor_type == "data":
-        data_edge = edge
 
-    fifo_id_i = DevConfig().get_tensor_edge_info_with_id_dir(
-        data_edge.dst_id, "in")[0].fifo_id
-    if fifo_id_i != 0:
-      logging.warning(f"conv block data fifo_id_i is not 0, but {fifo_id_i}")
+    fifo_id = -1
+    for edge in self.in_edges:
+      te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
+      assert len(te_infos) == 1, "more than one te_info found!"
+      te_info = te_infos[0]
+      try:
+        arg_id = edge.src_id.graph_node_id
+        if isinstance(arg_id, Tuple):
+          arg_id = arg_id[1]
+        if ConstPat.match(CustomIDToNode()[arg_id]):
+          continue
+      except KeyError:
+        # If the node is not found in CustomIDToNode, treat it as non-constant
+        pass
+
+      if te_info.fifo_id != 0:
+        logging.warning(f"conv block data fifo_id is not 0, but {te_info.fifo_id}")
+
+      if fifo_id != -1:
+        logging.warning(f"fifo_id already set to {fifo_id}")
+      else:
+        fifo_id = te_info.fifo_id
+
 
     code = TextBlock("")
-    code += LoadLBBlock(recv_count, self.num_blocks, fifo_id_i)
+    code += LoadLBBlock(recv_count, self.num_blocks, fifo_id)
     code += "__builtin_IMCE_STEP();\n"
 
     for i in range(self.num_blocks):
@@ -359,8 +375,8 @@ class ConvBlock(ImceCallCodeBlock):
     code += "\n"
 
     if self.post_op_chain:
-      all_in_edges = []
-      all_out_edges = []
+      all_in_edges = copy(self.in_edges)
+      all_out_edges = copy(self.out_edges)
       for op in self.post_op_chain:
         all_in_edges += op.in_edges
         all_out_edges += op.out_edges
@@ -370,7 +386,7 @@ class ConvBlock(ImceCallCodeBlock):
       assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
       send_block = self.post_op_chain[-1]
     else:
-      recv_edges = None
+      recv_edges = self.in_edges
       send_edges = self.out_edges
       send_block = self
 
@@ -478,14 +494,22 @@ class RecvSendWrapper(ImceCodeBlock):
 
     # Get tensor edge info for inputs and outputs
     if self.in_edges:
-      te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
-          edge.dst_id, "in")[0] for edge in self.in_edges
-          if DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") != []]
+      # te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
+      #     edge.dst_id, "in")[0] for edge in self.in_edges
+      #     if DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") != []]
       # Generate RECV for non-constant input edges
       for i in range(self.num_blocks):
-        for edge, te_info in zip(self.in_edges, te_in_infos):
+        # for edge, te_info in zip(self.in_edges, te_in_infos):
+        for edge in self.in_edges:
+          te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
+          assert len(te_infos) == 1, "more than one te_info found!"
+          te_info = te_infos[0]
+
           try:
-            if ConstPat.match(CustomIDToNode()[edge.src_id.graph_node_id]):
+            arg_id = edge.src_id.graph_node_id
+            if isinstance(arg_id, Tuple):
+              arg_id = arg_id[1]
+            if ConstPat.match(CustomIDToNode()[arg_id]):
               continue
           except KeyError:
             # If the node is not found in CustomIDToNode, treat it as non-constant
