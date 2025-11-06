@@ -135,8 +135,18 @@ class MultHandler(OperationHandler):
 
   def handle(self, call: 'BuilderContext') -> None:
     hid = call.get_hid()
-    block = MultlBlock(call, "multl")
 
+    for in_edge in call.get_input_edges():
+      arg_gid = in_edge.src_id.graph_node_id
+      try:
+        if ConstPat.match(CustomIDToNode()[arg_gid]):
+          block = RecvConstBlock(in_edge, f"mult const")
+          call.codeblocks.append(hid, block, CodePhase.INIT)
+      except KeyError:
+        # If the node is not found in CustomIDToNode, treat it as non-constant
+        pass
+
+    block = MultlBlock(call, "multl")
     if call.curr_composite_id is not None:
       call.curr_conv_block.add_post_op(block)
     else:

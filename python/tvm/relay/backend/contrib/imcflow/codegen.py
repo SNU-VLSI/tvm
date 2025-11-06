@@ -6,6 +6,7 @@ from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
 from tvm.relay.dataflow_pattern import *
 from tvm.contrib.imcflow import TensorID, TensorEdge
+from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.backend.contrib.imcflow import util
 from tvm.relay.backend.contrib.imcflow import transform
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
@@ -316,6 +317,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     out_edge_info = DevConfig().get_tensor_edge_info(edge)
     tid = edge.src_id
     hid = self.get_hid(tid)
+    if hid == None and CustomIDToNode()[edge.dst_id.graph_node_id].op.name == "split":
+      inner_node = CustomIDToNode()[edge.dst_id.graph_node_id]
+      for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
+        self.add_send_block(inner_edge)
+      return
 
     if hid not in self._imce_compute_added:
       block = IMCEComputeBlock(f"imce compute start")
