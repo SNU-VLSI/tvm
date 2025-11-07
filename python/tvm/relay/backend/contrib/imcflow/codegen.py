@@ -28,6 +28,7 @@ CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
+ConstPat = is_constant()
 
 
 @util.create_imcflow_function_pass(opt_level=0)
@@ -294,8 +295,6 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_function(self, fn):
     # constant tensor tags except "weight" (IMCU weights are handled separately)
-    const_tags = ["bias", "fused_scale", "fused_bias",
-                  "min", "max", "threshold", "scale", "config"]
     for x in fn.params:
       # self.visit(x)
       param_id = getNodeID(x)
@@ -304,9 +303,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.add_send_block(param_edge)
     #self.visit(fn.body)
     # traverse constant nodes
-    const_edges = [edge for edge in self.edges if edge.src_id.tensor_type in const_tags]
-    for edge in const_edges:
-      self.add_send_block(edge)
+    for edge in self.edges:
+      arg_id = edge.src_id.graph_node_id
+      if isinstance(arg_id, Tuple):
+        arg_id = arg_id[1]
+      if ConstPat.match(CustomIDToNode()[arg_id]):
+        if edge.src_id.tensor_type != "weight":
+          self.add_send_block(edge)
 
     # Add Recv Block
     fn_id = getNodeID(fn)
