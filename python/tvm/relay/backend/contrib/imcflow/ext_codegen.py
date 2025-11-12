@@ -11,10 +11,10 @@ import math
 import os
 
 
-IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
-IMCFLOW_LEN = os.environ["IMCFLOW_LEN"]
-INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
-INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
+IMCFLOW_ADDR = 0x80000000
+IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
+INT_ACK_GEN_ADDR = 0
+INT_ACK_GEN_LEN = 0
 
 def align_to_n_bytes(size, n_bytes):
   if (size % n_bytes) != 0:
@@ -264,9 +264,9 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
                                     compiled_blocks, base_address_macros)
   code += generateToNpuTransferCode(func, func_name,
                                     data_blocks[0], base_address_macros)
-  code += generateInvokeCode()
+  code += generateInvokeCode(os)
   code += generateFromNpuTransferCode(data_blocks[1], base_address_macros)
-  code += generateDevicePointerCleanup()
+  code += generateDevicePointerCleanup(os)
   code.prevIndent()
   code += '}\n'
 
@@ -277,10 +277,10 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
   return code
 
 
-def makeKernelStartCode(func_name, func):
+def makeKernelStartCode(func_name, func, os):
   compiled_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["compiled"]
   data_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["input"], ImcflowDeviceConfig().DataBlocks[func_name]["output"]
-  kernel_def = makeKernelDef(func_name, func, compiled_blocks, data_blocks)
+  kernel_def = makeKernelDef(func_name, func, compiled_blocks, data_blocks, os)
   code = kernel_def
 
   return str(code)
@@ -376,38 +376,42 @@ def generateDevicePointerSetup(os="linux"):
     raise ValueError("Unsupported OS type for device pointer setup!")
 
 
-def generateInvokeCode():
-  return ("""
-// Set the inode pc to 0 and run.
-for(int i=0; i<INODE_NUM; i++) {
-  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);
-}
-enable_imcflow_interrupt(npu_fd);
-*(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;
-wait_imcflow_interrupt(npu_fd);
-generate_ack(int_ack_gen_pointer);
-npu_pointer[7] = 1;
-for(int i=0; i<INODE_NUM; i++) {
-  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);
-}
-enable_imcflow_interrupt(npu_fd);
-*(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;
-wait_imcflow_interrupt(npu_fd);
-generate_ack(int_ack_gen_pointer);
-npu_pointer[7] = 1;
-""")
+def generateInvokeCode(os="linux"):
+  out = \
+  [
+    "// Set the inode pc to 0 and run.",
+    "for(int i=0; i<INODE_NUM; i++) {",
+    "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
+    "}",
+    "enable_imcflow_interrupt(npu_fd);" if os == "linux" else "",
+    " *(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;",
+    "wait_imcflow_interrupt(npu_fd);" if os == "linux" else "", 
+    "generate_ack(int_ack_gen_pointer);" if os == "linux" else "",
+    "npu_pointer[7] = 1;",
+    "for(int i=0; i<INODE_NUM; i++) {",
+    "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
+    "}",
+    "enable_imcflow_interrupt(npu_fd);" if os == "linux" else "",
+    "*(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;",
+    "wait_imcflow_interrupt(npu_fd);" if os == "linux" else "",
+    "generate_ack(int_ack_gen_pointer);" if os == "linux" else "",
+    "npu_pointer[7] = 1;"
+  ]
+
+  return "\n".join(out) + "\n"
 
 
 def generateDevicePointerCleanup(os="linux"):
-  return ("""
-// Cleanup device pointer
-munmap(npu_pointer, npu_len);
-close(npu_fd);
-munmap(int_ack_gen_pointer, int_ack_gen_len);
-close(int_ack_gen_fd);
-""")
-
-
+  if os == "linux":
+    return ("""
+  // Cleanup device pointer
+  munmap(npu_pointer, npu_len);
+  close(npu_fd);
+  munmap(int_ack_gen_pointer, int_ack_gen_len);
+  close(int_ack_gen_fd);
+  """)
+  else:
+    return ""
 
 def generate_invoke_code_for_subgraphs(mod):
   invoke_code_map = {}
@@ -432,7 +436,7 @@ def imcflow_external_codegen(func: relay.Function):
       func, "attrs") and "global_symbol" in func.attrs else "imcflow_subgraph"
 
   # Reuse existing kernel code generator
-  code = makeKernelStartCode(func_name, func)
+  code = makeKernelStartCode(func_name, func, DevConfig.HOST_OS)
 
   # Wrap as a CSourceModule so TVM can compile/link it with the rest of the MLF
   # Note: returning a CSourceModule is the standard for BYOC Python codegen.

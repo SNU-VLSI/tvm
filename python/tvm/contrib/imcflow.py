@@ -446,6 +446,8 @@ class ImcflowDeviceConfig:
   # INODE_DATA_MEM_SIZE = 131072
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
+  IMCFLOW_ADDR_SIZE = 266368 # 128 + 4*(65536+1024) == 260.125KB
+  HOST_OS = "baremetal"
 
   SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.bias_add", "imcflow.fused_batch_norm",
                    "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize",
