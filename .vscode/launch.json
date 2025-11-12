@@ -5,13 +5,6 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python C++ Debug",
-      "type": "pythoncpp",
-      "request": "launch",
-      "pythonLaunchName": "Python: Current File",
-      "cppAttachName": "(gdb) Attach",
-    },
-    {
       "name": "(gdb) Attach",
       "type": "cppdbg",
       "request": "attach",
@@ -28,7 +21,7 @@
       "cwd": "/root/project/tvm/tvm_practice/test_imcflow/codegen",
       "args": [
         "-k",
-        "mobilenet",
+        "test_one_relu_evl",
         "-s"
       ]
     },

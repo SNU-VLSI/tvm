@@ -9,7 +9,7 @@ import pdb
 
 
 class DeviceCodegen:
-  def __init__(self, target, build_dir="/tmp"):
+  def __init__(self, target, build_dir="/tmp", host_isa="arm"):
     assert target in ["inode", "imce"], f"Unknown target: {target}"
     self.target = target
     self.build_dir = build_dir
@@ -18,6 +18,7 @@ class DeviceCodegen:
     self.lld_options = "-e 0 -Ttext 0x0"
     self.ld_options = "-r -b binary"
     self.func_dir = None
+    self.host_isa = host_isa
     logging.basicConfig(level=logging.INFO)
 
   def handle_code_generation(self, func_name, codeblock_manager: NodeCodeBlockManager):
@@ -170,8 +171,14 @@ class DeviceCodegen:
       f.write(data)
 
   def create_host_object(self, bin_file: str, host_obj_file: str):
-    command = ["aarch64-linux-gnu-ld", *
-               self.ld_options.split(), "-o", host_obj_file, bin_file]
+    if self.host_isa == "arm":
+      command = ["aarch64-linux-gnu-ld", *
+                self.ld_options.split(), "-o", host_obj_file, bin_file]
+    elif self.host_isa == "x86":
+      command = ["ld", *self.ld_options.split(),
+                 "-o", host_obj_file, bin_file]
+    else:
+      raise ValueError(f"Unknown host ISA: {self.host_isa}")
     subprocess.run(command, cwd=self.func_dir, check=True)
 
   def get_object_size(self, obj_file: str, key: str = "text"):

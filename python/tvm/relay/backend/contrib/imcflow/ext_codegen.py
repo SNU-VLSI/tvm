@@ -8,6 +8,13 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, Tensor
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.expr import (Var, Constant)
 import math
+import os
+
+
+IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
+IMCFLOW_LEN = os.environ["IMCFLOW_LEN"]
+INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
+INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
 
 def align_to_n_bytes(size, n_bytes):
   if (size % n_bytes) != 0:
@@ -103,8 +110,10 @@ def getCInputVarName(func, func_name, data_block):
     graph_node_inner_id = imcflow_transform.getInnerNodeID(
         data_block.id.src_id.graph_node_id)
   else:
+    # graph_node_inner_id = imcflow_transform.getInnerNodeID(
+    #     data_block.id.dst_id.graph_node_id)
     graph_node_inner_id = imcflow_transform.getInnerNodeID(
-        data_block.id.dst_id.graph_node_id)
+        data_block.id.src_id.graph_node_id)
   node_type = node_map[graph_node_inner_id]
   if isinstance(node_type, Var):
     return node_type.name_hint
@@ -207,12 +216,12 @@ def generatePackedFuncWrapper(func_name, input_node_types, output_node_type):
   return code
 
 
-def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
+def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
   base_address_macros = {
-      "IMCFLOW_ADDR": 0xa0000000,
-      "IMCFLOW_LEN": 0x100000,
-      "INT_ACK_GEN_ADDR": 0xa0110000,
-      "INT_ACK_GEN_LEN": 0x10000,
+      "IMCFLOW_ADDR": IMCFLOW_ADDR,
+      "IMCFLOW_LEN": IMCFLOW_LEN,
+      "INT_ACK_GEN_ADDR": INT_ACK_GEN_ADDR,
+      "INT_ACK_GEN_LEN": INT_ACK_GEN_LEN,
       "IMCFLOW_DEVICE": "\"/dev/uio5\"",
       "INT_ACK_GEN_DEVICE": "\"/dev/uio4\"",
       "SET_IDLE_CODE": 0,
@@ -250,7 +259,7 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks):
   # Kernel function prototype and definition (C)
   code += f"void {func_name}_kernel({args_proto_type}) {{\n"
   code.nextIndent()
-  code += generateDevicePointerSetup()
+  code += generateDevicePointerSetup(os)
   code += generateToNpuTransferCode(func, func_name,
                                     compiled_blocks, base_address_macros)
   code += generateToNpuTransferCode(func, func_name,
@@ -319,40 +328,52 @@ void generate_ack(uint32_t* int_ack_gen)
 """)
 
 
-def generateDevicePointerSetup():
-  return ("""
-int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
-if (npu_fd < 0) {
-  perror("npu UIO cannot be opened");
-  exit(1);
-}
+def generateDevicePointerSetup(os="linux"):
+  """
+  os: linux or baremetal
+  """
+  if os == "linux":
+    return ("""
+  int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
+  if (npu_fd < 0) {
+    perror("npu UIO cannot be opened");
+    exit(1);
+  }
 
-int int_ack_gen_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
-if (int_ack_gen_fd < 0) {
-  perror("interrupt ack gen UIO cannot be opened");
-  close(npu_fd);
-  exit(1);
-}
+  int int_ack_gen_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
+  if (int_ack_gen_fd < 0) {
+    perror("interrupt ack gen UIO cannot be opened");
+    close(npu_fd);
+    exit(1);
+  }
 
-size_t npu_len = (size_t) IMCFLOW_LEN;
-uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);
-if (npu_pointer == MAP_FAILED) {
-  perror("npu_pointer mmap error");
-  close(npu_fd);
-  close(int_ack_gen_fd);
-  exit(1);
-}
+  size_t npu_len = (size_t) IMCFLOW_LEN;
+  uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);
+  if (npu_pointer == MAP_FAILED) {
+    perror("npu_pointer mmap error");
+    close(npu_fd);
+    close(int_ack_gen_fd);
+    exit(1);
+  }
 
-size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;
-uint32_t *int_ack_gen_pointer = (uint32_t*) mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);
-if (int_ack_gen_pointer == MAP_FAILED) {
-  perror("int_ack_gen_pointer mmap error");
-  munmap(npu_pointer, npu_len);
-  close(npu_fd);
-  close(int_ack_gen_fd);
-  exit(1);
-}
+  size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;
+  uint32_t *int_ack_gen_pointer = (uint32_t*) mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);
+  if (int_ack_gen_pointer == MAP_FAILED) {
+    perror("int_ack_gen_pointer mmap error");
+    munmap(npu_pointer, npu_len);
+    close(npu_fd);
+    close(int_ack_gen_fd);
+    exit(1);
+  }
+  """)
+  elif os == "baremetal":
+    return (f"""
+    uint32_t* npu_pointer = (uint32_t*)IMCFLOW_ADDR;
+    uint32_t* int_ack_gen_pointer = (uint32_t*)INT_ACK_GEN_ADDR;
 """)
+
+  else:
+    raise ValueError("Unsupported OS type for device pointer setup!")
 
 
 def generateInvokeCode():
@@ -377,7 +398,7 @@ npu_pointer[7] = 1;
 """)
 
 
-def generateDevicePointerCleanup():
+def generateDevicePointerCleanup(os="linux"):
   return ("""
 // Cleanup device pointer
 munmap(npu_pointer, npu_len);

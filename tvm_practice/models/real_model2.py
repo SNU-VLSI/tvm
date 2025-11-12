@@ -193,8 +193,8 @@ def getOneConvQuantModel():
 def getOneReluModel():
   # input_ = relay.var("input", shape=(1, 28, 4, 4))
   input_ = relay.var("input", shape=(1,28,4,4), dtype="int16")
-  y = relay.nn.pad(input_, pad_width=((0, 0),(0, 0),(1, 1),(1,1)), pad_value=0)
-  y = relay.nn.relu(y)
+  # y = relay.nn.pad(input_, pad_width=((0, 0),(0, 0),(1, 1),(1,1)), pad_value=0)
+  y = relay.nn.relu(input_)
 
   param_dict = {
     # "quant_scale": np.random.rand(28).astype("float32"),

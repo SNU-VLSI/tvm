@@ -230,7 +230,7 @@ def run_test_evl(test_name, mod, param_dict):
   pprint.pprint(f"idtoedge: {config.TensorIDtoEdge}")
   pprint.pprint(f"policy_table: {config.PolicyTableDict}")
 
-  CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
+  CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build", host_isa="x86")
   CodegenSuite(eval_mod)
 
   print(f"mem_layout: {config.MemLayout}")

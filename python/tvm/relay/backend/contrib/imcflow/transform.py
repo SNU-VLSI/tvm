@@ -154,13 +154,18 @@ def getInputNodesOfFunc(func):
   InNodes = []
 
   class _Visitor(tvm.relay.ExprVisitor):
-    def visit_var(self, var):
-      InNodes.append(var)
-      super().visit_var(var)
+    def visit_function(self, func):
+      for param in func.params:
+        InNodes.append(param)
 
-    def visit_constant(self, const):
-      InNodes.append(const)
-      super().visit_constant(const)
+    # def visit_var(self, var):
+    #   InNodes.append(var)
+    #   super().visit_var(var)
+
+    # constant node is embedded extern array. it is not input of function
+    # def visit_constant(self, const):
+    #   InNodes.append(const)
+    #   super().visit_constant(const)
 
   _Visitor().visit(func)
   return InNodes
@@ -3555,14 +3560,14 @@ def constructUsefulMappings(mod):
       # data[id_dict[int(hash(call))]] = call
       # self.Cnt = self.Cnt + 1
 
-      id_dict[int(hash(call))] = call.attrs["custom_id"]
+      id_dict[int(hash(call))] = int(call.attrs["custom_id"])
       name_dict[call.attrs["custom_id"]] = getNodeDebugID(call)
       data[id_dict[int(hash(call))]] = call
 
       super().visit_call(call)
 
     def visit_function(self, call):
-      id_dict[int(hash(call))] = call.attrs["custom_id"]
+      id_dict[int(hash(call))] = int(call.attrs["custom_id"])
       name_dict[call.attrs["custom_id"]] = "Function"
       data[id_dict[int(hash(call))]] = call
 
@@ -5020,6 +5025,68 @@ class ImcflowLayoutLegalizer:
           if isinstance(user, relay.Call):
             return True
         return False
+      
+      def layout_transform_imcflow_to_4d(self, arg_type, arg, i):
+          arg_shape = arg_type.shape
+          if len(arg_shape) != 4:
+            if len(arg_shape) == 6:
+              # Pattern 3: 6D tensor output (min_max_quant) - bit packed
+              # find most recent min_max_quant call node
+              if isinstance(arg, relay.Call) and arg.op == op.get("qnn.imcflow_min_max_quantize"):
+                channels = arg.attrs["channel"]
+              elif isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
+                target_func = self.module[arg.op.name_hint]
+                channels = target_func.body.attrs["channel"]
+              elif isinstance(arg, relay.TupleGetItem) and isinstance(arg.tuple_value, relay.Call) and arg.tuple_value.op == op.get("qnn.imcflow_min_max_quantize"):
+                channels = arg.tuple_value.attrs["channel"]
+              new_arg = imcflow_mmquant_out_to_4d(arg, channels)
+            elif len(arg_shape) == 5:
+              # Pattern 4: 5D tensor (NCHW16c) - vector layout
+              new_arg = relay.layout_transform(arg, "NCHW16c", "NCHW")
+
+              # Use ttype_map to get the original 4D shape
+              if isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
+                func_name = arg.op.name_hint
+                if func_name in self.ttype_map:
+                  ttype_info = self.ttype_map[func_name][func_name]
+
+                  # Handle both single tensor and tuple returns
+                  if isinstance(ttype_info, list):
+                    # Tuple return - need to determine which tuple element this is
+                    # For now, we'll use the first element's shape
+                    # TODO: If you need to handle specific tuple elements, track this
+                    real_shape, real_dtype, old_shape, old_dtype = ttype_info[i]
+                  else:
+                    # Single tensor return
+                    real_shape, real_dtype, old_shape, old_dtype = ttype_info
+
+                  # Get the original channel count from real_shape
+                  # real_shape is the 4D shape (N, C, H, W)
+                  original_channels = int(old_shape[1])
+
+                  # Get the current shape after layout_transform
+                  N, CG, H, W, _ = arg_type.shape
+
+                  debug_print(f"  Pattern 4: Converting NCHW16c->NCHW")
+                  debug_print(f"    Function: {func_name}")
+                  debug_print(f"    Original channels: {original_channels}, Current channels: {CG*16}")
+
+                  # If padding was added (current channels > original), slice it off
+                  if CG*16 > original_channels:
+                    new_arg = relay.op.strided_slice(
+                      new_arg,
+                      begin=[0, 0, 0, 0],
+                      end=[N, original_channels, H, W]
+                    )
+                    debug_print(f"    Removed padding: {CG*16} -> {original_channels} channels")
+            else:
+              print(f"  Skip: shape {len(arg_shape)}D is not need to transform")
+              new_arg = arg
+          else:
+            # Shapes match, no packing needed
+            new_arg = arg
+          
+          return new_arg
 
       def visit_function(self, fn):
         """Override to track if we're processing the main function"""
@@ -5027,11 +5094,15 @@ class ImcflowLayoutLegalizer:
         self.current_func = fn
         new_body = self.visit(fn.body)
 
+        # transform imcflow layout to 4D if last node is imcflow node.
+        new_body = self.layout_transform_imcflow_to_4d(_get_type(self.module, new_body), new_body, 0)
+        new_body_type = _get_type(self.module, new_body)
+
         # Create new function with updated body
         return relay.Function(
           fn.params,
           new_body,
-          fn.ret_type,
+          new_body_type,
           fn.type_params,
           fn.attrs
         )
@@ -5049,6 +5120,8 @@ class ImcflowLayoutLegalizer:
         # Check if this is a call to an global function or Function
         transformed_args = []
         if isinstance(call.op, relay.GlobalVar) and isImcflowFunc(self.module[call.op.name_hint], self.module): # imcflow global function
+          # check input side of this imcflow function call node. insert legalization node if needed
+          # 4D -> imcflow layout case
           target_func = self.module[call.op.name_hint]
           for i, arg in enumerate(new_args):
             receiver_param = target_func.params[i]
@@ -5083,68 +5156,71 @@ class ImcflowLayoutLegalizer:
             else:
               raise ValueError("Unsupported receiver type for imcflow function parameter")
         elif isinstance(call.op, tvm.ir.Op) and not isImcflowFunc(self.current_func, self.module): # CPU side normal op
+          # check input side of cpu call node.
+          # imcflow layout -> 4D case
           # For operator calls, assume receiver type is 4D tensor
           for i, arg in enumerate(new_args):
             arg_type = new_arg_types[i]
             if isinstance(arg_type, TensorType):
-              arg_shape = arg_type.shape
-              if len(arg_shape) != 4:
-                if len(arg_shape) == 6:
-                  # Pattern 3: 6D tensor output (min_max_quant) - bit packed
-                  # find most recent min_max_quant call node
-                  if isinstance(arg, relay.Call) and arg.op == op.get("qnn.imcflow_min_max_quantize"):
-                    channels = arg.attrs["channel"]
-                  elif isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
-                    target_func = self.module[arg.op.name_hint]
-                    channels = target_func.body.attrs["channel"]
-                  elif isinstance(arg, relay.TupleGetItem) and isinstance(arg.tuple_value, relay.Call) and arg.tuple_value.op == op.get("qnn.imcflow_min_max_quantize"):
-                    channels = arg.tuple_value.attrs["channel"]
-                  new_arg = imcflow_mmquant_out_to_4d(arg, channels)
-                elif len(arg_shape) == 5:
-                  # Pattern 4: 5D tensor (NCHW16c) - vector layout
-                  new_arg = relay.layout_transform(arg, "NCHW16c", "NCHW")
+              new_arg = self.layout_transform_imcflow_to_4d(arg_type, arg, i)
+              # arg_shape = arg_type.shape
+              # if len(arg_shape) != 4:
+              #   if len(arg_shape) == 6:
+              #     # Pattern 3: 6D tensor output (min_max_quant) - bit packed
+              #     # find most recent min_max_quant call node
+              #     if isinstance(arg, relay.Call) and arg.op == op.get("qnn.imcflow_min_max_quantize"):
+              #       channels = arg.attrs["channel"]
+              #     elif isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
+              #       target_func = self.module[arg.op.name_hint]
+              #       channels = target_func.body.attrs["channel"]
+              #     elif isinstance(arg, relay.TupleGetItem) and isinstance(arg.tuple_value, relay.Call) and arg.tuple_value.op == op.get("qnn.imcflow_min_max_quantize"):
+              #       channels = arg.tuple_value.attrs["channel"]
+              #     new_arg = imcflow_mmquant_out_to_4d(arg, channels)
+              #   elif len(arg_shape) == 5:
+              #     # Pattern 4: 5D tensor (NCHW16c) - vector layout
+              #     new_arg = relay.layout_transform(arg, "NCHW16c", "NCHW")
 
-                  # Use ttype_map to get the original 4D shape
-                  if isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
-                    func_name = arg.op.name_hint
-                    if func_name in self.ttype_map:
-                      ttype_info = self.ttype_map[func_name][func_name]
+              #     # Use ttype_map to get the original 4D shape
+              #     if isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
+              #       func_name = arg.op.name_hint
+              #       if func_name in self.ttype_map:
+              #         ttype_info = self.ttype_map[func_name][func_name]
 
-                      # Handle both single tensor and tuple returns
-                      if isinstance(ttype_info, list):
-                        # Tuple return - need to determine which tuple element this is
-                        # For now, we'll use the first element's shape
-                        # TODO: If you need to handle specific tuple elements, track this
-                        real_shape, real_dtype, old_shape, old_dtype = ttype_info[i]
-                      else:
-                        # Single tensor return
-                        real_shape, real_dtype, old_shape, old_dtype = ttype_info
+              #         # Handle both single tensor and tuple returns
+              #         if isinstance(ttype_info, list):
+              #           # Tuple return - need to determine which tuple element this is
+              #           # For now, we'll use the first element's shape
+              #           # TODO: If you need to handle specific tuple elements, track this
+              #           real_shape, real_dtype, old_shape, old_dtype = ttype_info[i]
+              #         else:
+              #           # Single tensor return
+              #           real_shape, real_dtype, old_shape, old_dtype = ttype_info
 
-                      # Get the original channel count from real_shape
-                      # real_shape is the 4D shape (N, C, H, W)
-                      original_channels = int(old_shape[1])
+              #         # Get the original channel count from real_shape
+              #         # real_shape is the 4D shape (N, C, H, W)
+              #         original_channels = int(old_shape[1])
 
-                      # Get the current shape after layout_transform
-                      N, CG, H, W, _ = arg_type.shape
+              #         # Get the current shape after layout_transform
+              #         N, CG, H, W, _ = arg_type.shape
 
-                      debug_print(f"  Pattern 4: Converting NCHW16c->NCHW")
-                      debug_print(f"    Function: {func_name}")
-                      debug_print(f"    Original channels: {original_channels}, Current channels: {CG*16}")
+              #         debug_print(f"  Pattern 4: Converting NCHW16c->NCHW")
+              #         debug_print(f"    Function: {func_name}")
+              #         debug_print(f"    Original channels: {original_channels}, Current channels: {CG*16}")
 
-                      # If padding was added (current channels > original), slice it off
-                      if CG*16 > original_channels:
-                        new_arg = relay.op.strided_slice(
-                          new_arg,
-                          begin=[0, 0, 0, 0],
-                          end=[N, original_channels, H, W]
-                        )
-                        debug_print(f"    Removed padding: {CG*16} -> {original_channels} channels")
-                else:
-                  print(f"  Skip: shape {len(arg_shape)}D is not need to transform")
-                  new_arg = arg
-              else:
-                # Shapes match, no packing needed
-                new_arg = arg
+              #         # If padding was added (current channels > original), slice it off
+              #         if CG*16 > original_channels:
+              #           new_arg = relay.op.strided_slice(
+              #             new_arg,
+              #             begin=[0, 0, 0, 0],
+              #             end=[N, original_channels, H, W]
+              #           )
+              #           debug_print(f"    Removed padding: {CG*16} -> {original_channels} channels")
+              #   else:
+              #     print(f"  Skip: shape {len(arg_shape)}D is not need to transform")
+              #     new_arg = arg
+              # else:
+              #   # Shapes match, no packing needed
+              #   new_arg = arg
               transformed_args.append(new_arg)
             else:
               raise ValueError("Unsupported argument type for CPU operator")

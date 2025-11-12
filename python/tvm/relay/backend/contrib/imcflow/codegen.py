@@ -35,8 +35,9 @@ ConstPat = is_constant()
 class CodegenSuite:
   """A pass that generates/compiles code for IMCFlow functions"""
 
-  def __init__(self, build_dir):
+  def __init__(self, build_dir, host_isa="arm"):
     self.build_dir = build_dir
+    self.host_isa = host_isa
     if not os.path.exists(build_dir):
       os.makedirs(build_dir)
 
@@ -64,15 +65,15 @@ class CodegenSuite:
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
-    DeviceCodegen("imce", self.build_dir).handle_code_generation(
+    DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
         func_name, builder.codeblocks)
 
     builder = InodeCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
-    DeviceCodegen("inode", self.build_dir).handle_code_generation(
+    DeviceCodegen("inode", self.build_dir, self.host_isa).handle_code_generation(
         func_name, builder.codeblocks)
 
-    PolicyTableCodegen(func_name, self.build_dir).generate(func_name)
+    PolicyTableCodegen(func_name, self.build_dir, self.host_isa).generate(func_name)
 
     return func
 
@@ -82,10 +83,11 @@ class PolicyTableCodegen:
   Write out a binary file for policy tables for each node.
   """
 
-  def __init__(self, func_name, build_dir="/tmp"):
+  def __init__(self, func_name, build_dir="/tmp", host_isa="arm"):
     super().__init__()
     self.func_name = func_name
     self.build_dir = build_dir
+    self.host_isa = host_isa
     self.func_dir = os.path.join(build_dir, func_name)
 
   def pack_to_bin(self, entry, endian):
@@ -119,12 +121,12 @@ class PolicyTableCodegen:
           policytable_bin = self.pack_to_bin(entry, endian='little')
           file.write(policytable_bin)
       if ("inode" in node_name.name):
-        DevCodegen = DeviceCodegen("inode", self.build_dir)
+        DevCodegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
         DevCodegen.func_dir = self.func_dir
         DevCodegen.create_host_object(
             f"{node_name.name}_policy.bin", policytable_host_obj_file)
       if ("imce" in node_name.name):
-        DevCodegen = DeviceCodegen("inode", self.build_dir)
+        DevCodegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
         DevCodegen.func_dir = self.func_dir
         DevCodegen.create_host_object(
             f"{node_name.name}_policy.bin", policytable_host_obj_file)
