@@ -182,7 +182,11 @@ int main(int argc, char** argv) {
   fprintf(stderr, "dbg: graph loaded (%zu bytes)\n", graph_size);
 
   const TVMModule* syslib = TVMSystemLibEntryPoint();
-  TVMModuleHandle mod = (TVMModuleHandle)syslib;
+  TVMModuleHandle mod;
+  if (TVMModCreateFromCModule(syslib, &mod) != 0) {
+    fprintf(stderr, "Failed to create module handle\n");
+    return -1;
+  }
   fprintf(stderr, "dbg: got system lib handle %p\n", (void*)mod);
 
   DLDevice dev = {kDLCPU, 0};
@@ -275,7 +279,7 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < onumel; ++i) ref[i] = (((int16_t*)x1_data)[i] > 0) ? ((int16_t*)x1_data)[i] : 0;
 
   // Print first 16 values and checksum (concise verification)
-  int16_t* out_f = (int16_t)out.data;
+  int16_t* out_f = (int16_t*)out.data;
   size_t to_print = (onumel < 16) ? onumel : 16;
   printf("first16:");
   for (size_t i = 0; i < to_print; ++i) printf(" %d", out_f[i]);

@@ -258,6 +258,7 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
 
   # Kernel function prototype and definition (C)
   code += f"void {func_name}_kernel({args_proto_type}) {{\n"
+  code += f"printf(\"{func_name}_kernel called\\n\");\n"
   code.nextIndent()
   code += generateDevicePointerSetup(os)
   code += generateToNpuTransferCode(func, func_name,
