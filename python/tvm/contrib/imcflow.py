@@ -448,6 +448,7 @@ class ImcflowDeviceConfig:
   IMCE_INST_MEM_SIZE = 1024
   IMCFLOW_ADDR_SIZE = 266368 # 128 + 4*(65536+1024) == 260.125KB
   HOST_OS = "baremetal"
+  HOST_ISA = "x86"
 
   SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.bias_add", "imcflow.fused_batch_norm",
                    "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize",
