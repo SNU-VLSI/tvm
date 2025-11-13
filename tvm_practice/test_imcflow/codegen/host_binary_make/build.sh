@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build script for ${ISA} target
 MAIN_SCRIPT=${1:-"relu.c"}
-ISA=${2:-"x86"}
+MAIN_TEST_FOLDER=${2:-"one_relu_evl"}
+ISA=${3:-"x86"}
 
 #check ISA validity
 if [ "$ISA" != "x86" ] && [ "$ISA" != "arm" ]; then
@@ -25,7 +26,8 @@ rm -rf *
 cmake .. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DMAIN_SCRIPT="$MAIN_SCRIPT" \
-    -C ../cmake/config_${ISA}.cmake
+    -DMAIN_TEST_FOLDER="$MAIN_TEST_FOLDER" \
+    -C ../cmake/config.cmake
 
 # Build
 if [ $? -eq 0 ]; then

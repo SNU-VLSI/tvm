@@ -73,8 +73,8 @@ static void fill_tensor_linear_chw_index(DLTensor* t) {
     for (int64_t h = 0; h < H; ++h) {
       for (int64_t w = 0; w < W; ++w) {
         int64_t idx = c * H * W + h * W + w;
-        data[idx] = (int16_t)idx;
-        // data[idx] = 1;
+        // data[idx] = (int16_t)idx;
+        data[idx] = 1;
       }
     }
   }
@@ -213,17 +213,18 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  int N, C, H, W;
+  int N, C, H, W, OC, OH, OW;
   N = 1; C = 28; H = 4; W = 4;
+  OC=64, OH=4, OW=4;
 
   int64_t shape4[4] = {N, C, H, W};
   DLTensor x1 = {0};
   x1.device = dev;
   x1.ndim = 4;
   x1.shape = shape4;
-  x1.dtype = (DLDataType){kDLInt, 16, 1};
+  x1.dtype = (DLDataType){kDLInt, 8, 1};
   size_t numel = (size_t)shape4[0]*shape4[1]*shape4[2]*shape4[3];
-  size_t nbytes = numel * sizeof(int16_t);
+  size_t nbytes = numel * sizeof(int8_t);
   void* x1_data = NULL;
   TVMPlatformMemoryAllocate(nbytes, dev, &x1_data);
   x1.data = x1_data;
@@ -267,7 +268,7 @@ int main(int argc, char** argv) {
 
   DLTensor out = {0};
   out.device = dev;
-  int64_t oshape[4] = {N, C, H, W};
+  int64_t oshape[4] = {N, OC, OH, OW};
   out.ndim = 4; out.shape = oshape; out.dtype = (DLDataType){kDLInt, 16, 1};
   size_t onumel = (size_t)oshape[0]*oshape[1]*oshape[2]*oshape[3];
   size_t onbytes = onumel * sizeof(int16_t);
@@ -279,37 +280,35 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  // prepare reference
-  int16_t ref[onumel];
-  for (size_t i = 0; i < onumel; ++i) ref[i] = (((int16_t*)x1_data)[i] > 0) ? ((int16_t*)x1_data)[i] : 0;
-
   // Print first 16 values and checksum (concise verification)
   int16_t* out_f = (int16_t*)out.data;
   size_t to_print = (onumel < 16) ? onumel : 16;
   printf("first16:");
   for (size_t i = 0; i < to_print; ++i) printf(" %d", out_f[i]);
   printf("\n");
-  // uint32_t csum = checksum_fnv1a_u32(out_f, onumel);
-  // printf("checksum=0x%08x\n", csum);
+
+  // prepare reference
+  //TODO: calculate reference
+  // int16_t ref[onumel];
+  // for (size_t i = 0; i < onumel; ++i) ref[i] = (((int16_t*)x1_data)[i] > 0) ? ((int16_t*)x1_data)[i] : 0;
 
   // Verify against reference
-  size_t nerr = 0;
-  for (size_t i = 0; i < onumel; ++i) {
-    if (out_f[i] != ref[i]) {
-      if (nerr < 16) {
-        printf("mismatch at %zu: got %d, expected %d\n", i, out_f[i], ref[i]);
-      }
-      ++nerr;
-    }
-  }
-  if(nerr == 0) {
-    printf("PASS: all %zu values match reference\n", onumel);
-  } else {
-    printf("FAIL: %zu mismatches found\n", nerr);
-  }
+  // size_t nerr = 0;
+  // for (size_t i = 0; i < onumel; ++i) {
+  //   if (out_f[i] != ref[i]) {
+  //     if (nerr < 16) {
+  //       printf("mismatch at %zu: got %d, expected %d\n", i, out_f[i], ref[i]);
+  //     }
+  //     ++nerr;
+  //   }
+  // }
+  // if(nerr == 0) {
+  //   printf("PASS: all %zu values match reference\n", onumel);
+  // } else {
+  //   printf("FAIL: %zu mismatches found\n", nerr);
+  // }
 
   TVMPlatformMemoryFree(x1_data, dev);
-  // TVMPlatformMemoryFree(x2_data, dev);
   TVMPlatformMemoryFree(out_data, dev);
   free(graph_json);
   free(params_buf);
