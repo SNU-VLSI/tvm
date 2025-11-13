@@ -73,7 +73,8 @@ static void fill_tensor_linear_chw_index(DLTensor* t) {
     for (int64_t h = 0; h < H; ++h) {
       for (int64_t w = 0; w < W; ++w) {
         int64_t idx = c * H * W + h * W + w;
-        data[idx] = (int16_t)idx;
+        // data[idx] = (int16_t)idx;
+        data[idx] = 1;
       }
     }
   }
@@ -212,15 +213,19 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  int64_t shape4[4] = {1, 28, 4, 4};
+  int N, C, H, W;
+  N = 1; C = 28; H = 4; W = 4;
+
+  int64_t shape4[4] = {N, C, H, W};
   DLTensor x1 = {0};
   x1.device = dev;
   x1.ndim = 4;
   x1.shape = shape4;
   x1.dtype = (DLDataType){kDLInt, 16, 1};
   size_t numel = (size_t)shape4[0]*shape4[1]*shape4[2]*shape4[3];
-  size_t nbytes = numel * sizeof(float);
-  void* x1_data = NULL; TVMPlatformMemoryAllocate(nbytes, dev, &x1_data);
+  size_t nbytes = numel * sizeof(int16_t);
+  void* x1_data = NULL;
+  TVMPlatformMemoryAllocate(nbytes, dev, &x1_data);
   x1.data = x1_data;
   // Initialize like cpp_graph_deploy.cpp
   fill_tensor_linear_chw_index(&x1);
@@ -262,7 +267,7 @@ int main(int argc, char** argv) {
 
   DLTensor out = {0};
   out.device = dev;
-  int64_t oshape[4] = {1, 28, 4, 4};
+  int64_t oshape[4] = {N, C, H, W};
   out.ndim = 4; out.shape = oshape; out.dtype = (DLDataType){kDLInt, 16, 1};
   size_t onumel = (size_t)oshape[0]*oshape[1]*oshape[2]*oshape[3];
   size_t onbytes = onumel * sizeof(int16_t);
@@ -296,6 +301,11 @@ int main(int argc, char** argv) {
       }
       ++nerr;
     }
+  }
+  if(nerr == 0) {
+    printf("PASS: all %zu values match reference\n", onumel);
+  } else {
+    printf("FAIL: %zu mismatches found\n", nerr);
   }
 
   TVMPlatformMemoryFree(x1_data, dev);

@@ -566,7 +566,8 @@ class RecvSendWrapper(ImceCodeBlock):
           edge_shape = call.type_args[idx].shape
 
     # FIXME: we don't like how count also has to take num_blocks into account as well...
-    count = edge_shape[-1] * edge_shape[-2] // self.num_blocks
+    # count = edge_shape[-1] * edge_shape[-2] // self.num_blocks
+    count = (edge_shape[0] * math.ceil(float(edge_shape[1].value)/16) * edge_shape[2] * edge_shape[3]) // self.num_blocks
 
     # Store the loop-wrapped content in the _loop_wrapper attribute
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")

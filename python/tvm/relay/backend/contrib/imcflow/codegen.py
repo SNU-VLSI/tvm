@@ -193,7 +193,7 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
   def visit_regular_call(self, call):
     self.visit(call.op)
     for idx, a in enumerate(call.args):
-      if hasattr(call.op, "arguments"):
+      if hasattr(call.op, "arguments"): # this is tvm primitive operations.
         dst_tag = call.op.arguments[idx].name
         dst_tid = self.get_tensor_id(call, dst_tag, self.composite_call)
         self.add_edge(dst_tid, a)

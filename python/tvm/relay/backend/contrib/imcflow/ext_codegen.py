@@ -137,13 +137,13 @@ def generateToNpuTransferCode(func, func_name, blocks, address_macros):
     if isinstance(block.id, str):
       var_prefix = getObjectFileName(block)
       code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {var_prefix}_start[i];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){var_prefix}_start)[i];\n"
       code += f"}}\n"
     else:
       size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
       numel = math.ceil(size/4)
       code += f"for(int i=0; i<{numel}; i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = {getCInputVarName(func, func_name, block)}[i];\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){getCInputVarName(func, func_name, block)})[i];\n"
       code += f"}}\n"
   return code
 
@@ -158,7 +158,7 @@ def generateFromNpuTransferCode(data_blocks, address_macros):
     address_macros.update({base_address_name: base_address})
     numel = math.ceil(size/4)
     code += f"for(int i=0; i<{numel}; i++){{\n"
-    code += f"  out{idx}[i] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
+    code += f"  ((uint32_t*)out{idx})[i] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
     code += f"}}\n"
   return code
 
@@ -217,6 +217,12 @@ def generatePackedFuncWrapper(func_name, input_node_types, output_node_type):
 
 
 def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
+  """
+  func : wrap function
+  """
+  imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
+  target_func_info = imcflow_func_map[func_name]
+  target_func = target_func_info.func_node
   base_address_macros = {
       "IMCFLOW_ADDR": IMCFLOW_ADDR,
       "IMCFLOW_LEN": IMCFLOW_LEN,
@@ -236,13 +242,16 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
   }
   proto_list = []
   for i, param in enumerate(func.params):
-    param_name = param.name_hint if param.name_hint else f"arg{i}"
+    # param_name = param.name_hint if param.name_hint else f"arg{i}"
+    impl_param = target_func.params[i]
+    param_name = impl_param.name_hint if impl_param.name_hint else f"arg{i}"
     dtype = "float32"
     if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
       dtype = param.checked_type.dtype
       cpp_type = dtype_to_cpp(dtype)
       proto_list.append(f"{cpp_type}* {param_name}")
 
+  # we need real type, so use wrap function
   input_nodes = [n for n in imcflow_transform.getInputNodesOfFunc(func)]
   input_node_types = [n.checked_type for n in input_nodes]
   output_node = imcflow_transform.getOutputNodesOfFunc(func)

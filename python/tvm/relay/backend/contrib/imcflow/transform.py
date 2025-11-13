@@ -5256,6 +5256,6 @@ def constructDataBlockDict(mod):
     if func_name_var.name_hint == "main": continue
     elif isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow" :
       target_func = imcflow_func_map[func_name_var.name_hint]
-      input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(func)]
+      input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
       output_node_id = getNodeID(target_func.func_node)
       ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id)
