@@ -24,13 +24,15 @@ def align_to_n_bytes(size, n_bytes):
 
 def dtype_to_cpp(dtype: str) -> str:
   mapping = {
+      "float64": "double",
       "float32": "float",
       "float": "float",
+      "uint32": "uint32_t",
       "int32": "int32_t",
+      "uint16": "uint16_t",
       "int16": "int16_t",
-      "int8": "int8_t",
       "uint8": "uint8_t",
-      "float64": "double",
+      "int8": "int8_t",
   }
 
   # if dtype not in mapping: print(dtype)

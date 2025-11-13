@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
   printf("\n");
 #endif
 
-  TVMGraphExecutor_SetInput(exec, "input", &x1);
+  TVMGraphExecutor_SetInput(exec, "conv_input", &x1);
   TVMGraphExecutor_Run(exec);
 
 #if 0
