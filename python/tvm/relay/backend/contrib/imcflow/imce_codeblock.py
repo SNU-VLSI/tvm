@@ -555,6 +555,7 @@ class RecvSendWrapper(ImceCodeBlock):
     call = call_ctx.call
     code = self._content()  # Get the current content (RECV/SEND wrapped code)
     edge_shape = None
+    in_edge = None
     for idx, arg in enumerate(call.args):
       if ConstPat.match(arg):
         continue
@@ -564,10 +565,14 @@ class RecvSendWrapper(ImceCodeBlock):
               edge_shape == call.type_args[idx].shape), "all input args should have the same shape"
         else:
           edge_shape = call.type_args[idx].shape
+          in_edge = self.in_edges[idx]
 
     # FIXME: we don't like how count also has to take num_blocks into account as well...
     # count = edge_shape[-1] * edge_shape[-2] // self.num_blocks
-    count = (edge_shape[0] * math.ceil(float(edge_shape[1].value)/16) * edge_shape[2] * edge_shape[3]) // self.num_blocks
+    # count = (edge_shape[0] * math.ceil(float(edge_shape[1].value)/16) * edge_shape[2] * edge_shape[3]) // self.num_blocks
+    print(f"Warning: create_loop_from_call is used, double-check the loop count calculation!")
+    size = DevConfig().MemLayout.get_data_block_by_id(in_edge).size
+    count = math.ceil(size / 32.0) 
 
     # Store the loop-wrapped content in the _loop_wrapper attribute
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")

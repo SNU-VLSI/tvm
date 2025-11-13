@@ -24,6 +24,7 @@ from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomI
 from models import real_model, real_model2, test_models
 from models import small_model
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
+from models import models_for_test
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
@@ -274,8 +275,13 @@ def test_one_conv_quant_evl():
 
 def test_one_relu_evl():
   """Generate evaluation for relu model"""
-  mod, param_dict = real_model2.getOneReluModel()
+  mod, param_dict = models_for_test.getOneReluModel()
   run_test_evl("one_relu", mod, param_dict)
+
+def test_one_conv_evl():
+  """Generate evaluation for conv model"""
+  mod, param_dict = models_for_test.getOneConvModel()
+  run_test_evl("one_conv", mod, param_dict)
 
 def test_model_v2():
   """Generate evaluation for relu model"""
