@@ -394,21 +394,37 @@ class ConvBlock(ImceCallCodeBlock):
 
     return code
 
-  def _inner_loop_content(self, loop_count: int, recv_count: int) -> CodeBlock:
-    return SimpleFor(loop_count, self._loop_body_content(recv_count), "inner_loop")
+  def _inner_loop_content(self, loop_count: int, recv_count: int, tag="") -> CodeBlock:
+    return SimpleFor(loop_count, self._loop_body_content(recv_count), f"{tag}_inner_loop(iterate col offset. load inputs)")
 
-  def _outer_loop_content(self, loop_count: int, loop_pattern: dict) -> CodeBlock:
+  def _outer_loop_content(self, loop_count: int, loop_pattern: dict, tag="") -> CodeBlock:
     code = TextBlock("")
-    for pat in loop_pattern:
-      code += self._inner_loop_content(pat["count"], pat["pattern"])
+    for idx, pat in enumerate(loop_pattern):
+      code += self._inner_loop_content(pat["count"], pat["pattern"], f"{tag}_col_group{idx}")
 
-    return SimpleFor(loop_count, code, "outer_loop")
+    return SimpleFor(loop_count, code, f"{tag}_outer_loop(iterate row offset)")
 
   def _content(self) -> CodeBlock:
+    """
+    row pattern example:
+    [
+      {'count': 1, 'pattern': [
+        {'count': 1, 'pattern': 6}, {'count': 2, 'pattern': 1}, {'count': 1, 'pattern': 0}]
+      }, 
+      {'count': 2, 'pattern': [
+        {'count': 1, 'pattern': 2}, {'count': 2, 'pattern': 1}, {'count': 1, 'pattern': 0}
+      ]}, 
+      {'count': 1, 'pattern': [
+        {'count': 4, 'pattern': 0}
+      ]}
+    ]
+    """
     row_pattern = self.conv.extract_2d_pattern()
     code = TextBlock("")
-    for row_pat in row_pattern:
-      code += self._outer_loop_content(row_pat["count"], row_pat["pattern"])
+    for idx, row_pat in enumerate(row_pattern):
+      # row_pat["count"] : number of rows that share the same pattern
+      # row_pat["pattern"] : pattern for a row. list of {count, pattern}. pattern is the read count for a output pixel
+      code += self._outer_loop_content(row_pat["count"], row_pat["pattern"], self.annotation + f"_row_group{idx}")
 
     return code
 

@@ -152,11 +152,11 @@ class SimpleFor(CodeBlock):
 
   def content(self) -> CodeBlock:
     if self.count == 0:
-      return TextBlock("")
+      return TextBlock(f"// Loop count is 0. no operation performed. {self.annotation}\n")
 
     if self.count == 1:
       formatted_body = self.body(0) if callable(self.body) else str(self.body)
-      return TextBlock(formatted_body)
+      return TextBlock(f"//Loop count is 1. simple statement will be used. {self.annotation}\n" + formatted_body)
 
     with self.manage_scope() as var_iter:
       formatted_body = self.body(var_iter) if callable(
