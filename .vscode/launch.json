@@ -5,6 +5,13 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Python C++ Debug",
+      "type": "pythoncpp",
+      "request": "launch",
+      "pythonLaunchName": "Python: Current File",
+      "cppAttachName": "(gdb) Attach",
+    },
+    {
       "name": "(gdb) Attach",
       "type": "cppdbg",
       "request": "attach",
@@ -21,7 +28,7 @@
       "cwd": "/root/project/tvm/tvm_practice/test_imcflow/codegen",
       "args": [
         "-k",
-        "test_one_relu_evl",
+        "test_one_conv_evl",
         "-s"
       ]
     },
@@ -33,7 +40,7 @@
       "env": {"PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/tvm_practice:${env:PYTHONPATH}"},
       "args": [
         "test.py",
-        "-k small_model",
+        "-k test_one_conv_evl",
         "-s"
       ],
       "stopAtEntry": false,

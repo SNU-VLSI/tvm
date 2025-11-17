@@ -111,14 +111,18 @@ class RecvConstBlock(ImceCodeBlock):
       var = UniqueVar((self.in_edge, i))
       var.set_static()
       if self.annotation == "min write":
-        code += f"{var} = __builtin_IMCE_RECV_MIN({te_info.fifo_id});"
+        # code += f"{var} = __builtin_IMCE_RECV_MIN({te_info.fifo_id});"
+        code += f"__builtin_IMCE_RECV_MIN({te_info.fifo_id});"
       elif self.annotation == "max write":
-        code += f"{var} = __builtin_IMCE_RECV_MAX({te_info.fifo_id});"
+        # code += f"{var} = __builtin_IMCE_RECV_MAX({te_info.fifo_id});"
+        code += f"__builtin_IMCE_RECV_MAX({te_info.fifo_id});"
       elif self.annotation == "config write":
-        code += f"{var} = __builtin_IMCE_RECV_CFG({te_info.fifo_id});"
+        # code += f"{var} = __builtin_IMCE_RECV_CFG({te_info.fifo_id});"
+        code += f"__builtin_IMCE_RECV_CFG({te_info.fifo_id});"
       elif self.annotation == "scan write":
-        code += f"{var} = __builtin_IMCE_RECV_SREG{i}({te_info.fifo_id});"
-        code += f"{var} = __builtin_IMCE_SCAN_RW({var});"
+        # code += f"{var} = __builtin_IMCE_RECV_SREG{i}({te_info.fifo_id});"
+        code += f"{var}_{i} = __builtin_IMCE_RECV({te_info.fifo_id});"
+        code += f"{var}_{i} = __builtin_IMCE_SCAN_RW({var}_{i});"
       else:
         code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id});"
     return code

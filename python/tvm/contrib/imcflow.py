@@ -176,6 +176,7 @@ class FunctionInfo:
   def __init__(self, func_node, tiling_factor=1):
     self.func_node = func_node          # relay.Function object
     self.tiling_factor = tiling_factor  # int: tiling factor for memory optimization
+    self.const_name_map = {} # node id : name
 
   def __repr__(self):
     return f"FunctionInfo(tiling_factor={self.tiling_factor})"
@@ -546,9 +547,9 @@ class ImcflowDeviceConfig:
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
     return self.InstEdgeInfoDict.get(imce_id, None)
 
-  def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None):
+  def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None, const_node_ids=None):
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
-    compiled_blocks, input_data_blocks, output_data_blocks = [], [], []
+    compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
 
     for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
       if memory_region.blocks:
@@ -558,13 +559,24 @@ class ImcflowDeviceConfig:
             compiled_blocks.append(block)
           # get input & output data blocks
           if isinstance(block_name, TensorEdge):
-            # get input data blocks
             if isinstance(block_name.src_id.graph_node_id, Tuple):
               src_gid = block_name.src_id.graph_node_id[1]
             else:
               src_gid = block_name.src_id.graph_node_id
+
+            is_input_block = False
+            is_const_block = False
+            is_output_block = False
+            # get input data blocks
             if any([input_node_id == imcflow_transform.getInnerNodeID(src_gid) for input_node_id in input_node_ids]):
               input_data_blocks.append(block)
+              is_input_block = True
+
+            # get const data blocks
+            if any([const_node_id == imcflow_transform.getInnerNodeID(src_gid) for const_node_id in const_node_ids]):
+              const_data_blocks.append(block)
+              is_const_block = True
+
             # get output data blocks
             if isinstance(block_name.dst_id.graph_node_id, Tuple):
               dst_gid = block_name.dst_id.graph_node_id[1]
@@ -572,9 +584,19 @@ class ImcflowDeviceConfig:
               dst_gid = block_name.dst_id.graph_node_id
             if output_node_id == imcflow_transform.getInnerNodeID(dst_gid):
               output_data_blocks.append(block)
+              is_output_block = True
+            
+            if sum([is_input_block, is_const_block, is_output_block]) == 0:
+              print(f"Warning: DataBlock {block} is neither input, output, nor const block for function {func_name}")
+              raise ValueError("DataBlock type identification error")
+            elif sum([is_input_block, is_const_block, is_output_block]) > 1:
+              print(f"Warning: DataBlock {block} is multiple types of blocks for function {func_name}")
+              raise ValueError("DataBlock type identification error")
+
 
     self.DataBlocks[func_name] = {
         "compiled": compiled_blocks,
         "input": input_data_blocks,
         "output": output_data_blocks,
+        "const" : const_data_blocks
     }

@@ -297,27 +297,49 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def visit_function(self, fn):
     # constant tensor tags except "weight" (IMCU weights are handled separately)
+    param_edges = []
+    const_edges = []
+    output_edges = []
     for x in fn.params:
       # self.visit(x)
       param_id = getNodeID(x)
       # The input variable will go to the same router entry => only need one send block
       param_edge = self.get_output_edges_from_id(param_id)[0]
-      self.add_send_block(param_edge)
+      param_edges.append(param_edge)
+      # self.add_send_block(param_edge)
     #self.visit(fn.body)
     # traverse constant nodes
+
     for edge in self.edges:
       arg_id = edge.src_id.graph_node_id
       if isinstance(arg_id, Tuple):
         arg_id = arg_id[1]
       if ConstPat.match(CustomIDToNode()[arg_id]):
         if edge.src_id.tensor_type != "weight":
-          self.add_send_block(edge)
+          const_edges.append(edge)
+          # self.add_send_block(edge)
 
     # Add Recv Block
     fn_id = getNodeID(fn)
     fn_edges = self.get_input_edges_from_id(fn_id)
     for last_edge in fn_edges:
-      self.add_recv_block(last_edge)
+      output_edges.append(last_edge)
+      # self.add_recv_block(last_edge)
+    
+    # send const edge interleaved
+    #TODO: consider recv node order..
+    for edge in const_edges:
+      self.add_send_block(edge)
+
+    # send param edge interleaved
+    #TODO: if edge count is more than one, interleave them
+    for edge in param_edges:
+      self.add_send_block(edge)
+
+    # recv output edge interleaved
+    #TODO: if edge count is more than one, interleave them
+    for edge in output_edges:
+      self.add_recv_block(edge)
 
   def add_send_block(self, edge):
     out_edge_info = DevConfig().get_tensor_edge_info(edge)
@@ -340,6 +362,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     block = SendBlock(db, out_edge_info.fifo_id, f"send: {edge}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
+  
+  def add_send_block_interleaved(self, edge_list):
+    pass
 
   def add_recv_block(self, edge):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
@@ -349,6 +374,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
+  
+  def add_recv_block_interleaved(self, edge_list):
+    pass
 
   def get_graph_node_id(self, call):
     if self.curr_composite_id:

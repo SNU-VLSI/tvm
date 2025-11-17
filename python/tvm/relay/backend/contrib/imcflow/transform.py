@@ -158,14 +158,16 @@ def getInputNodesOfFunc(func):
       for param in func.params:
         InNodes.append(param)
 
-    # def visit_var(self, var):
-    #   InNodes.append(var)
-    #   super().visit_var(var)
+  _Visitor().visit(func)
+  return InNodes
 
-    # constant node is embedded extern array. it is not input of function
-    # def visit_constant(self, const):
-    #   InNodes.append(const)
-    #   super().visit_constant(const)
+def getConstNodesOfFunc(func):
+  InNodes = []
+
+  class _Visitor(tvm.relay.ExprVisitor):
+    def visit_constant(self, const):
+      InNodes.append(const)
+      super().visit_constant(const)
 
   _Visitor().visit(func)
   return InNodes
@@ -5250,6 +5252,32 @@ class ImcflowLayoutLegalizer:
 
     return mod
 
+class ImcflowFuncInOutOrderSetup:
+  """
+  setup order of input and output nodes of imcflow functions.
+  IMCE has specific order of inputs. For example, 
+  - input data : input arguments of imcflow function
+    - some of them should be interleaved send.
+  
+  - output data : return values of imcflow function
+    - some of them should be interleaved receive.
+
+  - constant with CMD 
+    - conv weight
+      - weight : pushed by cmd. order is not important
+
+  - constant
+    - conv configuration : it should has priorify over conv input
+    - minmax params
+    - batch norm params
+    - if a IMCE have multiple nodes which has constant node, receive order of the IMCE is from first op to last op in topological order. 
+
+  order format:
+    - 2D list format. outer list is order groups. inner list is interleaving group.
+      e.g., [[input1, input2], [input3]] means input1 and input2 are interleaved send first, then input3 is sent.
+    
+  """
+
 def constructDataBlockDict(mod):
   imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
   for func_name_var, func in mod.functions.items():
@@ -5258,4 +5286,5 @@ def constructDataBlockDict(mod):
       target_func = imcflow_func_map[func_name_var.name_hint]
       input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
       output_node_id = getNodeID(target_func.func_node)
-      ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id)
+      const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
+      ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)

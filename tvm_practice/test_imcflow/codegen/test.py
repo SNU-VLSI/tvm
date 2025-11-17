@@ -35,7 +35,8 @@ def printModel(result_dir, mod, param_dict, mod_name):
   ).render(f"{result_dir}/{mod_name}")
 
   with open(f"{result_dir}/{mod_name}.txt", "w") as f:
-    f.write(pretty_print(mod))
+    # f.write(pretty_print(mod))
+    f.write(mod.astext(show_meta_data=True))
 
 def generate_graph_executor(ref_mod, param_dict, dir_name):
   executor_cfg = Executor("graph")

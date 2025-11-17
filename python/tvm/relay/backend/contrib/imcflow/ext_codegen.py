@@ -7,6 +7,7 @@ from . import transform as imcflow_transform
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, TensorEdge
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.expr import (Var, Constant)
+from tvm.runtime import String
 import math
 import os
 
@@ -15,6 +16,12 @@ IMCFLOW_ADDR = 0x80000000
 IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
 INT_ACK_GEN_ADDR = 0
 INT_ACK_GEN_LEN = 0
+
+def getInnerNodeID(graph_node_id):
+  if isinstance(graph_node_id, tuple):
+    return graph_node_id[1]
+  else:
+    return graph_node_id
 
 def align_to_n_bytes(size, n_bytes):
   if (size % n_bytes) != 0:
@@ -76,17 +83,67 @@ def makeBaseAddrName(block):
   const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
   # FIXME: maybe error in src/dst check
   if isinstance(block.id, TensorEdge):
+    graph_node_id = imcflow_transform.getInnerNodeID(block.id.src_id.graph_node_id)
+    node_id_str = str(graph_node_id).replace("-", "m")
     if block.id.src_id.tensor_type in const_tags:
-      return f"{block.id.src_id.tensor_type.upper()}_{imcflow_transform.getInnerNodeID(block.id.src_id.graph_node_id)}_BASE_ADDR"
+      return f"{block.id.src_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
     else:
-      return f"{block.id.dst_id.tensor_type.upper()}_{imcflow_transform.getInnerNodeID(block.id.dst_id.graph_node_id)}_BASE_ADDR"
+      return f"{block.id.dst_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
   elif isinstance(block.id, str):
     return f"{block.id.upper()}_BASE_ADDR"
   else:
     raise ValueError("Wrong data block type!")
 
+def makeConstArrayDecl(func, func_name):
+
+  params = {}
+
+  func_info = DevConfig().ImcflowFuncMap.get(func_name, None)
+  if func_info is None: raise ValueError(f"Function {func_name} not found in ImcflowFuncMap")
+  target_func = func_info.func_node
+  
+  class ConstantCollector(tvm.relay.ExprVisitor):
+      def __init__(self):
+          super().__init__()
+          self.cnt=0
+          
+      def visit_constant(self, const):
+          # constant 이름 생성 (symbol 기반)
+          node_id = getInnerNodeID(imcflow_transform.getNodeID(const))
+          name = f"imcflow_{func_name}_const_{self.cnt}"
+          params[String(name)] = const.data
+          DevConfig().ImcflowFuncMap[func_name].const_name_map[node_id] = String(name)
+          self.cnt += 1
+          super().visit_constant(const)
+  
+  collector = ConstantCollector()
+  collector.visit(target_func)
+
+  code = CodeWriter()
+  for const_name, array in params.items():
+    dtype = dtype_to_cpp(array.dtype)
+    shape = array.shape
+    size = 1
+    for dim in shape:
+      size *= dim
+    code += f"static const {dtype} {const_name}[] __attribute__((aligned(16))) = {{"
+    array_values = array.asnumpy().flatten()
+    for i, val in enumerate(array_values):
+      if i % 16 == 0:
+        code += "\n  "
+      code += f"{val}, "
+    code += "\n};\n\n"
+
+  return code
+  
 
 def getConstantIdx(func, node_id):
+  """
+  Get the index of the constant node in the function by its inner node ID.
+  parameters:
+    func    : relay.Function
+    node_id : inner node ID of the constant node
+  """
   node_id_to_constant_id = {}
 
   class _Visitor(tvm.relay.ExprVisitor):
@@ -95,7 +152,8 @@ def getConstantIdx(func, node_id):
       self.Cnt = 0
 
     def visit_constant(self, const):
-      node_id_to_constant_id[imcflow_transform.getNodeID(const)] = self.Cnt
+      node_id = getInnerNodeID(imcflow_transform.getNodeID(const))
+      node_id_to_constant_id[node_id] = self.Cnt
       self.Cnt = self.Cnt + 1
       super().visit_constant(const)
 
@@ -121,7 +179,9 @@ def getCInputVarName(func, func_name, data_block):
     return node_type.name_hint
   elif isinstance(node_type, Constant):
     data_type = dtype_to_cpp(node_type.checked_type.dtype)
-    return f"(({data_type}*)({func_name}_consts[{getConstantIdx(func, graph_node_inner_id)}]->data))"
+    node_id = getInnerNodeID(imcflow_transform.getNodeID(node_type))
+    const_name = DevConfig().ImcflowFuncMap[func_name].const_name_map[node_id]
+    return f"(({data_type}*)({const_name}))"
   else:
     raise ValueError(f"Invalid node_type!: {node_type}")
 
@@ -265,6 +325,7 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
   code = CodeWriter()
   code += generateHeader()
   code += generateExternLink(func_name, compiled_blocks)
+  code += makeConstArrayDecl(func, func_name)
   code += generateInterruptUtilities()
 
   # Kernel function prototype and definition (C)
@@ -276,8 +337,10 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
                                     compiled_blocks, base_address_macros)
   code += generateToNpuTransferCode(func, func_name,
                                     data_blocks[0], base_address_macros)
+  code += generateToNpuTransferCode(func, func_name,
+                                    data_blocks[1], base_address_macros)
   code += generateInvokeCode(os)
-  code += generateFromNpuTransferCode(data_blocks[1], base_address_macros)
+  code += generateFromNpuTransferCode(data_blocks[2], base_address_macros)
   code += generateDevicePointerCleanup(os)
   code.prevIndent()
   code += '}\n'
@@ -291,7 +354,7 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
 
 def makeKernelStartCode(func_name, func, os):
   compiled_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["compiled"]
-  data_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["input"], ImcflowDeviceConfig().DataBlocks[func_name]["output"]
+  data_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["const"], ImcflowDeviceConfig().DataBlocks[func_name]["input"], ImcflowDeviceConfig().DataBlocks[func_name]["output"]
   kernel_def = makeKernelDef(func_name, func, compiled_blocks, data_blocks, os)
   code = kernel_def
 
@@ -440,22 +503,24 @@ def generate_invoke_code_for_subgraphs(mod):
 
   return invoke_code_map
 
+@tvm._ffi.register_func("relay.ext.imcflow.constant_updater")
+def imcflow_constant_updater(expr, symbol):
+    """
+    Relay function에서 constant를 추출하여 반환
+    """
+    return dict()
 
 @tvm._ffi.register_func("relay.ext.imcflow")
 def imcflow_external_codegen(func: relay.Function):
   # Obtain the function name (global symbol) assigned by the partitioning pass
   func_name = func.attrs["global_symbol"] if hasattr(
       func, "attrs") and "global_symbol" in func.attrs else "imcflow_subgraph"
+  
+  # const_vars = list(DevConfig().ImcflowFuncMap[func_name].const_name_map.values())
 
   # Reuse existing kernel code generator
   code = makeKernelStartCode(func_name, func, DevConfig.HOST_OS)
 
   # Wrap as a CSourceModule so TVM can compile/link it with the rest of the MLF
   # Note: returning a CSourceModule is the standard for BYOC Python codegen.
-  return tvm.runtime._ffi_api.CSourceModuleCreate(code, "cc", [func_name], None)
-
-
-@tvm._ffi.register_func("relay.ext.imcflow.constant_updater")
-def imcflow_constant_updater(expr, symbol):  # pylint: disable=unused-argument
-  # Keep ownership of constants inside the external module
-  return dict()
+  return tvm.runtime._ffi_api.CSourceModuleCreate(code, "cc", [String(func_name)], None)
