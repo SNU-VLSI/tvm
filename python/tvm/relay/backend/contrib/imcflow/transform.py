@@ -2313,7 +2313,11 @@ class MemoryAllocator:
             # Allocate weight tensors (no tiling, allow overlap)
             for edge, mem_block, inode_tensorid in tensors['weight']:
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(
+              #TODO: handle it later
+              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(
+              #   self.func_name, mem_block
+              # )
+              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
                 self.func_name, mem_block
               )
             

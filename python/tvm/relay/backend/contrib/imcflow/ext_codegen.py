@@ -333,12 +333,10 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
   code += f"printf(\"{func_name}_kernel called\\n\");\n"
   code.nextIndent()
   code += generateDevicePointerSetup(os)
-  code += generateToNpuTransferCode(func, func_name,
-                                    compiled_blocks, base_address_macros)
-  code += generateToNpuTransferCode(func, func_name,
-                                    data_blocks[0], base_address_macros)
-  code += generateToNpuTransferCode(func, func_name,
-                                    data_blocks[1], base_address_macros)
+  code += generateToNpuTransferCode(func, func_name, compiled_blocks, base_address_macros) # inode instrunction
+  code += generateToNpuTransferCode(func, func_name, data_blocks[0], base_address_macros) # constant
+  code += generateToNpuTransferCode(func, func_name, data_blocks[1], base_address_macros) # input + policy
+  code += generatePolicyUpdateCode(os)
   code += generateInvokeCode(os)
   code += generateFromNpuTransferCode(data_blocks[2], base_address_macros)
   code += generateDevicePointerCleanup(os)
@@ -450,8 +448,7 @@ def generateDevicePointerSetup(os="linux"):
   else:
     raise ValueError("Unsupported OS type for device pointer setup!")
 
-
-def generateInvokeCode(os="linux"):
+def generatePolicyUpdateCode(os="linux"):
   out = \
   [
     "// Set the inode pc to 0 and run.",
@@ -463,6 +460,14 @@ def generateInvokeCode(os="linux"):
     "wait_imcflow_interrupt(npu_fd);" if os == "linux" else "", 
     "generate_ack(int_ack_gen_pointer);" if os == "linux" else "",
     "npu_pointer[7] = 1;",
+  ]
+
+  return "\n".join(out) + "\n"
+
+
+def generateInvokeCode(os="linux"):
+  out = \
+  [
     "for(int i=0; i<INODE_NUM; i++) {",
     "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
     "}",
