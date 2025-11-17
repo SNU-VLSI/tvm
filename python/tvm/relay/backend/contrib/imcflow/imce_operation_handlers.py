@@ -64,6 +64,8 @@ class ConvHandler(OperationHandler):
   weight initialization.
   """
 
+  uid=0
+
   @property
   def priority(self) -> int:
     return 10
@@ -91,7 +93,8 @@ class ConvHandler(OperationHandler):
 
     # write weights => on INODE
 
-    block = ConvBlock(call, shapes, call.call.attrs, "conv exec")
+    block = ConvBlock(call, shapes, call.call.attrs, f"conv exec{ConvHandler.uid}")
+    ConvHandler.uid += 1
     # FIXME: this assumes that convblock is called first... we don't want that
     call.curr_conv_block = block
     call.codeblocks.append(hid, block, CodePhase.EXEC)

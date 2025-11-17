@@ -106,7 +106,10 @@ class ConvUtil:
 
 # Test code
 if __name__ == "__main__":
-  utils = ConvUtil(8, 8, 2, 2, 3, 3)
+  N, IC, IH, IW = 1, 28, 4, 4
+  OC, KH, KW = 64, 3, 3
+  stride, padding = 1, 1
+  utils = ConvUtil(IH, IW, padding, stride, KH, KW)
   print("Input Read Count Matrix:")
   print(utils.calculate_input_read_counts())
 
