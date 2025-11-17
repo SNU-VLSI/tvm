@@ -96,7 +96,9 @@ class WriteIMCUBlock(InodeCodeBlock):
         info = DevConfig().get_tensor_edge_info(db.id)
         assert info.fifo_id == 1, f"IMCU fifo id should be set to 1 (although not used), but got {info.fifo_id} for {db.id}"
         var = UniqueVar("imcu_start_address", dtype="int")
-        code += f"{var} = {db.base_address};"
+        # code += f"{var} = {db.base_address};"
+        code += f"{var} = {db.offset};"
+        code += f"__builtin_INODE_SET_ADDR_CNT(0);"
         code += SimpleFor(math.ceil(db.size / 32),
                           lambda iter: f"__builtin_INODE_WR_IMCU({var} + {iter}*32, 0, {info.policy_info[0].address});")
                           # rs1, imm, policy
