@@ -336,7 +336,7 @@ class ConvBlock(ImceCallCodeBlock):
 
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
 
-    fifo_id = -1
+    load_info = []
     for edge in self.in_edges:
       te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
       assert len(te_infos) == 1, "more than one te_info found!"
@@ -350,18 +350,15 @@ class ConvBlock(ImceCallCodeBlock):
       except KeyError:
         # If the node is not found in CustomIDToNode, treat it as non-constant
         pass
+      load_info.append({"edge": edge, "te_info": te_info})
 
-      if te_info.fifo_id != 0:
-        logging.warning(f"conv block data fifo_id is not 0, but {te_info.fifo_id}")
-
-      if fifo_id != -1:
-        logging.warning(f"fifo_id already set to {fifo_id}")
-      else:
-        fifo_id = te_info.fifo_id
+    assert len(load_info) == 1, "there should be exactly one load edge"
+    load_edge = load_info[0]["edge"]
+    load_fifo_id = load_info[0]["te_info"].fifo_id
 
 
     code = TextBlock("")
-    code += LoadLBBlock(recv_count, self.num_blocks, fifo_id)
+    code += LoadLBBlock(recv_count, self.num_blocks, load_fifo_id)
     code += "__builtin_IMCE_STEP();\n"
 
     for i in range(self.num_blocks):
@@ -380,7 +377,7 @@ class ConvBlock(ImceCallCodeBlock):
       for op in self.post_op_chain:
         all_in_edges += op.in_edges
         all_out_edges += op.out_edges
-      recv_edges = list(set(all_in_edges) - set(all_out_edges) - set(self.out_edges))
+      recv_edges = list(set(all_in_edges) - set(all_out_edges) - set(self.out_edges) - set([load_edge]))
       send_edges = list(set(all_out_edges) - set(all_in_edges))
       last_out_edges = self.post_op_chain[-1].out_edges
       assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
@@ -517,6 +514,8 @@ class RecvSendWrapper(ImceCodeBlock):
           var_i = UniqueVar((edge, i))
           if not te_info or var_i.static:
             continue
+          if te_info.fifo_id == 0:
+            continue
           code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
 
     # Add the inner block's computation
@@ -567,12 +566,16 @@ class RecvSendWrapper(ImceCodeBlock):
           edge_shape = call.type_args[idx].shape
           in_edge = self.in_edges[idx]
 
-    # FIXME: we don't like how count also has to take num_blocks into account as well...
-    # count = edge_shape[-1] * edge_shape[-2] // self.num_blocks
     # count = (edge_shape[0] * math.ceil(float(edge_shape[1].value)/16) * edge_shape[2] * edge_shape[3]) // self.num_blocks
     print(f"Warning: create_loop_from_call is used, double-check the loop count calculation!")
-    size = DevConfig().MemLayout.get_data_block_by_id(in_edge).size
-    count = math.ceil(size / 32.0) 
+    datablock = DevConfig().MemLayout.get_data_block_by_id(in_edge)
+    if datablock:
+      # when data_block is allocated in the inode MemLayout
+      count = math.ceil(datablock.size / 32.0)
+    else:
+      # if data_block is none, we use usual...
+      # FIXME: we don't like how count also has to take num_blocks into account as well...
+      count = edge_shape[-1] * edge_shape[-2] // self.num_blocks
 
     # Store the loop-wrapped content in the _loop_wrapper attribute
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")
