@@ -65,6 +65,12 @@ class CodegenSuite:
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
+
+    # add stop block for active imces
+    for hid in DevConfig().ActiveIMCEPerFunc[func_name]:
+      block = CtrlBlock("STOP")
+      builder.codeblocks.append(hid, block, CodePhase.END)
+
     DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
         func_name, builder.codeblocks)
 
