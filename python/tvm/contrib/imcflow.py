@@ -455,6 +455,18 @@ class ImcflowDeviceConfig:
   HOST_OS = "baremetal"
   HOST_ISA = "x86"
 
+  INODE0_IMEM_BASE_ADDR = 128
+  INODE0_DMEM_BASE_ADDR = INODE0_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
+  INODE1_IMEM_BASE_ADDR = INODE0_DMEM_BASE_ADDR + INODE_DATA_MEM_SIZE
+  INODE1_DMEM_BASE_ADDR = INODE1_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
+  INODE2_IMEM_BASE_ADDR = INODE1_DMEM_BASE_ADDR + INODE_DATA_MEM_SIZE
+  INODE2_DMEM_BASE_ADDR = INODE2_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
+  INODE3_IMEM_BASE_ADDR = INODE2_DMEM_BASE_ADDR + INODE_DATA_MEM_SIZE # 0x30c80
+  INODE3_DMEM_BASE_ADDR = INODE3_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
   SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.bias_add", "imcflow.fused_batch_norm",
                    "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize",
                    "qnn.imcflow_nu_quantize", "divide", "imcflow_packing", "imcflow_unpacking",

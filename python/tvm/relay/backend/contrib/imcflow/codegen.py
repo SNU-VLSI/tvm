@@ -264,7 +264,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def initialize(self):
     # clear flag
     for inode in NodeID.inodes():
-      block = ClearFlag("clear flag")
+      block = ClearFlag("clear flag before policy update")
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # policy update
@@ -285,7 +285,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     
     # clear flag
     for inode in NodeID.inodes():
-      block = ClearFlag("clear flag")
+      block = ClearFlag("clear flag before imem write")
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # imem write
@@ -297,6 +297,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for node in NodeID.inodes():
       block = WriteIMCUBlock(node, "imcu write", self.codeblocks.func_name)
       self.codeblocks.append(node, block, CodePhase.INIT)
+
+    # imce compute
+    active_imces = DevConfig().ActiveIMCEPerFunc[self.codeblocks.func_name]
+    for imce in active_imces:
+      block = IMCEComputeBlock(f"{imce.name} compute")
+      self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+    
+    # wait all enable of imce
+    for inode in NodeID.inodes():
+      block = SetFlag()
+      self.codeblocks.append(inode, block, CodePhase.INIT)
+      other_nodes = [n for n in NodeID.inodes() if n != inode]
+      block = Standby(node_ids=other_nodes, annotation=f"standby for {inode.name}")
+      self.codeblocks.append(inode, block, CodePhase.INIT)
+
+      block = ClearFlag("clear flag after imce compute enable")
+      self.codeblocks.append(inode, block, CodePhase.INIT)
 
   def finalize(self):
     # standby and intrt
@@ -367,11 +384,6 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
         self.add_send_block(inner_edge)
       return
-
-    if hid not in self._imce_compute_added:
-      block = IMCEComputeBlock(f"imce compute start")
-      self.codeblocks.append(hid, block, CodePhase.EXEC)
-      self._imce_compute_added.add(hid)
 
     db = DevConfig().MemLayout.get_data_block_by_id(edge)
     assert db is not None, f"Data block not found for edge: {edge}"

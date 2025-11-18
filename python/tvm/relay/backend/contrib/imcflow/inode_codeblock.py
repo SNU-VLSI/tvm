@@ -181,12 +181,31 @@ class StandbyAndIntrtBlock(InodeCodeBlock):
     code += f"__builtin_INODE_HALT();"
     return code
 
+class Standby(InodeCodeBlock):
+  def __init__(self, node_ids: List[NodeID], annotation: str = ""):
+    super().__init__(annotation)
+    self.node_ids = node_ids
+
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+    for node in self.node_ids:
+      # FIXME: the hardcoded flag value 1 should be replaced with value from sync manager
+      code += f"__builtin_INODE_STANDBY({node.value}, 1);"
+    return code
+
 class SetFlagAndHaltBlock(InodeCodeBlock):
   def _content(self) -> Union[str, CodeBlock]:
     code = TextBlock("")
     # FIXME: the hardcoded flag value 1 should be replaced with value from sync manager
     code += f"__builtin_INODE_SET_FLAG(1);"
     code += f"__builtin_INODE_HALT();"
+    return code
+
+class SetFlag(InodeCodeBlock):
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+    # FIXME: the hardcoded flag value 1 should be replaced with value from sync manager
+    code += f"__builtin_INODE_SET_FLAG(1);"
     return code
 
 class ClearFlag(InodeCodeBlock):
@@ -231,8 +250,8 @@ class InodeCodeBlockManager(NodeCodeBlockManager):
   __builtin_INODE_SEND(1, 1, 1, 1);
   __builtin_INODE_RECV(1, 1, 1, 1);
   __builtin_INODE_LAYERINIT();
-  __builtin_INODE_IMCE_COMPUTE(1);
-
+    __builtin_INODE_IMCE_COMPUTE(1);
+  
   __builtin_INODE_WR_IMEM(1, 1, 1);
   __builtin_INODE_WR_IMCU(1, 1, 1);
   __builtin_INODE_WR_REG(1, 1, 1);
