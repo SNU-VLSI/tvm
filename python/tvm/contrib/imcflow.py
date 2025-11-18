@@ -58,15 +58,19 @@ class NodeID(Enum):
 
   @staticmethod
   def from_inode_coord(x: int) -> 'NodeID':
+    x = x % ImcflowDeviceConfig.INODE_NUM
     return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x)
 
   @staticmethod
   def from_imce_coord(x: int, y: Union[None | int] = None) -> 'NodeID':
     if y is None:
+      x = x % ImcflowDeviceConfig.IMCE_NUM
       ImceHeight = x//ImcflowDeviceConfig.IMCE_W_NUM
       ImceWidth = x % ImcflowDeviceConfig.IMCE_W_NUM
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*ImceHeight + (ImceWidth+1))
     else:
+      x = x % ImcflowDeviceConfig.IMCE_H_NUM
+      y = y % ImcflowDeviceConfig.IMCE_W_NUM
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
 
   @staticmethod
@@ -115,7 +119,7 @@ class TensorID:
     key = (graph_node_id, tensor_type)
     if tensor_type not in {"data", "odata", "weight",
                            "bias", "fused_scale", "fused_bias", "lhs", "rhs",
-                           "min", "max", "threshold", "zero","config"}:
+                           "min", "max", "threshold", "zero","config", "var", "func_out"}:
                            print("Invalid tensor type")
     if key not in cls._instances:
       instance = super(TensorID, cls).__new__(cls)

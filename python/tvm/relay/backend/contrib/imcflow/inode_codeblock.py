@@ -184,6 +184,13 @@ class SetFlagAndHaltBlock(InodeCodeBlock):
     code += f"__builtin_INODE_HALT();"
     return code
 
+class ClearFlag(InodeCodeBlock):
+  def _content(self) -> Union[str, CodeBlock]:
+    code = TextBlock("")
+    # FIXME: the hardcoded flag value 1 should be replaced with value from sync manager
+    code += f"__builtin_INODE_SET_FLAG(0);"
+    return code
+
 
 class InodeCodeBlockManager(NodeCodeBlockManager):
   """A class that manages and generates code blocks for inodes."""

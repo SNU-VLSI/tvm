@@ -256,6 +256,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.finalize()
 
   def initialize(self):
+    # clear flag
+    for inode in NodeID.inodes():
+      block = ClearFlag("clear flag")
+      self.codeblocks.append(inode, block, CodePhase.INIT)
+
     # policy update
     for inode in NodeID.inodes():
       block = PolicyUpdateBlock(inode, "policy update")
@@ -271,6 +276,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     block = SetFlagAndHaltBlock()
     for inode_slv in inode_slaves:
       self.codeblocks.append(inode_slv, block, CodePhase.INIT)
+    
+    # clear flag
+    for inode in NodeID.inodes():
+      block = ClearFlag("clear flag")
+      self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # imem write
     for imce, inst_edge in DevConfig().InstEdgeInfoDict.items():
