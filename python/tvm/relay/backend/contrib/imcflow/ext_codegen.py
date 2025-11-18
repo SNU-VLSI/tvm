@@ -2,7 +2,7 @@ import tvm
 from tvm import relay
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import DataBlock
-from tvm.relay.ty import TensorType
+from tvm.relay.ty import TensorType, TupleType
 from . import transform as imcflow_transform
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, TensorEdge
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
@@ -101,12 +101,12 @@ def makeConstArrayDecl(func, func_name):
   func_info = DevConfig().ImcflowFuncMap.get(func_name, None)
   if func_info is None: raise ValueError(f"Function {func_name} not found in ImcflowFuncMap")
   target_func = func_info.func_node
-  
+
   class ConstantCollector(tvm.relay.ExprVisitor):
       def __init__(self):
           super().__init__()
           self.cnt=0
-          
+
       def visit_constant(self, const):
           # constant 이름 생성 (symbol 기반)
           node_id = getInnerNodeID(imcflow_transform.getNodeID(const))
@@ -115,7 +115,7 @@ def makeConstArrayDecl(func, func_name):
           DevConfig().ImcflowFuncMap[func_name].const_name_map[node_id] = String(name)
           self.cnt += 1
           super().visit_constant(const)
-  
+
   collector = ConstantCollector()
   collector.visit(target_func)
 
@@ -135,7 +135,7 @@ def makeConstArrayDecl(func, func_name):
     code += "\n};\n\n"
 
   return code
-  
+
 
 def getConstantIdx(func, node_id):
   """
@@ -244,7 +244,7 @@ def generateExternLink(func_name, compiled_blocks):
   return code
 
 
-def generatePackedFuncWrapper(func_name, input_node_types, output_node_type):
+def generatePackedFuncWrapper(func_name, input_node_types, output_node_types):
   code = CodeWriter()
   # PackedFunc wrapper for CRT
   code += "#ifdef __cplusplus\n"
@@ -255,19 +255,23 @@ def generatePackedFuncWrapper(func_name, input_node_types, output_node_type):
   code += "(void)resource_handle;\n"
   code += "if (num_args < 2) return -1;\n"
 
+  num_in_args = len(input_node_types)
+  num_out_args = len(output_node_types)
+
   # get input and output data pointers
-  for idx in range(len(input_node_types)):
+  for idx in range(num_in_args):
     code += f"void* _in{idx} = (((TVMValue*)args)[{idx}].v_handle);\n"
     code += f"DLTensor* in{idx} = (DLTensor*)_in{idx};\n"
-  code += f"void* _out0 = (((TVMValue*)args)[{len(input_node_types)}].v_handle);\n"
-  code += f"DLTensor* out0 = (DLTensor*)_out0;\n"
+  for idx in range(num_out_args):
+    code += f"void* _out{idx} = (((TVMValue*)args)[{idx + num_in_args}].v_handle);\n"
+    code += f"DLTensor* out{idx} = (DLTensor*)_out{idx};\n"
 
   # call kernel function
   args_list = []
-  for idx in range(len(input_node_types)):
-    args_list.append(
-        f"({dtype_to_cpp(input_node_types[idx].dtype)}*)in{idx}->data")
-  args_list.append(f"({dtype_to_cpp(output_node_type.dtype)}*)out0->data")
+  for idx, i_type in enumerate(input_node_types):
+    args_list.append(f"({dtype_to_cpp(i_type)}*)in{idx}->data")
+  for idx, o_type in enumerate(output_node_types):
+    args_list.append(f"({dtype_to_cpp(o_type)}*)out{idx}->data")
   code += f"{func_name}_kernel({', '.join(args_list)});\n"
 
   code += "(void)out_ret_value;\n"
@@ -315,10 +319,23 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
 
   # we need real type, so use wrap function
   input_nodes = [n for n in imcflow_transform.getInputNodesOfFunc(func)]
-  input_node_types = [n.checked_type for n in input_nodes]
-  output_node = imcflow_transform.getOutputNodesOfFunc(func)
-  output_node_type = output_node.checked_type
-  proto_list.append(f"{dtype_to_cpp(output_node_type.dtype)}* out0")
+  input_node_types = [n.checked_type.dtype for n in input_nodes]
+  output_node = imcflow_transform.getOutputNodeOfFunc(func)
+
+  def node_types_to_list(node):
+    """Extract dtype(s) from a node's checked_type into a list."""
+    checked_type = node.checked_type
+    if isinstance(checked_type, TupleType):
+      return [field.dtype for field in checked_type.fields]
+    elif isinstance(checked_type, TensorType):
+      return [checked_type.dtype]
+    else:
+      raise TypeError(f"unsupported node type {checked_type.__class__}")
+
+  output_node_types = node_types_to_list(output_node)
+
+  for idx, node_type in enumerate(output_node_types):
+    proto_list.append(f"{dtype_to_cpp(node_type)}* out{idx}")
 
   args_proto_type = ", ".join(proto_list)
 
@@ -344,7 +361,7 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
   code += '}\n'
 
   code += generatePackedFuncWrapper(func_name,
-                                    input_node_types, output_node_type)
+                                    input_node_types, output_node_types)
   code = generateBaseAddrMacros(base_address_macros) + code
 
   return code
@@ -457,7 +474,7 @@ def generatePolicyUpdateCode(os="linux"):
     "}",
     "enable_imcflow_interrupt(npu_fd);" if os == "linux" else "",
     " *(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;",
-    "wait_imcflow_interrupt(npu_fd);" if os == "linux" else "", 
+    "wait_imcflow_interrupt(npu_fd);" if os == "linux" else "",
     "generate_ack(int_ack_gen_pointer);" if os == "linux" else "",
     "npu_pointer[7] = 1;",
   ]
@@ -520,7 +537,7 @@ def imcflow_external_codegen(func: relay.Function):
   # Obtain the function name (global symbol) assigned by the partitioning pass
   func_name = func.attrs["global_symbol"] if hasattr(
       func, "attrs") and "global_symbol" in func.attrs else "imcflow_subgraph"
-  
+
   # const_vars = list(DevConfig().ImcflowFuncMap[func_name].const_name_map.values())
 
   # Reuse existing kernel code generator

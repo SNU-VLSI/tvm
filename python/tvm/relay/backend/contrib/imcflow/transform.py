@@ -172,14 +172,8 @@ def getConstNodesOfFunc(func):
   _Visitor().visit(func)
   return InNodes
 
-def getOutputNodesOfFunc(func):
-  IsComposite = isinstance(func.body.op, relay.Function) and "Composite" in func.body.op.attrs and re.match(r"imcflow\..*", func.body.op.attrs["Composite"])
-  if IsComposite:
-    output_node = func.body.op.body
-  else:
-    output_node = func.body
-
-  return output_node
+def getOutputNodeOfFunc(func):
+  return func.body
 
 def getInputTensorIDs(func):
   pass
@@ -3725,7 +3719,7 @@ def makeWrapper(func, func_name):
       proto_list.append(f"DLTensor* {param_name}")
       cast_list.append(f"static_cast<{cpp_type}*>({param_name}->data)")
 
-  output_node = getOutputNodesOfFunc(func)
+  output_node = getOutputNodeOfFunc(func)
   output_node_type = output_node.checked_type
   proto_list.append(f"DLTensor* out0")
   cast_list.append(f"static_cast<{dtype_to_cpp(output_node_type.dtype)}*>(out0->data)")
