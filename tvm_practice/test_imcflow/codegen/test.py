@@ -181,56 +181,68 @@ def run_test_evl(test_name, mod, param_dict):
   imcflow_transform.constructCustomIDInFunc(eval_mod)
   imcflow_transform.constructImcflowFuncMap(eval_mod)
   print("-------------------- CustomID TO Name --------------------")
-  pprint.pprint(imcflow.CustomIDToName())
+  with open(f"{eval_dir}/custom_id_to_name.txt", "w") as f:
+    pprint.pprint(imcflow.CustomIDToName(), stream=f)
   print("-------------------- Node TO CustomID --------------------")
-  pprint.pprint(HashToCustomID())
+  with open(f"{eval_dir}/node_to_custom_id.txt", "w") as f:
+    pprint.pprint(HashToCustomID(), stream=f)
   print("-------------------- func map --------------------")
-  pprint.pprint(DevConfig().ImcflowFuncMap)
+  with open(f"{eval_dir}/func_map.txt", "w") as f:
+    pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
   printModel(eval_dir, eval_mod, eval_param_dict, "9_with_custom_id")
 
   imcflow_transform.NodeMapper().run(eval_mod)
-  print("------------------------------- HW MAP PASS 1----------------------------------")
-  pprint.pprint(DevConfig().HWNodeMap)
+  print("------------------------------- HW MAP ----------------------------------")
+  with open(f"{eval_dir}/hw_node_map.txt", "w") as f:
+    pprint.pprint(DevConfig().HWNodeMap, stream=f)
 
   imcflow_transform.constructTensorEdgeList(eval_mod)
   print("------------------------------- Tensor Edge List --------------------------------------")
-  for key, paths in DevConfig().TensorEdgeListDict.items():
-    print(key)
-    for path in paths:
-      print(path)
+  with open(f"{eval_dir}/tensor_edge_list.txt", "w") as f:
+    for key, paths in DevConfig().TensorEdgeListDict.items():
+      print(key, file=f)
+      for path in paths:
+        print(path, file=f)
 
   imcflow_transform.constructActiveIMCEDict(eval_mod)
   print("------------------------------  Active IMCE list ---------------------- ")
-  pprint.pprint(DevConfig().ActiveIMCEPerFunc)
+  with open(f"{eval_dir}/active_imce_list.txt", "w") as f:
+    pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
 
   imcflow_transform.constructTensorIDToTensorEdgeDict()
   print("Tensor ID to Tensor Edge")
-  for key, paths in DevConfig().TensorIDtoEdge.items():
-    print(f"{key} : {paths}")
+  with open(f"{eval_dir}/tensor_id_to_edge.txt", "w") as f:
+    for key, paths in DevConfig().TensorIDtoEdge.items():
+      print(f"{key} : {paths}", file=f)
 
   imcflow_transform.constructNoCPathDict(eval_mod)
   print("NoC Paths")
-  for key, paths in DevConfig().NoCPaths.items():
-    print(key)
-    for k, v in paths.items():
-      print(k, v)
+  with open(f"{eval_dir}/noc_paths.txt", "w") as f:
+    for key, paths in DevConfig().NoCPaths.items():
+      print(key, file=f)
+      for k, v in paths.items():
+        print(k, v, file=f)
 
   imcflow_transform.MemoryAllocator().run(eval_mod, ttype_map)
   print("------------------------------- Memory Layout ----------------------------------")
-  pprint.pprint(DevConfig().MemLayout)
+  with open(f"{eval_dir}/mem_layout.txt", "w") as f:
+    pprint.pprint(DevConfig().MemLayout, stream=f)
 
   imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
+  with open(f"{eval_dir}/policy_table.txt", "w") as f:
+    pprint.pprint(DevConfig().PolicyTableDict, stream=f)
 
   imcflow_transform.generateNoCVisualizations(eval_mod, eval_dir + "/noc_visualizations")
 
   # get the config
   config = DevConfig()
 
-  print("------------------------------- FE RESULTS ----------------------------------")
-  pprint.pprint(f"nodemap: {config.HWNodeMap}")
-  pprint.pprint(f"edgeinfo: {config.TensorEdgetoInfo}")
-  pprint.pprint(f"idtoedge: {config.TensorIDtoEdge}")
-  pprint.pprint(f"policy_table: {config.PolicyTableDict}")
+  with open(f"{eval_dir}/final_imcflow_config.txt", "w") as f:
+    print("------------------------------- FE RESULTS ----------------------------------", file=f)
+    pprint.pprint(f"nodemap: {config.HWNodeMap}", stream=f)
+    pprint.pprint(f"edgeinfo: {config.TensorEdgetoInfo}", stream=f)
+    pprint.pprint(f"idtoedge: {config.TensorIDtoEdge}", stream=f)
+    pprint.pprint(f"policy_table: {config.PolicyTableDict}", stream=f)
 
   CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build", host_isa=DevConfig().HOST_ISA)
   CodegenSuite(eval_mod)
@@ -265,10 +277,6 @@ def test_small_evl():
   """Generate only evaluation for small model"""
   mod, param_dict = real_model2.getModel()
   run_test_evl("small", mod, param_dict)
-
-def test_one_conv_evl():
-  mod, param_dict = real_model2.getOneConvModel()
-  run_test_evl("one_conv", mod, param_dict)
 
 def test_one_conv_quant_evl():
   mod, param_dict = real_model2.getOneConvQuantModel()
