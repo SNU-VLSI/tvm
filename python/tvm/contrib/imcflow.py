@@ -589,10 +589,11 @@ class ImcflowDeviceConfig:
             if output_node_id == imcflow_transform.getInnerNodeID(dst_gid):
               output_data_blocks.append(block)
               is_output_block = True
-            
+
             if sum([is_input_block, is_const_block, is_output_block]) == 0:
               print(f"Warning: DataBlock {block} is neither input, output, nor const block for function {func_name}")
-              raise ValueError("DataBlock type identification error")
+              # TODO: add the exception again after dealing with is_input_block with split node
+              # raise ValueError("DataBlock type identification error")
             elif sum([is_input_block, is_const_block, is_output_block]) > 1:
               print(f"Warning: DataBlock {block} is multiple types of blocks for function {func_name}")
               raise ValueError("DataBlock type identification error")
