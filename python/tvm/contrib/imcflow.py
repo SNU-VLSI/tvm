@@ -58,19 +58,15 @@ class NodeID(Enum):
 
   @staticmethod
   def from_inode_coord(x: int) -> 'NodeID':
-    x = x % ImcflowDeviceConfig.INODE_NUM
     return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x)
 
   @staticmethod
   def from_imce_coord(x: int, y: Union[None | int] = None) -> 'NodeID':
     if y is None:
-      x = x % ImcflowDeviceConfig.IMCE_NUM
       ImceHeight = x//ImcflowDeviceConfig.IMCE_W_NUM
       ImceWidth = x % ImcflowDeviceConfig.IMCE_W_NUM
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*ImceHeight + (ImceWidth+1))
     else:
-      x = x % ImcflowDeviceConfig.IMCE_H_NUM
-      y = y % ImcflowDeviceConfig.IMCE_W_NUM
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
 
   @staticmethod
