@@ -45,11 +45,16 @@ class PolicyUpdateBlock(InodeCodeBlock):
       if db is None:
         continue
       var = UniqueVar("policy_table_start_address", dtype="int")
-      # var_2 = UniqueVar("policy_table_entry_reg", dtype="int")
+      loop_count = math.ceil(db.size / 32)
+
       code += f"{var} = {db.offset};"
-      for i in range(0, db.size, 32):
-        # code += f"{var_2} = {i // 32};"
-        code += f"__builtin_INODE_PU({var}, {i}, {int(i // 32)}, {id.to_coord(1)});"
+      #FIXME: maybe we should leave the loop optimization to llvm?
+      if loop_count > 5:
+        code += SimpleFor(loop_count, lambda iter, wid=id.to_coord(1): f"__builtin_INODE_PU({var} + {iter}*32, 0, {iter}, {wid});")
+      else:
+        for i in range(loop_count):
+          code += f"__builtin_INODE_PU({var}, {i*32}, {i}, {id.to_coord(1)});"
+
     code += ""
 
     return code
