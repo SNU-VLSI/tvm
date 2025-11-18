@@ -17,7 +17,8 @@
 
 from typing import Tuple, List, Dict, Union
 from enum import Enum
-from collections import defaultdict
+from collections import defaultdict, UserDict
+import copy
 
 import re
 import math
@@ -219,63 +220,44 @@ class MemoryRegion:
   def __init__(self, name: str, size: int):
     self.name = name
     self.size = size
-    self.blocks = {} # {function : {data_block_name : DataBlock}}
+    self.blocks = {}  # {data_block_name : DataBlock}
     self.base_address = -1  # offset in the device memory
-    self._last_offset = defaultdict(int)  # {function_name : last_offset}
-    self.weight_offset = defaultdict(int)  # {function_name : weight_offset}
-    self.weight_allocated = defaultdict(bool)  # {function_name : weight_allocated}
+    self._last_offset = 0  # last offset in the region
+    self.weight_offset = 0  # weight offset for overlapping allocation
+    self.weight_allocated = False  # flag for weight allocation
 
-  def __getitem__(self, function_name: str):
+  def get_data_block_by_id(self, id):
     """
-    Gets blocks with specific function_name specified in {data_block_name : DataBlock}
+    Gets data_block by id.
     """
-    return self.blocks.get(function_name, None)
-
-  def get_data_block_by_id(self, id, function_name=None):
-    """
-    Gets data_block by id, where an optional function_name is given.
-    Caveats: if no function_name is given, it returns the first match if same id exists.
-    """
-    if function_name:
-      f_blocks = self.blocks[function_name]
-      return f_blocks.get(id, None)
+    if isinstance(id, TensorEdge):
+      for block in self.blocks.values():
+        if isinstance(block.id, TensorEdge):
+          # if node is not split => search by src_id (same output)
+          if id.split_idx is None and block.id.src_id == id.src_id:
+            return block
+          # if node is split => search by TensorEdge (different output)
+          elif id.split_idx is not None and block.id == id:
+            return block
     else:
-      for f_blocks in self.blocks.values():
-        for f_block in f_blocks.values():
-          if isinstance(id, TensorEdge):
-            if isinstance(f_block.id, TensorEdge): 
-              # if node is not split => search by src_id (same output)
-              if id.split_idx is None and f_block.id.src_id == id.src_id:
-                return f_block
-              # if node is split => search by TensorEdge (different output)
-              elif id.split_idx is not None and f_block.id == id:
-                return f_block
-            else:
-              block = None    # continue searching (type mismatch)
-          else:
-            block = f_blocks.get(id, None)
-        if block is not None:
-          return block
+      return self.blocks.get(id, None)
     return None
 
-  def allocate(self, function_name, block: DataBlock):
-    """Allocate a data block in the region sequentially, assuming they are not delocated"""
-    if function_name not in self.blocks:
-      self.blocks[function_name] = {}
-
+  def allocate(self, block: DataBlock):
+    """Allocate a data block in the region sequentially, assuming they are not deallocated"""
     # find first 32B aligned free offset
-    if block.id in [x.id for x in self.blocks[function_name].values()]:
-      print(f"Trying allocate {block} but skipped @ {function_name}")
+    if block.id in [x.id for x in self.blocks.values()]:
+      print(f"Trying allocate {block} but skipped (already exists)")
       return
-    
-    # skip reddundant allocation for Datablock which already allocated with same src_id (same data)
-    if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks[function_name].values() if isinstance(x.id, TensorEdge)]:
+
+    # skip redundant allocation for Datablock which already allocated with same src_id (same data)
+    if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks.values() if isinstance(x.id, TensorEdge)]:
       if block.id.split_idx is None:
-        print(f"Trying allocate {block} but skipped due to src_id overlap @ {function_name}")
+        print(f"Trying allocate {block} but skipped due to src_id overlap")
         return
 
-    print(f"Trying allocate {block} @ {function_name}")
-    aligned_offset = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address
+    print(f"Trying allocate {block}")
+    aligned_offset = math.ceil((self.base_address + self._last_offset) / 32) * 32 - self.base_address
     try:
       assert block.size + aligned_offset <= self.size
     except:
@@ -284,36 +266,8 @@ class MemoryRegion:
       exit(0)
     block.set_offset(aligned_offset)
     block.set_base_address(aligned_offset + self.base_address)
-    self._last_offset[function_name] = aligned_offset + block.size
-    self.blocks[function_name][block.id] = block
-
-  def allocate_allow_overlap(self, function_name, block: DataBlock):
-    """Allocate a data block in the region, allowing overlapping in case of weight params."""
-    if function_name not in self.blocks:
-      self.blocks[function_name] = {}
-
-    if block.id in [x.id for x in self.blocks[function_name].values()]:
-      print(f"Trying allocate_overlap {block} but skipped @ {function_name}")
-      return
-
-    print(f"Trying allocate_overlap {block}")
-    if self.weight_allocated[function_name] is False:
-      self.weight_allocated[function_name] = True
-      # Align weight_offset to 32B boundary
-      self.weight_offset[function_name] = math.ceil((self.base_address) / 32) * 32 - self.base_address
-
-    # Align current weight_offset to 32B boundary
-    aligned_offset = self.weight_offset[function_name]
-    try:
-      assert block.size + aligned_offset <= self.size
-    except:
-      print("overlap Data block size exceeds region size")
-      print(self)
-      exit(0)
-
-    block.set_offset(aligned_offset)
-    block.set_base_address(aligned_offset + self.base_address)
-    self.blocks[function_name][block.id] = block
+    self._last_offset = aligned_offset + block.size
+    self.blocks[block.id] = block
 
   def set_base_address(self, address: int):
     self.base_address = int(address)
@@ -321,16 +275,60 @@ class MemoryRegion:
   def __str__(self):
     if not self.blocks:
       return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
-    blocks_str=""
-    for function_name, blocks in self.blocks.items():
-      blocks_str += f"\n{function_name}:\n"
-      blocks_str += f"----------------------------------------------------------\n"
-      blocks_str += ",\n      ".join(str(block) for block in blocks.values())
+    blocks_str = ",\n      ".join(str(block) for block in self.blocks.values())
     return (f"MemoryRegion({self.name}, {self.size}, {self.base_address}, "
             f"blocks=[\n      {blocks_str}\n    ])")
 
   def __repr__(self):
     return self.__str__()
+
+
+class MemoryRegionPerPhase(UserDict):
+  """
+    MemoryRegionPerPhase is a dict of MemoryRegion accessible using key (phase_idx).
+    Automatically creates new MemoryRegion instances from the template when accessing non-existent keys.
+  """
+  def __init__(self, region: MemoryRegion):
+    super().__init__()
+    self._template_region = region
+
+  @property
+  def blocks(self):
+    """Aggregate all blocks from all phases. Returns dict {phase_idx: {block_id: DataBlock}}"""
+    aggregated = {}
+    for phase_idx, region in self.data.items():
+      if region.blocks:  # Only include phases with blocks
+        aggregated[phase_idx] = region.blocks
+    return aggregated
+
+  def __getitem__(self, key: int):
+    """auto-create from template"""
+    if key not in self.data:
+      return self.__missing__(key)
+    return self.data[key]
+
+  def __missing__(self, key: int):
+    """
+    Called when a key is not found. Creates a new MemoryRegion from the template.
+    """
+    # Create a deep copy of the template region
+    new_region = copy.deepcopy(self._template_region)
+    self[key] = new_region
+    return new_region
+
+  def __str__(self):
+    if not self.data:
+      return f"MemoryRegionPerPhase('{self._template_region.name}', empty)"
+
+    lines = [f"MemoryRegionPerPhase('{self._template_region.name}', ["]
+    for phase_idx, region in self.data.items():
+      lines.append(f"  phase_{phase_idx}: {region},")
+    lines.append("])")
+    return "\n".join(lines)
+
+  def __repr__(self):
+    return self.__str__()
+
 
 
 class MemoryLayout:
@@ -339,24 +337,37 @@ class MemoryLayout:
     _last_end_address = 0
 
     for region in regions:
-      self.regions[region.name] = region
+      self.regions[region.name] = MemoryRegionPerPhase(region)
       region.set_base_address(_last_end_address)
       _last_end_address += region.size
 
-  def get_data_block_by_id(self, id: Union[str, TensorEdge], func_name=None, region_name=None):
+  @property
+  def blocks(self):
+    """Aggregate all blocks from all regions and phases. Returns dict {region_name: {phase_idx: {block_id: DataBlock}}}"""
+    aggregated = {}
+    for region_name, region_dict in self.regions.items():
+      region_blocks = region_dict.blocks
+      if region_blocks:  # Only include regions with blocks
+        aggregated[region_name] = region_blocks
+    return aggregated
+
+  def get_data_block_by_id(self, id: Union[str, TensorEdge], phase_idx: int, region_name=None):
     """
-    Gets data_block by id, where an optional function_name and region_name is given.
-    Caveats: if no function_name / region_name is given, it returns the first match in the given hierarchy
+    Gets data_block by id from a specific phase, with optional region_name filter.
+    Caveats: if no region_name is given, it returns the first match across all regions
     """
     if region_name:
-      region = self.regions[region_name]
-      return region.get_data_block_by_id(id, func_name)
+      region_dict = self.regions[region_name]
+      if phase_idx in region_dict.data:
+        return region_dict[phase_idx].get_data_block_by_id(id)
+      return None
     else:
-      for region in self.regions.values():
-        block = region.get_data_block_by_id(id, func_name)
-        if block is not None:
-          return block
-    return None
+      for region_dict in self.regions.values():
+        if phase_idx in region_dict.data:
+          block = region_dict[phase_idx].get_data_block_by_id(id)
+          if block is not None:
+            return block
+      return None
 
   def __getitem__(self, region_name: str):
     return self.regions.get(region_name, None)
@@ -364,6 +375,53 @@ class MemoryLayout:
   def __str__(self):
     regions_str = ",\n  ".join(str(region) for region in self.regions.values())
     return f"MemoryLayout(regions=[\n  {regions_str}\n])"
+
+  def __repr__(self):
+    return self.__str__()
+
+class MemoryLayoutPerFunc(UserDict):
+  """
+    MemoryLayoutPerFunc is a dict of MemoryLayout accessible using key (func_name).
+    Automatically creates new MemoryLayout instances from the template when accessing non-existent keys.
+  """
+  def __init__(self, layout: MemoryLayout):
+    super().__init__()
+    self._layout = layout
+
+  @property
+  def blocks(self):
+    """Aggregate all blocks from all functions. Returns dict {func_name: {region_name: {phase_idx: {block_id: DataBlock}}}}"""
+    aggregated = {}
+    for func_name, layout in self.data.items():
+      layout_blocks = layout.blocks
+      if layout_blocks:  # Only include functions with blocks
+        aggregated[func_name] = layout_blocks
+    return aggregated
+
+  def __getitem__(self, key: str):
+    """auto-create from template"""
+    if key not in self.data:
+      return self.__missing__(key)
+    return self.data[key]
+
+  def __missing__(self, key: str):
+    """
+    Called when a key is not found. Creates a new MemoryLayout from the template.
+    """
+    # Create a deep copy of the template layout
+    new_layout = copy.deepcopy(self._layout)
+    self[key] = new_layout
+    return new_layout
+
+  def __str__(self):
+    if not self.data:
+      return "MemoryLayoutPerFunc(empty)"
+
+    lines = ["MemoryLayoutPerFunc("]
+    for func_name, layout in self.data.items():
+      lines.append(f"  {func_name!r}: {layout},")
+    lines.append(")")
+    return "\n".join(lines)
 
   def __repr__(self):
     return self.__str__()
@@ -487,6 +545,19 @@ class ImcflowDeviceConfig:
         MemoryRegion("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
         MemoryRegion("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
+    self.MemLayoutPerFunc = MemoryLayoutPerFunc(
+      MemoryLayout(
+        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+        MemoryRegion("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegion("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegion("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+      )
+    )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
     self.DataBlocks = {}
@@ -555,9 +626,10 @@ class ImcflowDeviceConfig:
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
     compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
 
-    for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
-      if memory_region.blocks:
-        for block_name, block in memory_region.blocks[func_name].items():
+    phase_idx = 0
+    for memory_region in ImcflowDeviceConfig().MemLayoutPerFunc[func_name].regions.values():
+      if memory_region[phase_idx].blocks:
+        for block_name, block in memory_region[phase_idx].blocks.items():
           # get compiled data blocks
           if isinstance(block_name, str):
             compiled_blocks.append(block)
