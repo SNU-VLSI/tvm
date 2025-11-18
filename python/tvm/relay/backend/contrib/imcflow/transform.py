@@ -1682,50 +1682,94 @@ class NodeMapper:
     def run_(self, func):
       class _Nodemapper(tvm.relay.ExprVisitor):
         """
+          Assign hardware node ID to func, var, const, call nodes.
+          Current implementation just assign hardware node ID interleavly.
+
+          function node -> assign to inode 
+          var node      -> assign to inode
+          constant node -> assign to inode
+
+          call node:
+            split -> inode or imce
+            other -> imce
+          
+          call nodes in composite function -> assign to the composite function's node ID
+
           Target Operators:
             conv2d, bias_add, batch_norm, relu, add and fused versions
             split, concat
+          
+          Assumption:
+            - concat node doesn't have args which is Var Node.
+          
+          TODO:
+            - locality between producer and consumers
         """
         def __init__(self):
             super().__init__()
             self.MappingDict ={}
             self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
             self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
+            self.in_composite = False
+            self.curr_composite_node_id = None
 
             self.undetermined_callnode_exists = False
             self.undetermined_callnode = None
 
         def traverse_func(self, func):
             self.visit(func)
+            if self.in_composite: 
+              self.MappingDict[getNodeID(func)] = self.curr_composite_node_id
+            else:
+              self.MappingDict[getNodeID(func)] = NodeID.from_inode_coord(self.inode_index)
+              self.inode_index -= 1
             return self.MappingDict
+        
+        def visit_var(self, var):
+          if not self.in_composite:
+            self.MappingDict[getNodeID(var)] = NodeID.from_inode_coord(self.inode_index)
+            self.inode_index -= 1
+        
+        def visit_constant(self, const):
+          self.MappingDict[getNodeID(const)] = NodeID.from_inode_coord(self.inode_index)
+          self.inode_index -= 1
 
         def visit_call(self, call):
           # post DFS search
           # traverse child node
+
+          # If we are already in a composite function, just traverse args without assigning
+          # we need to find constant node only
+          if self.in_composite:
+            assert isinstance(call.op, tvm.ir.Op), "not built-in operator found in composite function"
+
           for a in call.args:
               self.visit(a)
-
-          from_host = True if len(self.MappingDict) == 0 else False
-
-          #for debugging
-          indicator = getNodeDebugID(call)
-
-          # check if this node is
-          IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
-          IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
-          if IsConcat:
-              if from_host is True:
-                  raise ValueError("concatenate should have at least 1 child node")
-              self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1].fields[-1])]
-          elif IsSplit:
-              if from_host is True:
-                  self.MappingDict[getNodeID(call)] = NodeID.from_inode_coord(self.inode_index)
-                  self.inode_index -= 1
-              else:
-                  self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
+          
+          if not self.in_composite:
+            IsConcat = isinstance(call.op, tvm.ir.Op) and call.op.name in ["concatenate"]
+            IsSplit = isinstance(call.op, tvm.ir.Op) and call.op.name in ["split"]
+            if IsConcat:
+                self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1].fields[-1])]
+            elif IsSplit:
+                self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
+            else:
+                if self.imce_index < 0:
+                    raise ValueError("too many compute nodes for available hardware nodes")
+                self.MappingDict[getNodeID(call)] = NodeID.from_imce_coord(self.imce_index)
+                self.imce_index -= 1
           else:
-              self.MappingDict[getNodeID(call)] = NodeID.from_imce_coord(self.imce_index)
-              self.imce_index -= 1
+            # inside composite function, assign all nodes to the composite function's node ID
+            self.MappingDict[getNodeID(call)] = self.curr_composite_node_id
+
+          if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow.*", call.op.attrs["Composite"]):
+            self.in_composite = True
+            self.curr_composite_node_id = self.MappingDict[getNodeID(call)]
+            self.visit(call.op)
+            self.curr_composite_node_id = None
+            self.in_composite = False
+          else:
+            self.visit(call.op)
 
         def visit_tuple_getitem(self, op):
           super().visit_tuple_getitem(op)
@@ -1870,11 +1914,16 @@ class ConcatDistributor:
 def constructTensorEdgeList(mod):
   """
   make tensor edge list.
-  output edge -> (last_node, func_node). odata tag both
+  output edge -> (last_node, func_node). odata and func_out tag attached
     if last_node is tuple, go into each field recursively and find first call
     if last_node is composite node, go into body and find first call. use (func_node, body_node) as dst_node
+
   input edge -> (var_node, dst_node)
                 (const_node, dst_node)
+      we use "var" tag for var_node
+  
+  Tuple and TupleGetItem nodes are not included in edge list. When we detect tuple and tgi node,
+  we search var or const or call node they have and make the edges between (const, var, call) <-> (const, var, call)
   """
   @dataclass
   class TensorIDPair:
@@ -1945,7 +1994,7 @@ def constructTensorEdgeList(mod):
         InputGraphNodeID = self.getCustomID(fn.body)
         DstGraphNodeID = self.getCustomID(fn)
         SrcTag = "odata"
-        DstTag = "odata"
+        DstTag = "func_out"
         self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, None)
 
       if self.InSubFunction:
@@ -1987,7 +2036,8 @@ def constructTensorEdgeList(mod):
             return True
           else:
               if isinstance(SrcGraphNode, Var):
-                self.VarProperties[SrcGraphNode]["src_tag"] = SrcTag
+                # self.VarProperties[SrcGraphNode]["src_tag"] = SrcTag
+                self.VarProperties[SrcGraphNode]["src_tag"] = "var"
                 self.VarProperties[SrcGraphNode]["dst_tag"] = DstTag
                 self.VarProperties[SrcGraphNode]["dst_graph_node_id"] = DstGraphNodeID
               if isinstance(SrcGraphNode, Constant):
@@ -2093,6 +2143,11 @@ def constructActiveIMCEDict(mod):
       ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint] = list(ActiveIMCEs)
 
 def constructNoCPathDict(mod):
+  """
+  Make NoC path dict from tensor edge list.
+  Plus, add instruction path from inode to imce nodes.
+  """
+
   HwMapping = ImcflowDeviceConfig().HWNodeMap
   NocPaths = ImcflowDeviceConfig().NoCPaths
   IMCECOL = ImcflowDeviceConfig.IMCE_W_NUM
@@ -2101,8 +2156,6 @@ def constructNoCPathDict(mod):
     elif func.attrs["Compiler"]=="imcflow":
       NocPaths[func_name_var.name_hint] = {}
       # tensor edge to path entry
-      # if src graph is Var, hw_node_id is left-most inode of dst graph node hw_node_id
-      # we will add instruction path to each IMCE node
       TensorEdgeList_ = ImcflowDeviceConfig().TensorEdgeListDict[func_name_var.name_hint]
       for tensor_edge in TensorEdgeList_:
         SrcTensorID = tensor_edge.src_id
@@ -2110,29 +2163,41 @@ def constructNoCPathDict(mod):
         SplitIdx = tensor_edge.split_idx
         SrcGraphNode = CustomIDToNode()[getInnerNodeID(SrcTensorID.graph_node_id)]
         DstGraphNode = CustomIDToNode()[getInnerNodeID(DstTensorID.graph_node_id)]
-        if isinstance(SrcGraphNode, (Var, Constant)):
-          # else, map src node into inode
-          DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
-          # if "inode" not in DstHwNodeID:
-          if not DstHwNodeID.is_inode():
-            InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
-            NocPaths[func_name_var.name_hint][tensor_edge] = (
-              (InodeID, DstHwNodeID, SplitIdx)
-            )
-            HwMapping[SrcTensorID.graph_node_id] = InodeID
-        elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" :
-          # if this tensoredge is the final edge directly connected to host (= if destination is function)
-          SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
-          InodeID = NodeID.from_inode_coord(NodeID.to_coord(SrcHwNodeID)[0])
-          NocPaths[func_name_var.name_hint][tensor_edge] = (
-            (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], InodeID, SplitIdx)
-          )
-          HwMapping[DstTensorID.graph_node_id] = InodeID
-        else:
-          NocPaths[func_name_var.name_hint][tensor_edge] = (
-            (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], HwMapping[getOuterNodeID(DstTensorID.graph_node_id)], SplitIdx)
-          )
+        NocPaths[func_name_var.name_hint][tensor_edge] = (
+          (HwMapping[getInnerNodeID(SrcTensorID.graph_node_id)], HwMapping[getInnerNodeID(DstTensorID.graph_node_id)], SplitIdx)
+        )
+        # if isinstance(SrcGraphNode, (Var, Constant)):
+        #   # else, map src node into inode
+        #   SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
+        #   DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
+        #   NocPaths[func_name_var.name_hint][tensor_edge] = (
+        #     (SrcHwNodeID, DstHwNodeID, SplitIdx)
+        #   )
+        #   # # if "inode" not in DstHwNodeID:
+        #   # if not DstHwNodeID.is_inode():
+        #   #   InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
+        #   #   NocPaths[func_name_var.name_hint][tensor_edge] = (
+        #   #     (InodeID, DstHwNodeID, SplitIdx)
+        #   #   )
+        #   #   HwMapping[SrcTensorID.graph_node_id] = InodeID
+        # elif hasattr(DstGraphNode, "attrs") and hasattr(DstGraphNode.attrs, "Compiler") and DstGraphNode.attrs["Compiler"] == "imcflow" :
+        #   # if this tensoredge is the final edge directly connected to host (= if destination is function)
+        #   SrcHwNodeID = HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)]
+        #   DstHwNodeID = HwMapping[getOuterNodeID(DstTensorID.graph_node_id)]
+        #   NocPaths[func_name_var.name_hint][tensor_edge] = (
+        #     (SrcHwNodeID, DstHwNodeID, SplitIdx)
+        #   )
+        #   # InodeID = NodeID.from_inode_coord(NodeID.to_coord(SrcHwNodeID)[0])
+        #   # NocPaths[func_name_var.name_hint][tensor_edge] = (
+        #   #   (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], InodeID, SplitIdx)
+        #   # )
+        #   # HwMapping[DstTensorID.graph_node_id] = InodeID
+        # else:
+        #   NocPaths[func_name_var.name_hint][tensor_edge] = (
+        #     (HwMapping[getOuterNodeID(SrcTensorID.graph_node_id)], HwMapping[getOuterNodeID(DstTensorID.graph_node_id)], SplitIdx)
+        #   )
 
+      # instruction path
       for DstHwNodeID in NodeID.imces():
         InodeID = NodeID.from_inode_coord(NodeID.to_coord(DstHwNodeID)[0])
         NocPaths[func_name_var.name_hint][DstHwNodeID] = (
@@ -2156,13 +2221,17 @@ def constructTensorIDToTensorEdgeDict():
     _add(DstID, tensor_edge)
 
 class MemoryAllocator:
+    """
+    Allocate memory block to var, constant, function output.
+    Target Operators:
+      conv2d, bias_add, batch_norm, relu, add and fused versions
+      split, concat
+    
+    Assumption:
+      no edge from inode to inode directly
+    """
     def run_(self, func, func_name, ttype_map):
       class _MemoryAllocator(tvm.relay.ExprVisitor):
-        """
-          Target Operators:
-            conv2d, bias_add, batch_norm, relu, add and fused versions
-            split, concat
-        """
         def __init__(self):
             super().__init__()
             self.TensorEdgeList = ImcflowDeviceConfig().TensorEdgeList
@@ -2187,6 +2256,41 @@ class MemoryAllocator:
             self.allocate()
             return self.DataBlockDict
 
+        def visit_function(self, fn):
+          super().visit_function(fn)
+
+          if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
+            edges = self.find_in_edge_from_list(fn)
+            for edge in edges:
+              self.add_to_block_dict(edge, fn)
+        
+        def visit_var(self, var):
+          super().visit_var(var)
+          edges = self.find_out_edge_from_list(var)
+          for edge in edges:
+            self.add_to_block_dict(edge, var)
+        
+        def visit_constant(self, const):
+          super().visit_constant(const)
+          edges = self.find_out_edge_from_list(const)
+          for edge in edges:
+            self.add_to_block_dict(edge, const)
+          
+        def add_to_block_dict(self, edge, node):
+            size = self.get_size(edge, node)
+            if size > 0:
+              datablock = DataBlock(edge, None)
+              datablock.set_size(size)
+              self.DataBlockDict[edge] = datablock
+            else:
+              raise ValueError("edge has zero size.")
+
+        def visit_tuple_getitem(self, op):
+          super().visit_tuple_getitem(op)
+
+        def visit_tuple(self, op):
+          super().visit_tuple(op)
+
         def is_inode_in_edge(self, edge):
           dst_hw_node_id = None
           src_hw_node_id = None
@@ -2194,26 +2298,24 @@ class MemoryAllocator:
           inode_tensorid = None
 
           #dst id
-          if edge.dst_id.graph_node_id in self.hwnodemap:
-            dst_hw_node_id = self.hwnodemap[edge.dst_id.graph_node_id]
+          if getInnerNodeID(edge.dst_id.graph_node_id) in self.hwnodemap:
+            dst_hw_node_id = self.hwnodemap[getInnerNodeID(edge.dst_id.graph_node_id)]
             if dst_hw_node_id.name.startswith("inode"):
               # determine whether inode is included in the edge and which id it is.
               is_inode = True
               inode_tensorid = edge.dst_id
 
           #src id
-          if edge.src_id.graph_node_id in self.hwnodemap:
-            src_hw_node_id = self.hwnodemap[edge.src_id.graph_node_id]
+          if getInnerNodeID(edge.src_id.graph_node_id) in self.hwnodemap:
+            src_hw_node_id = self.hwnodemap[getInnerNodeID(edge.src_id.graph_node_id)]
             if src_hw_node_id.name.startswith("inode"):
               # determine whether inode is included in the edge and which id it is.
               is_inode = True
               inode_tensorid = edge.src_id
 
           return is_inode, inode_tensorid
-
-        def find_edge_from_list(self, call):
-          # call is dst node of the target edges
-          # find edges that call node belongs, and find valid edge which has inode
+        
+        def find_out_edge_from_list(self, call, to_only_inode=False):
           tensor_edge_list = self.TensorEdgeList
           graph_node_id = getNodeID(call)
 
@@ -2226,7 +2328,25 @@ class MemoryAllocator:
 
           edges = []
           for edge in tensor_edge_list:
-            if matches_node_id(edge.dst_id.graph_node_id) and self.is_inode_in_edge(edge)[0]:
+            if matches_node_id(getInnerNodeID(edge.src_id.graph_node_id)) and (not to_only_inode or self.is_inode_in_edge(edge)[0]):
+              edges.append(edge)
+
+          return edges
+
+        def find_in_edge_from_list(self, call, from_only_inode=False):
+          tensor_edge_list = self.TensorEdgeList
+          graph_node_id = getNodeID(call)
+
+          def matches_node_id(node_id):
+            if isinstance(node_id, (int, tvm.tir.expr.IntImm)):
+              return node_id == graph_node_id
+            elif isinstance(node_id, tuple):
+              return graph_node_id in node_id
+            return False
+
+          edges = []
+          for edge in tensor_edge_list:
+            if matches_node_id(getInnerNodeID(edge.dst_id.graph_node_id)) and (not from_only_inode or self.is_inode_in_edge(edge)[0]):
               edges.append(edge)
 
           return edges
@@ -2246,7 +2366,7 @@ class MemoryAllocator:
               raise ValueError("Memory size cannot be none.")
 
             _, inode_tensorid = self.is_inode_in_edge(edge)
-            hw_node_id = self.hwnodemap[inode_tensorid.graph_node_id]
+            hw_node_id = self.hwnodemap[getInnerNodeID(inode_tensorid.graph_node_id)]
             inode_name = hw_node_id.name  # ex) inode_3
             
             if inode_name not in inode_tensors:
@@ -2262,7 +2382,7 @@ class MemoryAllocator:
             
             if tensor_type == "weight":
               inode_tensors[inode_name]['weight'].append((edge, mem_block, inode_tensorid))
-            elif tensor_type == "data" or tensor_type == "odata":
+            elif tensor_type == "data" or tensor_type == "odata" or tensor_type == "func_out" or tensor_type == "var":
               # Check if this is function input or output
               src_node = self.data.get(getInnerNodeID(edge.src_id.graph_node_id))
               dst_node = self.data.get(getInnerNodeID(edge.dst_id.graph_node_id))
@@ -2357,55 +2477,55 @@ class MemoryAllocator:
 
           return
 
+        def get_arg_idx(self, edge, call):
+          # edge is input edge to call node
+          # find arg index from call by comparing edge's tensorid
+          idx = None
+          shape = None
+          arg_dtype = None
+          for i, arg in enumerate(call.args):
+            # Determine the source ID based on the type of `arg`
+            if isinstance(arg, TupleGetItem):
+                src_id = getNodeID(arg.tuple_value)
+            else:
+                src_id = getNodeID(arg)
+
+            dst_id = getNodeID(call)
+
+            # Check if `src_id` matches the source node in `edge`
+            if isinstance(edge.src_id.graph_node_id, tuple):
+              if src_id in edge.src_id.graph_node_id:
+                idx = i
+                shape = call.type_args[idx].shape
+                arg_dtype = call.type_args[idx].dtype
+            else:
+              if src_id == edge.src_id.graph_node_id:
+                idx = i
+                shape = call.type_args[idx].shape
+                arg_dtype = call.type_args[idx].dtype
+
+            # Check if `dst_id` matches the source node in `edge`
+            # this is only for the case where src node is Var node, because customID of Var node in subfunction is not the same one in tensoredge.
+            if isinstance(edge.dst_id.graph_node_id, tuple):
+              if dst_id in edge.dst_id.graph_node_id and isinstance(arg, Var):
+                idx = i
+                shape = call.type_args[idx].shape
+                arg_dtype = call.type_args[idx].dtype
+
+          return idx, shape, arg_dtype
+
+        def get_op_from_id(self, node_id):
+            if isinstance(node_id, (int, tvm.tir.expr.IntImm)):
+                return self.name_dict[node_id]
+            elif isinstance(node_id, tuple):
+                return self.name_dict[node_id[1]]
+            else:
+              raise ValueError("CustomIDToName does not have this node id.")
+
         def get_size(self, edge, call):
             size = None
             arg_shape = None
             arg_dtype = None
-
-            def get_op_from_id(node_id):
-                if isinstance(node_id, (int, tvm.tir.expr.IntImm)):
-                    return self.name_dict[node_id]
-                elif isinstance(node_id, tuple):
-                    return self.name_dict[node_id[1]]
-                else:
-                  raise ValueError("CustomIDToName does not have this node id.")
-
-            def get_arg_idx(edge, call):
-              # edge is input edge to call node
-              # find arg index from call by comparing edge's tensorid
-              idx = None
-              shape = None
-              arg_dtype = None
-              for i, arg in enumerate(call.args):
-                # Determine the source ID based on the type of `arg`
-                if isinstance(arg, TupleGetItem):
-                    src_id = getNodeID(arg.tuple_value)
-                else:
-                    src_id = getNodeID(arg)
-
-                dst_id = getNodeID(call)
-
-                # Check if `src_id` matches the source node in `edge`
-                if isinstance(edge.src_id.graph_node_id, tuple):
-                  if src_id in edge.src_id.graph_node_id:
-                    idx = i
-                    shape = call.type_args[idx].shape
-                    arg_dtype = call.type_args[idx].dtype
-                else:
-                  if src_id == edge.src_id.graph_node_id:
-                    idx = i
-                    shape = call.type_args[idx].shape
-                    arg_dtype = call.type_args[idx].dtype
-
-                # Check if `dst_id` matches the source node in `edge`
-                # this is only for the case where src node is Var node, because customID of Var node in subfunction is not the same one in tensoredge.
-                if isinstance(edge.dst_id.graph_node_id, tuple):
-                  if dst_id in edge.dst_id.graph_node_id and isinstance(arg, Var):
-                    idx = i
-                    shape = call.type_args[idx].shape
-                    arg_dtype = call.type_args[idx].dtype
-
-              return idx, shape, arg_dtype
 
             if isinstance(call, Function): # output edge of function
               size = None
@@ -2433,77 +2553,45 @@ class MemoryAllocator:
               arg_shape = arg_ttype[0]
               arg_dtype = arg_ttype[1]
             else:
-              src_op = get_op_from_id(edge.src_id.graph_node_id)
+              src_op = self.get_op_from_id(edge.src_id.graph_node_id)
 
               #find which argument index this edge correspond to find corresponding shape by type_args.shape
               src_node = self.data[getInnerNodeID(edge.src_id.graph_node_id)]
               if isinstance(src_node, relay.Var):
                 arg_ttype = self.ttype_map[src_node.name_hint]
                 arg_shape, arg_dtype = arg_ttype[0], arg_ttype[1]
+              elif isinstance(src_node, relay.Constant):
+                arg_shape, arg_dtype = list(src_node.data.shape), str(src_node.data.dtype)
+                # _, arg_shape, arg_dtype = self.get_arg_idx(edge, call)
               else:
-                _, arg_shape, arg_dtype = get_arg_idx(edge, call)
+                raise ValueError("Source node is neither Var nor Constant.")
 
-              if src_op == "Op(split)":
-                # when first node of subgraph is split, memoryblock is already allocated by (src: var -> dst: split) case.
-                arg_shape = -1
+              # if src_op == "Op(split)":
+              #   # when first node of subgraph is split, memoryblock is already allocated by (src: var -> dst: split) case.
+              #   arg_shape = -1
+              #   raise ValueError("Split operator output edge should not be allocated here.")
 
             # calculate size for inode memory allocation
-            if arg_shape == -1:
-              size = -1
+            # if arg_shape == -1:
+            #   size = -1
+            # else:
+            size = math.prod(arg_shape)
+            if arg_dtype == "int32" or arg_dtype == "uint32":
+              size = size * 32 // 8 # dtype is int32 and unit is byte
+            elif arg_dtype == "int16" or arg_dtype == "uint16":
+              size = size * 16 // 8 # dtype is int16 and unit is byte
+            elif arg_dtype == "int8" or arg_dtype == "uint8":
+              size = size * 8 // 8 # dtype is int8 and unit is byte
+            elif arg_dtype == "uint4":
+              size = size * 4 // 8 # dtype is int4 and unit is byte
             else:
-              size = math.prod(arg_shape)
-              if arg_dtype == "int32" or arg_dtype == "uint32":
-                size = size * 32 // 8 # dtype is int32 and unit is byte
-              elif arg_dtype == "int16" or arg_dtype == "uint16":
-                size = size * 16 // 8 # dtype is int16 and unit is byte
-              elif arg_dtype == "int8" or arg_dtype == "uint8":
-                size = size * 8 // 8 # dtype is int8 and unit is byte
-              elif arg_dtype == "uint4":
-                size = size * 4 // 8 # dtype is int4 and unit is byte
-              else:
-                #sanity check
-                raise ValueError(f"Unsupported dtype {arg_dtype} in function return type.")
+              #sanity check
+              raise ValueError(f"Unsupported dtype {arg_dtype} in function return type.")
 
             if size is None:
               raise ValueError("Size cannot be none.")
 
             return size
-
-        def visit_function(self, fn):
-          super().visit_function(fn)
-
-          if hasattr(fn.attrs, "Compiler") and fn.attrs["Compiler"]=="imcflow":
-            edges = self.find_edge_from_list(fn)
-            for edge in edges:
-              size = self.get_size(edge, fn)
-              if size > 0:
-                inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
-                datablock = DataBlock(edge, None)
-                datablock.set_size(size)
-                self.DataBlockDict[edge] = datablock
-              else:
-                raise ValueError("There should be at least one edge connected to function node.")
-
-        def visit_call(self, call):
-          super().visit_call(call)
-
-          IsSupportedOp = isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.SUPPORTED_OPS
-
-          if IsSupportedOp:
-            edges = self.find_edge_from_list(call)
-            for edge in edges:
-              size = self.get_size(edge, call)
-              if size > 0:
-                inode_tensorid = self.is_inode_in_edge(edge) # find which one is inode
-                datablock = DataBlock(edge, None)
-                datablock.set_size(size)
-                self.DataBlockDict[edge] = datablock
-
-        def visit_tuple_getitem(self, op):
-          super().visit_tuple_getitem(op)
-
-        def visit_tuple(self, op):
-          super().visit_tuple(op)
 
       _MemoryAllocator().traverse_func(func, func_name, ttype_map)
       return func
@@ -2791,12 +2879,9 @@ class PolicyTableGenerator:
                       # edgeinfo = ImcflowDeviceConfig().get_tensor_edge_info(edge)
                       # edgeinfo.set_policy_info(router_entry_list)
 
-                      if edge.src_id.tensor_type == "odata":
+                      if edge.src_id.tensor_type in ["odata", "var"]:
                         # get src node name from CustomIDToName
-                        if isinstance(edge.dst_id.graph_node_id, tuple):
-                          dst_node_name = ID_dict[edge.dst_id.graph_node_id[1]]
-                        else:
-                          dst_node_name = ID_dict[edge.dst_id.graph_node_id]
+                        dst_node_name = ID_dict[getInnerNodeID(edge.dst_id.graph_node_id)]
 
                         if dst_node_name == "nn.imcflow_qconv":
                           # if src is input of qconv, FIFO ID = 0

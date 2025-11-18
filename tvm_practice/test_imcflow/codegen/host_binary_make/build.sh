@@ -27,7 +27,7 @@ cmake .. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DMAIN_SCRIPT="$MAIN_SCRIPT" \
     -DMAIN_TEST_FOLDER="$MAIN_TEST_FOLDER" \
-    -C ../cmake/config.cmake
+    -C ../cmake/config_imcflow.cmake
 
 # Build
 if [ $? -eq 0 ]; then

@@ -183,7 +183,28 @@ class CtrlBlock(CodeBlock):
   DONE, HALT, INTRT, STANDBY, SET_ADDR_CNT, SET_FLAG
   NOP, STEP, STOP
   """
-  pass
+  def __init__(self, ctrl: str = "", annotation: str = ""):
+    super().__init__()
+    self.annotation = annotation
+    self.ctrl = ctrl
+    assert ctrl == "STOP", "only STOP CtrlBlock is supported for now. we to extend"
+
+  def content(self) -> CodeBlock:
+    if self.annotation:
+      code = TextBlock("")
+      code += f"// generate: {self.annotation}"
+      code += copy(self._content())
+      code += f"// endgenerate: {self.annotation}"
+      return code
+    else:
+      return self._content()
+
+  def _content(self) -> CodeBlock:
+    code = TextBlock("")
+    if self.ctrl == "STOP":
+      code += "__builtin_IMCE_STOP();"
+    return code
+
 
 
 class NodeCodeBlockManager:
