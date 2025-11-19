@@ -2427,12 +2427,10 @@ class MemoryAllocator:
             for edge, mem_block, inode_tensorid in tensors['weight']:
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
               #TODO: handle it later
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(
-                self.func_name, mem_block
-              )
-              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
+              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(
               #   self.func_name, mem_block
               # )
+              ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block)
             
             # Allocate input tensors (with tiling if needed)
             for edge, mem_block, inode_tensorid in tensors['input']:
@@ -2444,8 +2442,7 @@ class MemoryAllocator:
                 debug_print(f"    Input tensor tiled: {mem_block.size} -> {tiled_size} bytes")
               
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
-                self.func_name, mem_block
+              ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block)
               )
             
             # Allocate output tensors (with tiling if needed)
@@ -2457,16 +2454,12 @@ class MemoryAllocator:
                 debug_print(f"    Output tensor tiled: {mem_block.size} -> {tiled_size} bytes")
               
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
-                self.func_name, mem_block
-              )
+              ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block)
             
             # Allocate other tensors (no tiling)
             for edge, mem_block, inode_tensorid in tensors['other']:
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-              ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate(
-                self.func_name, mem_block
-              )
+              ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block)
 
           return
 
@@ -2911,7 +2904,7 @@ class PolicyTableGenerator:
             mem_size = len(policy_table) * 32
             mem_block = DataBlock(f"{node_id.name}_policy", mem_size)
             inode_id = node_id.master() if node_id.is_imce() else node_id
-            ImcflowDeviceConfig().MemLayout[f"{inode_id.name}_data"].allocate(func_name, mem_block)
+            ImcflowDeviceConfig().MemLayout[func_name][f"{inode_id.name}_data"].allocate(mem_block)
 
         def update_device_config(self, func_name):
             # traverse input function by visit() to make PathDict and generate policy table for it

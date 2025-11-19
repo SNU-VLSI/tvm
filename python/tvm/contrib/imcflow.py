@@ -216,7 +216,7 @@ class DataBlock:
     return self.__str__()
 
 
-class MemoryRegion:
+class MemoryRegionEntry:
   def __init__(self, name: str, size: int):
     self.name = name
     self.size = size
@@ -274,42 +274,45 @@ class MemoryRegion:
 
   def __str__(self):
     if not self.blocks:
-      return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
+      return f"MemoryRegionEntry({self.name}, {self.size}, {self.base_address}, blocks=[])"
     blocks_str = ",\n      ".join(str(block) for block in self.blocks.values())
-    return (f"MemoryRegion({self.name}, {self.size}, {self.base_address}, "
+    return (f"MemoryRegionEntry({self.name}, {self.size}, {self.base_address}, "
             f"blocks=[\n      {blocks_str}\n    ])")
 
   def __repr__(self):
     return self.__str__()
 
 
-class MemoryRegionPerPhase(UserDict):
+class MemoryRegion(UserDict):
   """
-    MemoryRegionPerPhase is a dict of MemoryRegion accessible using key (phase_idx).
-    Automatically creates new MemoryRegion instances from the template when accessing non-existent keys.
+    MemoryRegion is a dict of MemoryRegionEntry accessible using key (idx).
+    Automatically creates new MemoryRegionEntry instances from the template when accessing non-existent keys.
   """
-  def __init__(self, region: MemoryRegion):
+  def __init__(self, region: MemoryRegionEntry):
     super().__init__()
     self._template_region = region
 
   @property
   def blocks(self):
-    """Aggregate all blocks from all phases. Returns dict {phase_idx: {block_id: DataBlock}}"""
+    """Aggregate all blocks from all entries. Returns dict {idx: {block_id: DataBlock}}"""
     aggregated = {}
-    for phase_idx, region in self.data.items():
-      if region.blocks:  # Only include phases with blocks
-        aggregated[phase_idx] = region.blocks
+    for idx, region in self.data.items():
+      if region.blocks:  # Only include entries with blocks
+        aggregated[idx] = region.blocks
     return aggregated
+  
+  def allocate(self, block: DataBlock, idx: int = 0):
+    self.data[idx].allocate(block)
 
-  def __getitem__(self, key: int):
+  def __getitem__(self, key: int) -> 'MemoryRegionEntry':
     """auto-create from template"""
     if key not in self.data:
       return self.__missing__(key)
     return self.data[key]
 
-  def __missing__(self, key: int):
+  def __missing__(self, key: int) -> 'MemoryRegionEntry':
     """
-    Called when a key is not found. Creates a new MemoryRegion from the template.
+    Called when a key is not found. Creates a new MemoryRegionEntry from the template.
     """
     # Create a deep copy of the template region
     new_region = copy.deepcopy(self._template_region)
@@ -318,11 +321,11 @@ class MemoryRegionPerPhase(UserDict):
 
   def __str__(self):
     if not self.data:
-      return f"MemoryRegionPerPhase('{self._template_region.name}', empty)"
+      return f"MemoryRegion('{self._template_region.name}', empty)"
 
-    lines = [f"MemoryRegionPerPhase('{self._template_region.name}', ["]
-    for phase_idx, region in self.data.items():
-      lines.append(f"  phase_{phase_idx}: {region},")
+    lines = [f"MemoryRegion('{self._template_region.name}', ["]
+    for idx, region in self.data.items():
+      lines.append(f"  {idx}: {region},")
     lines.append("])")
     return "\n".join(lines)
 
@@ -331,66 +334,59 @@ class MemoryRegionPerPhase(UserDict):
 
 
 
-class MemoryLayout:
-  def __init__(self, *regions: MemoryRegion):
-    self.regions = {}
+class FuncMemoryLayout(UserDict):
+  def __init__(self, *regions: MemoryRegionEntry):
+    super().__init__()
     _last_end_address = 0
 
     for region in regions:
-      self.regions[region.name] = MemoryRegionPerPhase(region)
+      self.data[region.name] = MemoryRegion(region)
       region.set_base_address(_last_end_address)
       _last_end_address += region.size
 
   @property
   def blocks(self):
-    """Aggregate all blocks from all regions and phases. Returns dict {region_name: {phase_idx: {block_id: DataBlock}}}"""
+    """Aggregate all blocks from all regions and entries. Returns dict {region_name: {idx: {block_id: DataBlock}}}"""
     aggregated = {}
-    for region_name, region_dict in self.regions.items():
+    for region_name, region_dict in self.data.items():
       region_blocks = region_dict.blocks
       if region_blocks:  # Only include regions with blocks
         aggregated[region_name] = region_blocks
     return aggregated
 
-  def get_data_block_by_id(self, id: Union[str, TensorEdge], phase_idx: int, region_name=None):
-    """
-    Gets data_block by id from a specific phase, with optional region_name filter.
-    Caveats: if no region_name is given, it returns the first match across all regions
-    """
-    if region_name:
-      region_dict = self.regions[region_name]
-      if phase_idx in region_dict.data:
-        return region_dict[phase_idx].get_data_block_by_id(id)
-      return None
-    else:
-      for region_dict in self.regions.values():
-        if phase_idx in region_dict.data:
-          block = region_dict[phase_idx].get_data_block_by_id(id)
-          if block is not None:
-            return block
-      return None
+  def __getitem__(self, key: str) -> 'MemoryRegion':
+    """Get a memory region by name (e.g., 'inode_0_data')"""
+    return self.data[key]
 
-  def __getitem__(self, region_name: str):
-    return self.regions.get(region_name, None)
+  def get_data_block_by_id(self, id: Union[str, TensorEdge]):
+    """
+    Gets data_block by id from aggregated blocks
+    """
+    for block in self.blocks:
+      if block.id == id:
+        return block
+
+    return None
 
   def __str__(self):
-    regions_str = ",\n  ".join(str(region) for region in self.regions.values())
-    return f"MemoryLayout(regions=[\n  {regions_str}\n])"
+    regions_str = ",\n  ".join(str(region) for region in self.data.values())
+    return f"FuncMemoryLayout(regions=[\n  {regions_str}\n])"
 
   def __repr__(self):
     return self.__str__()
 
-class MemoryLayoutPerFunc(UserDict):
+class MemoryLayout(UserDict):
   """
-    MemoryLayoutPerFunc is a dict of MemoryLayout accessible using key (func_name).
-    Automatically creates new MemoryLayout instances from the template when accessing non-existent keys.
+    MemoryLayout is a dict of FuncMemoryLayout accessible using key (func_name).
+    Automatically creates new FuncMemoryLayout instances from the template when accessing non-existent keys.
   """
-  def __init__(self, layout: MemoryLayout):
+  def __init__(self, *regions: MemoryRegionEntry):
     super().__init__()
-    self._layout = layout
+    self._layout = FuncMemoryLayout(*regions)
 
   @property
   def blocks(self):
-    """Aggregate all blocks from all functions. Returns dict {func_name: {region_name: {phase_idx: {block_id: DataBlock}}}}"""
+    """Aggregate all blocks from all functions. Returns dict {func_name: {region_name: {idx: {block_id: DataBlock}}}}"""
     aggregated = {}
     for func_name, layout in self.data.items():
       layout_blocks = layout.blocks
@@ -398,15 +394,15 @@ class MemoryLayoutPerFunc(UserDict):
         aggregated[func_name] = layout_blocks
     return aggregated
 
-  def __getitem__(self, key: str):
+  def __getitem__(self, key: str) -> 'FuncMemoryLayout':
     """auto-create from template"""
     if key not in self.data:
       return self.__missing__(key)
     return self.data[key]
 
-  def __missing__(self, key: str):
+  def __missing__(self, key: str) -> 'FuncMemoryLayout':
     """
-    Called when a key is not found. Creates a new MemoryLayout from the template.
+    Called when a key is not found. Creates a new FuncMemoryLayout from the template.
     """
     # Create a deep copy of the template layout
     new_layout = copy.deepcopy(self._layout)
@@ -415,9 +411,9 @@ class MemoryLayoutPerFunc(UserDict):
 
   def __str__(self):
     if not self.data:
-      return "MemoryLayoutPerFunc(empty)"
+      return "MemoryLayout(empty)"
 
-    lines = ["MemoryLayoutPerFunc("]
+    lines = ["MemoryLayout("]
     for func_name, layout in self.data.items():
       lines.append(f"  {func_name!r}: {layout},")
     lines.append(")")
@@ -488,6 +484,38 @@ class TensorEdgeInfo(EdgeInfo):
     return self.__str__()
 
 
+class CodegenContext:
+  """Singleton context for codegen that tracks the current function being processed"""
+
+  def __new__(cls):
+    if not hasattr(cls, "instance"):
+      cls.instance = super(CodegenContext, cls).__new__(cls)
+      cls.instance._initialize()
+    return cls.instance
+
+  def _initialize(self):
+    self._func_name = None
+
+  def set_func_name(self, func_name: str):
+    """Set the current function name being processed"""
+    self._func_name = func_name
+
+  def get_func_name(self) -> str:
+    """Get the current function name"""
+    if self._func_name is None:
+      raise RuntimeError("No function context set. Call set_func_name() first in codegen.")
+    return self._func_name
+
+  @property
+  def func_name(self) -> str:
+    """Property access to current function name"""
+    return self.get_func_name()
+
+  def clear(self):
+    """Clear the current function context"""
+    self._func_name = None
+
+
 class ImcflowDeviceConfig:
   """Imcflow config class"""
   if SMALL_DEBUG:
@@ -535,28 +563,15 @@ class ImcflowDeviceConfig:
     self.PolicyTableDict = {}
     self.InstEdgeInfoDict = {}
     self.MemLayout = MemoryLayout(
-        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-        MemoryRegion("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-    )
-    self.MemLayoutPerFunc = MemoryLayoutPerFunc(
-      MemoryLayout(
-        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-        MemoryRegion("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-      )
+        MemoryRegionEntry("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+        MemoryRegionEntry("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
@@ -622,14 +637,26 @@ class ImcflowDeviceConfig:
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
     return self.InstEdgeInfoDict.get(imce_id, None)
 
+  @property
+  def CurrFuncMemLayout(self):
+    """Get the memory layout for the current function in CodegenContext.
+
+    This is a convenience property that allows accessing the current function's
+    memory layout without explicitly passing func_name around:
+
+    Instead of: DevConfig().MemLayout[func_name].get_data_block_by_id(edge)
+    Use: DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
+    """
+    return self.MemLayout[CodegenContext().func_name]
+
   def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None, const_node_ids=None):
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
     compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
 
-    phase_idx = 0
-    for memory_region in ImcflowDeviceConfig().MemLayoutPerFunc[func_name].regions.values():
-      if memory_region[phase_idx].blocks:
-        for block_name, block in memory_region[phase_idx].blocks.items():
+    idx = 0
+    for memory_region in ImcflowDeviceConfig().MemLayout[func_name].regions.values():
+      if memory_region[idx].blocks:
+        for block_name, block in memory_region[idx].blocks.items():
           # get compiled data blocks
           if isinstance(block_name, str):
             compiled_blocks.append(block)

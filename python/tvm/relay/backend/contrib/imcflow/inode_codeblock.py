@@ -41,7 +41,7 @@ class PolicyUpdateBlock(InodeCodeBlock):
 
     code = TextBlock("")
     for id in same_row_node_ids:
-      db = DevConfig().MemLayout.get_data_block_by_id(f"{id.name}_policy")
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(f"{id.name}_policy")
       if db is None:
         continue
       var = UniqueVar("policy_table_start_address", dtype="int")
@@ -95,7 +95,7 @@ class WriteIMCUBlock(InodeCodeBlock):
 
   def _content(self) -> Union[str, CodeBlock]:
     code = TextBlock("")
-    region = DevConfig().MemLayout[f"{self.node_id.name}_data"]
+    region = DevConfig().CurrFuncMemLayout[f"{self.node_id.name}_data"]
     for db in region.blocks[self.func_name].values():
       if isinstance(db.id, TensorEdge) and "weight" == db.id.src_id.tensor_type:
         info = DevConfig().get_tensor_edge_info(db.id)

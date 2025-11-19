@@ -11,6 +11,7 @@ from tvm.relay.backend.contrib.imcflow import util
 from tvm.relay.backend.contrib.imcflow import transform
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.contrib.imcflow import CodegenContext
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -53,6 +54,9 @@ class CodegenSuite:
     # which is the parent func's global_symbol attribute (prior: func.attsr.global_symbol).
     func_name = func.attrs["Composite"].strip("_impl")
 
+    # Set the codegen context for this function
+    CodegenContext().set_func_name(func_name)
+
     # annotate edges between (non-composite) calls,
     # while translating vars into corresponding calls
     annotator = InternalEdgeAnnotator()
@@ -81,6 +85,9 @@ class CodegenSuite:
 
     PolicyTableCodegen(func_name, self.build_dir, self.host_isa).generate(func_name)
 
+    # Clear the codegen context when done
+    CodegenContext().clear()
+
     return func
 
 
@@ -91,7 +98,6 @@ class PolicyTableCodegen:
 
   def __init__(self, func_name, build_dir="/tmp", host_isa="arm"):
     super().__init__()
-    self.func_name = func_name
     self.build_dir = build_dir
     self.host_isa = host_isa
     self.func_dir = os.path.join(build_dir, func_name)
@@ -373,7 +379,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.codeblocks.append(hid, block, CodePhase.EXEC)
       self._imce_compute_added.add(hid)
 
-    db = DevConfig().MemLayout.get_data_block_by_id(edge)
+    db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
     assert db is not None, f"Data block not found for edge: {edge}"
 
     block = SendBlock(db, out_edge_info.fifo_id, f"send: {edge}")
@@ -386,7 +392,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
     in_tid = edge.dst_id
     hid = self.get_hid(in_tid)
-    db = DevConfig().MemLayout.get_data_block_by_id(edge)
+    db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
 
     block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
     self.codeblocks.append(hid, block, CodePhase.EXEC)
