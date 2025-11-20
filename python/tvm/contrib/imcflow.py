@@ -294,15 +294,16 @@ class MemoryRegion(UserDict):
 
   @property
   def blocks(self):
-    """Aggregate all blocks from all entries. Returns dict {idx: {block_id: DataBlock}}"""
+    """Aggregate all blocks from all entries. Returns dict {block_id: DataBlock}"""
     aggregated = {}
     for idx, region in self.data.items():
       if region.blocks:  # Only include entries with blocks
-        aggregated[idx] = region.blocks
+        aggregated.update(region.blocks)
     return aggregated
   
   def allocate(self, block: DataBlock, idx: int = 0):
-    self.data[idx].allocate(block)
+    """Allocate a block at the given phase index (auto-creates phase if needed)"""
+    self[idx].allocate(block)
 
   def __getitem__(self, key: int) -> 'MemoryRegionEntry':
     """auto-create from template"""
@@ -346,12 +347,12 @@ class FuncMemoryLayout(UserDict):
 
   @property
   def blocks(self):
-    """Aggregate all blocks from all regions and entries. Returns dict {region_name: {idx: {block_id: DataBlock}}}"""
+    """Aggregate all blocks from all regions and entries. Returns dict {block_id: DataBlock}"""
     aggregated = {}
     for region_name, region_dict in self.data.items():
       region_blocks = region_dict.blocks
       if region_blocks:  # Only include regions with blocks
-        aggregated[region_name] = region_blocks
+        aggregated.update(region_blocks)
     return aggregated
 
   def __getitem__(self, key: str) -> 'MemoryRegion':
@@ -362,8 +363,8 @@ class FuncMemoryLayout(UserDict):
     """
     Gets data_block by id from aggregated blocks
     """
-    for block in self.blocks:
-      if block.id == id:
+    for key, block in self.blocks.items():
+      if key == id:
         return block
 
     return None
@@ -654,7 +655,7 @@ class ImcflowDeviceConfig:
     compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
 
     idx = 0
-    for memory_region in ImcflowDeviceConfig().MemLayout[func_name].regions.values():
+    for memory_region in ImcflowDeviceConfig().MemLayout[func_name].values():
       if memory_region[idx].blocks:
         for block_name, block in memory_region[idx].blocks.items():
           # get compiled data blocks

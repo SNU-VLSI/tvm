@@ -301,7 +301,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # imcu write
     for node in NodeID.inodes():
-      block = WriteIMCUBlock(node, "imcu write", self.codeblocks.func_name)
+      block = WriteIMCUBlock(node, "imcu write")
       self.codeblocks.append(node, block, CodePhase.INIT)
 
   def finalize(self):

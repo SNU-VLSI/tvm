@@ -2443,7 +2443,6 @@ class MemoryAllocator:
               
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block)
-              )
             
             # Allocate output tensors (with tiling if needed)
             for edge, mem_block, inode_tensorid in tensors['output']:
