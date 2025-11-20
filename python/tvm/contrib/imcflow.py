@@ -59,19 +59,15 @@ class NodeID(Enum):
 
   @staticmethod
   def from_inode_coord(x: int) -> 'NodeID':
-    x = x % ImcflowDeviceConfig.INODE_NUM
     return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x)
 
   @staticmethod
   def from_imce_coord(x: int, y: Union[None | int] = None) -> 'NodeID':
     if y is None:
-      x = x % ImcflowDeviceConfig.IMCE_NUM
       ImceHeight = x//ImcflowDeviceConfig.IMCE_W_NUM
       ImceWidth = x % ImcflowDeviceConfig.IMCE_W_NUM
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*ImceHeight + (ImceWidth+1))
     else:
-      x = x % ImcflowDeviceConfig.IMCE_H_NUM
-      y = y % ImcflowDeviceConfig.IMCE_W_NUM
       return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x + (y+1))
 
   @staticmethod
@@ -550,6 +546,18 @@ class ImcflowDeviceConfig:
   HOST_OS = "baremetal"
   HOST_ISA = "x86"
 
+  INODE0_IMEM_BASE_ADDR = 128
+  INODE0_DMEM_BASE_ADDR = INODE0_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
+  INODE1_IMEM_BASE_ADDR = INODE0_DMEM_BASE_ADDR + INODE_DATA_MEM_SIZE
+  INODE1_DMEM_BASE_ADDR = INODE1_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
+  INODE2_IMEM_BASE_ADDR = INODE1_DMEM_BASE_ADDR + INODE_DATA_MEM_SIZE
+  INODE2_DMEM_BASE_ADDR = INODE2_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
+  INODE3_IMEM_BASE_ADDR = INODE2_DMEM_BASE_ADDR + INODE_DATA_MEM_SIZE # 0x30c80
+  INODE3_DMEM_BASE_ADDR = INODE3_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE
+
   SUPPORTED_OPS = ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.bias_add", "imcflow.fused_batch_norm",
                    "nn.relu", "add", "split", "concatenate", "qnn.imcflow_min_max_quantize",
                    "qnn.imcflow_nu_quantize", "divide", "imcflow_packing", "imcflow_unpacking",
@@ -662,49 +670,47 @@ class ImcflowDeviceConfig:
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
     compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
 
-    idx = 0
     for memory_region in ImcflowDeviceConfig().MemLayout[func_name].values():
-      if memory_region[idx].blocks:
-        for block_name, block in memory_region[idx].blocks.items():
-          # get compiled data blocks
-          if isinstance(block_name, str):
-            compiled_blocks.append(block)
-          # get input & output data blocks
-          if isinstance(block_name, TensorEdge):
-            if isinstance(block_name.src_id.graph_node_id, Tuple):
-              src_gid = block_name.src_id.graph_node_id[1]
-            else:
-              src_gid = block_name.src_id.graph_node_id
+      for block_name, block in memory_region.blocks.items():
+        # get compiled data blocks
+        if isinstance(block_name, str):
+          compiled_blocks.append(block)
+        # get input & output data blocks
+        if isinstance(block_name, TensorEdge):
+          if isinstance(block_name.src_id.graph_node_id, Tuple):
+            src_gid = block_name.src_id.graph_node_id[1]
+          else:
+            src_gid = block_name.src_id.graph_node_id
 
-            is_input_block = False
-            is_const_block = False
-            is_output_block = False
-            # get input data blocks
-            if any([input_node_id == imcflow_transform.getInnerNodeID(src_gid) for input_node_id in input_node_ids]):
-              input_data_blocks.append(block)
-              is_input_block = True
+          is_input_block = False
+          is_const_block = False
+          is_output_block = False
+          # get input data blocks
+          if any([input_node_id == imcflow_transform.getInnerNodeID(src_gid) for input_node_id in input_node_ids]):
+            input_data_blocks.append(block)
+            is_input_block = True
 
-            # get const data blocks
-            if any([const_node_id == imcflow_transform.getInnerNodeID(src_gid) for const_node_id in const_node_ids]):
-              const_data_blocks.append(block)
-              is_const_block = True
+          # get const data blocks
+          if any([const_node_id == imcflow_transform.getInnerNodeID(src_gid) for const_node_id in const_node_ids]):
+            const_data_blocks.append(block)
+            is_const_block = True
 
-            # get output data blocks
-            if isinstance(block_name.dst_id.graph_node_id, Tuple):
-              dst_gid = block_name.dst_id.graph_node_id[1]
-            else:
-              dst_gid = block_name.dst_id.graph_node_id
-            if output_node_id == imcflow_transform.getInnerNodeID(dst_gid):
-              output_data_blocks.append(block)
-              is_output_block = True
+          # get output data blocks
+          if isinstance(block_name.dst_id.graph_node_id, Tuple):
+            dst_gid = block_name.dst_id.graph_node_id[1]
+          else:
+            dst_gid = block_name.dst_id.graph_node_id
+          if output_node_id == imcflow_transform.getInnerNodeID(dst_gid):
+            output_data_blocks.append(block)
+            is_output_block = True
 
-            if sum([is_input_block, is_const_block, is_output_block]) == 0:
-              print(f"Warning: DataBlock {block} is neither input, output, nor const block for function {func_name}")
-              # TODO: add the exception again after dealing with is_input_block with split node
-              # raise ValueError("DataBlock type identification error")
-            elif sum([is_input_block, is_const_block, is_output_block]) > 1:
-              print(f"Warning: DataBlock {block} is multiple types of blocks for function {func_name}")
-              raise ValueError("DataBlock type identification error")
+          if sum([is_input_block, is_const_block, is_output_block]) == 0:
+            print(f"Warning: DataBlock {block} is neither input, output, nor const block for function {func_name}")
+            # TODO: add the exception again after dealing with is_input_block with split node
+            # raise ValueError("DataBlock type identification error")
+          elif sum([is_input_block, is_const_block, is_output_block]) > 1:
+            print(f"Warning: DataBlock {block} is multiple types of blocks for function {func_name}")
+            raise ValueError("DataBlock type identification error")
 
 
     self.DataBlocks[func_name] = {

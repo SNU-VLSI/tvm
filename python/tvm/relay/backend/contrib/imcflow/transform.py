@@ -1674,6 +1674,44 @@ class NodeMapper:
       self.MappingDict = {}
 
     def run_(self, func):
+      class _UseDefChainBuilder(relay.ExprVisitor):
+        """Build use-def chain: expr -> [users of expr]"""
+        def __init__(self):
+          super().__init__()
+          self.def_to_users = {}  # expr -> [users]
+        
+        def add_user(self, definition, user):
+          """Add user to the definition's user list"""
+          if definition not in self.def_to_users:
+            self.def_to_users[definition] = []
+          if user not in self.def_to_users[definition]:
+            self.def_to_users[definition].append(user)
+        
+        def visit_call(self, call):
+          # Register all args as definitions used by this call
+          for arg in call.args:
+            self.add_user(arg, call)
+            self.visit(arg)
+          
+          # Visit the operator (for composite functions)
+          if isinstance(call.op, relay.Function):
+            self.visit(call.op)
+        
+        def visit_tuple(self, tup):
+          # Register tuple fields as definitions used by the tuple
+          for field in tup.fields:
+            self.add_user(field, tup)
+            self.visit(field)
+        
+        def visit_tuple_getitem(self, tgi):
+          # Register the tuple as definition used by tuple_getitem
+          self.add_user(tgi.tuple_value, tgi)
+          self.visit(tgi.tuple_value)
+        
+        def get_users(self, expr):
+          """Get all users of an expression"""
+          return self.def_to_users.get(expr, [])
+
       class _Nodemapper(tvm.relay.ExprVisitor):
         """
           Assign hardware node ID to func, var, const, call nodes.
@@ -1693,39 +1731,119 @@ class NodeMapper:
             conv2d, bias_add, batch_norm, relu, add and fused versions
             split, concat
           
+          We assign var and constant node to consumer node to avoid sync overhead because some edges have hard order constraints.
+          For example, 2d conv inputs are config and data. In this case, config should be arrived before data.
+          
           Assumption:
             - concat node doesn't have args which is Var Node.
           
           TODO:
             - locality between producer and consumers
         """
-        def __init__(self):
+        def __init__(self, use_def_chain_builder):
             super().__init__()
             self.MappingDict ={}
             self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
             self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
             self.in_composite = False
             self.curr_composite_node_id = None
+            self.vars = []
+            self.consts = []
+            self.use_def_builder = use_def_chain_builder
 
             self.undetermined_callnode_exists = False
             self.undetermined_callnode = None
 
         def traverse_func(self, func):
             self.visit(func)
-            if self.in_composite: 
-              self.MappingDict[getNodeID(func)] = self.curr_composite_node_id
-            else:
-              self.MappingDict[getNodeID(func)] = NodeID.from_inode_coord(self.inode_index)
-              self.inode_index -= 1
+            
+            # assign var and constant nodes to consumer nodes
+            self._assign_var_const_nodes()
             return self.MappingDict
         
+        def _assign_var_const_nodes(self):
+            """Assign var and const nodes to their consumer's hardware node"""
+            # Process var nodes
+            for var in self.vars:
+                consumers = self.use_def_builder.get_users(var)
+                if consumers:
+                    # Find the first consumer that has been assigned
+                    consumer_node_id = None
+                    for consumer in consumers:
+                        # Skip tuple and tuple_getitem nodes, find actual call nodes
+                        actual_consumer = self._find_actual_consumer(consumer)
+                        if actual_consumer and getNodeID(actual_consumer) in self.MappingDict:
+                            consumer_node_id = self.MappingDict[getNodeID(actual_consumer)]
+                            break
+                    
+                    if consumer_node_id is not None:
+                        self.MappingDict[getNodeID(var)] = consumer_node_id.master()
+                    else:
+                      raise ValueError("No assigned consumer found for Var node")
+                else:
+                  raise ValueError("Var node has no consumers")
+            
+            # Process const nodes
+            for const in self.consts:
+                consumers = self.use_def_builder.get_users(const)
+                if consumers:
+                    # Find the first consumer that has been assigned
+                    consumer_node_id = None
+                    for consumer in consumers:
+                        # Skip tuple and tuple_getitem nodes, find actual call nodes
+                        actual_consumer = self._find_actual_consumer(consumer)
+                        if actual_consumer and getNodeID(actual_consumer) in self.MappingDict:
+                            consumer_node_id = self.MappingDict[getNodeID(actual_consumer)]
+                            break
+                    
+                    if consumer_node_id is not None:
+                        self.MappingDict[getNodeID(const)] = consumer_node_id.master()
+                    else:
+                        raise ValueError("No assigned consumer found for Constant node")
+                else:
+                  raise ValueError("Constant node has no consumers")
+        
+        def _find_actual_consumer(self, expr):
+            """
+            Find the actual consumer call node by traversing through tuple/tuple_getitem nodes.
+            Returns the first Call node found, or None.
+            """
+            if isinstance(expr, relay.Call):
+                return expr
+            elif isinstance(expr, relay.Tuple):
+                # Tuple is used by something else, find its users
+                users = self.use_def_builder.get_users(expr)
+                for user in users:
+                    result = self._find_actual_consumer(user)
+                    if result:
+                        return result
+            elif isinstance(expr, relay.TupleGetItem):
+                # TupleGetItem is used by something else, find its users
+                users = self.use_def_builder.get_users(expr)
+                for user in users:
+                    result = self._find_actual_consumer(user)
+                    if result:
+                        return result
+            raise ValueError("No valid consumer Call node found in the chain")
+        
+        def visit_function(self, fn):
+          if self.in_composite: 
+            self.MappingDict[getNodeID(func)] = self.curr_composite_node_id
+          else:
+            self.MappingDict[getNodeID(func)] = NodeID.from_inode_coord(self.inode_index)
+            self.inode_index -= 1
+          super().visit_function(fn)
+        
         def visit_var(self, var):
-          self.MappingDict[getNodeID(var)] = NodeID.from_inode_coord(self.inode_index)
-          self.inode_index -= 1
+          if not self.in_composite:
+            self.vars.append(var)
+            # self.MappingDict[getNodeID(var)] = NodeID.from_inode_coord(self.inode_index)
+            # self.inode_index -= 1
         
         def visit_constant(self, const):
-          self.MappingDict[getNodeID(const)] = NodeID.from_inode_coord(self.inode_index)
-          self.inode_index -= 1
+          self.consts.append(const)
+          # self.MappingDict[getNodeID(const)] = NodeID.from_inode_coord(self.inode_index)
+          # self.inode_index -= 1
 
         def visit_call(self, call):
           # post DFS search
@@ -1770,7 +1888,12 @@ class NodeMapper:
         def visit_tuple(self, op):
           super().visit_tuple(op)
 
-      return _Nodemapper().traverse_func(func)
+      # First build use-def chain
+      use_def_builder = _UseDefChainBuilder()
+      use_def_builder.visit(func)
+      
+      # Then run node mapper with use-def chain
+      return _Nodemapper(use_def_builder).traverse_func(func)
 
     def run(self, mod):
       imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
@@ -2426,10 +2549,6 @@ class MemoryAllocator:
             # Allocate weight tensors (no tiling, allow overlap)
             for edge, mem_block, inode_tensorid in tensors['weight']:
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-              #TODO: handle it later
-              # ImcflowDeviceConfig().MemLayout[f"{inode_name}_data"].allocate_allow_overlap(
-              #   self.func_name, mem_block
-              # )
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="init")
             
             # Allocate input tensors (with tiling if needed)

@@ -63,7 +63,7 @@ static void fill_tensor_ramp(DLTensor* t, float start, float step) {
 }
 
 static void fill_tensor_linear_chw_index(DLTensor* t) {
-  int16_t* data = (int16_t*)t->data;
+  int8_t* data = (int8_t*)t->data;
   // expects shape [N,C,H,W] with N=1
   if (t->ndim != 4) return;
   int64_t C = t->shape[1];
@@ -230,7 +230,11 @@ int main(int argc, char** argv) {
   x1.data = x1_data;
   // Initialize like cpp_graph_deploy.cpp
   fill_tensor_linear_chw_index(&x1);
-  fprintf(stderr, "dbg: inputs prepared (%zu bytes each)\n", nbytes);
+  printf("dbg: inputs prepared (%zu bytes each)\n", nbytes);
+  for(size_t i=0; i<numel; ++i) {
+    printf("%d ", ((int8_t*)x1_data)[i]);
+    if((i+1)%16 == 0) printf("\n");
+  }
 
 #if 0
   // Optional input dumps for debugging
@@ -282,10 +286,11 @@ int main(int argc, char** argv) {
 
   // Print first 16 values and checksum (concise verification)
   int16_t* out_f = (int16_t*)out.data;
-  size_t to_print = (onumel < 16) ? onumel : 16;
-  printf("first16:");
-  for (size_t i = 0; i < to_print; ++i) printf(" %d", out_f[i]);
-  printf("\n");
+  printf("Output tensor (%zu elements):\n", onumel);
+  for(int i=0; i<onumel; ++i) {
+    printf("%d ", out_f[i]);
+    if((i+1)%16 == 0) printf("\n");
+  }
 
   // prepare reference
   //TODO: calculate reference
