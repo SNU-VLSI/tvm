@@ -212,16 +212,16 @@ class DeviceCodegen:
       if size is not None:
         db = DataBlock(f"{node.name}_imem", size)
         if self.target == "inode":
-          self.allocate_db(db, f"{node.name}_inst", 0)
+          self.allocate_db(db, f"{node.name}_inst", "init")
         else:
-          self.allocate_db(db, f"{node.master().name}_data", 0)
+          self.allocate_db(db, f"{node.master().name}_data", "init")
           self.insert_db_to_inst_edge_info(db, node)
       else:
         print(f"Failed to allocate imem for {obj_file}")
     print(DevConfig().CurrFuncMemLayout)
 
-  def allocate_db(self, data_block: DataBlock, region: str, idx: int):
-    DevConfig().CurrFuncMemLayout[region].allocate(data_block, idx)
+  def allocate_db(self, data_block: DataBlock, region: str, phase: str):
+    DevConfig().CurrFuncMemLayout[region].allocate(data_block, phase)
 
   def insert_db_to_inst_edge_info(self, db: DataBlock, node: NodeID):
     edge_info = DevConfig().get_inst_edge_info(node)

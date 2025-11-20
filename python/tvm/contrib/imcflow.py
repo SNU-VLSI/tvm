@@ -223,8 +223,6 @@ class MemoryRegionEntry:
     self.blocks = {}  # {data_block_name : DataBlock}
     self.base_address = -1  # offset in the device memory
     self._last_offset = 0  # last offset in the region
-    self.weight_offset = 0  # weight offset for overlapping allocation
-    self.weight_allocated = False  # flag for weight allocation
 
   def get_data_block_by_id(self, id):
     """
@@ -242,32 +240,39 @@ class MemoryRegionEntry:
     else:
       return self.blocks.get(id, None)
     return None
-
-  def allocate(self, block: DataBlock):
-    """Allocate a data block in the region sequentially, assuming they are not deallocated"""
-    # find first 32B aligned free offset
+  
+  def _already_exists(self, block: DataBlock):
     if block.id in [x.id for x in self.blocks.values()]:
       print(f"Trying allocate {block} but skipped (already exists)")
-      return
+      return True
 
     # skip redundant allocation for Datablock which already allocated with same src_id (same data)
     if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks.values() if isinstance(x.id, TensorEdge)]:
       if block.id.split_idx is None:
         print(f"Trying allocate {block} but skipped due to src_id overlap")
-        return
+        return True
+    return False
+
+  def allocate(self, block: DataBlock) -> bool:
+    """
+    Allocate a data block in the region sequentially, assuming they are not deallocated
+    returns True (when allocated, or already allocated) or False (exceeds region size)
+    """
+    if self._already_exists(block):
+      return True
 
     print(f"Trying allocate {block}")
+    # find first 32B aligned free offset
     aligned_offset = math.ceil((self.base_address + self._last_offset) / 32) * 32 - self.base_address
-    try:
-      assert block.size + aligned_offset <= self.size
-    except:
+    if block.size + aligned_offset <= self.size:
+      block.set_offset(aligned_offset)
+      block.set_base_address(aligned_offset + self.base_address)
+      self._last_offset = aligned_offset + block.size
+      self.blocks[block.id] = block
+      return True
+    else:
       print(f"Data block size exceeds region size. {block.size} + {aligned_offset} > {self.size}")
-      print(self)
-      exit(0)
-    block.set_offset(aligned_offset)
-    block.set_base_address(aligned_offset + self.base_address)
-    self._last_offset = aligned_offset + block.size
-    self.blocks[block.id] = block
+      return False
 
   def set_base_address(self, address: int):
     self.base_address = int(address)
@@ -301,17 +306,20 @@ class MemoryRegion(UserDict):
         aggregated.update(region.blocks)
     return aggregated
   
-  def allocate(self, block: DataBlock, idx: int = 0):
-    """Allocate a block at the given phase index (auto-creates phase if needed)"""
-    self[idx].allocate(block)
+  def allocate(self, block: DataBlock, phase: str):
+    """Allocate block by finding first region of the phase with available space."""
+    i = 0
+    while not self[(phase, i)].allocate(block):
+      i += 1
 
-  def __getitem__(self, key: int) -> 'MemoryRegionEntry':
+
+  def __getitem__(self, key) -> 'MemoryRegionEntry':
     """auto-create from template"""
     if key not in self.data:
       return self.__missing__(key)
     return self.data[key]
 
-  def __missing__(self, key: int) -> 'MemoryRegionEntry':
+  def __missing__(self, key) -> 'MemoryRegionEntry':
     """
     Called when a key is not found. Creates a new MemoryRegionEntry from the template.
     """
