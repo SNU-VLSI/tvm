@@ -1749,7 +1749,9 @@ class NodeMapper:
             self.curr_composite_node_id = None
             self.vars = []
             self.consts = []
+            self.remaining_splits = []
             self.use_def_builder = use_def_chain_builder
+            self._split_prod_cons_map = {}
 
             self.undetermined_callnode_exists = False
             self.undetermined_callnode = None
@@ -1758,14 +1760,15 @@ class NodeMapper:
             self.visit(func)
             
             # assign var and constant nodes to consumer nodes
-            self._assign_var_const_nodes()
+            self._assign_nodes_same_as_consumer(self.remaining_splits)
+            self._assign_nodes_same_as_consumer(self.vars)
+            self._assign_nodes_same_as_consumer(self.consts)
             return self.MappingDict
         
-        def _assign_var_const_nodes(self):
-            """Assign var and const nodes to their consumer's hardware node"""
-            # Process var nodes
-            for var in self.vars:
-                consumers = self.use_def_builder.get_users(var)
+        def _assign_nodes_same_as_consumer(self, node_list):
+            """Assign remaining split nodes to their consumer's hardware node"""
+            for node in node_list:
+                consumers = self.use_def_builder.get_users(node)
                 if consumers:
                     # Find the first consumer that has been assigned
                     consumer_node_id = None
@@ -1777,32 +1780,15 @@ class NodeMapper:
                             break
                     
                     if consumer_node_id is not None:
-                        self.MappingDict[getNodeID(var)] = consumer_node_id.master()
+                      if consumer_node_id.is_imce():
+                        self.MappingDict[getNodeID(node)] = consumer_node_id.master()
+                      else:
+                        self.MappingDict[getNodeID(node)] = consumer_node_id
                     else:
-                      raise ValueError("No assigned consumer found for Var node")
+                      raise ValueError(f"No assigned consumer found for {node} node")
                 else:
-                  raise ValueError("Var node has no consumers")
-            
-            # Process const nodes
-            for const in self.consts:
-                consumers = self.use_def_builder.get_users(const)
-                if consumers:
-                    # Find the first consumer that has been assigned
-                    consumer_node_id = None
-                    for consumer in consumers:
-                        # Skip tuple and tuple_getitem nodes, find actual call nodes
-                        actual_consumer = self._find_actual_consumer(consumer)
-                        if actual_consumer and getNodeID(actual_consumer) in self.MappingDict:
-                            consumer_node_id = self.MappingDict[getNodeID(actual_consumer)]
-                            break
-                    
-                    if consumer_node_id is not None:
-                        self.MappingDict[getNodeID(const)] = consumer_node_id.master()
-                    else:
-                        raise ValueError("No assigned consumer found for Constant node")
-                else:
-                  raise ValueError("Constant node has no consumers")
-        
+                  raise ValueError(f"{node} node has no consumers")
+      
         def _find_actual_consumer(self, expr):
             """
             Find the actual consumer call node by traversing through tuple/tuple_getitem nodes.
@@ -1863,7 +1849,11 @@ class NodeMapper:
             if IsConcat:
                 self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1].fields[-1])]
             elif IsSplit:
-                self.MappingDict[getNodeID(call)] = self.MappingDict[getNodeID(call.args[-1])]
+              producer_node_id = getNodeID(call.args[-1])
+              if producer_node_id in self.MappingDict.keys():
+                self.MappingDict[getNodeID(call)] = self.MappingDict[producer_node_id]
+              else:
+                self.remaining_splits.append(call)
             else:
                 if self.imce_index < 0:
                     raise ValueError("too many compute nodes for available hardware nodes")
