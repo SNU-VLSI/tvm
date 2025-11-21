@@ -58,6 +58,7 @@ class NodeID(Enum):
 
   @staticmethod
   def from_inode_coord(x: int) -> 'NodeID':
+    assert x >= 0 and x < ImcflowDeviceConfig.INODE_NUM, "inode coord is out of range"
     return NodeID(ImcflowDeviceConfig.NODE_COL_NUM*x)
 
   @staticmethod

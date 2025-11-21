@@ -2899,9 +2899,9 @@ class NodeMapper:
         
         def visit_function(self, fn):
           if self.in_composite: 
-            self.MappingDict[getNodeID(func)] = self.curr_composite_node_id
+            self.MappingDict[getNodeID(fn)] = self.curr_composite_node_id
           else:
-            self.MappingDict[getNodeID(func)] = NodeID.from_inode_coord(self.inode_index)
+            self.MappingDict[getNodeID(fn)] = NodeID.from_inode_coord(self.inode_index)
             self.inode_index -= 1
           super().visit_function(fn)
         
