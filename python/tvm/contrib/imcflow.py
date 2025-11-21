@@ -594,6 +594,7 @@ class ImcflowDeviceConfig:
     self.NoCPaths = {}
     self.DataBlocks = {}
     self.ImcflowFuncMap = {}  # {func_name: FunctionInfo}
+    self.use_def_chain = {}   # {func_name: use-def mapping}
 
   def clear(self):
     self._initialize()

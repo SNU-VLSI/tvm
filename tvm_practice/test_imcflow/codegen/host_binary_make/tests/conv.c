@@ -215,7 +215,7 @@ int main(int argc, char** argv) {
 
   int N, C, H, W, OC, OH, OW;
   N = 1; C = 28; H = 4; W = 4;
-  OC=64, OH=4, OW=4;
+  OC=64, OH=H, OW=W;
 
   int64_t shape4[4] = {N, C, H, W};
   DLTensor x1 = {0};
