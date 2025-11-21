@@ -11,6 +11,22 @@ from tvm.relay.adt import Constructor, Match, Clause
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
+
+# Operator groups for predicate reuse
+ELEMENT_WISE_OPS = {
+  op.get("add"),
+  op.get("multiply"),
+  op.get("divide"),
+  op.get("subtract"),
+  op.get("clip"),
+  op.get("nn.relu"),
+}
+
+def skip_element_wise_predicate(call, _idx):
+  return isinstance(call, relay.Call) and isinstance(call.op, tvm.ir.Op) and call.op in ELEMENT_WISE_OPS
+
+def skip_composite_predicate(call, _idx):
+  return isinstance(call, relay.Call) and isinstance(call.op, relay.Function) and call.op.attrs and "Composite" in call.op.attrs.keys()
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d, imcflow_qdwconv2d
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.transform import imcflow_packing, imcflow_unpacking, imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
@@ -41,10 +57,6 @@ class LayoutType(Enum):
   QCONV_WEIGHT = "QCONV_WEIGHT" # Packed filter layout for qconv
   QDCONV_WEIGHT = "QDCONV_WEIGHT"
   SCALAR = "SCALAR"
-  SAME_ARBITRARY = "SAME_ARBITRARY"
-
-class LayoutProperty(Enum):
-  COMMUTATIVE = "COMMUTATIVE"
 
 def _deduce_layout_from_type(ttype):
   if not isinstance(ttype, TensorType):
@@ -59,162 +71,218 @@ def _deduce_layout_from_type(ttype):
       return LayoutType.NCHW16C
     if block == 64:
       return LayoutType.NCHW64C
-    return LayoutType.SAME_ARBITRARY
+    raise ValueError(f"Unknown blocked layout with block size {block}")
   if len(ttype.shape) == 4:
     return LayoutType.NCHW
   return None
 
+def get_op_name_of_call(call):
+  if not isinstance(call, relay.Call):
+    raise ValueError("Input must be a relay.Call")
+
+  if isinstance(call.op, tvm.ir.Op):
+    op_name = call.op.name
+  elif isinstance(call.op, relay.GlobalVar):
+    op_name = call.op.name_hint
+  else:
+    raise ValueError("Unsupported call.op type for getting op name")
+  
+  return op_name
+
+# Layout requirements per op.
+# Each op maps to a list of rules. A rule is a tuple:
+#   (inputs_options, output_layout)
+# - inputs_options: list of possible input layout lists (one list per permutation).
+#   Example: [[a, b], [b, a]] means two valid input orderings.
+#   If a layout list has length 1 and the call has more args, the single layout applies to all args.
+# - output_layout: single layout applied to all outputs of the op.
 OP_LAYOUT_REQUIREMENTS = {
-  "nn.imcflow_qconv": {
-    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QCONV_WEIGHT, 2: LayoutType.SCALAR},
-    "outputs": {0: LayoutType.NCHW64C},
-  },
-  "nn.imcflow_qdwconv": {
-    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QDCONV_WEIGHT, 2: LayoutType.SCALAR},
-    "outputs": {0: LayoutType.NCHW16C},
-  },
-  "qnn.imcflow_min_max_quantize": {
-    "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.SCALAR, 2: LayoutType.SCALAR},
-    "outputs": {0: LayoutType.QCONV_INPUT},
-  },
-  "qnn.imcflow_nu_quantize": {
-    "inputs": {0: LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
-  },
-  "nn.bias_add": {
-    "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "nn.relu": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "imcflow.fused_batch_norm": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "add": [
-    {
-      "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.NCHW16C},
-      "outputs": {0: LayoutType.NCHW16C},
-    },
-    {
-      "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.NCHW64C},
-      "outputs": {0: LayoutType.NCHW64C},
-    },
-    {
-      "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.SCALAR},
-      "outputs": {0: LayoutType.NCHW16C},
-      "property" : LayoutProperty.COMMUTATIVE
-    },
-    {
-      "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.SCALAR},
-      "outputs": {0: LayoutType.NCHW64C},
-      "property" : LayoutProperty.COMMUTATIVE
-    }
+  "nn.imcflow_qconv": [
+    (
+      [
+        [LayoutType.QCONV_INPUT, LayoutType.QCONV_WEIGHT, LayoutType.SCALAR],
+      ],
+      LayoutType.NCHW64C,
+    ),
   ],
-  "multiply": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "divide": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "split": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "concatenate": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
+  "nn.imcflow_qdwconv": [
+    (
+      [
+        [LayoutType.QCONV_INPUT, LayoutType.QDCONV_WEIGHT, LayoutType.SCALAR],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
+  "qnn.imcflow_min_max_quantize": [
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.SCALAR, LayoutType.SCALAR],
+      ],
+      LayoutType.QCONV_INPUT,
+    ),
+  ],
+  "qnn.imcflow_nu_quantize": [
+    (
+      [
+        [LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
+    ),
+  ],
+  "nn.bias_add": [
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
+  "nn.relu": [
+    (
+      [
+        [LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
+  "imcflow.fused_batch_norm": [
+    (
+      [
+        [LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
+  "add": [
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C, LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
+    ),
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
+    ),
+  ],
+  "multiply": [
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
+  "divide": [
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
+  "split": [
+    (
+      [
+        [LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
+  "concatenate": [
+    (
+      [
+        [LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+  ],
 }
 
 def get_required_layout_from_op(op_name, io_kind, index, call_node=None):
   req = OP_LAYOUT_REQUIREMENTS.get(op_name, None)
   if req is None:
-    return LayoutType.NCHW
+    raise ValueError(f"Layout requirement not defined for op {op_name}")
 
-  rules = req if isinstance(req, list) else [req]
+  rules = req
 
-  def _has_property(rule, prop):
-    props = rule.get("property", None)
-    if props is None:
-      return False
-    if isinstance(props, (list, tuple, set)):
-      return prop in props
-    return props == prop
-
-  def _layout_match(expected, arg_layout):
-    if expected == LayoutType.SAME_ARBITRARY:
-      return True
-    if expected == LayoutType.SCALAR:
-      return arg_layout == LayoutType.SCALAR
-    if arg_layout is None:
-      return True
-    return expected == arg_layout
-
-  def _rule_matches(rule):
+  def _layouts_match(pattern):
+    # pattern: list of layouts for inputs. len may be 1 -> apply to all inputs.
     if call_node is None or not isinstance(call_node, relay.Call):
-      return True
-    inputs = rule.get("inputs", {})
+      raise ValueError("call_node must be provided and be a relay.Call")
 
-    if _has_property(rule, LayoutProperty.COMMUTATIVE) and len(inputs) == 2 and len(call_node.args) >= 2:
-      actual_layouts = []
-      for idx in range(2):
-        arg_type = getattr(call_node.args[idx], "checked_type", None)
-        actual_layouts.append(_deduce_layout_from_type(arg_type) if isinstance(arg_type, TensorType) else None)
-      expected = [inputs.get(0), inputs.get(1)]
-      order1 = _layout_match(expected[0], actual_layouts[0]) and _layout_match(expected[1], actual_layouts[1])
-      order2 = _layout_match(expected[0], actual_layouts[1]) and _layout_match(expected[1], actual_layouts[0])
-      return order1 or order2
+    args = call_node.args
+    if len(pattern) == len(args):
+      zipped = zip(pattern, args)
+    elif len(pattern) == 1:
+      zipped = [(pattern[0], arg) for arg in args]
+    else:
+      return False
 
-    for idx, layout in inputs.items():
-      if idx >= len(call_node.args):
-        return False
-      arg_type = getattr(call_node.args[idx], "checked_type", None)
+    for expected, arg in zipped:
+      if expected is None:
+        continue
+      arg_type = getattr(arg, "checked_type", None)
       if isinstance(arg_type, TensorType):
         deduced = _deduce_layout_from_type(arg_type)
-        if not _layout_match(layout, deduced):
+        if deduced != expected:
           return False
+      else:
+        return False
     return True
 
-  def _get_layout_from_rule(rule, idx, kind):
-    if kind == "inputs":
-      inputs = rule.get("inputs", {})
-      layout = inputs.get(idx, None)
-      if layout is None and _has_property(rule, LayoutProperty.COMMUTATIVE):
-        for alt_idx, layout in inputs.items():
-          if alt_idx != idx:
-            return layout
-      if layout is not None and _has_property(rule, LayoutProperty.COMMUTATIVE) and call_node is not None:
-        arg_type = getattr(call_node.args[idx], "checked_type", None)
-        arg_layout = _deduce_layout_from_type(arg_type) if isinstance(arg_type, TensorType) else None
-        if not _layout_match(layout, arg_layout):
-          for alt_idx, alt_layout in inputs.items():
-            if alt_idx != idx and _layout_match(alt_layout, arg_layout):
-              return alt_layout
-      return layout
-    outputs = rule.get("outputs", {})
-    if idx in outputs:
-      return outputs[idx]
-    return outputs.get("default", None)
+  def _pick_layout_from_pattern(layouts, idx):
+    if layouts is None:
+      raise ValueError("layouts is None")
 
-  for rule in rules:
-    if not _rule_matches(rule):
-      continue
-    layout = _get_layout_from_rule(rule, index, io_kind)
-    if layout is not None:
-      return layout
+    # layouts can be a list (inputs) or a single layout (outputs)
+    if not isinstance(layouts, (list, tuple)):
+      return layouts
+    if idx < len(layouts):
+      return layouts[idx]
+    else:
+      raise ValueError(f"Index {idx} out of range for layouts {layouts}")
 
-  # fallback to the first rule even if no match
-  fallback = rules[0]
-  layout = _get_layout_from_rule(fallback, index, io_kind)
-  if layout is not None:
-    return layout
-  return LayoutType.NCHW
+  chosen_inputs = None
+  chosen_output = None
 
+  for inputs_options, outputs_options in rules:
+    matched_pattern = None
+    for pattern in inputs_options:
+      if _layouts_match(pattern):
+        matched_pattern = pattern
+        break
+    if matched_pattern is not None:
+      chosen_inputs = matched_pattern
+      chosen_output = outputs_options
+      break
+
+  if chosen_inputs is None:
+    # fallback to first rule / first pattern
+    first_inputs_options, first_outputs_options = rules[0]
+    chosen_inputs = first_inputs_options[0]
+    chosen_output = first_outputs_options
+
+  if io_kind == "inputs":
+    return _pick_layout_from_pattern(chosen_inputs, index)
+  else:
+    return _pick_layout_from_pattern(chosen_output, index)
 
 # Debug logging utility controlled by IMCFLOW_DEBUG environment variable
 # Usage:
@@ -356,160 +424,168 @@ def getConstNodesOfFunc(func):
   _Visitor().visit(func)
   return InNodes
 
+class UseDefChainParser(relay.ExprVisitor):
+  """
+  Parse Use-Def chain for expressions.
+  Builds a mapping from each expression to its users (consumers).
+  """
+  def __init__(self):
+    super().__init__()
+    self.use_def_chain = {}  # {expr : [list of (user_call, arg_index)]}
+
+  def visit_call(self, call):
+    # Record that this call uses each of its arguments
+    for i, arg in enumerate(call.args):
+      if arg not in self.use_def_chain:
+        self.use_def_chain[arg] = []
+      self.use_def_chain[arg].append((call, i))
+
+    # Continue visiting child nodes
+    super().visit_call(call)
+
+  def visit_tuple(self, tup):
+    # Record tuple field usage
+    for i, field in enumerate(tup.fields):
+      if field not in self.use_def_chain:
+        self.use_def_chain[field] = []
+      # Note: tuples don't have a single call user, we mark with None
+      self.use_def_chain[field].append((tup, i))
+
+    super().visit_tuple(tup)
+
+  def visit_tuple_getitem(self, tgi):
+    # Record TupleGetItem usage
+    if tgi.tuple_value not in self.use_def_chain:
+      self.use_def_chain[tgi.tuple_value] = []
+    self.use_def_chain[tgi.tuple_value].append((tgi, tgi.index))
+
+    super().visit_tuple_getitem(tgi)
+
+  def get_users(self, expr):
+    """Get all users (consumers) of an expression"""
+    return self.use_def_chain.get(expr, [])
+
+class ConsumerFinder:
+  """
+  Find consumers of a node and arg idx for the node. consumer is Call node.
+  If current target node is A, and consumer node is B and B = func(A, C), then return (B, 0) where 0 is the arg index of A in B.
+
+  parameters:
+    - use_def_chain_parser: helper to query direct users of an expr
+    - skip_predicates     : list of callables(call, arg_index) -> bool.
+                            If any predicate returns True for a consumer call,
+                            we skip recording that call and recurse downstream.
+
+  returns:
+    - list of (consumer_call, arg_index)
+  """
+  def __init__(self, use_def_chain_parser, skip_predicates=None):
+    self.use_def_chain_parser = use_def_chain_parser
+    self.skip_predicates = skip_predicates or []
+    self.visited = set()  # Track visited expressions to avoid cycles
+
+  def find_consumers_of_node(self, node):
+    """Find all final consumers for an expr node (skipping via predicate)"""
+    self.visited.clear()
+    consumers_found = []
+    self._find_consumers_recursive(node, consumers_found)
+    return consumers_found
+
+  def _find_consumers_recursive(self, expr, consumers):
+    """Recursively find consumers, skipping element-wise operations"""
+
+    # Avoid infinite loops
+    if expr in self.visited:
+      return
+    self.visited.add(expr)
+
+    # Get direct users of this expression
+    users = self.use_def_chain_parser.get_users(expr)
+
+    for user, arg_index in users:
+      if isinstance(user, relay.Call):
+        should_recurse = any(pred(user, arg_index) for pred in self.skip_predicates) if self.skip_predicates else False
+        if should_recurse:
+          if isinstance(user.op, relay.Function):
+            _recurse_use_def = UseDefChainParser()
+            _recurse_use_def.visit(user.op.body)
+            recursive_consumer_finder = ConsumerFinder(_recurse_use_def, self.skip_predicates)
+            param_var = user.op.params[arg_index]
+            param_consumers = recursive_consumer_finder.find_consumers_of_node(param_var)
+            for cons in param_consumers:
+              consumers.append(cons)
+          else:
+            # Skip recording this call and continue downstream
+            self._find_consumers_recursive(user, consumers)
+        else:
+          if isinstance(user.op, tvm.ir.Op):
+            op_name = user.op.name
+          elif isinstance(user.op, relay.GlobalVar):
+            op_name = user.op.name_hint
+          else:
+            op_name = None
+          consumers.append((user, arg_index))
+      elif isinstance(user, relay.TupleGetItem):
+        self._find_consumers_recursive(user, consumers)
+      elif isinstance(user, relay.Tuple):
+        self._find_consumers_recursive(user, consumers)
+      else:
+        raise ValueError("Unsupported type")
+
+class ProducerFinder:
+  """
+  Find producers for an expression.
+
+  Returns list of (producer_call, output_index).
+  If the producer is a TupleGetItem path, the output_index is the tuple index used.
+
+  parameters:
+    - skip_predicates: list of callables(call, output_index) -> bool.
+                       If any predicate returns True for a producer Call, we skip
+                       recording that call and recurse into its inputs instead.
+  """
+  def __init__(self, skip_predicates=None):
+    self.skip_predicates = skip_predicates or []
+    self.visited = set()
+
+  def find_producers_of_node(self, node):
+    self.visited.clear()
+    producers = []
+    self._find_producers_recursive(node, 0, producers)
+    return producers
+
+  def _find_producers_recursive(self, expr, out_index, producers):
+    key = (expr, out_index)
+    if key in self.visited:
+      return
+    self.visited.add(key)
+
+    if isinstance(expr, relay.TupleGetItem):
+      # Track tuple index as output index
+      self._find_producers_recursive(expr.tuple_value, expr.index, producers)
+    elif isinstance(expr, relay.Tuple):
+      # Follow the specific tuple field indicated by out_index
+      target_index = out_index if out_index < len(expr.fields) else 0
+      self._find_producers_recursive(expr.fields[target_index], 0, producers)
+    elif isinstance(expr, relay.Call):
+      # If calling a relay.Function, recurse into its body to find real producers
+      if isinstance(expr.op, relay.Function):
+        self._find_producers_recursive(expr.op.body, out_index, producers)
+        return
+
+      should_recurse = any(pred(expr, out_index) for pred in self.skip_predicates) if self.skip_predicates else False
+      if should_recurse:
+        # Skip this call and recurse into its inputs
+        for arg in expr.args:
+          self._find_producers_recursive(arg, 0, producers)
+      else:
+        producers.append((expr, out_index))
+    else:
+      # For vars/constants etc., no Call producer to record
+      return
+
 def getOutputNodeOfFunc(func):
   return func.body
-
-def getInputTensorIDs(func):
-  pass
-
-def getOutputTensorIDs(func):
-  pass
-
-# def makeToQuantizedForm_old(mod):
-#   """
-#   List of transformations:
-#     1. convert Conv to ImcflowQConv2D
-#     2. data type conversion to int form
-#       conv2d input  : packed 1D int8
-#       conv2d weight : packed 1D int8
-#       bias, relu, etc -> int16 data type
-#   """
-#   param_map = {}
-
-#   class _OpConverter(tvm.relay.ExprMutator):
-#     def __init__(self):
-#       super().__init__()
-
-#     def visit_call(self, call):
-#       if call.op == op.get("nn.conv2d"):
-#         new_op = op.get("nn.imcflow_qconv")
-#         args = [self.visit(arg) for arg in call.args]
-#         type_args = []
-#         type_args.append(relay.TensorType(call.type_args[0].shape, "int8"))
-#         type_args.append(relay.TensorType(call.type_args[1].shape, "int8"))
-#         return imcflow_qconv2d(args[0], args[1], strides=(1, 1), padding=(1, 1))
-#         # return Call(new_op, args, call.attrs, type_args, call.span)
-#       elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-#         args = [self.visit(arg) for arg in call.args]
-#         return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
-#       else:
-#         return super().visit_call(call)
-
-#     def visit_var(self, var):
-#       new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
-#       param_map[var.name_hint] = new_var
-#       return new_var
-
-#     def visit_constant(self, const):
-#       Data = const.data.numpy().astype(np.int8)
-#       return relay.const(Data, "int8")
-
-#     def visit_function(self, func):
-#       # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
-#       # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
-#       # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
-#       # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
-#       new_body = self.visit(func.body)
-#       new_params = [param_map.get(p.name_hint, p) for p in func.params]
-#       new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
-#       return relay.Function(new_params, new_body, new_ret_type)
-
-#   mod['main'] = _OpConverter().visit(mod['main'])
-#   return mod
-
-# @relay.transform.function_pass(opt_level=0)
-# class makeToQuantizedForm:
-#     """
-#     List of transformations:
-#       1. convert Conv to ImcflowQConv2D
-#       2. data type conversion to int form
-#         conv2d input  : packed 1D int8
-#         conv2d weight : packed 1D int8
-#         bias, relu, etc -> int16 data type
-#     """
-#     def transform_function(self, func, mod, ctx):
-#       param_map = {}
-#       class _OpConverter(tvm.relay.ExprMutator):
-#         def __init__(self):
-#           super().__init__()
-#           self.NewParamDict = {}
-
-#         def visit_call(self, call):
-#           if call.op == op.get("nn.conv2d"):
-#             args = [self.visit(arg) for arg in call.args]
-
-#             # TODO: add in_channels and channels to attribute of nn.conv2d and fix this
-#             # TODO: Sanity check needed!!!!
-#             in_channels = 0 # FIXME
-#             channels = 0 # FIXME
-
-#             # input layout [ceil(IC/256), N, H, W, IB, 8] int32
-#             input_shape_orig = args[0].type_annotation.shape # N ic H W
-#             input_shape_new = [math.ceil(in_channels//256), input_shape_orig[0], input_shape_orig[2], input_shape_orig[3], 4, 8] # IB = 4
-#             input_new = relay.Var(args[0].name_hint, relay.TensorType(input_shape_new, "int32"))
-
-#             # weight layout [ceil(OC/64), ceil(IC/ic), 256, 8] int32
-#             weight_shape_orig = args[1].data.shape # OC/64, ic, KH, KW
-#             weight_numpy_array = np.zeros((weight_shape_orig[0], math.ceil(in_channels//weight_shape_orig[1]), 256, 8), dtype=np.int32) #TODO: this should be replaced with real weight tensor!!!!
-#             weight_new = relay.Constant(tvm.nd.array(weight_numpy_array))
-
-#             # append new params to param_map
-#             param_map[args[0].name_hint] = input_new
-
-#             # Create config data (FIXME: needs proper values)
-#             from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
-#             config_data = ConfigData(
-#                 data_shape=(1, in_channels, 1, 1),  # FIXME: use actual shape
-#                 weight_shape=(channels, in_channels, 1, 1),  # FIXME: use actual shape
-#                 padding=1,
-#                 stride=1
-#             )
-
-#             return imcflow_qconv2d(input_new, weight_new, config_data.get_as_const_tensor(), in_channels=in_channels, channels=channels, strides=(1, 1), padding=(1, 1), out_dtype="int16")
-
-#           # TODO: Add batchnorm transform and insert quantize op
-#           # elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-#           #   args = [self.visit(arg) for arg in call.args]
-#           #   return imcflow_min_max_quantize(args[0], args[1], args[2], 1, "int8")
-
-#           else:
-#             return super().visit_call(call)
-
-#         # def visit_var(self, var):
-#         #   # new_var = relay.Var(var.name_hint, relay.TensorType(var.type_annotation.shape, "int8"))
-#         #   # param_map[var.name_hint] = new_var
-#         #   # return new_var
-#         #   return var
-
-#         # def visit_constant(self, const):
-#         #   Data = const.data.numpy().astype(np.int8)
-#         #   return relay.const(Data, "int8")
-
-#         def visit_function(self, func):
-#           # params = [relay.Var(func.params[0].name_hint, relay.TensorType(func.params[0].type_annotation.shape, "int8"))]
-#           # func.params[0].type_annotation = relay.TensorType(func.params[0].type_annotation.shape, "int8")
-#           # func.params[0] = relay.Var(func.params[0].name_hint, func.params[0].type_annotation)
-#           # func.ret_type = relay.TensorType(func.ret_type.shape, "int8")
-#           new_body = self.visit(func.body)
-#           new_params = [param_map.get(p.name_hint, p) for p in func.params]
-#           return relay.Function(new_params, new_body)
-
-#           # new_ret_type = relay.TensorType(func.ret_type.shape, "int8")
-#           # return relay.Function(new_params, new_body, new_ret_type)
-
-#       # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
-#       items = mod.functions_items()
-#       function_names = [item[0].name_hint for item in items]
-
-#       num_func = len(function_names)
-#       for i in range(num_func):
-#         if function_names[i]=="main":
-#           continue
-#         elif "Compiler" in mod[function_names[i]].attrs and mod[function_names[i]].attrs["Compiler"]=="imcflow":
-#           print(f"Transforming imcflow function: {function_names[i]}")
-#           mod[function_names[i]] = _OpConverter().visit(mod[function_names[i]])
-
-#       return func #TODO: returning func is right???
 
 def isImcflowFunc(func, mod):
   if isinstance(func, relay.Function):
@@ -3663,157 +3739,6 @@ def generateNoCVisualizations(mod, output_dir="noc_visualizations"):
     visualizer.visualize_all_functions(mod)
     debug_print(f"NoC visualizations saved to: {output_dir}")
 
-@relay.transform.function_pass(opt_level=0)
-class PackingInserter:
-    def __init__(self):
-      pass
-
-    def transform_function(self, func, mod, ctx):
-      class _PackingInserter(tvm.relay.ExprMutator):
-        def __init__(self):
-            super().__init__()
-            self.func_param_map = {}
-            self.InSubFunc = False
-            self.VarOriginShape = {}
-
-        def visit_var(self, var):
-          if self.InSubFunc:
-            # check var shape is 1D. If so, unpack it.
-            input_node = self.func_param_map[var.name_hint]
-            input_node_type = _get_type(mod, input_node)
-            if len(input_node_type.shape) == 1:
-              new_var = relay.Var(var.name_hint, relay.TensorType(input_node_type.shape, input_node_type.dtype))
-              self.VarOriginShape[var.name_hint] = var.type_annotation.shape
-              return new_var
-              # return imcflow_unpacking(new_var, var.type_annotation.shape[0], "float32")
-            else:
-              return super().visit_var(var)
-          else:
-            return super().visit_var(var)
-
-        def visit_function(self, func):
-          if self.InSubFunc:
-            new_params = [self.visit(param) for param in func.params]
-            new_body = self.visit(func.body)
-
-            # check last node is related to quantization like qnn.imcflow_min_max_quantize
-            # check also concat of quantized data. If so, pack it.
-            def _addPacking(node, parentNode=None):
-              parentNode = node if parentNode is None else parentNode
-              if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name in ImcflowDeviceConfig.QAUNT_OPS:
-                Shape1D = 1
-                # for shape in node.type_args[0].shape:
-                for shape in node.checked_type.shape:
-                  Shape1D = Shape1D * shape
-                node = imcflow_packing(parentNode, [Shape1D], "int8")
-              elif isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == "concatenate":
-                # check if all input nodes are quantized. If so, pack it.
-                AllQuant = True
-                for arg in node.args:
-                  if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op) and arg.op.name not in ImcflowDeviceConfig.QAUNT_OPS:
-                    AllQuant = False
-                if AllQuant:
-                  Shape1D = 1
-                  for shape in _get_type(mod, node).shape:
-                    Shape1D = Shape1D * shape
-                  node = imcflow_packing(parentNode, [Shape1D], "int8")
-              elif isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
-                node = _addPacking(node.op.body, parentNode)
-
-              return node
-
-            new_body = _addPacking(new_body)
-            new_func_ret_type = _get_type(mod, new_body)
-            new_type_params = func.type_params
-            return relay.Function(new_params, new_body, new_func_ret_type, new_type_params, func.attrs)
-          else:
-            new_params = [self.visit(param) for param in func.params]
-            new_body = self.visit(func.body)
-            new_ret_type = _get_type(mod, new_body)
-            return relay.Function(new_params, new_body, new_ret_type, func.type_params, func.attrs)
-
-        def visit_global_var(self, gvar):
-          return relay.GlobalVar(gvar.name_hint)
-
-        def visit_call(self, call):
-          #post DFS
-          new_args = [self.visit(arg) for arg in call.args]
-
-          if self.InSubFunc:
-            for idx, narg in enumerate(new_args):
-              if isinstance(narg, relay.Var) and len(narg.type_annotation.shape) == 1:
-                VarShape = self.VarOriginShape[narg.name_hint]
-                new_args[idx] = imcflow_unpacking(narg, VarShape, "float32")
-              else:
-                new_args[idx] = narg
-
-          if isinstance(call.op, relay.Function):
-            InSubFunc = self.InSubFunc
-            self.InSubFunc = False
-            new_func = self.visit_function(call.op)
-            self.InSubFunc = InSubFunc
-            return Call(new_func, new_args, call.attrs, call.type_args, call.span)
-
-          if isinstance(call.op, relay.GlobalVar):
-             #make var to node mapping
-             args = new_args
-             params = mod[call.op.name_hint].params
-             self.func_param_map = {param.name_hint: arg for param, arg in zip(params, args)}
-             self.InSubFunc = True
-            #  new_op = self.visit(call.op)
-             mod[call.op.name_hint] = self.visit(mod[call.op.name_hint])
-             self.InSubFunc = False
-             return Call(call.op, new_args, call.attrs, call.type_args, call.span)
-
-          if call.op == op.get("nn.imcflow_qconv"):
-            # OriginWeight = call.args[1]
-            OriginWeight = new_args[1]
-            Weight1D = relay.Constant(tvm.nd.array(OriginWeight.data.asnumpy().flatten().astype("int8")))
-            NewWeight = imcflow_unpacking(Weight1D, OriginWeight.checked_type.shape, "float32")
-            # NewInput = super().visit(call.args[0])
-            NewInput = new_args[0]
-            # Config is the third argument
-            Config = new_args[2]
-
-            return imcflow_qconv2d(NewInput, NewWeight, Config,
-                                   **call.attrs)
-
-          if call.op == op.get("imcflow.fused_batch_norm"):
-            # convert dtype to int16
-            # NewScale = relay.Constant(tvm.nd.array(call.args[1].data.asnumpy().astype("int16")))
-            # NewBias = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
-            NewScale = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
-            NewBias = relay.Constant(tvm.nd.array(new_args[2].data.asnumpy().astype("int16")))
-            return imcflow_batch_norm(new_args[0], NewScale, NewBias,1)
-
-          if call.op == op.get("qnn.imcflow_min_max_quantize"):
-            # convert dtype to int16
-            # NewMin = relay.Constant(tvm.nd.array(call.args[1].data.asnumpy().astype("int16")))
-            # NewMax = relay.Constant(tvm.nd.array(call.args[2].data.asnumpy().astype("int16")))
-            NewMin = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
-            NewMax = relay.Constant(tvm.nd.array(new_args[2].data.asnumpy().astype("int16")))
-            return imcflow_min_max_quantize(new_args[0], NewMin, NewMax,1, "float32", "int16")
-
-          if call.op == op.get("qnn.imcflow_nu_quantize"):
-            # convert dtype to int16
-            NewThreshold = relay.Constant(tvm.nd.array(new_args[1].data.asnumpy().astype("int16")))
-            return imcflow_nu_quantize(new_args[0], NewThreshold,1, "float32", "int16")
-
-          if call.op == op.get("qnn.simulated_quantize"):
-            # convert dtype to int16
-            Shape = _get_type(mod, new_args[0]).shape
-            Shape1D = 1
-            for shape in Shape:
-              Shape1D = Shape1D * shape
-            NewQuantCall = relay.qnn.simulated_quantize(new_args[0], new_args[1], new_args[2], **call.attrs)
-            return imcflow_packing(NewQuantCall, [Shape1D], "int8")
-
-          new_op = self.visit(call.op)
-          return Call(new_op, new_args, call.attrs, call.type_args, call.span)
-
-      new_func = _PackingInserter().visit(func)
-      return new_func
-
 def clearPrimitiveTag(mod):
   class _Visitor(tvm.relay.ExprMutator):
     def visit_function(self, fn):
@@ -4300,63 +4225,97 @@ def modify_call_node_attrs(call_node, in_node=None, out_node=None, const_packed_
 
   return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
 
-# Helper class for Use-Def chain parsing (shared across methods)
-class _UseDefChainParser(relay.ExprVisitor):
-  """
-  Parse Use-Def chain for expressions.
-  Builds a mapping from each expression to its users (consumers).
-  """
-  def __init__(self):
-    super().__init__()
-    self.use_def_chain = {}  # {expr : [list of (user_call, arg_index)]}
-
-  def visit_call(self, call):
-    # Record that this call uses each of its arguments
-    for i, arg in enumerate(call.args):
-      if arg not in self.use_def_chain:
-        self.use_def_chain[arg] = []
-      self.use_def_chain[arg].append((call, i))
-
-    # Continue visiting child nodes
-    super().visit_call(call)
-
-  def visit_tuple(self, tup):
-    # Record tuple field usage
-    for i, field in enumerate(tup.fields):
-      if field not in self.use_def_chain:
-        self.use_def_chain[field] = []
-      # Note: tuples don't have a single call user, we mark with None
-      self.use_def_chain[field].append((tup, i))
-
-    super().visit_tuple(tup)
-
-  def visit_tuple_getitem(self, tgi):
-    # Record TupleGetItem usage
-    if tgi.tuple_value not in self.use_def_chain:
-      self.use_def_chain[tgi.tuple_value] = []
-    self.use_def_chain[tgi.tuple_value].append((tgi, tgi.index))
-
-    super().visit_tuple_getitem(tgi)
-
-  def get_users(self, expr):
-    """Get all users (consumers) of an expression"""
-    return self.use_def_chain.get(expr, [])
-
 def calculate_imcflow_func_type(func, func_name=None):
+  """
+  imcflow function need real tensor type with real layout.
+  This function calculates the real parameter and return types of the given imcflow function.
+  For example, qconv2d input parameter will be changed from float32[N,C,H,W] to uint32[N,C//256,H,W,4,8] type.
+
+  arguments:
+    func: relay.Function
+          target function.
+  return:
+    param_types: list of relay.Type
+                  updated parameter types.
+    param_layouts: list of LayoutType
+                    layout type for each parameter.
+    ret_type: relay.Type (can be tupleType)
+              updated return type.
+    ret_layout: LayoutType
+                layout type for return value.
+  """
 
   class _ImcflowFunctionParamUpdater(relay.ExprMutator):
     def __init__(self, func_name=None):
       super().__init__()
       self.func_name = func_name
-      self.param_layouts = []
-      self.ret_layouts = []
+
+    def run(self, func):
+      temp_mod = tvm.IRModule.from_expr(func)
+      temp_mod = relay.transform.InferType()(temp_mod)
+      gv = list(temp_mod.get_global_vars())[0]
+      inferred_func = temp_mod[gv]
+      param_types, param_layouts = self.calculate_param_type(inferred_func)
+      ret_type, ret_layout = self.calculate_ret_type(inferred_func)
+      return param_types, param_layouts, ret_type, ret_layout
+
+    def calculate_param_type(self, func):
+      self.gather_var_consumers(func)
+      param_layouts = []
+      new_params = []
+      for param in func.params:
+        layout_type, new_param = self.calculate_real_in_type(param)
+        param_layouts.append(layout_type)
+        new_params.append(new_param)
+      return new_params, param_layouts
+
+    def calculate_ret_type(self, func):
+      """
+      Calculate the return type of the function based on its body.
+      This uses InferType to get the accurate return type after parameter updates.
+      """
+      #- find last node of function. skip elementwise op because element wise op doesn't have layout constraints
+      #- skip composite calls. we need concreate op. 
+      producer_finder = ProducerFinder(skip_predicates=[skip_composite_predicate, skip_element_wise_predicate])
+      producers = producer_finder.find_producers_of_node(func.body)
+      if len(producers) == 0:
+        raise ValueError("No producers found for function return value")
+
+      ret_types = []
+      ret_layouts = []
+      for prod, idx in producers:
+        layout_type = self._get_output_layout(prod, idx)
+        ret_layouts.append(layout_type)
+        source_type = prod.checked_type
+        ret_types.append(self._apply_layout_to_type(source_type, layout_type))
+
+      if len(ret_types) == 1:
+        return ret_types[0], ret_layouts[0]
+      else:
+        return relay.TupleType(ret_types), ret_layouts
 
     def _apply_layout_to_type(self, original_type, layout_type):
-      if layout_type in (LayoutType.NCHW, LayoutType.SCALAR):
-        return original_type
-
+      """
+      Apply layout to tensor type. it reshape tensor.
+      args:
+        - original_type: relay.TensorType
+                         original tensor type.
+        - layout_type: LayoutType
+                       layout type to be applied.
+      return:
+        - new_type: relay.TensorType
+                    new tensor type with applied layout.
+      """
       if not isinstance(original_type, TensorType):
         raise ValueError("Variable type must be TensorType")
+
+      if layout_type == LayoutType.NCHW:
+        assert isinstance(original_type, TensorType) and len(original_type.shape) == 4, "NCHW layout requires 4D tensor"
+        return original_type
+      
+      if layout_type == LayoutType.SCALAR:
+        assert isinstance(original_type, TensorType) and len(original_type.shape) == 0, "SCALAR layout requires 0D tensor"
+        return original_type
 
       original_shape = original_type.shape
       original_dtype = original_type.dtype
@@ -4417,15 +4376,10 @@ def calculate_imcflow_func_type(func, func_name=None):
       return first
 
     def _get_output_layout(self, expr, index=0):
-      if isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op):
-        op_name = expr.op.name
-        return get_required_layout_from_op(op_name, "outputs", index, expr)
-      elif isinstance(expr, relay.TupleGetItem):
-        return self._get_output_layout(expr.tuple_value, expr.index)
-      elif isinstance(expr, relay.Tuple):
-        target_field = expr.fields[index]
-        return self._get_output_layout(target_field, 0)
-      return LayoutType.NCHW
+      if not(isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op)):
+        raise ValueError("Expression must be a Call node with an Op")
+      op_name = expr.op.name
+      return get_required_layout_from_op(op_name, "outputs", index, expr)
 
     def gather_var_consumers(self, func):
       """
@@ -4442,77 +4396,19 @@ def calculate_imcflow_func_type(func, func_name=None):
         self.var_consumers[param] = []
 
       # Step 1: Build use-def chain
-      use_def_parser = _UseDefChainParser()
+      use_def_parser = UseDefChainParser()
       use_def_parser.visit(func.body)
       if self.func_name:
         ImcflowDeviceConfig().use_def_chain[self.func_name] = use_def_parser.use_def_chain
 
-      # Step 2: Find consumers for each variable
-      class _ConsumerFinder:
-        def __init__(self, use_def_chain_parser):
-          self.use_def_chain_parser = use_def_chain_parser
-          self.visited = set()  # Track visited expressions to avoid cycles
-
-        def find_consumers_for_var(self, var):
-          """Find all final consumers for a variable (skipping element-wise ops)"""
-          self.visited.clear()
-          consumers_with_layout = []
-          self._find_consumers_recursive(var, consumers_with_layout)
-          return consumers_with_layout
-
-        def _find_consumers_recursive(self, expr, consumers):
-          """Recursively find consumers, skipping element-wise operations"""
-
-          # Avoid infinite loops
-          if expr in self.visited:
-            return
-          self.visited.add(expr)
-
-          # Get direct users of this expression
-          users = self.use_def_chain_parser.get_users(expr)
-
-          for user, arg_index in users:
-            if isinstance(user, relay.Call):
-              if isinstance(user.op, relay.Function):
-                _recurse_use_def = _UseDefChainParser()
-                _recurse_use_def.visit(user.op.body)
-                recursive_consumer_finder = _ConsumerFinder(_recurse_use_def)
-                param_var = user.op.params[arg_index]
-                param_consumers = recursive_consumer_finder.find_consumers_for_var(param_var)
-                for cons in param_consumers:
-                  consumers.append(cons)
-              else:
-                if isinstance(user.op, tvm.ir.Op):
-                  op_name = user.op.name
-                elif isinstance(user.op, relay.GlobalVar):
-                  op_name = user.op.name_hint
-                else:
-                  op_name = None
-                layout = get_required_layout_from_op(op_name, "inputs", arg_index, user) if op_name else LayoutType.NCHW
-                consumers.append((layout, user))
-            elif isinstance(user, relay.TupleGetItem):
-              self._find_consumers_recursive(user, consumers)
-            elif isinstance(user, relay.Tuple):
-              self._find_consumers_recursive(user, consumers)
-            else:
-              raise ValueError("Unsupported type")
-
       # Step 3: Find consumers for each parameter
-      finder = _ConsumerFinder(use_def_parser)
+      finder = ConsumerFinder(use_def_parser)
 
       for param in func.params:
-        consumers = finder.find_consumers_for_var(param)
+        consumers = finder.find_consumers_of_node(param)
         self.var_consumers[param] = consumers
 
       return self.var_consumers
-
-    def get_required_layout(self, consumer_node_desc):
-      """
-      given a consumer node description, return the required layout for the function parameter.
-      Returns layout type derived from the consumer.
-      """
-      layout_type, _ = consumer_node_desc
-      return layout_type
 
     def calculate_real_in_type(self, var):
       """
@@ -4531,69 +4427,14 @@ def calculate_imcflow_func_type(func, func_name=None):
       consumers = self.var_consumers[var]
 
       # Gather all required layouts
-      required_layouts = [self.get_required_layout(desc) for desc in consumers]
+      required_layouts = [
+        get_required_layout_from_op(get_op_name_of_call(desc[0]), "inputs", desc[1], desc[0])
+        for desc in consumers]
 
       # Check compatibility - all consumers should require the same layout
       layout_type = self._resolve_layout(required_layouts)
       new_type = self._apply_layout_to_type(var.checked_type, layout_type)
       return layout_type, new_type
-
-    def calculate_param_type(self, func):
-      self.gather_var_consumers(func)
-      self.param_layouts = []
-      new_params = []
-      for param in func.params:
-        layout_type, new_param = self.calculate_real_in_type(param)
-        self.param_layouts.append(layout_type)
-        new_params.append(new_param)
-      return new_params
-
-    def calculate_ret_type(self, func):
-      """
-      Calculate the return type of the function based on its body.
-      This uses InferType to get the accurate return type after parameter updates.
-      """
-      self.ret_layouts = []
-      if isinstance(func.body, relay.Call):
-        if isinstance(func.body.op, relay.Function):
-          producer = [func.body.op.body]
-        else:
-          producer = [func.body]
-      elif isinstance(func.body, relay.TupleGetItem):
-        producer = [func.body.tuple_value]
-      elif isinstance(func.body, relay.Tuple):
-        producer = []
-        for field in func.body.fields:
-          if isinstance(field.op, relay.Function):
-            producer.append(field.op.body)
-          else:
-            producer.append(field)
-      else:
-        raise ValueError("Unsupported function body type for return type calculation")
-
-      if len(producer) == 0:
-        raise ValueError("No producers found for function return value")
-
-      ret_types = []
-      for idx, prod in enumerate(producer):
-        layout_type = self._get_output_layout(prod, idx)
-        self.ret_layouts.append(layout_type)
-        source_type = prod.checked_type
-        ret_types.append(self._apply_layout_to_type(source_type, layout_type))
-
-      if len(ret_types) == 1:
-        return ret_types[0], self.ret_layouts[0]
-      else:
-        return relay.TupleType(ret_types), self.ret_layouts
-
-    def run(self, func):
-      temp_mod = tvm.IRModule.from_expr(func)
-      temp_mod = relay.transform.InferType()(temp_mod)
-      gv = list(temp_mod.get_global_vars())[0]
-      inferred_func = temp_mod[gv]
-      param_types = self.calculate_param_type(inferred_func)
-      ret_type, ret_layout = self.calculate_ret_type(inferred_func)
-      return param_types, ret_type, {"params": self.param_layouts, "returns": ret_layout}
 
   updater = _ImcflowFunctionParamUpdater(func_name)
   return updater.run(func)
@@ -4967,118 +4808,24 @@ class ImcflowLayoutLegalizer:
     class _ImcflowFunctionParamUpdater(relay.ExprMutator):
       def __init__(self):
         super().__init__()
-        self.var_consumers = {}  # {var : [(consumer_node, tag), ...]}
+        self.var_consumers = {}  # {var : [(consumer_call, arg_index), ...]}
 
       def gather_var_consumers(self, func):
         """
-        traverse the imcflow function to gather consumer node descriptions of function parameters.
-        we gather tuple of (consumer_node, tag). tag is data type like LHS, RHS, weight, ..
-        {var : [list of consumer nodes]}
-
-        if consumer node is element-wise op node which is not related with layout, we recursively find its consumer nodes.
+        Traverse the function to gather consumer node descriptions of function parameters.
+        Returns {var : [(consumer_call, arg_index), ...]}
         """
-        self.var_consumers = {}
+        self.var_consumers = {param: [] for param in func.params}
 
-        # Initialize consumer list for each parameter
-        for param in func.params:
-          self.var_consumers[param] = []
-
-        # Step 1: Build use-def chain
-        use_def_parser = _UseDefChainParser()
+        # Build use-def chain for the function body
+        use_def_parser = UseDefChainParser()
         use_def_parser.visit(func.body)
 
-        # Step 2: Find consumers for each variable
-        class _ConsumerFinder:
-          def __init__(self, use_def_chain_parser):
-            self.use_def_chain_parser = use_def_chain_parser
-            self.element_wise_ops = [op.get("add"), op.get("multiply"), op.get("divide"),
-                                     op.get("subtract"), op.get("clip"), op.get("nn.relu")]
-            self.visited = set()  # Track visited expressions to avoid cycles
-
-          def is_element_wise_op(self, call):
-            """Check if a call is an element-wise operation"""
-            return isinstance(call, relay.Call) and call.op in self.element_wise_ops
-
-          def find_consumers_for_var(self, var):
-            """Find all final consumers for a variable (skipping element-wise ops)"""
-            self.visited.clear()
-            consumers = []
-            self._find_consumers_recursive(var, consumers)
-            return consumers
-
-          def _find_consumers_recursive(self, expr, consumers):
-            """Recursively find consumers, skipping element-wise operations"""
-
-            # Avoid infinite loops
-            if expr in self.visited:
-              return
-            self.visited.add(expr)
-
-            # Get direct users of this expression
-            users = self.use_def_chain_parser.get_users(expr)
-
-            for user, arg_index in users:
-              if isinstance(user, relay.Call):
-                if self.is_element_wise_op(user):
-                  # Element-wise op: skip and continue to its users
-                  # self._find_consumers_recursive(user, consumers)
-                  tag = self._get_arg_tag(user, arg_index)
-                  consumers.append((user, tag))
-                else:
-                  if isinstance(user.op, relay.Function):
-                    _recurse_use_def = _UseDefChainParser()
-                    _recurse_use_def.visit(user.op.body)
-                    recursive_consumer_finder = _ConsumerFinder(_recurse_use_def)
-                    param_var = user.op.params[arg_index]
-                    param_consumers = recursive_consumer_finder.find_consumers_for_var(param_var)
-                    for cons in param_consumers:
-                      consumers.append(cons)
-                  else:
-                    tag = self._get_arg_tag(user, arg_index)
-                    consumers.append((user, tag))
-              elif isinstance(user, relay.TupleGetItem):
-                # TupleGetItem: continue following the chain
-                self._find_consumers_recursive(user, consumers)
-              elif isinstance(user, relay.Tuple):
-                # Tuple: continue following the chain
-                self._find_consumers_recursive(user, consumers)
-              # Add more cases as needed
-
-          def _get_arg_tag(self, call, arg_index):
-            """Determine the tag (role) of an argument in a call"""
-            if call.op == op.get("nn.imcflow_qconv"):
-              if arg_index == 0:
-                return "input"
-              elif arg_index == 1:
-                return "weight"
-            elif call.op == op.get("nn.bias_add"):
-              if arg_index == 0:
-                return "input"
-              elif arg_index == 1:
-                return "bias"
-            elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-              if arg_index == 0:
-                return "input"
-              elif arg_index == 1:
-                return "min"
-              elif arg_index == 2:
-                return "max"
-            elif call.op == op.get("split"):
-              return "input"
-            elif call.op == op.get("concatenate"):
-              return "input"
-            elif call.op == op.get("nn.relu"):
-              return "input"
-            elif call.op == op.get("imcflow.fused_batch_norm"):
-              return "input"
-            else:
-              return "input"  # Default tag
-
-        # Step 3: Find consumers for each parameter
-        finder = _ConsumerFinder(use_def_parser)
+        # Skip element-wise ops and recurse through them to reach meaningful consumers
+        finder = ConsumerFinder(use_def_parser, skip_predicates=[skip_element_wise_predicate])
 
         for param in func.params:
-          consumers = finder.find_consumers_for_var(param)
+          consumers = finder.find_consumers_of_node(param)
           self.var_consumers[param] = consumers
 
         return self.var_consumers
@@ -5090,7 +4837,7 @@ class ImcflowLayoutLegalizer:
         - layout_type: "qconv_input", "qconv_output", "vector", "scalar"
         - is_packed: True if already packed, False if needs packing
         """
-        consumer_node, tag = consumer_node_desc
+        consumer_node, arg_index = consumer_node_desc
         assert isinstance(consumer_node, relay.Call), "Consumer node must be a Call node"
 
         if consumer_node.op == op.get("split"):
@@ -5098,24 +4845,21 @@ class ImcflowLayoutLegalizer:
         elif consumer_node.op == op.get("concatenate"):
           return ("vector", True)
         elif consumer_node.op == op.get("nn.imcflow_qconv") or consumer_node.op == op.get("nn.imcflow_qdwconv"):
-          if tag == "input":
+          # arg_index: 0=input, 1=weight
+          if arg_index == 0:
             return ("qconv_input", True)
-          elif tag == "weight":
-            #TODO: do we need it?
+          elif arg_index == 1:
             return ("qconv_output", True)
         elif consumer_node.op == op.get("nn.bias_add"):
-          if tag == "input":
-            return ("vector", True)
-          elif tag == "bias":
-            return ("vector", True)
+          return ("vector", True)
         elif consumer_node.op == op.get("nn.relu"):
           return ("vector", True)
         elif consumer_node.op == op.get("imcflow.fused_batch_norm"):
           return ("vector", True)
         elif consumer_node.op == op.get("qnn.imcflow_min_max_quantize"):
-          if tag == "input":
+          if arg_index == 0:
             return ("vector", True)
-          elif tag == "min" or tag == "max":
+          else:
             return ("scalar", False)
         elif consumer_node.op == op.get("add") or consumer_node.op == op.get("divide") or consumer_node.op == op.get("multiply"):
           return ("vector", True)
@@ -5588,7 +5332,7 @@ class ImcflowLayoutLegalizer:
         return new_call
 
     # Step 1: Build use-def chain for main function to track consumers
-    use_def_parser = _UseDefChainParser()
+    use_def_parser = UseDefChainParser()
     use_def_parser.visit(mod["main"])
 
     # Step 2: Create layout transformer and set use-def chain
