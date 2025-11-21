@@ -39,19 +39,42 @@ class LayoutType(Enum):
   NCHW64C = "NCHW64c"
   QCONV_INPUT = "QCONV_INPUT"   # Packed activation layout used by qconv input path
   QCONV_WEIGHT = "QCONV_WEIGHT" # Packed filter layout for qconv
+  QDCONV_WEIGHT = "QDCONV_WEIGHT"
   SCALAR = "SCALAR"
+  SAME_ARBITRARY = "SAME_ARBITRARY"
+
+class LayoutProperty(Enum):
+  COMMUTATIVE = "COMMUTATIVE"
+
+def _deduce_layout_from_type(ttype):
+  if not isinstance(ttype, TensorType):
+    return None
+  if len(ttype.shape) == 0:
+    return LayoutType.SCALAR
+  if len(ttype.shape) == 6:
+    return LayoutType.QCONV_INPUT
+  if len(ttype.shape) == 5:
+    block = int(ttype.shape[4])
+    if block == 16:
+      return LayoutType.NCHW16C
+    if block == 64:
+      return LayoutType.NCHW64C
+    return LayoutType.SAME_ARBITRARY
+  if len(ttype.shape) == 4:
+    return LayoutType.NCHW
+  return None
 
 OP_LAYOUT_REQUIREMENTS = {
   "nn.imcflow_qconv": {
-    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QCONV_WEIGHT},
+    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QCONV_WEIGHT, 2: LayoutType.SCALAR},
     "outputs": {0: LayoutType.NCHW64C},
   },
   "nn.imcflow_qdwconv": {
-    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QCONV_WEIGHT},
-    "outputs": {0: LayoutType.NCHW64C},
+    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QDCONV_WEIGHT, 2: LayoutType.SCALAR},
+    "outputs": {0: LayoutType.NCHW16C},
   },
   "qnn.imcflow_min_max_quantize": {
-    "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.SCALAR, 2: LayoutType.SCALAR},
+    "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.SCALAR, 2: LayoutType.SCALAR},
     "outputs": {0: LayoutType.QCONV_INPUT},
   },
   "qnn.imcflow_nu_quantize": {
@@ -59,45 +82,138 @@ OP_LAYOUT_REQUIREMENTS = {
     "outputs": {"default": LayoutType.NCHW64C},
   },
   "nn.bias_add": {
-    "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
+    "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.NCHW16C},
+    "outputs": {"default": LayoutType.NCHW16C},
   },
   "nn.relu": {
-    "inputs": {"default": LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
+    "inputs": {"default": LayoutType.NCHW16C},
+    "outputs": {"default": LayoutType.NCHW16C},
   },
   "imcflow.fused_batch_norm": {
-    "inputs": {"default": LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
+    "inputs": {"default": LayoutType.NCHW16C},
+    "outputs": {"default": LayoutType.NCHW16C},
   },
-  "add": {
-    "inputs": {"default": LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
-  },
+  "add": [
+    {
+      "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.NCHW16C},
+      "outputs": {0: LayoutType.NCHW16C},
+    },
+    {
+      "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.NCHW64C},
+      "outputs": {0: LayoutType.NCHW64C},
+    },
+    {
+      "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.SCALAR},
+      "outputs": {0: LayoutType.NCHW16C},
+      "property" : LayoutProperty.COMMUTATIVE
+    },
+    {
+      "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.SCALAR},
+      "outputs": {0: LayoutType.NCHW64C},
+      "property" : LayoutProperty.COMMUTATIVE
+    }
+  ],
   "multiply": {
-    "inputs": {"default": LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
+    "inputs": {"default": LayoutType.NCHW16C},
+    "outputs": {"default": LayoutType.NCHW16C},
   },
   "divide": {
-    "inputs": {"default": LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
+    "inputs": {"default": LayoutType.NCHW16C},
+    "outputs": {"default": LayoutType.NCHW16C},
   },
   "split": {
-    "inputs": {"default": LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
+    "inputs": {"default": LayoutType.NCHW16C},
+    "outputs": {"default": LayoutType.NCHW16C},
   },
   "concatenate": {
-    "inputs": {"default": LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
+    "inputs": {"default": LayoutType.NCHW16C},
+    "outputs": {"default": LayoutType.NCHW16C},
   },
 }
 
-def get_required_layout_from_op(op_name, io_kind, index):
-  req = OP_LAYOUT_REQUIREMENTS.get(op_name, {})
-  constraints = req.get(io_kind, {})
-  if index in constraints:
-    return constraints[index]
-  return constraints.get("default", LayoutType.NCHW)
+def get_required_layout_from_op(op_name, io_kind, index, call_node=None):
+  req = OP_LAYOUT_REQUIREMENTS.get(op_name, None)
+  if req is None:
+    return LayoutType.NCHW
+
+  rules = req if isinstance(req, list) else [req]
+
+  def _has_property(rule, prop):
+    props = rule.get("property", None)
+    if props is None:
+      return False
+    if isinstance(props, (list, tuple, set)):
+      return prop in props
+    return props == prop
+
+  def _layout_match(expected, arg_layout):
+    if expected == LayoutType.SAME_ARBITRARY:
+      return True
+    if expected == LayoutType.SCALAR:
+      return arg_layout == LayoutType.SCALAR
+    if arg_layout is None:
+      return True
+    return expected == arg_layout
+
+  def _rule_matches(rule):
+    if call_node is None or not isinstance(call_node, relay.Call):
+      return True
+    inputs = rule.get("inputs", {})
+
+    if _has_property(rule, LayoutProperty.COMMUTATIVE) and len(inputs) == 2 and len(call_node.args) >= 2:
+      actual_layouts = []
+      for idx in range(2):
+        arg_type = getattr(call_node.args[idx], "checked_type", None)
+        actual_layouts.append(_deduce_layout_from_type(arg_type) if isinstance(arg_type, TensorType) else None)
+      expected = [inputs.get(0), inputs.get(1)]
+      order1 = _layout_match(expected[0], actual_layouts[0]) and _layout_match(expected[1], actual_layouts[1])
+      order2 = _layout_match(expected[0], actual_layouts[1]) and _layout_match(expected[1], actual_layouts[0])
+      return order1 or order2
+
+    for idx, layout in inputs.items():
+      if idx >= len(call_node.args):
+        return False
+      arg_type = getattr(call_node.args[idx], "checked_type", None)
+      if isinstance(arg_type, TensorType):
+        deduced = _deduce_layout_from_type(arg_type)
+        if not _layout_match(layout, deduced):
+          return False
+    return True
+
+  def _get_layout_from_rule(rule, idx, kind):
+    if kind == "inputs":
+      inputs = rule.get("inputs", {})
+      layout = inputs.get(idx, None)
+      if layout is None and _has_property(rule, LayoutProperty.COMMUTATIVE):
+        for alt_idx, layout in inputs.items():
+          if alt_idx != idx:
+            return layout
+      if layout is not None and _has_property(rule, LayoutProperty.COMMUTATIVE) and call_node is not None:
+        arg_type = getattr(call_node.args[idx], "checked_type", None)
+        arg_layout = _deduce_layout_from_type(arg_type) if isinstance(arg_type, TensorType) else None
+        if not _layout_match(layout, arg_layout):
+          for alt_idx, alt_layout in inputs.items():
+            if alt_idx != idx and _layout_match(alt_layout, arg_layout):
+              return alt_layout
+      return layout
+    outputs = rule.get("outputs", {})
+    if idx in outputs:
+      return outputs[idx]
+    return outputs.get("default", None)
+
+  for rule in rules:
+    if not _rule_matches(rule):
+      continue
+    layout = _get_layout_from_rule(rule, index, io_kind)
+    if layout is not None:
+      return layout
+
+  # fallback to the first rule even if no match
+  fallback = rules[0]
+  layout = _get_layout_from_rule(fallback, index, io_kind)
+  if layout is not None:
+    return layout
+  return LayoutType.NCHW
 
 
 # Debug logging utility controlled by IMCFLOW_DEBUG environment variable
@@ -4279,6 +4395,13 @@ def calculate_imcflow_func_type(func, func_name=None):
           8,
         ]
         new_dtype = "int32"
+      elif layout_type == LayoutType.QDCONV_WEIGHT:
+        if len(original_shape) != 4:
+          raise ValueError(f"Unsupported shape for qdwconv_weight layout: {original_shape}")
+        out_channels, _, kh, kw = original_shape
+        # mirror packing logic used in qdwconv path (uint32)
+        new_shape = [math.ceil(out_channels / 16), 8, 8]
+        new_dtype = "uint32"
       else:
         raise ValueError(f"Unknown layout type: {layout_type}")
 
@@ -4296,7 +4419,7 @@ def calculate_imcflow_func_type(func, func_name=None):
     def _get_output_layout(self, expr, index=0):
       if isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op):
         op_name = expr.op.name
-        return get_required_layout_from_op(op_name, "outputs", index)
+        return get_required_layout_from_op(op_name, "outputs", index, expr)
       elif isinstance(expr, relay.TupleGetItem):
         return self._get_output_layout(expr.tuple_value, expr.index)
       elif isinstance(expr, relay.Tuple):
@@ -4365,7 +4488,7 @@ def calculate_imcflow_func_type(func, func_name=None):
                   op_name = user.op.name_hint
                 else:
                   op_name = None
-                layout = get_required_layout_from_op(op_name, "inputs", arg_index) if op_name else LayoutType.NCHW
+                layout = get_required_layout_from_op(op_name, "inputs", arg_index, user) if op_name else LayoutType.NCHW
                 consumers.append((layout, user))
             elif isinstance(user, relay.TupleGetItem):
               self._find_consumers_recursive(user, consumers)
