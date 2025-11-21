@@ -31,190 +31,6 @@ import os
 #TODO:
 # 1. memory allocation is not optimal. we can split tensor to multiple inode. current implementation assign only one inode for entire tensor.
 
-# Layout requirements for each IMCFLOW-friendly op.
-# These drive packing/unpacking instead of ad-hoc shape checks.
-class LayoutType(Enum):
-  NCHW = "NCHW"
-  NCHW16C = "NCHW16c"
-  NCHW64C = "NCHW64c"
-  QCONV_INPUT = "QCONV_INPUT"   # Packed activation layout used by qconv input path
-  QCONV_WEIGHT = "QCONV_WEIGHT" # Packed filter layout for qconv
-  QDCONV_WEIGHT = "QDCONV_WEIGHT"
-  SCALAR = "SCALAR"
-  SAME_ARBITRARY = "SAME_ARBITRARY"
-
-class LayoutProperty(Enum):
-  COMMUTATIVE = "COMMUTATIVE"
-
-def _deduce_layout_from_type(ttype):
-  if not isinstance(ttype, TensorType):
-    return None
-  if len(ttype.shape) == 0:
-    return LayoutType.SCALAR
-  if len(ttype.shape) == 6:
-    return LayoutType.QCONV_INPUT
-  if len(ttype.shape) == 5:
-    block = int(ttype.shape[4])
-    if block == 16:
-      return LayoutType.NCHW16C
-    if block == 64:
-      return LayoutType.NCHW64C
-    return LayoutType.SAME_ARBITRARY
-  if len(ttype.shape) == 4:
-    return LayoutType.NCHW
-  return None
-
-OP_LAYOUT_REQUIREMENTS = {
-  "nn.imcflow_qconv": {
-    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QCONV_WEIGHT, 2: LayoutType.SCALAR},
-    "outputs": {0: LayoutType.NCHW64C},
-  },
-  "nn.imcflow_qdwconv": {
-    "inputs": {0: LayoutType.QCONV_INPUT, 1: LayoutType.QDCONV_WEIGHT, 2: LayoutType.SCALAR},
-    "outputs": {0: LayoutType.NCHW16C},
-  },
-  "qnn.imcflow_min_max_quantize": {
-    "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.SCALAR, 2: LayoutType.SCALAR},
-    "outputs": {0: LayoutType.QCONV_INPUT},
-  },
-  "qnn.imcflow_nu_quantize": {
-    "inputs": {0: LayoutType.NCHW64C},
-    "outputs": {"default": LayoutType.NCHW64C},
-  },
-  "nn.bias_add": {
-    "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "nn.relu": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "imcflow.fused_batch_norm": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "add": [
-    {
-      "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.NCHW16C},
-      "outputs": {0: LayoutType.NCHW16C},
-    },
-    {
-      "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.NCHW64C},
-      "outputs": {0: LayoutType.NCHW64C},
-    },
-    {
-      "inputs": {0: LayoutType.NCHW16C, 1: LayoutType.SCALAR},
-      "outputs": {0: LayoutType.NCHW16C},
-      "property" : LayoutProperty.COMMUTATIVE
-    },
-    {
-      "inputs": {0: LayoutType.NCHW64C, 1: LayoutType.SCALAR},
-      "outputs": {0: LayoutType.NCHW64C},
-      "property" : LayoutProperty.COMMUTATIVE
-    }
-  ],
-  "multiply": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "divide": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "split": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-  "concatenate": {
-    "inputs": {"default": LayoutType.NCHW16C},
-    "outputs": {"default": LayoutType.NCHW16C},
-  },
-}
-
-def get_required_layout_from_op(op_name, io_kind, index, call_node=None):
-  req = OP_LAYOUT_REQUIREMENTS.get(op_name, None)
-  if req is None:
-    return LayoutType.NCHW
-
-  rules = req if isinstance(req, list) else [req]
-
-  def _has_property(rule, prop):
-    props = rule.get("property", None)
-    if props is None:
-      return False
-    if isinstance(props, (list, tuple, set)):
-      return prop in props
-    return props == prop
-
-  def _layout_match(expected, arg_layout):
-    if expected == LayoutType.SAME_ARBITRARY:
-      return True
-    if expected == LayoutType.SCALAR:
-      return arg_layout == LayoutType.SCALAR
-    if arg_layout is None:
-      return True
-    return expected == arg_layout
-
-  def _rule_matches(rule):
-    if call_node is None or not isinstance(call_node, relay.Call):
-      return True
-    inputs = rule.get("inputs", {})
-
-    if _has_property(rule, LayoutProperty.COMMUTATIVE) and len(inputs) == 2 and len(call_node.args) >= 2:
-      actual_layouts = []
-      for idx in range(2):
-        arg_type = getattr(call_node.args[idx], "checked_type", None)
-        actual_layouts.append(_deduce_layout_from_type(arg_type) if isinstance(arg_type, TensorType) else None)
-      expected = [inputs.get(0), inputs.get(1)]
-      order1 = _layout_match(expected[0], actual_layouts[0]) and _layout_match(expected[1], actual_layouts[1])
-      order2 = _layout_match(expected[0], actual_layouts[1]) and _layout_match(expected[1], actual_layouts[0])
-      return order1 or order2
-
-    for idx, layout in inputs.items():
-      if idx >= len(call_node.args):
-        return False
-      arg_type = getattr(call_node.args[idx], "checked_type", None)
-      if isinstance(arg_type, TensorType):
-        deduced = _deduce_layout_from_type(arg_type)
-        if not _layout_match(layout, deduced):
-          return False
-    return True
-
-  def _get_layout_from_rule(rule, idx, kind):
-    if kind == "inputs":
-      inputs = rule.get("inputs", {})
-      layout = inputs.get(idx, None)
-      if layout is None and _has_property(rule, LayoutProperty.COMMUTATIVE):
-        for alt_idx, layout in inputs.items():
-          if alt_idx != idx:
-            return layout
-      if layout is not None and _has_property(rule, LayoutProperty.COMMUTATIVE) and call_node is not None:
-        arg_type = getattr(call_node.args[idx], "checked_type", None)
-        arg_layout = _deduce_layout_from_type(arg_type) if isinstance(arg_type, TensorType) else None
-        if not _layout_match(layout, arg_layout):
-          for alt_idx, alt_layout in inputs.items():
-            if alt_idx != idx and _layout_match(alt_layout, arg_layout):
-              return alt_layout
-      return layout
-    outputs = rule.get("outputs", {})
-    if idx in outputs:
-      return outputs[idx]
-    return outputs.get("default", None)
-
-  for rule in rules:
-    if not _rule_matches(rule):
-      continue
-    layout = _get_layout_from_rule(rule, index, io_kind)
-    if layout is not None:
-      return layout
-
-  # fallback to the first rule even if no match
-  fallback = rules[0]
-  layout = _get_layout_from_rule(fallback, index, io_kind)
-  if layout is not None:
-    return layout
-  return LayoutType.NCHW
-
 
 # Debug logging utility controlled by IMCFLOW_DEBUG environment variable
 # Usage:
@@ -4330,95 +4146,17 @@ class _UseDefChainParser(relay.ExprVisitor):
     """Get all users (consumers) of an expression"""
     return self.use_def_chain.get(expr, [])
 
-def calculate_imcflow_func_type(func, func_name=None):
+def calculate_imcflow_func_type(func):
 
   class _ImcflowFunctionParamUpdater(relay.ExprMutator):
-    def __init__(self, func_name=None):
+    def __init__(self):
       super().__init__()
-      self.func_name = func_name
-      self.param_layouts = []
-      self.ret_layouts = []
-
-    def _apply_layout_to_type(self, original_type, layout_type):
-      if layout_type in (LayoutType.NCHW, LayoutType.SCALAR):
-        return original_type
-
-      if not isinstance(original_type, TensorType):
-        raise ValueError("Variable type must be TensorType")
-
-      original_shape = original_type.shape
-      original_dtype = original_type.dtype
-
-      if layout_type == LayoutType.NCHW16C:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for NCHW16c layout: {original_shape}")
-        N, C, H, W = original_shape
-        C_ceil = (C + 15) // 16
-        new_shape = [N, C_ceil, H, W, 16]
-        new_dtype = original_dtype
-      elif layout_type == LayoutType.NCHW64C:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for NCHW64c layout: {original_shape}")
-        N, C, H, W = original_shape
-        C_ceil = (C + 63) // 64
-        new_shape = [N, C_ceil, H, W, 64]
-        new_dtype = original_dtype
-      elif layout_type == LayoutType.QCONV_INPUT:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for qconv_input layout: {original_shape}")
-        N, C, H, W = original_shape
-        C_ceil = (C + 255) // 256
-        IB = 4
-        new_shape = [N, C_ceil, H, W, IB, 8]
-        new_dtype = "uint32"
-      elif layout_type == LayoutType.QCONV_WEIGHT:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for qconv_weight layout: {original_shape}")
-        out_channels, in_channels, kh, kw = original_shape
-        ic = 256 // (kh * kw)
-        new_shape = [
-          (out_channels + 63) // 64,
-          (in_channels + ic - 1) // ic,
-          256,
-          8,
-        ]
-        new_dtype = "int32"
-      elif layout_type == LayoutType.QDCONV_WEIGHT:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for qdwconv_weight layout: {original_shape}")
-        out_channels, _, kh, kw = original_shape
-        # mirror packing logic used in qdwconv path (uint32)
-        new_shape = [math.ceil(out_channels / 16), 8, 8]
-        new_dtype = "uint32"
-      else:
-        raise ValueError(f"Unknown layout type: {layout_type}")
-
-      return relay.TensorType(new_shape, new_dtype)
-
-    def _resolve_layout(self, layout_list):
-      if len(layout_list) == 0:
-        return LayoutType.NCHW
-      first = layout_list[0]
-      for layout in layout_list[1:]:
-        if layout != first:
-          raise ValueError(f"Incompatible layouts required: {first} vs {layout}")
-      return first
-
-    def _get_output_layout(self, expr, index=0):
-      if isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op):
-        op_name = expr.op.name
-        return get_required_layout_from_op(op_name, "outputs", index, expr)
-      elif isinstance(expr, relay.TupleGetItem):
-        return self._get_output_layout(expr.tuple_value, expr.index)
-      elif isinstance(expr, relay.Tuple):
-        target_field = expr.fields[index]
-        return self._get_output_layout(target_field, 0)
-      return LayoutType.NCHW
+      self.var_consumers = {}  # {var : [(consumer_node, tag), ...]}
 
     def gather_var_consumers(self, func):
       """
       traverse the imcflow function to gather consumer node descriptions of function parameters.
-      we gather tuple of (required_layout, consumer_node).
+      we gather tuple of (consumer_node, tag). tag is data type like LHS, RHS, weight, ..
       {var : [list of consumer nodes]}
 
       if consumer node is element-wise op node which is not related with layout, we recursively find its consumer nodes.
@@ -4432,8 +4170,6 @@ def calculate_imcflow_func_type(func, func_name=None):
       # Step 1: Build use-def chain
       use_def_parser = _UseDefChainParser()
       use_def_parser.visit(func.body)
-      if self.func_name:
-        ImcflowDeviceConfig().use_def_chain[self.func_name] = use_def_parser.use_def_chain
 
       # Step 2: Find consumers for each variable
       class _ConsumerFinder:
@@ -4444,9 +4180,9 @@ def calculate_imcflow_func_type(func, func_name=None):
         def find_consumers_for_var(self, var):
           """Find all final consumers for a variable (skipping element-wise ops)"""
           self.visited.clear()
-          consumers_with_layout = []
-          self._find_consumers_recursive(var, consumers_with_layout)
-          return consumers_with_layout
+          consumers = []
+          self._find_consumers_recursive(var, consumers)
+          return consumers
 
         def _find_consumers_recursive(self, expr, consumers):
           """Recursively find consumers, skipping element-wise operations"""
@@ -4470,20 +4206,46 @@ def calculate_imcflow_func_type(func, func_name=None):
                 for cons in param_consumers:
                   consumers.append(cons)
               else:
-                if isinstance(user.op, tvm.ir.Op):
-                  op_name = user.op.name
-                elif isinstance(user.op, relay.GlobalVar):
-                  op_name = user.op.name_hint
-                else:
-                  op_name = None
-                layout = get_required_layout_from_op(op_name, "inputs", arg_index, user) if op_name else LayoutType.NCHW
-                consumers.append((layout, user))
+                tag = self._get_arg_tag(user, arg_index)
+                consumers.append((user, tag))
             elif isinstance(user, relay.TupleGetItem):
               self._find_consumers_recursive(user, consumers)
             elif isinstance(user, relay.Tuple):
               self._find_consumers_recursive(user, consumers)
             else:
               raise ValueError("Unsupported type")
+
+        def _get_arg_tag(self, call, arg_index):
+          """Determine the tag (role) of an argument in a call"""
+          if call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
+            if arg_index == 0:
+              return "input"
+            elif arg_index == 1:
+              return "weight"
+            elif arg_index == 3:
+              return "config"
+          elif call.op == op.get("nn.bias_add"):
+            if arg_index == 0:
+              return "input"
+            elif arg_index == 1:
+              return "bias"
+          elif call.op == op.get("qnn.imcflow_min_max_quantize"):
+            if arg_index == 0:
+              return "input"
+            elif arg_index == 1:
+              return "min"
+            elif arg_index == 2:
+              return "max"
+          elif call.op == op.get("split"):
+            return "input"
+          elif call.op == op.get("concatenate"):
+            return "input"
+          elif call.op == op.get("nn.relu"):
+            return "input"
+          elif call.op == op.get("imcflow.fused_batch_norm"):
+            return "input"
+          else:
+            return "input"  # Default tag
 
       # Step 3: Find consumers for each parameter
       finder = _ConsumerFinder(use_def_parser)
@@ -4497,10 +4259,44 @@ def calculate_imcflow_func_type(func, func_name=None):
     def get_required_layout(self, consumer_node_desc):
       """
       given a consumer node description, return the required layout for the function parameter.
-      Returns layout type derived from the consumer.
+      Returns tuple: (layout_type, is_packed)
+      - layout_type: "qconv_input", "qconv_output", "vector", "scalar"
+      - is_packed: True if already packed, False if needs packing
       """
-      layout_type, _ = consumer_node_desc
-      return layout_type
+      consumer_node, tag = consumer_node_desc
+      assert isinstance(consumer_node, relay.Call), "Consumer node must be a Call node"
+
+      if consumer_node.op == op.get("split"):
+        return ("qconv_input", True)
+      elif consumer_node.op == op.get("concatenate"):
+        return ("vector", True)
+      elif consumer_node.op == op.get("nn.imcflow_qconv"):
+        if tag == "input":
+          return ("qconv_input", True)
+        elif tag == "weight":
+          return ("qconv_output", True)
+      elif consumer_node.op == op.get("nn.bias_add"):
+        if tag == "input":
+          return ("vector", True)
+        elif tag == "bias":
+          return ("vector", True)
+      elif consumer_node.op == op.get("nn.relu"):
+        return ("vector", True)
+      elif consumer_node.op == op.get("imcflow.fused_batch_norm"):
+        return ("vector", True)
+      elif consumer_node.op == op.get("qnn.imcflow_min_max_quantize"):
+        if tag == "input":
+          return ("vector", True)
+        elif tag == "min" or tag == "max":
+          return ("scalar", False)
+      elif consumer_node.op == op.get("add") or consumer_node.op == op.get("divide") or consumer_node.op == op.get("multiply"):
+        return ("vector", True)
+      elif consumer_node.op == op.get("qnn.imcflow_nu_quantize"):
+        raise ValueError("nu_quantize should not be consumer nodes of function parameters")
+      elif consumer_node.op == op.get("nn.conv2d"):
+        raise ValueError("conv2d should not be consumer nodes of function parameters")
+      else:
+        raise ValueError(f"Unsupported operator detected: {consumer_node.op}. please check.")
 
     def calculate_real_in_type(self, var):
       """
@@ -4519,20 +4315,77 @@ def calculate_imcflow_func_type(func, func_name=None):
       consumers = self.var_consumers[var]
 
       # Gather all required layouts
-      required_layouts = [self.get_required_layout(desc) for desc in consumers]
+      required_layouts = []
+      for consumer_desc in consumers:
+        layout_info = self.get_required_layout(consumer_desc)
+        required_layouts.append(layout_info)
 
       # Check compatibility - all consumers should require the same layout
-      layout_type = self._resolve_layout(required_layouts)
-      new_type = self._apply_layout_to_type(var.checked_type, layout_type)
-      return layout_type, new_type
+      if len(required_layouts) == 0:
+        return var
+
+      first_layout = required_layouts[0]
+      for layout_info in required_layouts[1:]:
+        if layout_info[0] != first_layout[0]:
+          raise ValueError(f"Incompatible layouts required for parameter {var.name_hint}: "
+                          f"{first_layout[0]} vs {layout_info[0]}")
+
+      layout_type, is_packed = first_layout
+
+      # If not packed, keep original (scalar values like min/max)
+      if not is_packed:
+        return var.checked_type
+
+      # Calculate new shape based on layout type
+      original_type = var.checked_type
+      if not isinstance(original_type, TensorType):
+        raise ValueError("Variable type must be TensorType")
+
+      original_shape = original_type.shape
+      original_dtype = original_type.dtype
+
+      # Calculate new shape based on layout type
+      if layout_type == "vector":
+        # NCHW -> NCHW16c
+        if len(original_shape) == 4:
+          N, C, H, W = original_shape
+          C_ceil = (C + 15) // 16
+          new_shape = [N, C_ceil, H, W, 16]
+          new_dtype = original_dtype
+        else:
+          raise ValueError(f"Unsupported shape for vector layout: {original_shape}")
+      elif layout_type == "qconv_input":
+        # NCHW -> [N, ceil(C/256), H, W, IB, 8] int32
+        if len(original_shape) == 4:
+          N, C, H, W = original_shape
+          C_ceil = (C + 255) // 256
+          IB = 4  # Fixed value for qconv_input
+          new_shape = [N, C_ceil, H, W, IB, 8]
+          new_dtype = "uint32"
+        else:
+          raise ValueError(f"Unsupported shape for qconv_input layout: {original_shape}")
+      elif layout_type == "qconv_output":
+        # NCHW -> [N, ceil(C/256), H, W, IB, 8] int32 (same as qconv_input for weights)
+        if len(original_shape) == 4:
+          N, C, H, W = original_shape
+          C_ceil = (C + 255) // 256
+          IB = 4  # Fixed value for qconv_output
+          new_shape = [N, C_ceil, H, W, IB, 8]
+          new_dtype = "int32"
+        else:
+          raise ValueError(f"Unsupported shape for qconv_output layout: {original_shape}")
+      else:
+        raise ValueError(f"Unknown layout type: {layout_type}")
+
+      # Create new variable with updated type
+      new_type = relay.TensorType(new_shape, new_dtype)
+      return new_type
 
     def calculate_param_type(self, func):
       self.gather_var_consumers(func)
-      self.param_layouts = []
       new_params = []
       for param in func.params:
-        layout_type, new_param = self.calculate_real_in_type(param)
-        self.param_layouts.append(layout_type)
+        new_param = self.calculate_real_in_type(param)
         new_params.append(new_param)
       return new_params
 
@@ -4541,7 +4394,6 @@ def calculate_imcflow_func_type(func, func_name=None):
       Calculate the return type of the function based on its body.
       This uses InferType to get the accurate return type after parameter updates.
       """
-      self.ret_layouts = []
       if isinstance(func.body, relay.Call):
         if isinstance(func.body.op, relay.Function):
           producer = [func.body.op.body]
@@ -4563,16 +4415,23 @@ def calculate_imcflow_func_type(func, func_name=None):
         raise ValueError("No producers found for function return value")
 
       ret_types = []
-      for idx, prod in enumerate(producer):
-        layout_type = self._get_output_layout(prod, idx)
-        self.ret_layouts.append(layout_type)
-        source_type = prod.checked_type
-        ret_types.append(self._apply_layout_to_type(source_type, layout_type))
+      for prod in producer:
+        curr_op = prod.op
+        origin_shape = prod.checked_type.shape
+        N, C, H, W = origin_shape
+        if curr_op == op.get("qnn.imcflow_min_max_quantize"):
+          shape = [N, (C+255)//256, H, W, 4, 8]
+          dtype = "uint32"
+        else:
+          shape = [N, (C+15)//16, H, W, 16]
+          dtype = "int16"
+
+        ret_types.append(relay.TensorType(shape, dtype))
 
       if len(ret_types) == 1:
-        return ret_types[0], self.ret_layouts[0]
+        return ret_types[0]
       else:
-        return relay.TupleType(ret_types), self.ret_layouts
+        return relay.TupleType(ret_types)
 
     def run(self, func):
       temp_mod = tvm.IRModule.from_expr(func)
@@ -4580,36 +4439,17 @@ def calculate_imcflow_func_type(func, func_name=None):
       gv = list(temp_mod.get_global_vars())[0]
       inferred_func = temp_mod[gv]
       param_types = self.calculate_param_type(inferred_func)
-      ret_type, ret_layout = self.calculate_ret_type(inferred_func)
-      return param_types, ret_type, {"params": self.param_layouts, "returns": ret_layout}
+      ret_type = self.calculate_ret_type(inferred_func)
+      return param_types, ret_type
 
-  updater = _ImcflowFunctionParamUpdater(func_name)
+  updater = _ImcflowFunctionParamUpdater()
   return updater.run(func)
 
-#TODO: just shape consideration is not robust. find producer or consumer node and op type.
-def create_wrap_func(func, func_name, new_param_type, new_ret_type, layout_info):
+def create_wrap_func(func, func_name, new_param_type, new_ret_type):
     """
     param_specs: [(name, shape, dtype), ...]
     """
     ttype_map = {}
-    param_layouts = layout_info.get("params", [])
-    ret_layouts = layout_info.get("returns", [])
-
-    def _block_from_layout(layout_type):
-      if layout_type == LayoutType.NCHW16C:
-        return 16
-      if layout_type == LayoutType.NCHW64C:
-        return 64
-      return None
-
-    def _pack_output_value(expr, layout_type):
-      if layout_type == LayoutType.QCONV_INPUT:
-        return imcflow_4d_to_qconv_input(expr)
-      if layout_type == LayoutType.NCHW16C:
-        return relay.op.layout_transform(expr, "NCHW", "NCHW16c")
-      if layout_type == LayoutType.NCHW64C:
-        return relay.op.layout_transform(expr, "NCHW", "NCHW64c")
-      return expr
     params = []
     for i, typ in enumerate(new_param_type):
         name  = f"var{i}"
@@ -4626,19 +4466,21 @@ def create_wrap_func(func, func_name, new_param_type, new_ret_type, layout_info)
     for i in range(len(old_params)):
         old_type = old_params[i].checked_type
         new_type = new_param_type[i]
-        layout_type = param_layouts[i] if i < len(param_layouts) else LayoutType.NCHW
-        if layout_type == LayoutType.QCONV_INPUT:
-          arg = imcflow_mmquant_out_to_4d(params[i], old_type.shape[1])
-        elif layout_type in (LayoutType.NCHW16C, LayoutType.NCHW64C):
-          block = _block_from_layout(layout_type)
-          arg = relay.op.layout_transform(params[i], layout_type.value, "NCHW")
-          N, CG, H, W, _ = new_type.shape
-          c_converted = CG * block
-          if c_converted > old_type.shape[1]:
-            arg = relay.op.strided_slice(arg, begin=[0,0,0,0], end=[N, old_type.shape[1], H, W])
+        # insert layout transform or bitpack
+        if len(new_type.shape) == 6: # qconv2d input
+            # bitunpack
+            arg = imcflow_mmquant_out_to_4d(params[i], old_type.shape[1])
+            args.append(arg)
+        elif len(new_type.shape) == 5: # vector input
+            # layout transform
+            arg = relay.op.layout_transform(params[i], "NCHW16c", "NCHW")
+            N, CG, H, W, c = new_type.shape
+            c_converted = CG * 16
+            if c_converted > old_type.shape[1]:
+              arg = relay.op.strided_slice(arg, begin=[0,0,0,0], end=[N, old_type.shape[1], H, W])
+            args.append(arg)
         else:
-          arg = params[i]
-        args.append(arg)
+            raise ValueError("why imcflow function params is not 5D or 6D")
         ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype, old_type.shape, old_type.dtype)
 
     # func_no_global_symbol = func.without_attr("global_symbol")
@@ -4649,14 +4491,28 @@ def create_wrap_func(func, func_name, new_param_type, new_ret_type, layout_info)
     if isinstance(new_ret_type, relay.TupleType):
       outs = []
       for i, field_type in enumerate(new_ret_type.fields):
-        layout_type = ret_layouts[i] if i < len(ret_layouts) else LayoutType.NCHW
-        gti = relay.TupleGetItem(body, i)
-        ret_field = _pack_output_value(gti, layout_type)
-        outs.append(ret_field)
+        if len(field_type.shape) == 6:  # qconv2d output
+            # bitpack
+            gti = relay.TupleGetItem(body, i)
+            ret_field = imcflow_4d_to_qconv_input(gti)
+            outs.append(ret_field)
+        elif len(field_type.shape) == 5:  # vector output
+            # layout transform
+            gti = relay.TupleGetItem(body, i)
+            ret_field = relay.op.layout_transform(gti, "NCHW", "NCHW16c")
+            outs.append(ret_field)
+        else:
+            raise ValueError("why imcflow function return type is not 5D or 6D")
       body = relay.Tuple(outs)
     elif isinstance(new_ret_type, relay.TensorType):
-      target_layout = ret_layouts if isinstance(ret_layouts, LayoutType) else (ret_layouts[0] if ret_layouts else LayoutType.NCHW)
-      body = _pack_output_value(body, target_layout)
+      if len(new_ret_type.shape) == 6:  # qconv2d output
+          # bitpack
+          body = imcflow_4d_to_qconv_input(body)
+      elif len(new_ret_type.shape) == 5:  # vector output
+          # layout transform
+          body = relay.op.layout_transform(body, "NCHW", "NCHW16c")
+      else:
+          raise ValueError("why imcflow function return type is not 5D or 6D")
 
     if isinstance(old_ret_type, relay.TupleType):
       temp = []
@@ -4705,9 +4561,9 @@ class ImcflowLayoutLegalizer:
 
     for i in range(num_func):
       if isImcflowFunc(mod[function_names[i]], mod):
-        param_type, ret_type, layout_info = calculate_imcflow_func_type(mod[function_names[i]], function_names[i])
+        param_type, ret_type = calculate_imcflow_func_type(mod[function_names[i]])
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
-        wrap_func, ttype_map = create_wrap_func(mod[function_names[i]], function_names[i], param_type, ret_type, layout_info)
+        wrap_func, ttype_map = create_wrap_func(mod[function_names[i]], function_names[i], param_type, ret_type)
         real_tensor_type_map[function_names[i]] = ttype_map
         old_gv = mod.get_global_var(function_names[i])
         func_type = relay.FuncType([x.type_annotation for x in wrap_func.params], wrap_func.ret_type)
@@ -5381,8 +5237,7 @@ class ImcflowLayoutLegalizer:
               new_arg = imcflow_mmquant_out_to_4d(arg, channels)
             elif len(arg_shape) == 5:
               # Pattern 4: 5D tensor (NCHW16c) - vector layout
-              block = int(arg_shape[4])
-              new_arg = relay.layout_transform(arg, f"NCHW{block}c", "NCHW")
+              new_arg = relay.layout_transform(arg, "NCHW16c", "NCHW")
 
               # Use ttype_map to get the original 4D shape
               if isinstance(arg, relay.Call) and isinstance(arg.op, relay.GlobalVar):
@@ -5407,18 +5262,18 @@ class ImcflowLayoutLegalizer:
                   # Get the current shape after layout_transform
                   N, CG, H, W, _ = arg_type.shape
 
-                  debug_print(f"  Pattern 4: Converting NCHW{block}c->NCHW")
+                  debug_print(f"  Pattern 4: Converting NCHW16c->NCHW")
                   debug_print(f"    Function: {func_name}")
-                  debug_print(f"    Original channels: {original_channels}, Current channels: {CG*block}")
+                  debug_print(f"    Original channels: {original_channels}, Current channels: {CG*16}")
 
                   # If padding was added (current channels > original), slice it off
-                  if CG*block > original_channels:
+                  if CG*16 > original_channels:
                     new_arg = relay.op.strided_slice(
                       new_arg,
                       begin=[0, 0, 0, 0],
                       end=[N, original_channels, H, W]
                     )
-                    debug_print(f"    Removed padding: {CG*block} -> {original_channels} channels")
+                    debug_print(f"    Removed padding: {CG*16} -> {original_channels} channels")
             else:
               print(f"  Skip: shape {len(arg_shape)}D is not need to transform")
               new_arg = arg
@@ -5485,9 +5340,8 @@ class ImcflowLayoutLegalizer:
                   print(f"    arg shape: {arg_type.shape}, receiver shape: {receiver_shape}")
                 elif len(receiver_shape) == 5:
                   # Pattern 2: 5D tensor (NCHW16c) - vector layout
-                  block = int(receiver_shape[4])
-                  new_arg = relay.layout_transform(arg, "NCHW", f"NCHW{block}c")
-                  print(f"  Pattern 2: Inserting layout_transform(NCHW->NCHW{block}c) for 5D input")
+                  new_arg = relay.layout_transform(arg, "NCHW", "NCHW16c")
+                  print(f"  Pattern 2: Inserting layout_transform(NCHW->NCHW16c) for 5D input")
                 else:
                   raise ValueError(f"Unsupported receiver shape {len(receiver_shape)}D for imcflow function parameter")
               else:
