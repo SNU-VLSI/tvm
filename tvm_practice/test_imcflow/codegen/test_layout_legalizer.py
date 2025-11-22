@@ -190,12 +190,12 @@ def test_get_valid_output_layout_split_concat():
   print(f"test_get_valid_output_layout_split_concat")
   p0 = relay.var("p0", shape=(1, 16, 8, 8))
   split_out = relay.split(p0, indices_or_sections=2, axis=1)
-  tgi0 = relay.TupleGetItem(split_out, 0)
-  tgi1 = relay.TupleGetItem(split_out, 1)
+  tgi0 = split_out[0]
+  tgi1 = split_out[1]
   concat_input = relay.Tuple([tgi0, tgi1])
   concat_out = relay.concatenate(concat_input, axis=1)
   split_out2 = relay.split(concat_out, indices_or_sections=2, axis=1)
-  tgi2 = relay.TupleGetItem(split_out2, 0)
+  tgi2 = split_out2[0]
   func = relay.Function([p0], tgi2)
   call = relay.Call(func, [_const((1, 16, 8, 8), "float32")])
 
@@ -203,6 +203,24 @@ def test_get_valid_output_layout_split_concat():
   print("\n=== valid layout split + concat ===")
   print("layout:", layout)
   assert layout == LayoutType.QCONV_INPUT
+
+def test_get_valid_output_layout_split_concat2():
+  print(f"test_get_valid_output_layout_split_concat")
+  p0 = relay.var("p0", shape=(1, 16, 8, 8))
+  split_out = relay.split(p0, indices_or_sections=2, axis=1)
+  tgi0 = split_out[0]
+  tgi1 = split_out[1]
+  concat_input = relay.Tuple([tgi0, tgi1])
+  concat_out = relay.concatenate(concat_input, axis=1)
+  split_out2 = relay.split(concat_out, indices_or_sections=2, axis=1)
+  tgi2 = split_out2[0]
+  func = relay.Function([p0], tgi2)
+  call = relay.Call(func, [_const((1, 16, 8, 8), "float32")])
+
+  layout = get_valid_output_layout_of_node(call, [LayoutType.NCHW16C])
+  print("\n=== valid layout split + concat ===")
+  print("layout:", layout)
+  assert layout == LayoutType.NCHW16C
 
 if __name__ == "__main__":
   test_builtin_call_inputs_outputs()
@@ -217,4 +235,5 @@ if __name__ == "__main__":
   test_get_valid_output_layout_complex_graph()
   test_get_valid_output_layout_complex_graph2()
   test_get_valid_output_layout_split_concat()
+  test_get_valid_output_layout_split_concat2()
   print("layout legalizer tests passed.")

@@ -91,24 +91,86 @@ class LayoutType(Enum):
   QCONV_WEIGHT = "QCONV_WEIGHT" # Packed filter layout for qconv
   QDCONV_WEIGHT = "QDCONV_WEIGHT"
   SCALAR = "SCALAR"
+  C="C"
 
-def _deduce_layout_from_type(ttype):
-  if not isinstance(ttype, TensorType):
-    return None
-  if len(ttype.shape) == 0:
-    return LayoutType.SCALAR
-  if len(ttype.shape) == 6:
-    return LayoutType.QCONV_INPUT
-  if len(ttype.shape) == 5:
-    block = int(ttype.shape[4])
-    if block == 16:
-      return LayoutType.NCHW16C
-    if block == 64:
-      return LayoutType.NCHW64C
-    raise ValueError(f"Unknown blocked layout with block size {block}")
-  if len(ttype.shape) == 4:
-    return LayoutType.NCHW
-  return None
+def is_layout_compatible_with_type(layout, ttype):
+  if layout == LayoutType.SCALAR:
+    if not isinstance(ttype, TensorType):
+      return False
+    rank = len(ttype.shape)
+    if rank == 0:
+      return True
+    if (rank == 1 and ttype.shape[0] == 1) or (rank == 1 and ttype.shape[0] == 8 and ttype.dtype == "uint32"): # conv config
+      return True
+    return False
+  return True
+
+# def _deduce_layout_from_type(ttype):
+#   if not isinstance(ttype, TensorType):
+#     raise ValueError("Input must be a TensorType")
+#   elif len(ttype.shape) == 0 or (len(ttype.shape) == 1 and ttype.shape[0] == 1):
+#     return LayoutType.SCALAR
+#   elif len(ttype.shape) == 1 and ttype.dtype == "uint32" and ttype.shape[0] == 8: # conv config
+#     return LayoutType.SCALAR
+#   elif len(ttype.shape) == 6:
+#     return LayoutType.QCONV_INPUT
+#   elif len(ttype.shape) == 5:
+#     block = int(ttype.shape[4])
+#     if block == 16:
+#       return LayoutType.NCHW16C
+#     elif block == 64:
+#       return LayoutType.NCHW64C
+#     raise ValueError(f"Unknown blocked layout with block size {block}")
+#   elif len(ttype.shape) == 4:
+#     if ttype.shape[2] == 256 and ttype.shape[3] == 8 and ttype.dtype == "uint32": # qconv2d weight
+#       return LayoutType.QCONV_WEIGHT
+#     else:
+#       return LayoutType.NCHW
+#   raise ValueError(f"Cannot deduce layout from type with shape length {len(ttype.shape)}")
+
+def _deduce_layout_from_op_const(call, index, not_const_layouts):
+  if not isinstance(call, relay.Call):
+    raise ValueError("Input must be a relay.Call")
+  if not isinstance(call.op, tvm.ir.Op):
+    raise ValueError("call.op must be a tvm.ir.Op")
+
+  op_name = call.op.name
+  const = call.args[index]
+  ttype = const.checked_type
+  if op_name == "nn.imcflow_qconv":
+    if index == 1:
+      return LayoutType.QCONV_WEIGHT
+    elif index == 2:
+      return LayoutType.SCALAR
+  elif op_name == "nn.imcflow_qdwconv":
+    if index == 1:
+      return LayoutType.QDCONV_WEIGHT
+    elif index == 2:
+      return LayoutType.SCALAR
+  elif op_name == "qnn.imcflow_min_max_quantize":
+    if index in [1, 2]:
+      return LayoutType.SCALAR
+  elif op_name == "qnn.imcflow_nu_quantize":
+    if index in [1, 2]:
+      return LayoutType.SCALAR
+  elif op_name == "imcflow.fused_batch_norm":
+    if index in [1,2]:
+      return LayoutType.C
+  elif op_name == "nn.bias_add":
+    if index == 1:
+      return LayoutType.C
+  elif op_name in ["add", "multiply", "divide"]:
+    if len(ttype.shape) == 0 or (len(ttype.shape) == 1 and ttype.shape[0] == 1):
+      return LayoutType.SCALAR
+    else:
+      if LayoutType.NCHW16C in not_const_layouts and (LayoutType.NCHW64C not in not_const_layouts):
+        return LayoutType.NCHW16C
+      elif LayoutType.NCHW64C in not_const_layouts and (LayoutType.NCHW16C not in not_const_layouts):
+        return LayoutType.NCHW64C
+      else:
+        raise ValueError("Cannot deduce constant layout for binary op with ambiguous input layouts.")
+  
+  raise ValueError(f"Cannot deduce layout from op {op_name} at index {index}")
 
 def get_op_name_of_call(call):
   if not isinstance(call, relay.Call):
@@ -168,21 +230,39 @@ REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.QCONV_INPUT,
     ),
-  ],
-  "qnn.imcflow_nu_quantize": [
     (
       [
-        [LayoutType.NCHW64C],
+        [LayoutType.NCHW64C, LayoutType.SCALAR, LayoutType.SCALAR],
       ],
-      LayoutType.NCHW64C,
+      LayoutType.QCONV_INPUT,
+    ),
+  ],
+  "qnn.imcflow_nu_quantize": [ #TODO: refine
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.SCALAR, LayoutType.SCALAR],
+      ],
+      LayoutType.QCONV_INPUT,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C, LayoutType.SCALAR, LayoutType.SCALAR],
+      ],
+      LayoutType.QCONV_INPUT,
     ),
   ],
   "nn.bias_add": [
     (
       [
-        [LayoutType.NCHW16C, LayoutType.NCHW16C],
+        [LayoutType.NCHW16C, LayoutType.C],
       ],
       LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C, LayoutType.C],
+      ],
+      LayoutType.NCHW64C,
     ),
   ],
   "nn.relu": [
@@ -192,13 +272,25 @@ REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW16C,
     ),
+    (
+      [
+        [LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
+    ),
   ],
   "imcflow.fused_batch_norm": [
     (
       [
-        [LayoutType.NCHW16C],
+        [LayoutType.NCHW16C, LayoutType.C, LayoutType.C],
       ],
       LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C, LayoutType.C, LayoutType.C],
+      ],
+      LayoutType.NCHW64C,
     ),
   ],
   "add": [
@@ -228,6 +320,13 @@ REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW64C,
     ),
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.NCHW64C],
+        [LayoutType.NCHW64C, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW64C,
+    ),
   ],
   "multiply": [
     (
@@ -246,6 +345,13 @@ REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW64C,
     ),
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.NCHW64C],
+        [LayoutType.NCHW64C, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW64C,
+    ),
   ],
   "divide": [
     (
@@ -256,6 +362,13 @@ REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW16C,
     ),
+    (
+      [
+        [LayoutType.NCHW16C, LayoutType.NCHW64C],
+        [LayoutType.NCHW64C, LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW64C,
+    ),
   ],
   "split": [
     (
@@ -263,6 +376,18 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.QCONV_INPUT],
       ],
       LayoutType.QCONV_INPUT,
+    ),
+    (
+      [
+        [LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
     ),
   ],
   "concatenate": [
@@ -435,7 +560,7 @@ def get_valid_output_layout_of_node(node, input_layouts):
   propagate layouts inside function body to get output layout.
   """
 
-  debug_print(f"[get_valid_output_layout_of_node] node: {node}, input_layouts: {input_layouts}")
+  debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, input_layouts: {input_layouts}")
 
   # if not isinstance(node, (relay.Call, relay.Function)): raise ValueError("node must be relay.Call or relay.Function")
 
@@ -453,11 +578,25 @@ def get_valid_output_layout_of_node(node, input_layouts):
     for rule in rules:
       inputs_options, outputs_layout = rule
       for option in inputs_options:
+        _option = option
+        _inputs = input_layouts
+        if len(option) == 1 and len(input_layouts) == 1 and isinstance(input_layouts[0], (tuple, list)):
+          _inputs = list(input_layouts[0])
+          _option = [option[0]] * len(_inputs)
+
         # check if input_layouts match option
-        if len(option) == len(input_layouts) and all(_layout_match(input_layouts[i], option[i]) for i in range(len(input_layouts))):
-          if valid_outputs_layout: raise ValueError("multiple valid output layouts found")
-          valid_outputs_layout = outputs_layout
+        if len(_option) == len(_inputs):
+          arg_types = [arg.checked_type for arg in node.args]
+          match = True
+          for i in range(len(_inputs)):
+            if (not _layout_match(_inputs[i], _option[i])) or (not is_layout_compatible_with_type(_inputs[i], arg_types[i])):
+              match = False
+              break
+          if match:
+            if valid_outputs_layout: raise ValueError("multiple valid output layouts found")
+            valid_outputs_layout = outputs_layout
     
+    debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, valid_outputs_layout: {valid_outputs_layout}")
     return valid_outputs_layout
   elif (isinstance(node, relay.Call) and (isinstance(node.op, relay.Function) or isinstance(node.op, relay.GlobalVar))) or (isinstance(node, relay.Function)):
     if isinstance(node, relay.Function):
@@ -473,29 +612,69 @@ def get_valid_output_layout_of_node(node, input_layouts):
     #- initalize layout dict for function params
     layout_dict = {param: layout for param, layout in zip(func.params, input_layouts)}
 
-    def _get_layout(expr):
-      assert expr in layout_dict, "input layout not found for expr in layout dict."
-      return layout_dict[expr]
+    def _get_layout(expr, call=None, idx=None, not_const_layouts=None):
+      if isinstance(expr, relay.Constant):
+        assert call is not None and idx is not None, "call and idx must be provided for constant layout deduction."
+        assert not_const_layouts is not None, "not_const_layouts must be provided for constant layout deduction."
+        debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, constant layout deduced.")
+        return _deduce_layout_from_op_const(call, idx, not_const_layouts)
+      else:
+        assert expr in layout_dict, "input layout not found for expr in layout dict."
+        return layout_dict[expr]
 
     for _node in call_nodes_topological:
       node_input_layouts = []
       if isinstance(_node, relay.Var):
         continue
       elif isinstance(_node, relay.Call):
-        for arg in _node.args:
-          node_input_layouts.append(_get_layout(arg))
+        const_args_indices = [i for i, arg in enumerate(_node.args) if isinstance(arg, relay.Constant)]
+        args_sorted = sorted(range(len(_node.args)), key=lambda k: k in const_args_indices)
+        not_const_layouts = []
+        for idx in args_sorted:
+          arg = _node.args[idx]
+          layout = _get_layout(arg, _node, idx, not_const_layouts=not_const_layouts)
+          node_input_layouts.append(layout)
+          if not isinstance(arg, relay.Constant):
+            not_const_layouts.append(layout)
+
       elif isinstance(_node, relay.Tuple):
         for field in _node.fields:
           node_input_layouts.append(_get_layout(field))
       elif isinstance(_node, relay.TupleGetItem):
+        assert isinstance(_node.tuple_value, relay.Tuple) or (isinstance(_node.tuple_value, relay.Call) and _node.tuple_value.op == op.get("split")), "tuple get item input must be tuple or split call."
         tuple_layout = _get_layout(_node.tuple_value)
-        assert isinstance(tuple_layout, tuple), "tuple layout expected for tuple get item input."
-        node_input_layouts.append(tuple_layout[_node.index])
+        if isinstance(_node.tuple_value, relay.Tuple):
+          node_input_layouts.append(tuple_layout[_node.index])
+        else:
+          node_input_layouts.append(tuple_layout)
       else:
         continue
 
       #- get output layout
-      node_output_layout = get_valid_output_layout_of_node(_node, node_input_layouts)
+      is_multi_candidate = any(isinstance(l, list) for l in node_input_layouts)
+      if not is_multi_candidate:
+        node_output_layout = get_valid_output_layout_of_node(_node, node_input_layouts)
+      else:
+        # multiple input layout candidates, try all combinations
+        input_layouts_candidates = []
+        for l in node_input_layouts:
+          if isinstance(l, list):
+            input_layouts_candidates.append(l)
+          else:
+            input_layouts_candidates.append([l])
+        
+        output_layout_candidates = set()
+        for comb in itertools.product(*input_layouts_candidates):
+          out_layout = get_valid_output_layout_of_node(_node, list(comb))
+          if out_layout:
+            output_layout_candidates.add(out_layout)
+        
+        if len(output_layout_candidates) == 1:
+          node_output_layout = output_layout_candidates.pop()
+        else:
+          debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, multiple output layout candidates found: {output_layout_candidates}.")
+          node_output_layout = output_layout_candidates[-1]
+
       if node_output_layout is None:
         return None
       layout_dict[_node] = node_output_layout
@@ -504,20 +683,29 @@ def get_valid_output_layout_of_node(node, input_layouts):
       if isinstance(expr, relay.Tuple):
         return tuple(_resolve(f) for f in expr.fields)
       if isinstance(expr, relay.TupleGetItem):
-        tuple_layout = _resolve(expr.tuple_value)
-        assert isinstance(tuple_layout, tuple), "tuple layout expected for tuple get item."
-        return tuple_layout[expr.index]
+        assert isinstance(_node.tuple_value, relay.Tuple) or (isinstance(_node.tuple_value, relay.Call) and _node.tuple_value.op == op.get("split")), "tuple get item input must be tuple or split call."
+        tuple_layout = _get_layout(_node.tuple_value)
+        if isinstance(_node.tuple_value, relay.Tuple):
+          return tuple_layout[expr.index]
+        else:
+          return tuple_layout
       return _get_layout(expr)
 
-    return _resolve(func.body)
+    output = _resolve(func.body) 
+    debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {output}")
+    return output
   elif isinstance(node, relay.Tuple):
+    debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {tuple(input_layouts)}")
     return tuple(input_layouts)
   elif isinstance(node, relay.TupleGetItem):
     if isinstance(input_layouts, (list, tuple)):
       if len(input_layouts) == 1:
+        debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts[0]}")
         return input_layouts[0]
       if len(input_layouts) > node.index:
+        debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts[node.index]}")
         return input_layouts[node.index]
+    debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts}")
     return input_layouts
 
 def getNodeID(node) -> int:
@@ -537,8 +725,17 @@ def getNodeDebugID(node):
       indicator = str(node.op.name_hint)
     else:
       indicator = "imcflow_func_impl"
+  elif isinstance(node, relay.Function):
+    if "Composite" in node.attrs:
+      indicator = str(node.attrs["Composite"])
+    else:
+      indicator = "func"
   else:
-    indicator = str(node.op)
+    node_id = getNodeID(node)
+    if node_id is not None:
+      indicator = f"node_{node_id}"
+    else:
+      indicator = "node_unknown"
   return indicator
 
 def getInnerNodeID(node):
@@ -734,7 +931,8 @@ class UseDefChainParser(relay.ExprVisitor):
     self._register_uses(call, call.args)
 
     # Continue visiting child nodes
-    super().visit_call(call)
+    for arg in call.args:
+      self.visit(arg)
 
   def visit_tuple(self, tup):
     # Record tuple field usage
@@ -837,7 +1035,7 @@ class LayoutPropagationContext:
     for param in self.func.params:
       layouts = self._collect_candidate_layouts(param, self.use_def_chain, set())
       if not layouts:
-        fallback = _deduce_layout_from_type(param.checked_type) or LayoutType.NCHW
+        fallback = LayoutType.NCHW
         layouts = {fallback}
       candidate_lists.append(sorted(list(layouts), key=lambda l: l.name))
 
@@ -4736,11 +4934,12 @@ def calculate_imcflow_func_type(func, func_name=None):
       for combo in param_layout_combinations:
         output_layout = get_valid_output_layout_of_node(inferred_func, [l for l in combo.values()])
         if output_layout is not None:
+          debug_print(f"[layout] combo succeeded: {combo} -> output layout: {output_layout}")
           valid_layouts.append((combo, output_layout))
         else:
           debug_print(f"[layout] combo failed: {combo}")
 
-      if len(output_layout) == 0:
+      if len(valid_layouts) == 0:
         raise ValueError("No valid layout cases found for function")
 
       for idx, (param_layouts, output_layout) in enumerate(valid_layouts):
@@ -4756,7 +4955,7 @@ def calculate_imcflow_func_type(func, func_name=None):
       param_layouts = []
       input_layouts = layout[0]
       for idx, param in enumerate(func.params):
-        layout = input_layouts[idx]
+        layout = input_layouts[param]
         param_layouts.append(layout)
         param_types.append(self._apply_layout_to_type(param.checked_type, layout))
       return param_types, param_layouts
@@ -4800,7 +4999,7 @@ def calculate_imcflow_func_type(func, func_name=None):
         return original_type
       
       if layout_type == LayoutType.SCALAR:
-        assert isinstance(original_type, TensorType) and len(original_type.shape) == 0, "SCALAR layout requires 0D tensor"
+        assert len(original_type.shape) == 0 or (len(original_type.shape) == 1 and original_type.shape[0] == 1) , f"SCALAR layout requires 0D tensor or shape [1]. input : {original_type}"
         return original_type
 
       original_shape = original_type.shape
