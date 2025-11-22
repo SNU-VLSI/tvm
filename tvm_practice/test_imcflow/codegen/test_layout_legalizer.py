@@ -155,6 +155,54 @@ def test_get_valid_output_layout_tgi():
   print("layout:", layout)
   assert layout == LayoutType.NCHW16C
 
+def test_get_valid_output_layout_complex_graph():
+  p0 = relay.var("p0", shape=(1, 16, 8, 8))
+  p1 = relay.var("p1", shape=(1, 16, 8, 8))
+  add_1 = relay.add(p0, p1)
+  relu_1 = relay.nn.relu(add_1)
+  mul_1 = relay.multiply(relu_1, p1)
+  tup = relay.Tuple([add_1, relu_1, mul_1])
+  tgi = relay.TupleGetItem(tup, 2)
+  func = relay.Function([p0, p1], tgi)
+  call = relay.Call(func, [_const((1, 16, 8, 8), "float32"), _const((1, 16, 8, 8), "float32")])
+
+  layout = get_valid_output_layout_of_node(call, [LayoutType.NCHW16C, LayoutType.NCHW16C])
+  print("\n=== valid layout complex graph ===")
+  print("layout:", layout)
+  assert layout == LayoutType.NCHW16C
+
+def test_get_valid_output_layout_complex_graph2():
+  p0 = relay.var("p0", shape=(1, 16, 8, 8))
+  p1 = relay.var("p1", shape=(1, 16, 8, 8))
+  add_1 = relay.add(p0, p1)
+  relu_1 = relay.nn.relu(add_1)
+  mul_1 = relay.multiply(relu_1, p1)
+  tup = relay.Tuple([add_1, relu_1, mul_1])
+  func = relay.Function([p0, p1], tup)
+  call = relay.Call(func, [_const((1, 16, 8, 8), "float32"), _const((1, 16, 8, 8), "float32")])
+
+  layout = get_valid_output_layout_of_node(call, [LayoutType.NCHW16C, LayoutType.NCHW16C])
+  print("\n=== valid layout complex graph ===")
+  print("layout:", layout)
+  assert layout == (LayoutType.NCHW16C, LayoutType.NCHW16C, LayoutType.NCHW16C)
+
+def test_get_valid_output_layout_split_concat():
+  print(f"test_get_valid_output_layout_split_concat")
+  p0 = relay.var("p0", shape=(1, 16, 8, 8))
+  split_out = relay.split(p0, indices_or_sections=2, axis=1)
+  tgi0 = relay.TupleGetItem(split_out, 0)
+  tgi1 = relay.TupleGetItem(split_out, 1)
+  concat_input = relay.Tuple([tgi0, tgi1])
+  concat_out = relay.concatenate(concat_input, axis=1)
+  split_out2 = relay.split(concat_out, indices_or_sections=2, axis=1)
+  tgi2 = relay.TupleGetItem(split_out2, 0)
+  func = relay.Function([p0], tgi2)
+  call = relay.Call(func, [_const((1, 16, 8, 8), "float32")])
+
+  layout = get_valid_output_layout_of_node(call, [LayoutType.QCONV_INPUT])
+  print("\n=== valid layout split + concat ===")
+  print("layout:", layout)
+  assert layout == LayoutType.QCONV_INPUT
 
 if __name__ == "__main__":
   test_builtin_call_inputs_outputs()
@@ -166,4 +214,7 @@ if __name__ == "__main__":
   test_get_valid_output_layout_tuple()
   test_get_valid_output_layout_composite()
   test_get_valid_output_layout_tgi()
+  test_get_valid_output_layout_complex_graph()
+  test_get_valid_output_layout_complex_graph2()
+  test_get_valid_output_layout_split_concat()
   print("layout legalizer tests passed.")

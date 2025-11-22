@@ -272,6 +272,18 @@ REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.QCONV_INPUT,
     ),
+    (
+      [
+        [LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
+    ),
   ],
 }
 
@@ -425,8 +437,14 @@ def get_valid_output_layout_of_node(node, input_layouts):
 
   debug_print(f"[get_valid_output_layout_of_node] node: {node}, input_layouts: {input_layouts}")
 
-  if not isinstance(node, (relay.Call, relay.Function)): raise ValueError("node must be relay.Call or relay.Function")
+  # if not isinstance(node, (relay.Call, relay.Function)): raise ValueError("node must be relay.Call or relay.Function")
+
   if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+    def _layout_match(actual, expected):
+      if isinstance(actual, (tuple, list)):
+        return all(_layout_match(a, expected) for a in actual)
+      return actual == expected
+
     op_name = node.op.name
     rules = REQUIRED_OP_LAYOUTS.get(op_name, None)
     if rules is None: raise ValueError(f"Layout requirement not defined for op {op_name}")
@@ -436,7 +454,7 @@ def get_valid_output_layout_of_node(node, input_layouts):
       inputs_options, outputs_layout = rule
       for option in inputs_options:
         # check if input_layouts match option
-        if len(option) == len(input_layouts) and all([input_layouts[i] == option[i] for i in range(len(input_layouts))]):
+        if len(option) == len(input_layouts) and all(_layout_match(input_layouts[i], option[i]) for i in range(len(input_layouts))):
           if valid_outputs_layout: raise ValueError("multiple valid output layouts found")
           valid_outputs_layout = outputs_layout
     
@@ -450,40 +468,57 @@ def get_valid_output_layout_of_node(node, input_layouts):
     # topological sort of function body to visit nodes in order
     use_def = UseDefChainParser()
     use_def.visit(func.body)
-    call_nodes_topological = use_def.topological_call_order()
+    call_nodes_topological = use_def.topological_call_order(call_only=False)
 
     #- initalize layout dict for function params
-    input_layout_dict = {param: layout for param, layout in zip(func.params, input_layouts)}
-    output_layout_dict = {}
+    layout_dict = {param: layout for param, layout in zip(func.params, input_layouts)}
+
+    def _get_layout(expr):
+      assert expr in layout_dict, "input layout not found for expr in layout dict."
+      return layout_dict[expr]
 
     for _node in call_nodes_topological:
-      # assert isinstance(_node, relay.Call), "only call nodes are expected in topological order"
-      #- get input layouts
       node_input_layouts = []
-      for arg in _node.args:
-        assert arg in input_layout_dict, "input layout not found for call arg in input layout dict."
-        node_input_layouts.append(input_layout_dict[arg])
+      if isinstance(_node, relay.Var):
+        continue
+      elif isinstance(_node, relay.Call):
+        for arg in _node.args:
+          node_input_layouts.append(_get_layout(arg))
+      elif isinstance(_node, relay.Tuple):
+        for field in _node.fields:
+          node_input_layouts.append(_get_layout(field))
+      elif isinstance(_node, relay.TupleGetItem):
+        tuple_layout = _get_layout(_node.tuple_value)
+        assert isinstance(tuple_layout, tuple), "tuple layout expected for tuple get item input."
+        node_input_layouts.append(tuple_layout[_node.index])
+      else:
+        continue
 
       #- get output layout
       node_output_layout = get_valid_output_layout_of_node(_node, node_input_layouts)
       if node_output_layout is None:
         return None
-      output_layout_dict[_node] = node_output_layout
+      layout_dict[_node] = node_output_layout
     
-    return output_layout_dict[node.op.body]
+    def _resolve(expr):
+      if isinstance(expr, relay.Tuple):
+        return tuple(_resolve(f) for f in expr.fields)
+      if isinstance(expr, relay.TupleGetItem):
+        tuple_layout = _resolve(expr.tuple_value)
+        assert isinstance(tuple_layout, tuple), "tuple layout expected for tuple get item."
+        return tuple_layout[expr.index]
+      return _get_layout(expr)
+
+    return _resolve(func.body)
   elif isinstance(node, relay.Tuple):
-    output_layouts = []
-    for i, field in enumerate(node.fields):
-      field_layout = get_valid_output_layout_of_node(field, input_layouts[i])
-      if field_layout is None:
-        return None
-      output_layouts.append(field_layout)
-    return tuple(output_layouts)
+    return tuple(input_layouts)
   elif isinstance(node, relay.TupleGetItem):
-    parent_layout = get_valid_output_layout_of_node(node.tuple_value, input_layouts)
-    if parent_layout is None:
-      return None
-    return parent_layout[node.index]
+    if isinstance(input_layouts, (list, tuple)):
+      if len(input_layouts) == 1:
+        return input_layouts[0]
+      if len(input_layouts) > node.index:
+        return input_layouts[node.index]
+    return input_layouts
 
 def getNodeID(node) -> int:
   id_dict = HashToCustomID()
@@ -4699,7 +4734,7 @@ def calculate_imcflow_func_type(func, func_name=None):
 
       valid_layouts = []
       for combo in param_layout_combinations:
-        output_layout = get_valid_output_layout_of_node(inferred_func.body, [l for l in combo.values()])
+        output_layout = get_valid_output_layout_of_node(inferred_func, [l for l in combo.values()])
         if output_layout is not None:
           valid_layouts.append((combo, output_layout))
         else:
