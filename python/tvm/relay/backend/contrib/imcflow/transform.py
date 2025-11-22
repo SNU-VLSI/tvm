@@ -12,6 +12,39 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeI
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
+# Debug logging utility controlled by IMCFLOW_DEBUG environment variable
+# Usage:
+#   export IMCFLOW_DEBUG=1  # Enable all debug messages
+#   export IMCFLOW_DEBUG=0  # Disable all debug messages
+_DEBUG_ENABLED = None
+
+def _is_debug_enabled():
+    """Check if debug logging is enabled via IMCFLOW_DEBUG environment variable"""
+    global _DEBUG_ENABLED
+    if _DEBUG_ENABLED is None:
+        debug_var = os.environ.get('IMCFLOW_DEBUG', '0')
+        _DEBUG_ENABLED = debug_var == '1' or debug_var.lower() == 'true'
+    return _DEBUG_ENABLED
+
+def debug_print(*args, **kwargs):
+    """Print debug message only if IMCFLOW_DEBUG is enabled"""
+    if _is_debug_enabled():
+        print(*args, **kwargs)
+
+
+from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
+from tvm.relay import pretty_print
+def printModel(result_dir, mod, param_dict, mod_name):
+  RelayVisualizer(
+      relay_mod=mod,
+      relay_param=param_dict,
+      plotter=DotPlotter(),
+      parser=DotVizParser(),
+  ).render(f"{result_dir}/{mod_name}")
+
+  with open(f"{result_dir}/{mod_name}.txt", "w") as f:
+    f.write(pretty_print(mod))
+
 # Operator groups for predicate reuse
 ELEMENT_WISE_OPS = {
   op.get("add"),
@@ -38,6 +71,7 @@ import math
 from copy import deepcopy
 import collections
 import re
+import itertools
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -79,24 +113,38 @@ def _deduce_layout_from_type(ttype):
 def get_op_name_of_call(call):
   if not isinstance(call, relay.Call):
     raise ValueError("Input must be a relay.Call")
+  
+  if not isinstance(call.op, tvm.ir.Op):
+    raise ValueError("call.op must be a tvm.ir.Op or relay.GlobalVar")
 
-  if isinstance(call.op, tvm.ir.Op):
-    op_name = call.op.name
-  elif isinstance(call.op, relay.GlobalVar):
-    op_name = call.op.name_hint
-  else:
-    raise ValueError("Unsupported call.op type for getting op name")
+  op_name = call.op.name
   
   return op_name
+
+def find_first_builtin_call(self, expr):
+  """DFS to find the first Call with builtin Op in the expression."""
+  if isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op):
+    return expr
+  elif isinstance(expr, relay.Call) and isinstance(expr.op, relay.Function):
+    return self.find_first_builtin_call(expr.op.body)
+  elif isinstance(expr, relay.Tuple):
+    for field in expr.fields:
+      found = self.find_first_builtin_call(field)
+      if found:
+        return found
+  elif isinstance(expr, relay.TupleGetItem):
+    return self.find_first_builtin_call(expr.tuple_value)
+  return None
+
 
 # Layout requirements per op.
 # Each op maps to a list of rules. A rule is a tuple:
 #   (inputs_options, output_layout)
-# - inputs_options: list of possible input layout lists (one list per permutation).
+# - inputs_options: list of possible input layout lists (one list per permutatio.
 #   Example: [[a, b], [b, a]] means two valid input orderings.
 #   If a layout list has length 1 and the call has more args, the single layout applies to all args.
 # - output_layout: single layout applied to all outputs of the op.
-OP_LAYOUT_REQUIREMENTS = {
+REQUIRED_OP_LAYOUTS = {
   "nn.imcflow_qconv": [
     (
       [
@@ -185,14 +233,26 @@ OP_LAYOUT_REQUIREMENTS = {
     (
       [
         [LayoutType.NCHW16C, LayoutType.NCHW16C],
+        [LayoutType.NCHW16C, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.NCHW16C],
       ],
       LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C, LayoutType.NCHW64C],
+        [LayoutType.NCHW64C, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
     ),
   ],
   "divide": [
     (
       [
         [LayoutType.NCHW16C, LayoutType.NCHW16C],
+        [LayoutType.NCHW16C, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.NCHW16C],
       ],
       LayoutType.NCHW16C,
     ),
@@ -200,122 +260,230 @@ OP_LAYOUT_REQUIREMENTS = {
   "split": [
     (
       [
-        [LayoutType.NCHW16C],
+        [LayoutType.QCONV_INPUT],
       ],
-      LayoutType.NCHW16C,
+      LayoutType.QCONV_INPUT,
     ),
   ],
   "concatenate": [
     (
       [
-        [LayoutType.NCHW16C],
+        [LayoutType.QCONV_INPUT],
       ],
-      LayoutType.NCHW16C,
+      LayoutType.QCONV_INPUT,
     ),
   ],
 }
 
-def get_required_layout_from_op(op_name, io_kind, index, call_node=None):
-  req = OP_LAYOUT_REQUIREMENTS.get(op_name, None)
-  if req is None:
-    raise ValueError(f"Layout requirement not defined for op {op_name}")
+def get_required_layout_from_op(call, io_kind, index):
+  """
+  Lightweight accessor for layout rules.
 
-  rules = req
+  Parameters
+  ----------
+  call : relay.Call
+    call node. it can be built-in op or composite function.
+  io_kind : str
+    "inputs" or "outputs".
+  index : int
+    Input or output index.
+  """
+  if not isinstance(call, relay.Call):
+    raise ValueError("Input must be a relay.Call")
 
-  def _layouts_match(pattern):
-    # pattern: list of layouts for inputs. len may be 1 -> apply to all inputs.
-    if call_node is None or not isinstance(call_node, relay.Call):
-      raise ValueError("call_node must be provided and be a relay.Call")
+  # Resolve op name (builtin or from composite body)
+  if isinstance(call.op, tvm.ir.Op):
+    op_names = [call.op.name]
+    index_list = [index]
+    layout_set = set([LayoutType.SCALAR, LayoutType.NCHW, LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT, LayoutType.QCONV_WEIGHT, LayoutType.QDCONV_WEIGHT])
+    for op_name, index in zip(op_names, index_list):
+      rules = REQUIRED_OP_LAYOUTS.get(op_name, None)
 
-    args = call_node.args
-    if len(pattern) == len(args):
-      zipped = zip(pattern, args)
-    elif len(pattern) == 1:
-      zipped = [(pattern[0], arg) for arg in args]
-    else:
-      return False
+      if rules is None:
+        raise ValueError(f"Layout requirement not defined for op {op_name}")
 
-    for expected, arg in zipped:
-      if expected is None:
-        continue
-      arg_type = getattr(arg, "checked_type", None)
-      if isinstance(arg_type, TensorType):
-        deduced = _deduce_layout_from_type(arg_type)
-        if deduced != expected:
-          return False
+      required_layouts_ = []
+      for rule in rules:
+        inputs_options, outputs_layout = rule
+        if io_kind == "inputs":
+          required_layouts_.extend([opt[index] for opt in inputs_options])
+        elif io_kind == "outputs":
+          required_layouts_.append(outputs_layout)
+        else:
+          raise ValueError(f"Unknown io_kind {io_kind}")
+      
+      layout = required_layouts_
+      layout_set = layout_set.intersection(set(layout))
+
+    return list(layout_set)
+  elif isinstance(call.op, relay.Function):
+    # Traverse into composite function to find first builtin call
+    def first_builtin_pred(_ctx, expr):
+      curr_is_builtin = isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op)
+      stack = _ctx["stack"]
+      already_meet = any([isinstance(s, relay.Call) and isinstance(s.op, tvm.ir.Op) for s in stack])
+      return curr_is_builtin and not already_meet
+    collector = NodeCollector(predicates=[first_builtin_pred])
+    collected = collector.collect(call.op.body)
+    if not collected:
+      raise ValueError("Composite function does not contain builtin call for layout lookup")
+
+    if io_kind == "inputs":
+      # Map param index to actual arg usage in first builtin call
+      target_param = call.op.params[index]
+      # Find user of target_param inside composite body
+      use_def = UseDefChainParser()
+      use_def.visit(call.op.body)
+      users = use_def.get_users(target_param)
+      if not users:
+        raise ValueError("Composite param has no users in body for layout lookup")
+
+      builtin_users = []
+      builtin_idxs = []
+      for user, arg_idx in users:
+        if isinstance(user, relay.Call) and isinstance(user.op, tvm.ir.Op):
+          builtin_users.append(user)
+          builtin_idxs.append(arg_idx)
+      
+      op_names = [builtin_user.op.name for builtin_user in builtin_users]
+      index_list = builtin_idxs
+
+      layout_set = set([LayoutType.SCALAR, LayoutType.NCHW, LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT, LayoutType.QCONV_WEIGHT, LayoutType.QDCONV_WEIGHT])
+      for op_name, index in zip(op_names, index_list):
+        rules = REQUIRED_OP_LAYOUTS.get(op_name, None)
+
+        if rules is None:
+          raise ValueError(f"Layout requirement not defined for op {op_name}")
+
+        required_layouts_ = []
+        for rule in rules:
+          inputs_options, outputs_layout = rule
+          if io_kind == "inputs":
+            required_layouts_.extend([opt[index] for opt in inputs_options])
+          elif io_kind == "outputs":
+            required_layouts_.append(outputs_layout)
+          else:
+            raise ValueError(f"Unknown io_kind {io_kind}")
+        
+        layout = required_layouts_
+        layout_set = layout_set.intersection(set(layout))
+
+      return list(layout_set)
+    elif io_kind == "outputs":
+      if len(collected) == 1:
+        builtin_call = collected[0]
+        op_name = builtin_call.op.name
+        index_list = 0  # Assume single output for now
+      elif len(collected) > 1:
+        op_name = tuple([c.op.name for c in collected])
+        index_list = tuple([0 for _ in collected])
+
+      if isinstance(op_name, tuple): # output is tuple
+        required_layouts_per_output = {key:[] for key in op_name} # container of layout candidates per tuple field
+        for op_name_, index_ in zip(op_name, index_list):
+          rules = REQUIRED_OP_LAYOUTS.get(op_name_, None)
+          if rules is None:
+            raise ValueError(f"Layout requirement not defined for op {op_name_}")
+          
+          for rule in rules:
+            inputs_options, outputs_layout = rule
+            if outputs_layout not in required_layouts_per_output[op_name_]:
+              required_layouts_per_output[op_name_].append(outputs_layout)
+        
+        required_layouts = []
+        for comb in itertools.product(*required_layouts_per_output.values()):
+          layout_candidate = tuple(comb)
+          required_layouts.append(layout_candidate)
+          
+        return required_layouts
       else:
-        return False
-    return True
+        rules = REQUIRED_OP_LAYOUTS.get(op_name, None)
 
-  def _pick_layout_from_pattern(layouts, idx):
-    if layouts is None:
-      raise ValueError("layouts is None")
+        if rules is None:
+          raise ValueError(f"Layout requirement not defined for op {op_name}")
 
-    # layouts can be a list (inputs) or a single layout (outputs)
-    if not isinstance(layouts, (list, tuple)):
-      return layouts
-    if idx < len(layouts):
-      return layouts[idx]
+        required_layouts_ = []
+        for rule in rules:
+          inputs_options, outputs_layout = rule
+          if outputs_layout not in required_layouts_:
+            required_layouts_.append(outputs_layout)
+        
+        return required_layouts_
     else:
-      raise ValueError(f"Index {idx} out of range for layouts {layouts}")
-
-  chosen_inputs = None
-  chosen_output = None
-
-  for inputs_options, outputs_options in rules:
-    matched_pattern = None
-    for pattern in inputs_options:
-      if _layouts_match(pattern):
-        matched_pattern = pattern
-        break
-    if matched_pattern is not None:
-      chosen_inputs = matched_pattern
-      chosen_output = outputs_options
-      break
-
-  if chosen_inputs is None:
-    # fallback to first rule / first pattern
-    first_inputs_options, first_outputs_options = rules[0]
-    chosen_inputs = first_inputs_options[0]
-    chosen_output = first_outputs_options
-
-  if io_kind == "inputs":
-    return _pick_layout_from_pattern(chosen_inputs, index)
+      raise ValueError(f"Unknown io_kind {io_kind}")
   else:
-    return _pick_layout_from_pattern(chosen_output, index)
+    raise ValueError("call.op must be a tvm.ir.Op or relay.Function")
 
-# Debug logging utility controlled by IMCFLOW_DEBUG environment variable
-# Usage:
-#   export IMCFLOW_DEBUG=1  # Enable all debug messages
-#   export IMCFLOW_DEBUG=0  # Disable all debug messages
-_DEBUG_ENABLED = None
+def get_valid_output_layout_of_node(node, input_layouts):
+  """
+  get valid output layout of call node based on input layouts.
+  call node can be built-in op or composite function or global var.
+  If call is built-in op, use REQUIRED_OP_LAYOUTS to get output layout.
+  if call is composite function or global var, we apply input layouts to function params and
+  propagate layouts inside function body to get output layout.
+  """
 
-def _is_debug_enabled():
-    """Check if debug logging is enabled via IMCFLOW_DEBUG environment variable"""
-    global _DEBUG_ENABLED
-    if _DEBUG_ENABLED is None:
-        debug_var = os.environ.get('IMCFLOW_DEBUG', '0')
-        _DEBUG_ENABLED = debug_var == '1' or debug_var.lower() == 'true'
-    return _DEBUG_ENABLED
+  debug_print(f"[get_valid_output_layout_of_node] node: {node}, input_layouts: {input_layouts}")
 
-def debug_print(*args, **kwargs):
-    """Print debug message only if IMCFLOW_DEBUG is enabled"""
-    if _is_debug_enabled():
-        print(*args, **kwargs)
+  if not isinstance(node, (relay.Call, relay.Function)): raise ValueError("node must be relay.Call or relay.Function")
+  if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+    op_name = node.op.name
+    rules = REQUIRED_OP_LAYOUTS.get(op_name, None)
+    if rules is None: raise ValueError(f"Layout requirement not defined for op {op_name}")
 
+    valid_outputs_layout = None
+    for rule in rules:
+      inputs_options, outputs_layout = rule
+      for option in inputs_options:
+        # check if input_layouts match option
+        if len(option) == len(input_layouts) and all([input_layouts[i] == option[i] for i in range(len(input_layouts))]):
+          if valid_outputs_layout: raise ValueError("multiple valid output layouts found")
+          valid_outputs_layout = outputs_layout
+    
+    return valid_outputs_layout
+  elif (isinstance(node, relay.Call) and (isinstance(node.op, relay.Function) or isinstance(node.op, relay.GlobalVar))) or (isinstance(node, relay.Function)):
+    if isinstance(node, relay.Function):
+      func = node
+    else:
+      func = node.op
 
-from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
-from tvm.relay import pretty_print
-def printModel(result_dir, mod, param_dict, mod_name):
-  RelayVisualizer(
-      relay_mod=mod,
-      relay_param=param_dict,
-      plotter=DotPlotter(),
-      parser=DotVizParser(),
-  ).render(f"{result_dir}/{mod_name}")
+    # topological sort of function body to visit nodes in order
+    use_def = UseDefChainParser()
+    use_def.visit(func.body)
+    call_nodes_topological = use_def.topological_call_order()
 
-  with open(f"{result_dir}/{mod_name}.txt", "w") as f:
-    f.write(pretty_print(mod))
+    #- initalize layout dict for function params
+    input_layout_dict = {param: layout for param, layout in zip(func.params, input_layouts)}
+    output_layout_dict = {}
+
+    for _node in call_nodes_topological:
+      # assert isinstance(_node, relay.Call), "only call nodes are expected in topological order"
+      #- get input layouts
+      node_input_layouts = []
+      for arg in _node.args:
+        assert arg in input_layout_dict, "input layout not found for call arg in input layout dict."
+        node_input_layouts.append(input_layout_dict[arg])
+
+      #- get output layout
+      node_output_layout = get_valid_output_layout_of_node(_node, node_input_layouts)
+      if node_output_layout is None:
+        return None
+      output_layout_dict[_node] = node_output_layout
+    
+    return output_layout_dict[node.op.body]
+  elif isinstance(node, relay.Tuple):
+    output_layouts = []
+    for i, field in enumerate(node.fields):
+      field_layout = get_valid_output_layout_of_node(field, input_layouts[i])
+      if field_layout is None:
+        return None
+      output_layouts.append(field_layout)
+    return tuple(output_layouts)
+  elif isinstance(node, relay.TupleGetItem):
+    parent_layout = get_valid_output_layout_of_node(node.tuple_value, input_layouts)
+    if parent_layout is None:
+      return None
+    return parent_layout[node.index]
 
 def getNodeID(node) -> int:
   id_dict = HashToCustomID()
@@ -413,6 +581,83 @@ def getInputNodesOfFunc(func):
   _Visitor().visit(func)
   return InNodes
 
+class NodeCollector(relay.ExprVisitor):
+  """
+  Collects expr nodes matching given predicates (default: all).
+
+  Parameters
+  ----------
+  predicates : list of callables(ctx, expr) -> bool
+    If empty, all nodes are collected. If provided, a node is collected if any predicate returns True.
+  ctx : any (optional)
+    Carried into predicates; defaults to internal dict with traversal flags.
+  """
+  def __init__(self, predicates=None):
+    super().__init__()
+    self.ctx = {
+      "in_sub_func" : False,
+      "sub_func_level" : 0,
+      "stack" : []
+    }
+    self.predicates = predicates or []
+    self.collected = []
+
+  def _should_collect(self, expr):
+    if not self.predicates:
+      return True
+    return any(pred(self.ctx, expr) for pred in self.predicates)
+
+  def visit_call(self, call):
+    # Collect current call if it matches predicates
+    if self._should_collect(call):
+      self.collected.append(call)
+    
+    self.ctx["stack"].append(call)
+
+    # If call is a composite function, traverse into its body
+    if isinstance(call.op, relay.Function):
+      self.ctx["in_sub_func"] = True
+      self.ctx["sub_func_level"] += 1
+      self.visit(call.op.body)
+      self.ctx["sub_func_level"] -= 1
+      if self.ctx["sub_func_level"] == 0:
+        self.ctx["in_sub_func"] = False
+    else:
+      super().visit_call(call)
+    
+    self.ctx["stack"].pop()
+
+  def visit_var(self, var):
+    if self._should_collect(var):
+      self.collected.append(var)
+    
+    self.ctx["stack"].append(var)
+    super().visit_var(var)
+    self.ctx["stack"].pop()
+
+  def visit_tuple(self, tup):
+    if self._should_collect(tup):
+      self.collected.append(tup)
+    
+    self.ctx["stack"].append(tup)
+    super().visit_tuple(tup)
+    self.ctx["stack"].pop()
+
+  def visit_tuple_getitem(self, tgi):
+    if self._should_collect(tgi):
+      self.collected.append(tgi)
+
+    self.ctx["stack"].append(tgi)
+    super().visit_tuple_getitem(tgi)
+    self.ctx["stack"].pop()
+
+  def collect(self, expr, ctx=None):
+    if ctx is not None:
+      self.ctx = ctx
+    self.collected = []
+    self.visit(expr)
+    return self.collected
+
 def getConstNodesOfFunc(func):
   InNodes = []
 
@@ -431,39 +676,192 @@ class UseDefChainParser(relay.ExprVisitor):
   """
   def __init__(self):
     super().__init__()
-    self.use_def_chain = {}  # {expr : [list of (user_call, arg_index)]}
+    self.users = {}  # {expr : [list of (user_call, arg_index)]}
+    self.uses = {}  # {expr : [list of operand exprs]}
+    self.call_nodes = []
+    self._call_set = set()
+
+  def _record_use(self, user, operand, tag):
+    if operand not in self.users:
+      self.users[operand] = []
+    self.users[operand].append((user, tag))
+
+  def _register_uses(self, user, operands, tag_fn=None):
+    self.uses[user] = list(operands)
+    for idx, operand in enumerate(operands):
+      tag = tag_fn(idx, operand) if tag_fn else idx
+      self._record_use(user, operand, tag)
 
   def visit_call(self, call):
-    # Record that this call uses each of its arguments
-    for i, arg in enumerate(call.args):
-      if arg not in self.use_def_chain:
-        self.use_def_chain[arg] = []
-      self.use_def_chain[arg].append((call, i))
+    if call not in self._call_set:
+      self._call_set.add(call)
+      self.call_nodes.append(call)
+    self._register_uses(call, call.args)
 
     # Continue visiting child nodes
     super().visit_call(call)
 
   def visit_tuple(self, tup):
     # Record tuple field usage
-    for i, field in enumerate(tup.fields):
-      if field not in self.use_def_chain:
-        self.use_def_chain[field] = []
-      # Note: tuples don't have a single call user, we mark with None
-      self.use_def_chain[field].append((tup, i))
+    self._register_uses(tup, tup.fields)
 
     super().visit_tuple(tup)
 
   def visit_tuple_getitem(self, tgi):
     # Record TupleGetItem usage
-    if tgi.tuple_value not in self.use_def_chain:
-      self.use_def_chain[tgi.tuple_value] = []
-    self.use_def_chain[tgi.tuple_value].append((tgi, tgi.index))
+    self._register_uses(
+      tgi,
+      [tgi.tuple_value],
+      tag_fn=lambda idx, _: tgi.index if idx == 0 else idx,
+    )
 
     super().visit_tuple_getitem(tgi)
 
   def get_users(self, expr):
     """Get all users (consumers) of an expression"""
-    return self.use_def_chain.get(expr, [])
+    return self.users.get(expr, [])
+
+  def get_uses(self, expr):
+    """Get operands (dependencies) of an expression"""
+    return self.uses.get(expr, [])
+
+  def _find_call_inputs(self, call):
+    deps = set()
+    stack = list(self.uses.get(call, []))
+    while stack:
+      expr = stack.pop()
+      if isinstance(expr, relay.Call):
+        deps.add(expr)
+      elif isinstance(expr, relay.TupleGetItem):
+        stack.append(expr.tuple_value)
+      elif isinstance(expr, relay.Tuple):
+        stack.extend(expr.fields)
+    return deps
+
+  def topological_call_order(self, call_only=False):
+    """
+    Return nodes in topological order (producers before consumers).
+    If call_only is True, only call nodes are included. Otherwise tuples,
+    tuple_get_item, and var nodes are also part of the ordering.
+    """
+    if call_only:
+      nodes = list(self.call_nodes)
+      dep_fn = lambda n: self._find_call_inputs(n)
+    else:
+      node_set = set(self.call_nodes)
+      for expr, deps in self.uses.items():
+        if isinstance(expr, (relay.Tuple, relay.TupleGetItem, relay.Var)):
+          node_set.add(expr)
+        for dep in deps:
+          if isinstance(dep, (relay.Call, relay.Tuple, relay.TupleGetItem, relay.Var)):
+            node_set.add(dep)
+      nodes = list(node_set)
+      dep_fn = lambda n: [
+        op for op in self.uses.get(n, [])
+        if isinstance(op, (relay.Call, relay.Tuple, relay.TupleGetItem, relay.Var))
+      ]
+
+    indegree = {n: 0 for n in nodes}
+    adj = collections.defaultdict(list)
+
+    for node in nodes:
+      for dep in dep_fn(node):
+        adj[dep].append(node)
+        indegree[node] += 1
+
+    queue = collections.deque([n for n, deg in indegree.items() if deg == 0])
+    ordered = []
+
+    while queue:
+      curr = queue.popleft()
+      ordered.append(curr)
+      for nxt in adj.get(curr, []):
+        indegree[nxt] -= 1
+        if indegree[nxt] == 0:
+          queue.append(nxt)
+
+    if len(ordered) != len(nodes):
+      raise ValueError("Cycle detected in node graph")
+    return ordered
+
+class LayoutPropagationContext:
+  """
+  Helper to build candidate layout combinations for function variables using use-def chains.
+
+  The context parses the use-def chain of the function body and walks from inputs toward outputs
+  to gather all possible required layouts for each parameter. It returns the Cartesian product
+  of these per-parameter candidate sets.
+  """
+  def __init__(self, func):
+    self.func = func
+    self.use_def_chain = UseDefChainParser()
+    self.use_def_chain.visit(func.body)
+
+  def build_var_layout_combinations(self):
+    candidate_lists = []
+    for param in self.func.params:
+      layouts = self._collect_candidate_layouts(param, self.use_def_chain, set())
+      if not layouts:
+        fallback = _deduce_layout_from_type(param.checked_type) or LayoutType.NCHW
+        layouts = {fallback}
+      candidate_lists.append(sorted(list(layouts), key=lambda l: l.name))
+
+    combinations = []
+    for product in itertools.product(*candidate_lists):
+      combo = {}
+      for param, layout in zip(self.func.params, product):
+        combo[param] = layout
+      combinations.append(combo)
+    return combinations
+
+  def _collect_candidate_layouts(self, expr, parser, visited):
+    key = (expr, id(parser))
+    if key in visited:
+      return set()
+    visited.add(key)
+
+    layouts = set()
+    for user, arg_index in parser.get_users(expr):
+      if isinstance(user, relay.Call):
+        if isinstance(user.op, tvm.ir.Op):
+          layouts.update(self._layouts_from_op(user, arg_index))
+        elif isinstance(user.op, relay.Function):
+          inner_parser = UseDefChainParser()
+          inner_parser.visit(user.op.body)
+          param_var = user.op.params[arg_index]
+          layouts.update(self._collect_candidate_layouts(param_var, inner_parser, visited))
+        elif isinstance(user.op, relay.GlobalVar):
+          # Without module context, conservatively fall back to default layout later.
+          continue
+      elif isinstance(user, relay.TupleGetItem):
+        layouts.update(self._collect_candidate_layouts(user, parser, visited))
+      elif isinstance(user, relay.Tuple):
+        layouts.update(self._collect_candidate_layouts(user, parser, visited))
+    return layouts
+
+  def _layouts_from_op(self, call, arg_index):
+    layouts = set()
+    rules = None
+    if isinstance(call.op, tvm.ir.Op):
+      rules = REQUIRED_OP_LAYOUTS.get(call.op.name, None)
+    elif isinstance(call.op, relay.Function):
+      inner_call = self._find_first_builtin_call(call.op.body)
+      if inner_call is None or not isinstance(inner_call.op, tvm.ir.Op):
+        raise ValueError("Composite function does not contain builtin call for layout deduction")
+      rules = REQUIRED_OP_LAYOUTS.get(inner_call.op.name, None)
+    if rules is None:
+      raise ValueError(f"Layout requirement not defined for op {call.op}")
+    for inputs_options, _ in rules:
+      for pattern in inputs_options:
+        if len(pattern) == 1:
+          candidate = pattern[0]
+        elif arg_index < len(pattern):
+          candidate = pattern[arg_index]
+        else:
+          continue
+        if candidate is not None:
+          layouts.add(candidate)
+    return layouts
 
 class ConsumerFinder:
   """
@@ -506,6 +904,7 @@ class ConsumerFinder:
       if isinstance(user, relay.Call):
         should_recurse = any(pred(user, arg_index) for pred in self.skip_predicates) if self.skip_predicates else False
         if should_recurse:
+          before = len(consumers)
           if isinstance(user.op, relay.Function):
             _recurse_use_def = UseDefChainParser()
             _recurse_use_def.visit(user.op.body)
@@ -517,6 +916,10 @@ class ConsumerFinder:
           else:
             # Skip recording this call and continue downstream
             self._find_consumers_recursive(user, consumers)
+          # If skipping did not yield any downstream consumers (e.g., leaf element-wise op),
+          # keep this call as the consumer so the variable is not lost.
+          if len(consumers) == before:
+            consumers.append((user, arg_index))
         else:
           if isinstance(user.op, tvm.ir.Op):
             op_name = user.op.name
@@ -551,35 +954,62 @@ class ProducerFinder:
   def find_producers_of_node(self, node):
     self.visited.clear()
     producers = []
-    self._find_producers_recursive(node, 0, producers)
+    self._find_producers_recursive(node, [], producers)
     return producers
 
+  def _normalize_index_for_key(self, out_index):
+    if isinstance(out_index, list):
+      return tuple(out_index)
+    return out_index
+
+  def _push_index(self, current_index, new_index):
+    if isinstance(current_index, list):
+      stack = list(current_index)
+    elif current_index == 0:
+      stack = []
+    else:
+      stack = [current_index]
+    stack.append(new_index)
+    return stack
+
+  def _materialize_index(self, index_stack):
+    if isinstance(index_stack, list):
+      if len(index_stack) == 0:
+        return 0
+      if len(index_stack) == 1:
+        return index_stack[0]
+      return index_stack
+    return index_stack
+
   def _find_producers_recursive(self, expr, out_index, producers):
-    key = (expr, out_index)
+    key = (expr, self._normalize_index_for_key(out_index))
     if key in self.visited:
       return
     self.visited.add(key)
 
     if isinstance(expr, relay.TupleGetItem):
       # Track tuple index as output index
-      self._find_producers_recursive(expr.tuple_value, expr.index, producers)
+      next_index = self._push_index(out_index, expr.index)
+      self._find_producers_recursive(expr.tuple_value, next_index, producers)
     elif isinstance(expr, relay.Tuple):
-      # Follow the specific tuple field indicated by out_index
-      target_index = out_index if out_index < len(expr.fields) else 0
-      self._find_producers_recursive(expr.fields[target_index], 0, producers)
+      # Traverse every tuple field, tracking the nested output indices like a stack
+      for idx, field in enumerate(expr.fields):
+        next_index = self._push_index(out_index, idx)
+        self._find_producers_recursive(field, next_index, producers)
     elif isinstance(expr, relay.Call):
+      materialized_index = self._materialize_index(out_index)
       # If calling a relay.Function, recurse into its body to find real producers
       if isinstance(expr.op, relay.Function):
         self._find_producers_recursive(expr.op.body, out_index, producers)
         return
 
-      should_recurse = any(pred(expr, out_index) for pred in self.skip_predicates) if self.skip_predicates else False
+      should_recurse = any(pred(expr, materialized_index) for pred in self.skip_predicates) if self.skip_predicates else False
       if should_recurse:
         # Skip this call and recurse into its inputs
         for arg in expr.args:
-          self._find_producers_recursive(arg, 0, producers)
+          self._find_producers_recursive(arg, out_index, producers)
       else:
-        producers.append((expr, out_index))
+        producers.append((expr, materialized_index))
     else:
       # For vars/constants etc., no Call producer to record
       return
@@ -4225,6 +4655,13 @@ def modify_call_node_attrs(call_node, in_node=None, out_node=None, const_packed_
 
   return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
 
+def expand_pattern(pattern, num_args):
+  if len(pattern) == num_args:
+    return pattern
+  if len(pattern) == 1:
+    return [pattern[0]] * num_args
+  return None
+
 def calculate_imcflow_func_type(func, func_name=None):
   """
   imcflow function need real tensor type with real layout.
@@ -4255,44 +4692,58 @@ def calculate_imcflow_func_type(func, func_name=None):
       temp_mod = relay.transform.InferType()(temp_mod)
       gv = list(temp_mod.get_global_vars())[0]
       inferred_func = temp_mod[gv]
-      param_types, param_layouts = self.calculate_param_type(inferred_func)
-      ret_type, ret_layout = self.calculate_ret_type(inferred_func)
+
+      layout_context = LayoutPropagationContext(inferred_func)
+      param_layout_combinations = layout_context.build_var_layout_combinations()
+      debug_print(f"Parameter layout combinations: {param_layout_combinations}")
+
+      valid_layouts = []
+      for combo in param_layout_combinations:
+        output_layout = get_valid_output_layout_of_node(inferred_func.body, [l for l in combo.values()])
+        if output_layout is not None:
+          valid_layouts.append((combo, output_layout))
+        else:
+          debug_print(f"[layout] combo failed: {combo}")
+
+      if len(output_layout) == 0:
+        raise ValueError("No valid layout cases found for function")
+
+      for idx, (param_layouts, output_layout) in enumerate(valid_layouts):
+        debug_print(f"[layout] valid case {idx}: params {param_layouts}, output {output_layout}")
+
+      chosen_layout = valid_layouts[-1]
+      param_types, param_layouts = self._build_param_types(inferred_func, chosen_layout)
+      ret_type, ret_layout = self._build_return_type(inferred_func, chosen_layout)
       return param_types, param_layouts, ret_type, ret_layout
 
-    def calculate_param_type(self, func):
-      self.gather_var_consumers(func)
+    def _build_param_types(self, func, layout):
+      param_types = []
       param_layouts = []
-      new_params = []
-      for param in func.params:
-        layout_type, new_param = self.calculate_real_in_type(param)
-        param_layouts.append(layout_type)
-        new_params.append(new_param)
-      return new_params, param_layouts
+      input_layouts = layout[0]
+      for idx, param in enumerate(func.params):
+        layout = input_layouts[idx]
+        param_layouts.append(layout)
+        param_types.append(self._apply_layout_to_type(param.checked_type, layout))
+      return param_types, param_layouts
 
-    def calculate_ret_type(self, func):
-      """
-      Calculate the return type of the function based on its body.
-      This uses InferType to get the accurate return type after parameter updates.
-      """
-      #- find last node of function. skip elementwise op because element wise op doesn't have layout constraints
-      #- skip composite calls. we need concreate op. 
-      producer_finder = ProducerFinder(skip_predicates=[skip_composite_predicate, skip_element_wise_predicate])
-      producers = producer_finder.find_producers_of_node(func.body)
-      if len(producers) == 0:
-        raise ValueError("No producers found for function return value")
-
-      ret_types = []
-      ret_layouts = []
-      for prod, idx in producers:
-        layout_type = self._get_output_layout(prod, idx)
-        ret_layouts.append(layout_type)
-        source_type = prod.checked_type
-        ret_types.append(self._apply_layout_to_type(source_type, layout_type))
-
-      if len(ret_types) == 1:
-        return ret_types[0], ret_layouts[0]
-      else:
+    def _build_return_type(self, func, layout):
+      body = func.body
+      output_layout = layout[1]
+      if isinstance(body, relay.Tuple):
+        ret_layouts = []
+        ret_types = []
+        for idx, field in enumerate(body.fields):
+          field_type = getattr(field, "checked_type", None)
+          if field_type is None and isinstance(body.checked_type, relay.TupleType):
+            field_type = body.checked_type.fields[idx]
+          layout = output_layout[idx]
+          ret_layouts.append(layout)
+          ret_types.append(self._apply_layout_to_type(field_type, layout))
         return relay.TupleType(ret_types), ret_layouts
+      else:
+        layout = output_layout
+        ret_type = self._apply_layout_to_type(body.checked_type, layout)
+        return ret_type, layout
 
     def _apply_layout_to_type(self, original_type, layout_type):
       """
@@ -4365,76 +4816,6 @@ def calculate_imcflow_func_type(func, func_name=None):
         raise ValueError(f"Unknown layout type: {layout_type}")
 
       return relay.TensorType(new_shape, new_dtype)
-
-    def _resolve_layout(self, layout_list):
-      if len(layout_list) == 0:
-        return LayoutType.NCHW
-      first = layout_list[0]
-      for layout in layout_list[1:]:
-        if layout != first:
-          raise ValueError(f"Incompatible layouts required: {first} vs {layout}")
-      return first
-
-    def _get_output_layout(self, expr, index=0):
-      if not(isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op)):
-        raise ValueError("Expression must be a Call node with an Op")
-      op_name = expr.op.name
-      return get_required_layout_from_op(op_name, "outputs", index, expr)
-
-    def gather_var_consumers(self, func):
-      """
-      traverse the imcflow function to gather consumer node descriptions of function parameters.
-      we gather tuple of (required_layout, consumer_node).
-      {var : [list of consumer nodes]}
-
-      if consumer node is element-wise op node which is not related with layout, we recursively find its consumer nodes.
-      """
-      self.var_consumers = {}
-
-      # Initialize consumer list for each parameter
-      for param in func.params:
-        self.var_consumers[param] = []
-
-      # Step 1: Build use-def chain
-      use_def_parser = UseDefChainParser()
-      use_def_parser.visit(func.body)
-      if self.func_name:
-        ImcflowDeviceConfig().use_def_chain[self.func_name] = use_def_parser.use_def_chain
-
-      # Step 3: Find consumers for each parameter
-      finder = ConsumerFinder(use_def_parser)
-
-      for param in func.params:
-        consumers = finder.find_consumers_of_node(param)
-        self.var_consumers[param] = consumers
-
-      return self.var_consumers
-
-    def calculate_real_in_type(self, var):
-      """
-      Gather required layouts from all consumer nodes of the variable.
-      If more than one consumer node exists, check compatibility of them.
-      If compatible, calculate new shape corresponding to the layout.
-
-      vector : NCHW16c
-      qconv_input : [N, ceil(C/256), H, W, IB, 8] int32
-
-      Returns updated variable with new type, or original if no update needed.
-      """
-      if var not in self.var_consumers or len(self.var_consumers[var]) == 0:
-        raise ValueError("Variable has no consumers recorded")
-
-      consumers = self.var_consumers[var]
-
-      # Gather all required layouts
-      required_layouts = [
-        get_required_layout_from_op(get_op_name_of_call(desc[0]), "inputs", desc[1], desc[0])
-        for desc in consumers]
-
-      # Check compatibility - all consumers should require the same layout
-      layout_type = self._resolve_layout(required_layouts)
-      new_type = self._apply_layout_to_type(var.checked_type, layout_type)
-      return layout_type, new_type
 
   updater = _ImcflowFunctionParamUpdater(func_name)
   return updater.run(func)
@@ -4580,13 +4961,19 @@ class ImcflowLayoutLegalizer:
 
     for i in range(num_func):
       if isImcflowFunc(mod[function_names[i]], mod):
+        print('--------------------TRYING---------------------------')
+        print(mod[function_names[i]])
         param_type, param_layout, ret_type, ret_layout = calculate_imcflow_func_type(mod[function_names[i]], function_names[i])
+        print("Created wrapper function for", function_names[i])
+        print("  Param Types and Layouts:")
+        print(param_type)
+        print(param_layout)
+        print("  Return Type and Layout:")
+        print(ret_type)
+        print(ret_layout)
+        continue
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
         wrap_func, ttype_map = create_wrap_func(mod[function_names[i]], function_names[i], param_type, param_layout, ret_type, ret_layout)
-        print("Created wrapper function for", function_names[i])
-        print(wrap_func)
-        print(ttype_map)
-        continue
         real_tensor_type_map[function_names[i]] = ttype_map
         old_gv = mod.get_global_var(function_names[i])
         func_type = relay.FuncType([x.type_annotation for x in wrap_func.params], wrap_func.ret_type)
