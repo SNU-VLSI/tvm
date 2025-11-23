@@ -350,11 +350,12 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
   code += f"printf(\"{func_name}_kernel called\\n\");\n"
   code.nextIndent()
   code += generateDevicePointerSetup(os)
-  code += generateToNpuTransferCode(func, func_name, compiled_blocks, base_address_macros) # inode instrunction
+  code += generateToNpuTransferCode(func, func_name, compiled_blocks, base_address_macros) # inode instrunction + policy
   code += generateToNpuTransferCode(func, func_name, data_blocks[0], base_address_macros) # constant
-  code += generateToNpuTransferCode(func, func_name, data_blocks[1], base_address_macros) # input + policy
-  code += generatePolicyUpdateCode(os)
-  code += generateInvokeCode(os)
+  code += generatePolicyUpdateCode(os) # start from pc 0, up to halt
+  code += generateInvokeCode(os) # proceed up to halt
+  code += generateToNpuTransferCode(func, func_name, data_blocks[1], base_address_macros) # input
+  code += generateInvokeCode(os) # end of exec
   code += generateFromNpuTransferCode(data_blocks[2], base_address_macros)
   code += generateDevicePointerCleanup(os)
   code.prevIndent()

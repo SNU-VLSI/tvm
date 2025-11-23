@@ -11,6 +11,7 @@ from tvm.relay.backend.contrib.imcflow import util
 from tvm.relay.backend.contrib.imcflow import transform
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.contrib.imcflow import CodegenContext
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -53,6 +54,9 @@ class CodegenSuite:
     # which is the parent func's global_symbol attribute (prior: func.attsr.global_symbol).
     func_name = func.attrs["Composite"].strip("_impl")
 
+    # Set the codegen context for this function
+    CodegenContext().set_func_name(func_name)
+
     # annotate edges between (non-composite) calls,
     # while translating vars into corresponding calls
     annotator = InternalEdgeAnnotator()
@@ -76,10 +80,17 @@ class CodegenSuite:
 
     builder = InodeCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
+
+    # add sync logic after INIT Phase
+    builder.sync_inrt_clear(CodePhase.INIT)
+
     DeviceCodegen("inode", self.build_dir, self.host_isa).handle_code_generation(
         func_name, builder.codeblocks)
 
     PolicyTableCodegen(func_name, self.build_dir, self.host_isa).generate(func_name)
+
+    # Clear the codegen context when done
+    CodegenContext().clear()
 
     return func
 
@@ -91,7 +102,6 @@ class PolicyTableCodegen:
 
   def __init__(self, func_name, build_dir="/tmp", host_isa="arm"):
     super().__init__()
-    self.func_name = func_name
     self.build_dir = build_dir
     self.host_isa = host_isa
     self.func_dir = os.path.join(build_dir, func_name)
@@ -260,6 +270,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.initialize()
     self.curr_composite_id = None
     self.finalize()
+  
+  def sync_inrt_clear(self, codephase: CodePhase):
+    # standby and intrt
+    inode_master = NodeID.inode_3
+    inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
+    block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
+    self.codeblocks.append(inode_master, block, codephase)
+
+    # set_flag
+    block = SetFlagAndHaltBlock()
+    for inode_slv in inode_slaves:
+      self.codeblocks.append(inode_slv, block, codephase)
+
+    # clear flag
+    for inode in NodeID.inodes():
+      block = ClearFlag("clear flag")
+      self.codeblocks.append(inode, block, codephase)
 
   def initialize(self):
     # clear flag
@@ -272,21 +299,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       block = PolicyUpdateBlock(inode, "policy update")
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
-    # standby and intrt
-    inode_master = NodeID.inode_3
-    inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
-    block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
-    self.codeblocks.append(inode_master, block, CodePhase.INIT)
-
-    # set_flag
-    block = SetFlagAndHaltBlock()
-    for inode_slv in inode_slaves:
-      self.codeblocks.append(inode_slv, block, CodePhase.INIT)
-    
-    # clear flag
-    for inode in NodeID.inodes():
-      block = ClearFlag("clear flag before imem write")
-      self.codeblocks.append(inode, block, CodePhase.INIT)
+    # sync and intrt and clear
+    self.sync_inrt_clear(CodePhase.INIT)
 
     # imem write
     for imce, inst_edge in DevConfig().InstEdgeInfoDict.items():
@@ -295,7 +309,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # imcu write
     for node in NodeID.inodes():
-      block = WriteIMCUBlock(node, "imcu write", self.codeblocks.func_name)
+      block = WriteIMCUBlock(node, "imcu write")
       self.codeblocks.append(node, block, CodePhase.INIT)
 
     # imce compute
@@ -314,6 +328,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
       block = ClearFlag("clear flag after imce compute enable")
       self.codeblocks.append(inode, block, CodePhase.INIT)
+    
+    # send constant goes is taken care of by graph traverse
+
 
   def finalize(self):
     # standby and intrt
@@ -362,19 +379,19 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # send const edge interleaved
     #TODO: consider recv node order..
     for edge in const_edges:
-      self.add_send_block(edge)
+      self.add_send_block(edge, CodePhase.INIT)
 
     # send param edge interleaved
     #TODO: if edge count is more than one, interleave them
     for edge in param_edges:
-      self.add_send_block(edge)
+      self.add_send_block(edge, CodePhase.EXEC)
 
     # recv output edge interleaved
     #TODO: if edge count is more than one, interleave them
     for edge in output_edges:
-      self.add_recv_block(edge)
+      self.add_recv_block(edge, CodePhase.EXEC)
 
-  def add_send_block(self, edge):
+  def add_send_block(self, edge, phase: CodePhase):
     out_edge_info = DevConfig().get_tensor_edge_info(edge)
     tid = edge.src_id
     hid = self.get_hid(tid)
@@ -382,26 +399,26 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     if hid == None and CustomIDToNode()[edge.dst_id.graph_node_id].op.name == "split":
       inner_node = CustomIDToNode()[edge.dst_id.graph_node_id]
       for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
-        self.add_send_block(inner_edge)
+        self.add_send_block(inner_edge, phase)
       return
 
-    db = DevConfig().MemLayout.get_data_block_by_id(edge)
+    db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
     assert db is not None, f"Data block not found for edge: {edge}"
 
     block = SendBlock(db, out_edge_info.fifo_id, f"send: {edge}")
-    self.codeblocks.append(hid, block, CodePhase.EXEC)
+    self.codeblocks.append(hid, block, phase)
   
   def add_send_block_interleaved(self, edge_list):
     pass
 
-  def add_recv_block(self, edge):
+  def add_recv_block(self, edge, phase: CodePhase):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
     in_tid = edge.dst_id
     hid = self.get_hid(in_tid)
-    db = DevConfig().MemLayout.get_data_block_by_id(edge)
+    db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
 
     block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
-    self.codeblocks.append(hid, block, CodePhase.EXEC)
+    self.codeblocks.append(hid, block, phase)
   
   def add_recv_block_interleaved(self, edge_list):
     pass

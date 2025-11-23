@@ -17,7 +17,8 @@
 
 from typing import Tuple, List, Dict, Union
 from enum import Enum
-from collections import defaultdict
+from collections import defaultdict, UserDict
+import copy
 
 import re
 import math
@@ -212,155 +213,217 @@ class DataBlock:
     return self.__str__()
 
 
-class MemoryRegion:
+class MemoryRegionEntry:
   def __init__(self, name: str, size: int):
     self.name = name
     self.size = size
-    self.blocks = {} # {function : {data_block_name : DataBlock}}
+    self.blocks = {}  # {data_block_name : DataBlock}
     self.base_address = -1  # offset in the device memory
-    self._last_offset = defaultdict(int)  # {function_name : last_offset}
-    self.weight_offset = defaultdict(int)  # {function_name : weight_offset}
-    self.weight_allocated = defaultdict(bool)  # {function_name : weight_allocated}
+    self._last_offset = 0  # last offset in the region
 
-  def __getitem__(self, function_name: str):
+  def get_data_block_by_id(self, id):
     """
-    Gets blocks with specific function_name specified in {data_block_name : DataBlock}
+    Gets data_block by id.
     """
-    return self.blocks.get(function_name, None)
-
-  def get_data_block_by_id(self, id, function_name=None):
-    """
-    Gets data_block by id, where an optional function_name is given.
-    Caveats: if no function_name is given, it returns the first match if same id exists.
-    """
-    if function_name:
-      f_blocks = self.blocks[function_name]
-      return f_blocks.get(id, None)
+    if isinstance(id, TensorEdge):
+      for block in self.blocks.values():
+        if isinstance(block.id, TensorEdge):
+          # if node is not split => search by src_id (same output)
+          if id.split_idx is None and block.id.src_id == id.src_id:
+            return block
+          # if node is split => search by TensorEdge (different output)
+          elif id.split_idx is not None and block.id == id:
+            return block
     else:
-      for f_blocks in self.blocks.values():
-        for f_block in f_blocks.values():
-          if isinstance(id, TensorEdge):
-            if isinstance(f_block.id, TensorEdge): 
-              # if node is not split => search by src_id (same output)
-              if id.split_idx is None and f_block.id.src_id == id.src_id:
-                return f_block
-              # if node is split => search by TensorEdge (different output)
-              elif id.split_idx is not None and f_block.id == id:
-                return f_block
-            else:
-              block = None    # continue searching (type mismatch)
-          else:
-            block = f_blocks.get(id, None)
-        if block is not None:
-          return block
+      return self.blocks.get(id, None)
     return None
+  
+  def _already_exists(self, block: DataBlock):
+    if block.id in [x.id for x in self.blocks.values()]:
+      print(f"Trying allocate {block} but skipped (already exists)")
+      return True
 
-  def allocate(self, function_name, block: DataBlock):
-    """Allocate a data block in the region sequentially, assuming they are not delocated"""
-    if function_name not in self.blocks:
-      self.blocks[function_name] = {}
-
-    # find first 32B aligned free offset
-    if block.id in [x.id for x in self.blocks[function_name].values()]:
-      print(f"Trying allocate {block} but skipped @ {function_name}")
-      return
-    
-    # skip reddundant allocation for Datablock which already allocated with same src_id (same data)
-    if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks[function_name].values() if isinstance(x.id, TensorEdge)]:
+    # skip redundant allocation for Datablock which already allocated with same src_id (same data)
+    if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks.values() if isinstance(x.id, TensorEdge)]:
       if block.id.split_idx is None:
-        print(f"Trying allocate {block} but skipped due to src_id overlap @ {function_name}")
-        return
+        print(f"Trying allocate {block} but skipped due to src_id overlap")
+        return True
+    return False
 
-    print(f"Trying allocate {block} @ {function_name}")
-    aligned_offset = math.ceil((self.base_address + self._last_offset[function_name]) / 32) * 32 - self.base_address
-    try:
-      assert block.size + aligned_offset <= self.size
-    except:
+  def allocate(self, block: DataBlock) -> bool:
+    """
+    Allocate a data block in the region sequentially, assuming they are not deallocated
+    returns True (when allocated, or already allocated) or False (exceeds region size)
+    """
+    if self._already_exists(block):
+      return True
+
+    print(f"Trying allocate {block}")
+    # find first 32B aligned free offset
+    aligned_offset = math.ceil((self.base_address + self._last_offset) / 32) * 32 - self.base_address
+    if block.size + aligned_offset <= self.size:
+      block.set_offset(aligned_offset)
+      block.set_base_address(aligned_offset + self.base_address)
+      self._last_offset = aligned_offset + block.size
+      self.blocks[block.id] = block
+      return True
+    else:
       print(f"Data block size exceeds region size. {block.size} + {aligned_offset} > {self.size}")
-      print(self)
-      exit(0)
-    block.set_offset(aligned_offset)
-    block.set_base_address(aligned_offset + self.base_address)
-    self._last_offset[function_name] = aligned_offset + block.size
-    self.blocks[function_name][block.id] = block
-
-  def allocate_allow_overlap(self, function_name, block: DataBlock):
-    """Allocate a data block in the region, allowing overlapping in case of weight params."""
-    if function_name not in self.blocks:
-      self.blocks[function_name] = {}
-
-    if block.id in [x.id for x in self.blocks[function_name].values()]:
-      print(f"Trying allocate_overlap {block} but skipped @ {function_name}")
-      return
-
-    print(f"Trying allocate_overlap {block}")
-    if self.weight_allocated[function_name] is False:
-      self.weight_allocated[function_name] = True
-      # Align weight_offset to 32B boundary
-      self.weight_offset[function_name] = math.ceil((self.base_address) / 32) * 32 - self.base_address
-
-    # Align current weight_offset to 32B boundary
-    aligned_offset = self.weight_offset[function_name]
-    try:
-      assert block.size + aligned_offset <= self.size
-    except:
-      print("overlap Data block size exceeds region size")
-      print(self)
-      exit(0)
-
-    block.set_offset(aligned_offset)
-    block.set_base_address(aligned_offset + self.base_address)
-    self.blocks[function_name][block.id] = block
+      return False
 
   def set_base_address(self, address: int):
     self.base_address = int(address)
 
   def __str__(self):
     if not self.blocks:
-      return f"MemoryRegion({self.name}, {self.size}, {self.base_address}, blocks=[])"
-    blocks_str=""
-    for function_name, blocks in self.blocks.items():
-      blocks_str += f"\n{function_name}:\n"
-      blocks_str += f"----------------------------------------------------------\n"
-      blocks_str += ",\n      ".join(str(block) for block in blocks.values())
-    return (f"MemoryRegion({self.name}, {self.size}, {self.base_address}, "
+      return f"MemoryRegionEntry({self.name}, {self.size}, {self.base_address}, blocks=[])"
+    blocks_str = ",\n      ".join(str(block) for block in self.blocks.values())
+    return (f"MemoryRegionEntry({self.name}, {self.size}, {self.base_address}, "
             f"blocks=[\n      {blocks_str}\n    ])")
 
   def __repr__(self):
     return self.__str__()
 
 
-class MemoryLayout:
-  def __init__(self, *regions: MemoryRegion):
-    self.regions = {}
+class MemoryRegion(UserDict):
+  """
+    MemoryRegion is a dict of MemoryRegionEntry accessible using key (idx).
+    Automatically creates new MemoryRegionEntry instances from the template when accessing non-existent keys.
+  """
+  def __init__(self, region: MemoryRegionEntry):
+    super().__init__()
+    self._template_region = region
+
+  @property
+  def blocks(self):
+    """Aggregate all blocks from all entries. Returns dict {block_id: DataBlock}"""
+    aggregated = {}
+    for idx, region in self.data.items():
+      if region.blocks:  # Only include entries with blocks
+        aggregated.update(region.blocks)
+    return aggregated
+  
+  def allocate(self, block: DataBlock, phase: str):
+    """Allocate block by finding first region of the phase with available space."""
+    i = 0
+    while not self[(phase, i)].allocate(block):
+      i += 1
+
+
+  def __getitem__(self, key) -> 'MemoryRegionEntry':
+    """auto-create from template"""
+    if key not in self.data:
+      return self.__missing__(key)
+    return self.data[key]
+
+  def __missing__(self, key) -> 'MemoryRegionEntry':
+    """
+    Called when a key is not found. Creates a new MemoryRegionEntry from the template.
+    """
+    # Create a deep copy of the template region
+    new_region = copy.deepcopy(self._template_region)
+    self[key] = new_region
+    return new_region
+
+  def __str__(self):
+    if not self.data:
+      return f"MemoryRegion('{self._template_region.name}', empty)"
+
+    lines = [f"MemoryRegion('{self._template_region.name}', ["]
+    for idx, region in self.data.items():
+      lines.append(f"  {idx}: {region},")
+    lines.append("])")
+    return "\n".join(lines)
+
+  def __repr__(self):
+    return self.__str__()
+
+
+
+class FuncMemoryLayout(UserDict):
+  def __init__(self, *regions: MemoryRegionEntry):
+    super().__init__()
     _last_end_address = 0
 
     for region in regions:
-      self.regions[region.name] = region
+      self.data[region.name] = MemoryRegion(region)
       region.set_base_address(_last_end_address)
       _last_end_address += region.size
 
-  def get_data_block_by_id(self, id: Union[str, TensorEdge], func_name=None, region_name=None):
+  @property
+  def blocks(self):
+    """Aggregate all blocks from all regions and entries. Returns dict {block_id: DataBlock}"""
+    aggregated = {}
+    for region_name, region_dict in self.data.items():
+      region_blocks = region_dict.blocks
+      if region_blocks:  # Only include regions with blocks
+        aggregated.update(region_blocks)
+    return aggregated
+
+  def __getitem__(self, key: str) -> 'MemoryRegion':
+    """Get a memory region by name (e.g., 'inode_0_data')"""
+    return self.data[key]
+
+  def get_data_block_by_id(self, id: Union[str, TensorEdge]):
     """
-    Gets data_block by id, where an optional function_name and region_name is given.
-    Caveats: if no function_name / region_name is given, it returns the first match in the given hierarchy
+    Gets data_block by id from aggregated blocks
     """
-    if region_name:
-      region = self.regions[region_name]
-      return region.get_data_block_by_id(id, func_name)
-    else:
-      for region in self.regions.values():
-        block = region.get_data_block_by_id(id, func_name)
-        if block is not None:
-          return block
+    for key, block in self.blocks.items():
+      if key == id:
+        return block
+
     return None
 
-  def __getitem__(self, region_name: str):
-    return self.regions.get(region_name, None)
+  def __str__(self):
+    regions_str = ",\n  ".join(str(region) for region in self.data.values())
+    return f"FuncMemoryLayout(regions=[\n  {regions_str}\n])"
+
+  def __repr__(self):
+    return self.__str__()
+
+class MemoryLayout(UserDict):
+  """
+    MemoryLayout is a dict of FuncMemoryLayout accessible using key (func_name).
+    Automatically creates new FuncMemoryLayout instances from the template when accessing non-existent keys.
+  """
+  def __init__(self, *regions: MemoryRegionEntry):
+    super().__init__()
+    self._layout = FuncMemoryLayout(*regions)
+
+  @property
+  def blocks(self):
+    """Aggregate all blocks from all functions. Returns dict {func_name: {region_name: {idx: {block_id: DataBlock}}}}"""
+    aggregated = {}
+    for func_name, layout in self.data.items():
+      layout_blocks = layout.blocks
+      if layout_blocks:  # Only include functions with blocks
+        aggregated[func_name] = layout_blocks
+    return aggregated
+
+  def __getitem__(self, key: str) -> 'FuncMemoryLayout':
+    """auto-create from template"""
+    if key not in self.data:
+      return self.__missing__(key)
+    return self.data[key]
+
+  def __missing__(self, key: str) -> 'FuncMemoryLayout':
+    """
+    Called when a key is not found. Creates a new FuncMemoryLayout from the template.
+    """
+    # Create a deep copy of the template layout
+    new_layout = copy.deepcopy(self._layout)
+    self[key] = new_layout
+    return new_layout
 
   def __str__(self):
-    regions_str = ",\n  ".join(str(region) for region in self.regions.values())
-    return f"MemoryLayout(regions=[\n  {regions_str}\n])"
+    if not self.data:
+      return "MemoryLayout(empty)"
+
+    lines = ["MemoryLayout("]
+    for func_name, layout in self.data.items():
+      lines.append(f"  {func_name!r}: {layout},")
+    lines.append(")")
+    return "\n".join(lines)
 
   def __repr__(self):
     return self.__str__()
@@ -427,6 +490,38 @@ class TensorEdgeInfo(EdgeInfo):
     return self.__str__()
 
 
+class CodegenContext:
+  """Singleton context for codegen that tracks the current function being processed"""
+
+  def __new__(cls):
+    if not hasattr(cls, "instance"):
+      cls.instance = super(CodegenContext, cls).__new__(cls)
+      cls.instance._initialize()
+    return cls.instance
+
+  def _initialize(self):
+    self._func_name = None
+
+  def set_func_name(self, func_name: str):
+    """Set the current function name being processed"""
+    self._func_name = func_name
+
+  def get_func_name(self) -> str:
+    """Get the current function name"""
+    if self._func_name is None:
+      raise RuntimeError("No function context set. Call set_func_name() first in codegen.")
+    return self._func_name
+
+  @property
+  def func_name(self) -> str:
+    """Property access to current function name"""
+    return self.get_func_name()
+
+  def clear(self):
+    """Clear the current function context"""
+    self._func_name = None
+
+
 class ImcflowDeviceConfig:
   """Imcflow config class"""
   if SMALL_DEBUG:
@@ -486,15 +581,15 @@ class ImcflowDeviceConfig:
     self.PolicyTableDict = {}
     self.InstEdgeInfoDict = {}
     self.MemLayout = MemoryLayout(
-        MemoryRegion("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-        MemoryRegion("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegion("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegion("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
+        MemoryRegionEntry("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}
@@ -562,52 +657,63 @@ class ImcflowDeviceConfig:
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
     return self.InstEdgeInfoDict.get(imce_id, None)
 
+  @property
+  def CurrFuncMemLayout(self):
+    """Get the memory layout for the current function in CodegenContext.
+
+    This is a convenience property that allows accessing the current function's
+    memory layout without explicitly passing func_name around:
+
+    Instead of: DevConfig().MemLayout[func_name].get_data_block_by_id(edge)
+    Use: DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
+    """
+    return self.MemLayout[CodegenContext().func_name]
+
   def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None, const_node_ids=None):
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
     compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
 
-    for memory_region in ImcflowDeviceConfig().MemLayout.regions.values():
-      if memory_region.blocks:
-        for block_name, block in memory_region.blocks[func_name].items():
-          # get compiled data blocks
-          if isinstance(block_name, str):
-            compiled_blocks.append(block)
-          # get input & output data blocks
-          if isinstance(block_name, TensorEdge):
-            if isinstance(block_name.src_id.graph_node_id, Tuple):
-              src_gid = block_name.src_id.graph_node_id[1]
-            else:
-              src_gid = block_name.src_id.graph_node_id
+    for memory_region in ImcflowDeviceConfig().MemLayout[func_name].values():
+      for block_name, block in memory_region.blocks.items():
+        # get compiled data blocks
+        if isinstance(block_name, str):
+          compiled_blocks.append(block)
+        # get input & output data blocks
+        if isinstance(block_name, TensorEdge):
+          if isinstance(block_name.src_id.graph_node_id, Tuple):
+            src_gid = block_name.src_id.graph_node_id[1]
+          else:
+            src_gid = block_name.src_id.graph_node_id
 
-            is_input_block = False
-            is_const_block = False
-            is_output_block = False
-            # get input data blocks
-            if any([input_node_id == imcflow_transform.getInnerNodeID(src_gid) for input_node_id in input_node_ids]):
-              input_data_blocks.append(block)
-              is_input_block = True
+          is_input_block = False
+          is_const_block = False
+          is_output_block = False
+          # get input data blocks
+          if any([input_node_id == imcflow_transform.getInnerNodeID(src_gid) for input_node_id in input_node_ids]):
+            input_data_blocks.append(block)
+            is_input_block = True
 
-            # get const data blocks
-            if any([const_node_id == imcflow_transform.getInnerNodeID(src_gid) for const_node_id in const_node_ids]):
-              const_data_blocks.append(block)
-              is_const_block = True
+          # get const data blocks
+          if any([const_node_id == imcflow_transform.getInnerNodeID(src_gid) for const_node_id in const_node_ids]):
+            const_data_blocks.append(block)
+            is_const_block = True
 
-            # get output data blocks
-            if isinstance(block_name.dst_id.graph_node_id, Tuple):
-              dst_gid = block_name.dst_id.graph_node_id[1]
-            else:
-              dst_gid = block_name.dst_id.graph_node_id
-            if output_node_id == imcflow_transform.getInnerNodeID(dst_gid):
-              output_data_blocks.append(block)
-              is_output_block = True
+          # get output data blocks
+          if isinstance(block_name.dst_id.graph_node_id, Tuple):
+            dst_gid = block_name.dst_id.graph_node_id[1]
+          else:
+            dst_gid = block_name.dst_id.graph_node_id
+          if output_node_id == imcflow_transform.getInnerNodeID(dst_gid):
+            output_data_blocks.append(block)
+            is_output_block = True
 
-            if sum([is_input_block, is_const_block, is_output_block]) == 0:
-              print(f"Warning: DataBlock {block} is neither input, output, nor const block for function {func_name}")
-              # TODO: add the exception again after dealing with is_input_block with split node
-              # raise ValueError("DataBlock type identification error")
-            elif sum([is_input_block, is_const_block, is_output_block]) > 1:
-              print(f"Warning: DataBlock {block} is multiple types of blocks for function {func_name}")
-              raise ValueError("DataBlock type identification error")
+          if sum([is_input_block, is_const_block, is_output_block]) == 0:
+            print(f"Warning: DataBlock {block} is neither input, output, nor const block for function {func_name}")
+            # TODO: add the exception again after dealing with is_input_block with split node
+            # raise ValueError("DataBlock type identification error")
+          elif sum([is_input_block, is_const_block, is_output_block]) > 1:
+            print(f"Warning: DataBlock {block} is multiple types of blocks for function {func_name}")
+            raise ValueError("DataBlock type identification error")
 
 
     self.DataBlocks[func_name] = {

@@ -41,7 +41,7 @@ class PolicyUpdateBlock(InodeCodeBlock):
 
     code = TextBlock("")
     for id in same_row_node_ids:
-      db = DevConfig().MemLayout.get_data_block_by_id(f"{id.name}_policy")
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(f"{id.name}_policy")
       if db is None:
         continue
       var = UniqueVar("policy_table_start_address", dtype="int")
@@ -87,16 +87,15 @@ class WriteIMEMBlock(InodeCodeBlock):
 class WriteIMCUBlock(InodeCodeBlock):
   """ Code block for writing IMCU weights given the master inode's hid  """
 
-  def __init__(self, node_id: NodeID, annotation: str = "", func_name: str = ""):
+  def __init__(self, node_id: NodeID, annotation: str = ""):
     super().__init__(annotation)
     assert node_id.is_inode(), "WriteIMCUBlock can only be used for inode"
     self.node_id = node_id
-    self.func_name = func_name
 
   def _content(self) -> Union[str, CodeBlock]:
     code = TextBlock("")
-    region = DevConfig().MemLayout[f"{self.node_id.name}_data"]
-    for db in region.blocks[self.func_name].values():
+    region = DevConfig().CurrFuncMemLayout[f"{self.node_id.name}_data"]
+    for db in region.blocks.values():
       if isinstance(db.id, TensorEdge) and "weight" == db.id.src_id.tensor_type:
         info = DevConfig().get_tensor_edge_info(db.id)
         assert info.fifo_id == 1, f"IMCU fifo id should be set to 1 (although not used), but got {info.fifo_id} for {db.id}"
