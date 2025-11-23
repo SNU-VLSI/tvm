@@ -201,7 +201,6 @@ def run_test_evl(test_name, mod, param_dict):
   with open(f"{eval_dir}/func_map.txt", "w") as f:
     pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
   printModel(eval_dir, eval_mod, eval_param_dict, "9_with_custom_id")
-  return
 
   imcflow_transform.NodeMapper().run(eval_mod)
   print("------------------------------- HW MAP ----------------------------------")
