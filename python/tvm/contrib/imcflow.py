@@ -500,6 +500,7 @@ class ImcflowDeviceConfig:
     self.DataBlocks = {}
     self.ImcflowFuncMap = {}  # {func_name: FunctionInfo}
     self.use_def_chain = {}   # {func_name: use-def mapping}
+    self.LayoutMap={}
 
   def clear(self):
     self._initialize()

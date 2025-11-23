@@ -435,10 +435,10 @@ def makeBNPattern(data):
   # return is_tuple_get_item(imcflow_bn | nn_bn, 0)
 
 def makeAddPattern(data):
-  return is_op("add")(data, wildcard())
+  return is_op("add")(data, is_constant()) | is_op("add")(is_constant(), data) | is_op("add")(data, wildcard()) | is_op("add")(wildcard(), data)
 
 def makeMulPattern(data):
-  return is_op("multiply")(data, wildcard())
+  return is_op("multiply")(data, is_constant()) | is_op("multiply")(is_constant(), data) | is_op("multiply")(data, wildcard()) | is_op("multiply")(wildcard(), data)
 
 def makeBiasAddPattern(data):
   return is_op("nn.bias_add")(data, is_constant())

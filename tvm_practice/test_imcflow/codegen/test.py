@@ -165,9 +165,20 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "7_after_prune_model")
 
+  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "7.5_after_annotate_custom_id")
+  imcflow_transform.constructUsefulMappings(eval_mod)
+  print("-------------------- CustomID TO Name --------------------")
+  with open(f"{eval_dir}/custom_id_to_name.txt", "w") as f:
+    pprint.pprint(imcflow.CustomIDToName(), stream=f)
+  print("-------------------- Node TO CustomID --------------------")
+  with open(f"{eval_dir}/node_to_custom_id.txt", "w") as f:
+    pprint.pprint(HashToCustomID(), stream=f)
+  printModel(eval_dir, eval_mod, eval_param_dict, "7.6_with_custom_id")
+
   layout_legalizer = imcflow_transform.ImcflowLayoutLegalizer()
   eval_mod, ttype_map = layout_legalizer.transform_mod(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "8_after_mark_in_out")
+  printModel(eval_dir, eval_mod, eval_param_dict, "7.7_after_mark_in_out")
   print("-------------------- Real Tensor Type Map --------------------")
   pprint.pprint(ttype_map)
 
@@ -190,6 +201,7 @@ def run_test_evl(test_name, mod, param_dict):
   with open(f"{eval_dir}/func_map.txt", "w") as f:
     pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
   printModel(eval_dir, eval_mod, eval_param_dict, "9_with_custom_id")
+  return
 
   imcflow_transform.NodeMapper().run(eval_mod)
   print("------------------------------- HW MAP ----------------------------------")
