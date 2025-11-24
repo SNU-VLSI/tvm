@@ -290,7 +290,11 @@ if(HOST_OBJ_FILES)
     get_filename_component(host_obj_dir ${host_obj_file} DIRECTORY)
     set(bin_file_path "${host_obj_dir}/${bin_file_name}")
 
-    string(REPLACE "/" "_" host_obj_target_name ${host_obj_name})
+    # Create unique target name using full path relative to H_OBJ_PATH
+    file(RELATIVE_PATH rel_obj_path "${H_OBJ_PATH}" "${host_obj_file}")
+    string(REPLACE "/" "_" host_obj_target_name "${rel_obj_path}")
+    string(REPLACE ".host.o" "" host_obj_target_name "${host_obj_target_name}")
+    string(REPLACE "." "_" host_obj_target_name "${host_obj_target_name}")
     set(host_obj_target "create_${host_obj_target_name}")
 
     # Select linker based on ISA

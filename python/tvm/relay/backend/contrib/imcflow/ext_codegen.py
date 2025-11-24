@@ -399,7 +399,7 @@ def generateHeader():
 
 def generateInterruptUtilities():
   return ("""
-void enable_imcflow_interrupt(int fd)
+static inline void enable_imcflow_interrupt(int fd)
 {
   uint32_t info = 1;
   ssize_t nb = write(fd, &info, sizeof(info));
@@ -410,13 +410,13 @@ void enable_imcflow_interrupt(int fd)
   }
 }
 
-void wait_imcflow_interrupt(int fd)
+static inline void wait_imcflow_interrupt(int fd)
 {
   uint32_t info;
   ssize_t nb = read(fd, &info, sizeof(info));
 }
 
-void generate_ack(uint32_t* int_ack_gen)
+static inline void generate_ack(uint32_t* int_ack_gen)
 {
   int_ack_gen[0] = 0b1;
 }
