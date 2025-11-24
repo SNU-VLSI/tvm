@@ -152,43 +152,25 @@ class PolicyTableCodegen:
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
   def __init__(self):
     super().__init__()
-    self.composite_call = None
-    self.stack = []
-    self.edges = set(TensorEdge._instances.values())
+    self.stack = [] # track composite call stacks
+    # self.edges = set(TensorEdge._instances.values())
+    self.edges = set(DevConfig().TensorEdgeList)
+  
+  @property
+  def composite_call(self):
+    return self.stack[-1] if self.stack else None
 
   def add_edge(self, dst_tid, arg, split_idx=None):
-    # pass arg in below cases
-    if CompositePat.match(arg):
-      self.stack.append(arg)
-      self.add_edge(dst_tid, arg.op.body)
-      self.stack.pop()
-      return
-    elif TuplePat.match(arg):
+    # handle tuple using recursion
+    if TuplePat.match(arg):
       for a in arg.fields:
         self.add_edge(dst_tid, a)
       return
     elif TupleGetItemPat.match(arg):
       self.add_edge(dst_tid, arg.tuple_value, split_idx=arg.index)
       return
-    elif VarPat.match(arg) and self.composite_call:
-      for idx, p in enumerate(self.composite_call.op.params):
-        if p == arg:
-          a = self.composite_call.args[idx]
-          self.stack.append(None)
-          self.add_edge(dst_tid, a)
-          self.stack.pop()
-      return
 
-    src_composite = self.stack[-1] if self.stack else None
-
-    # override src tag to const tag if dst tag is const tag
-    const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
-    src_tag = "odata"
-    if dst_tid.tensor_type in const_tags:
-      src_tag = dst_tid.tensor_type
-
-    src_tid = self.get_tensor_id(arg, src_tag, src_composite)
-    # TODO: add split idx for split op
+    src_tid = self.get_tensor_id(arg, "odata")
     self.edges.add(TensorEdge(src_tid, dst_tid, split_idx))  # add edge to set
 
   def visit_call(self, call):
@@ -198,26 +180,30 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
       self.visit_regular_call(call)
 
   def visit_composite_call(self, call):
-    self.composite_call = call
     self.stack.append(call)
     self.visit(call.op.body)
-    self.composite_call = None
     self.stack.pop()
     for a in call.args:
       self.visit(a)
 
   def visit_regular_call(self, call):
     self.visit(call.op)
-    for idx, a in enumerate(call.args):
-      if hasattr(call.op, "arguments"): # this is tvm primitive operations.
+
+    # add edges for internal edges
+    if self.composite_call:
+      for idx, a in enumerate(call.args):
+        if VarPat.match(a) or ConstPat.match(a) or not hasattr(call.op, "arguments"):
+          continue
         dst_tag = call.op.arguments[idx].name
-        dst_tid = self.get_tensor_id(call, dst_tag, self.composite_call)
+        dst_tid = self.get_tensor_id(call, dst_tag)
         self.add_edge(dst_tid, a)
+
+    for a in call.args:
       self.visit(a)
 
-  def get_tensor_id(self, call, tag, composite=None):
-    if composite:
-      return TensorID((getNodeID(composite), getNodeID(call)), tag)
+  def get_tensor_id(self, call, tag):
+    if self.composite_call:
+      return TensorID((getNodeID(self.composite_call), getNodeID(call)), tag)
     else:
       return TensorID(getNodeID(call), tag)
 
