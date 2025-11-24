@@ -59,7 +59,7 @@ class CodegenSuite:
 
     # annotate edges between (non-composite) calls,
     # while translating vars into corresponding calls
-    annotator = InternalEdgeAnnotator()
+    annotator = InternalEdgeAnnotator(func_name)
     annotator.visit(func)
 
     print(f"Annotated edges for function {func_name}:")
@@ -150,11 +150,11 @@ class PolicyTableCodegen:
 
 
 class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
-  def __init__(self):
+  def __init__(self, func_name):
     super().__init__()
     self.stack = [] # track composite call stacks
     # self.edges = set(TensorEdge._instances.values())
-    self.edges = set(DevConfig().TensorEdgeList)
+    self.edges = set(DevConfig().TensorEdgeListDict[func_name])
   
   @property
   def composite_call(self):
@@ -348,8 +348,6 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     for edge in self.edges:
       arg_id = edge.src_id.graph_node_id
-      if isinstance(arg_id, Tuple):
-        arg_id = arg_id[1]
       if ConstPat.match(CustomIDToNode()[arg_id]):
         if edge.src_id.tensor_type != "weight":
           const_edges.append(edge)
@@ -377,20 +375,27 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for edge in output_edges:
       self.add_recv_block(edge, CodePhase.EXEC)
 
-  def add_send_block(self, edge, phase: CodePhase):
+  def add_send_block(self, edge, phase: CodePhase, db=None):
     out_edge_info = DevConfig().get_tensor_edge_info(edge)
     tid = edge.src_id
     hid = self.get_hid(tid)
     # split op handling => pass down to inner edges from input var node
-    if hid == None and CustomIDToNode()[edge.dst_id.graph_node_id].op.name == "split":
-      inner_node = CustomIDToNode()[edge.dst_id.graph_node_id]
+    gid = edge.dst_id.graph_node_id
+    if db is None:
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
+      if db is None:
+        pass
+      assert db is not None, f"Data block not found for edge: {edge}"
+
+    if CustomIDToNode()[gid].op.name == "split":
+      inner_node = CustomIDToNode()[gid]
       for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
-        self.add_send_block(inner_edge, phase)
+        self.add_send_block(inner_edge, phase, db)
       return
 
-    db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
-    assert db is not None, f"Data block not found for edge: {edge}"
-
+    if out_edge_info.fifo_id < 0:
+      pass
+    assert out_edge_info.fifo_id >= 0, "fifo id should be assigned to a positive id"
     block = SendBlock(db, out_edge_info.fifo_id, f"send: {edge}")
     self.codeblocks.append(hid, block, phase)
   
@@ -401,7 +406,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
     in_tid = edge.dst_id
     hid = self.get_hid(in_tid)
-    db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
+    db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
 
     block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
     self.codeblocks.append(hid, block, phase)
@@ -422,4 +427,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     return [edge for edge in self.edges if edge.src_inner_gid_match(id)]
 
   def get_hid(self, tensor_id):
-    return DevConfig().get_hw_node(tensor_id.graph_node_id)
+    gid = tensor_id.graph_node_id
+    if isinstance(gid, tuple):
+      gid = gid[-1]
+    return DevConfig().get_hw_node(gid)

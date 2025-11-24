@@ -1619,6 +1619,11 @@ class CustomIDToNode(dict):
   def __init__(self):
     super().__init__()
 
+  def __getitem__(self, key):
+    # If key is a tuple, use the last element
+    actual_key = key[-1] if isinstance(key, tuple) else key
+    return super().__getitem__(actual_key)
+
 class CustomIDInFunc(dict):
   _instance = None
 

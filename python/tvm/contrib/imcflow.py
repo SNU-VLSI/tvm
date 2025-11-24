@@ -185,11 +185,25 @@ class FunctionInfo:
 
 
 class DataBlock:
-  def __init__(self, id: Union[str, TensorEdge], size: int):
-    self.id = id
+  def __init__(self, id: Union[str, TensorEdge, List[TensorEdge]], size: int):
+    """
+    id can be either:
+      str, used for "policy", "imem", etc
+      TensorEdge, corresponding to a single edge (one dst)
+      List[TensorEdge], corresponding to multiple edges (1< dst)
+    kept internally as edges
+    """
+    self.edges = [id] if not isinstance(id, List) else id
     self.size = size
     self.offset = -1  # offset in the region
     self.base_address = -1  # base address in the device memory
+  
+  @property
+  def id(self):
+    if len(self.edges) == 1:
+      return self.edges[0]
+    else:
+      return self.edges
 
   def set_size(self, size: int):
     if isinstance(size, float):
@@ -221,21 +235,13 @@ class MemoryRegionEntry:
     self.base_address = -1  # offset in the device memory
     self._last_offset = 0  # last offset in the region
 
-  def get_data_block_by_id(self, id):
+  def get_data_block_by_edge(self, edge):
     """
-    Gets data_block by id.
+    Gets data_block by edge.
     """
-    if isinstance(id, TensorEdge):
-      for block in self.blocks.values():
-        if isinstance(block.id, TensorEdge):
-          # if node is not split => search by src_id (same output)
-          if id.split_idx is None and block.id.src_id == id.src_id:
-            return block
-          # if node is split => search by TensorEdge (different output)
-          elif id.split_idx is not None and block.id == id:
-            return block
-    else:
-      return self.blocks.get(id, None)
+    for block in self.blocks.values():
+      if edge in block.edges:
+        return block
     return None
   
   def _already_exists(self, block: DataBlock):
@@ -243,11 +249,15 @@ class MemoryRegionEntry:
       print(f"Trying allocate {block} but skipped (already exists)")
       return True
 
-    # skip redundant allocation for Datablock which already allocated with same src_id (same data)
-    if isinstance(block.id, TensorEdge) and block.id.src_id in [x.id.src_id for x in self.blocks.values() if isinstance(x.id, TensorEdge)]:
-      if block.id.split_idx is None:
-        print(f"Trying allocate {block} but skipped due to src_id overlap")
-        return True
+    # extend existing Datablock's id when same src_id found (same data, different destinations)
+    if isinstance(block.id, TensorEdge) and block.id.split_idx is None:
+      for existing_block in self.blocks.values():
+        # Check if any edge has the same src_id
+        for edge in existing_block.edges:
+          if isinstance(edge, TensorEdge) and edge.src_id == block.id.src_id:
+            existing_block.edges.append(block.id)
+            print(f"Extended existing block with {block.id}, now block.id = {existing_block.id}")
+            return True
     return False
 
   def allocate(self, block: DataBlock) -> bool:
@@ -364,14 +374,13 @@ class FuncMemoryLayout(UserDict):
     """Get a memory region by name (e.g., 'inode_0_data')"""
     return self.data[key]
 
-  def get_data_block_by_id(self, id: Union[str, TensorEdge]):
+  def get_data_block_by_edge(self, edge: Union[str, TensorEdge]):
     """
     Gets data_block by id from aggregated blocks
     """
-    for key, block in self.blocks.items():
-      if key == id:
+    for block in self.blocks.values():
+      if edge in block.edges:
         return block
-
     return None
 
   def __str__(self):
@@ -659,13 +668,11 @@ class ImcflowDeviceConfig:
 
   @property
   def CurrFuncMemLayout(self):
-    """Get the memory layout for the current function in CodegenContext.
+    """
+    Get the memory layout for the current function in CodegenContext.
 
     This is a convenience property that allows accessing the current function's
     memory layout without explicitly passing func_name around:
-
-    Instead of: DevConfig().MemLayout[func_name].get_data_block_by_id(edge)
-    Use: DevConfig().CurrFuncMemLayout.get_data_block_by_id(edge)
     """
     return self.MemLayout[CodegenContext().func_name]
 

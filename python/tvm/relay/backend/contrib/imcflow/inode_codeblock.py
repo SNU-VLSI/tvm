@@ -41,7 +41,7 @@ class PolicyUpdateBlock(InodeCodeBlock):
 
     code = TextBlock("")
     for id in same_row_node_ids:
-      db = DevConfig().CurrFuncMemLayout.get_data_block_by_id(f"{id.name}_policy")
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(f"{id.name}_policy")
       if db is None:
         continue
       var = UniqueVar("policy_table_start_address", dtype="int")

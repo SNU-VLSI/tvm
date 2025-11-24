@@ -1,3 +1,4 @@
+from typing import List
 import tvm
 from tvm import relay
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
@@ -81,18 +82,21 @@ class CodeWriter:
 
 def makeBaseAddrName(block):
   const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
-  # FIXME: maybe error in src/dst check
-  if isinstance(block.id, TensorEdge):
-    graph_node_id = imcflow_transform.getInnerNodeID(block.id.src_id.graph_node_id)
-    node_id_str = str(graph_node_id).replace("-", "m")
-    if block.id.src_id.tensor_type in const_tags:
-      return f"{block.id.src_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
-    else:
-      return f"{block.id.dst_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
-  elif isinstance(block.id, str):
+
+  if isinstance(block.id, str):
     return f"{block.id.upper()}_BASE_ADDR"
-  else:
-    raise ValueError("Wrong data block type!")
+
+  # Get first TensorEdge from edges list
+  if isinstance(block.id, TensorEdge) or isinstance(block.id, List):
+    edge = block.edges[0]  # Use first edge for naming
+    graph_node_id = imcflow_transform.getInnerNodeID(edge.src_id.graph_node_id)
+    node_id_str = str(graph_node_id).replace("-", "m")
+    if edge.src_id.tensor_type in const_tags:
+      return f"{edge.src_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
+    else:
+      return f"{edge.dst_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
+
+  raise ValueError("Wrong data block type!")
 
 def makeConstArrayDecl(func, func_name):
 
@@ -164,16 +168,16 @@ def getConstantIdx(func, node_id):
 def getCInputVarName(func, func_name, data_block):
   node_map = CustomIDToNode()
   const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
-  # FIXME: maybe error in src/dst check
-  assert isinstance(data_block.id, TensorEdge), "data_block.id must be TensorEdge to get C input var name"
-  if data_block.id.src_id.tensor_type in const_tags:
-    graph_node_inner_id = imcflow_transform.getInnerNodeID(
-        data_block.id.src_id.graph_node_id)
+
+  # Get first edge from edges list (handles both single TensorEdge and List[TensorEdge])
+  assert data_block.edges, "data_block must have at least one TensorEdge to get C input var name"
+
+  edge = data_block.edges[0]
+  if edge.src_id.tensor_type in const_tags:
+    graph_node_inner_id = imcflow_transform.getInnerNodeID(edge.src_id.graph_node_id)
   else:
-    # graph_node_inner_id = imcflow_transform.getInnerNodeID(
-    #     data_block.id.dst_id.graph_node_id)
-    graph_node_inner_id = imcflow_transform.getInnerNodeID(
-        data_block.id.src_id.graph_node_id)
+    graph_node_inner_id = imcflow_transform.getInnerNodeID(edge.src_id.graph_node_id)
+
   node_type = node_map[graph_node_inner_id]
   if isinstance(node_type, Var):
     return node_type.name_hint

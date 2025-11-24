@@ -101,8 +101,8 @@ class RecvConstBlock(ImceCodeBlock):
     assert len(te_info) == 1, "Multiple tensor edge infos found for the given edge"
     te_info = te_info[0]
 
-    size = DevConfig().CurrFuncMemLayout.get_data_block_by_id(self.in_edge).size
-    base_addr = DevConfig().CurrFuncMemLayout.get_data_block_by_id(
+    size = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(self.in_edge).size
+    base_addr = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(
         self.in_edge).base_address
     assert base_addr % 32 == 0, "Base address must be a multiple of 32"
     recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
@@ -347,8 +347,6 @@ class ConvBlock(ImceCallCodeBlock):
       te_info = te_infos[0]
       try:
         arg_id = edge.src_id.graph_node_id
-        if isinstance(arg_id, Tuple):
-          arg_id = arg_id[1]
         if ConstPat.match(CustomIDToNode()[arg_id]):
           continue
       except KeyError:
@@ -524,8 +522,6 @@ class RecvSendWrapper(ImceCodeBlock):
 
           try:
             arg_id = edge.src_id.graph_node_id
-            if isinstance(arg_id, Tuple):
-              arg_id = arg_id[1]
             if ConstPat.match(CustomIDToNode()[arg_id]):
               continue
           except KeyError:
@@ -588,7 +584,7 @@ class RecvSendWrapper(ImceCodeBlock):
 
     # count = (edge_shape[0] * math.ceil(float(edge_shape[1].value)/16) * edge_shape[2] * edge_shape[3]) // self.num_blocks
     print(f"Warning: create_loop_from_call is used, double-check the loop count calculation!")
-    datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_id(in_edge)
+    datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(in_edge)
     if datablock:
       # when data_block is allocated in the inode MemLayout
       count = math.ceil(datablock.size / 32.0)
