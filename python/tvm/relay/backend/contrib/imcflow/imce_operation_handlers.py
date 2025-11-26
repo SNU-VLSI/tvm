@@ -139,6 +139,7 @@ class MultHandler(OperationHandler):
   def handle(self, call: 'BuilderContext') -> None:
     hid = call.get_hid()
 
+    to_process_in_edges = []
     for in_edge in call.get_input_edges():
       arg_gid = in_edge.src_id.graph_node_id
       try:
@@ -147,13 +148,14 @@ class MultHandler(OperationHandler):
           call.codeblocks.append(hid, block, CodePhase.INIT)
       except KeyError:
         # If the node is not found in CustomIDToNode, treat it as non-constant
+        to_process_in_edges.append(in_edge)
         pass
 
     block = MultlBlock(call, "multl")
     if call.curr_composite_id is not None:
       call.curr_conv_block.add_post_op(block)
     else:
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone").create_loop_from_call(call)
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone").create_loop_from_call(call, to_process_in_edges)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 

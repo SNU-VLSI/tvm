@@ -219,10 +219,6 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     super().__init__(call, annotation)
     self.o_split_idx = o_split_idx
 
-  @property
-  def num_blocks(self) -> int:
-    return 4  # FIXED in MinmaxQuantBlock
-
   def _content(self) -> CodeBlock:
     """Generate only computation, no RECV/SEND."""
     src_mask = 15
@@ -550,7 +546,7 @@ class RecvSendWrapper(ImceCodeBlock):
           fifo_ids = {info.fifo_id for info in te_out_infos}
           assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
           te_out_infos = [te_out_infos[0]]
-
+      
       # Generate SEND for all output edges (supports merged case above)
       for i in range(self.num_blocks):
         for te_out_info in te_out_infos:
@@ -561,7 +557,7 @@ class RecvSendWrapper(ImceCodeBlock):
     return code
 
 
-  def create_loop_from_call(self, call_ctx):
+  def create_loop_from_call(self, call_ctx, to_process_in_edges=None):
     """Wrap the content in a loop based on call's type_args.
 
     Returns self to allow method chaining.
@@ -569,29 +565,31 @@ class RecvSendWrapper(ImceCodeBlock):
     # Wrap in a loop based on calls' type_args
     call = call_ctx.call
     code = self._content()  # Get the current content (RECV/SEND wrapped code)
-    edge_shape = None
-    in_edge = None
-    for idx, arg in enumerate(call.args):
-      if ConstPat.match(arg):
-        continue
-      else:
-        if edge_shape is not None:
-          assert (
-              edge_shape == call.type_args[idx].shape), "all input args should have the same shape"
-        else:
-          edge_shape = call.type_args[idx].shape
-          in_edge = self.in_edges[idx]
+
+    # FIXME: this is a quick fix for ruling out the constant edges using to_process_in_edges
+    in_edges = to_process_in_edges or self.in_edges
+
+    data_edge = next(
+        edge for edge in in_edges if edge.dst_id.tensor_type in ["data", "rhs", "lhs"])
 
     # count = (edge_shape[0] * math.ceil(float(edge_shape[1].value)/16) * edge_shape[2] * edge_shape[3]) // self.num_blocks
     print(f"Warning: create_loop_from_call is used, double-check the loop count calculation!")
-    datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(in_edge)
+    datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(data_edge)
+
     if datablock:
-      # when data_block is allocated in the inode MemLayout
       count = math.ceil(datablock.size / 32.0)
     else:
-      # if data_block is none, we use usual...
-      # FIXME: we don't like how count also has to take num_blocks into account as well...
-      count = edge_shape[-1] * edge_shape[-2] // self.num_blocks
+      edge_shape = None
+      for idx, arg in enumerate(call.args):
+        if ConstPat.match(arg):
+          continue
+        else:
+          if edge_shape is not None:
+            assert (
+                edge_shape == call.type_args[idx].shape), "all input args should have the same shape"
+          else:
+            edge_shape = call.type_args[idx].shape
+      count = edge_shape[-2] * edge_shape[-1]
 
     # Store the loop-wrapped content in the _loop_wrapper attribute
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")
