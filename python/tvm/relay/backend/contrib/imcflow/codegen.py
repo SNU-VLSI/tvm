@@ -67,6 +67,9 @@ class CodegenSuite:
     for edge in annotator.edges:
       print(f"  {edge}")
 
+    # clear IMCECodeBlockInfo before codegen
+    IMCECodeBlockInfo().clear()
+
     # generate code blocks for each node
     builder = ImceCodeBlockBuilder(func_name, annotator.edges)
     builder.visit(func)
@@ -371,6 +374,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       for edge in const_edge_list:
         if edge in const_edges:
           self.add_send_block(edge, CodePhase.INIT)
+        else:
+          assert False, f"const edge {edge} in IMCECodeBlockInfo not found in function const edges"
 
     # send param edge interleaved
     #TODO: if edge count is more than one, interleave them
