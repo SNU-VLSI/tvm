@@ -90,6 +90,8 @@ class ConvHandler(OperationHandler):
     edge = call.get_tensor_edge_from_tag("config")
     block = RecvConstBlock(edge, f"config write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
+    # add constedge info to codeblock info
+    IMCECodeBlockInfo().append_const_edge_info(edge, hid)
 
     # write weights => on INODE
 
@@ -146,6 +148,8 @@ class MultHandler(OperationHandler):
         if ConstPat.match(CustomIDToNode()[arg_gid]):
           block = RecvConstBlock(in_edge, f"mult const")
           call.codeblocks.append(hid, block, CodePhase.INIT)
+          # add constedge info to codeblock info
+          IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
       except KeyError:
         # If the node is not found in CustomIDToNode, treat it as non-constant
         to_process_in_edges.append(in_edge)
@@ -255,6 +259,8 @@ class MinMaxQuantizeHandler(OperationHandler):
       # TODO: two ways to set min/max reg. RecvConst vs. ADDI
       block = RecvConstBlock(edge, f"{tag} write")
       call.codeblocks.append(hid, block, CodePhase.INIT)
+      # add constedge info to codeblock info
+      IMCECodeBlockInfo().append_const_edge_info(edge, hid)
 
     # TODO: add reset qreg code block
     # _edge = TensorEdge(TensorID(-1, "zero"), TensorID(getNodeID(call), "data"))
@@ -326,6 +332,9 @@ class BiasAddHandler(OperationHandler):
     block = RecvConstBlock(bias_edge, "bias write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
 
+    # add constedge info to codeblock info
+    IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)
+
     block = AddBlock(call, "add_bias")
     call.curr_conv_block.add_post_op(block)
 
@@ -353,8 +362,12 @@ class BatchNormHandler(OperationHandler):
 
     block = RecvConstBlock(scale_edge, "fused_scale write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
+    # add constedge info to codeblock info
+    IMCECodeBlockInfo().append_const_edge_info(scale_edge, hid)
     block = RecvConstBlock(bias_edge, "fused_bias write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
+    # add constedge info to codeblock info
+    IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)
 
     # TODO: how to scale?
     block = BatchNormBlock(call, "batch_norm")
@@ -378,3 +391,27 @@ class NuQuantizeHandler(OperationHandler):
   def handle(self, call: 'BuilderContext') -> None:
     # Currently does nothing
     pass
+
+class IMCECodeBlockInfo:
+  """Holds ordered constant receive edges per IMCE core.
+
+  Structure:
+    self.imce_const_edges[hid] = [TensorEdge, ...] in arrival order.
+  """
+  def __new__(cls):
+    if not hasattr(cls, "instance"):
+      cls.instance = super(IMCECodeBlockInfo, cls).__new__(cls)
+      cls.instance._initialize()
+    return cls.instance
+
+  def _initialize(self):
+    super().__init__()
+    self.imce_const_edges = {
+      hid: [] for hid in NodeID.imces()
+    }  # key: hid value: list[TensorEdge]
+  
+  def clear(self):
+    self._initialize()
+
+  def append_const_edge_info(self, edge: TensorEdge, hid: NodeID):
+    self.imce_const_edges[hid].append(edge)
