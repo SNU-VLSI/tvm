@@ -149,32 +149,34 @@ class SimpleFor(CodeBlock):
       yield f"i{SimpleFor.scope}"
     finally:
       SimpleFor.scope -= 1
+  
+  @property
+  def annotation_str(self):
+    return f" : {self.annotation}" if self.annotation else ""
 
   def content(self) -> CodeBlock:
     if self.count == 0:
-      return TextBlock(f"// Loop count is 0. no operation performed. {self.annotation}\n")
+      return TextBlock(f"// loop ignored with loop count == 0{self.annotation_str}\n")
 
     if self.count == 1:
       formatted_body = self.body(0) if callable(self.body) else str(self.body)
-      return TextBlock(f"//Loop count is 1. simple statement will be used. {self.annotation}\n" + formatted_body)
+      code = TextBlock("")
+      code += f"// generate{self.annotation_str}. loop count == 1"
+      code += formatted_body
+      code += f"// endgenerate{self.annotation_str}"
+      return code
 
     with self.manage_scope() as var_iter:
       formatted_body = self.body(var_iter) if callable(
           self.body) else str(self.body)
 
-      if self.annotation:
-        code = TextBlock("")
-        code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate: {self.annotation}"
-        # FIXME: explicit str is NOT the right way
-        # but currently is necessay for scope to work.
-        # since before current content exits, the body's content should be evaluated
-        code += indent(formatted_body, '  ')
-        code += f"}} // endgenerate: {self.annotation}"
-      else:
-        code = TextBlock("")
-        code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{"
-        code += indent(formatted_body, '  ')
-        code += f"}}"
+      code = TextBlock("")
+      code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate{self.annotation_str}"
+      # FIXME: explicit str is NOT the right way
+      # but currently is necessay for scope to work.
+      # since before current content exits, the body's content should be evaluated
+      code += indent(formatted_body, '  ')
+      code += f"}} // endgenerate{self.annotation_str}"
     return code
 
 
@@ -245,7 +247,7 @@ class NodeCodeBlockManager:
     first = True
     for node in self.nodes:
       condition = f"if" if first else f"else if"
-      code += f"{condition} (hid == {node.to_coord(0)} && wid == {node.to_coord(1)}) {{\n"
+      code += f"{condition} (hid == {node.to_coord(0)} && wid == {node.to_coord(1)}) {{ // {node.name}\n"
       # Generate SETUP blocks first
       for codeblock in self.blocks[node][CodePhase.INIT]:
         code += f"{indent(str(codeblock), '  ')}\n"

@@ -528,8 +528,9 @@ class RecvSendWrapper(ImceCodeBlock):
             continue
           if te_info.fifo_id == 0:
             continue
-          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id});"
-
+          annotation = f"{edge}, {te_info.policy_info[0].router_id.name} -> {te_info.policy_info[-1].router_id.name}"
+          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
+  
     # Add the inner block's computation
     code += str(self.body)
 
@@ -552,7 +553,8 @@ class RecvSendWrapper(ImceCodeBlock):
         for te_out_info in te_out_infos:
           var_o = UniqueVar((self.send_block, i))
           if te_out_info:
-            code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0);"
+            annotation = f"{te_out_info.policy_info[0].router_id.name} -> {te_out_info.policy_info[-1].router_id.name}"
+            code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
 
     return code
 

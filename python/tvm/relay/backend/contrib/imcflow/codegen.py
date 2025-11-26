@@ -396,7 +396,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     if out_edge_info.fifo_id < 0:
       pass
     assert out_edge_info.fifo_id >= 0, "fifo id should be assigned to a positive id"
-    block = SendBlock(db, out_edge_info.fifo_id, f"send: {edge}")
+    annotation = f"send - {edge}, {out_edge_info.policy_info[0].router_id.name} -> {out_edge_info.policy_info[-1].router_id.name}"
+    block = SendBlock(db, out_edge_info.fifo_id, annotation)
     self.codeblocks.append(hid, block, phase)
   
   def add_send_block_interleaved(self, edge_list):
