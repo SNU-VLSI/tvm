@@ -24,6 +24,7 @@ import pdb
 from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 # Load operation handlers (imports trigger registration via decorators)
 from . import imce_operation_handlers  # noqa: F401
+from tvm.relay.backend.contrib.imcflow.imce_operation_handlers import IMCECodeBlockInfo
 
 CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})(None)
 TuplePat = is_tuple(None)
@@ -362,8 +363,14 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     
     # send const edge interleaved
     #TODO: consider recv node order..
-    for edge in const_edges:
-      self.add_send_block(edge, CodePhase.INIT)
+
+    # add send block for const edges based on imce const edge ordering
+    imce_edges = IMCECodeBlockInfo()
+    for hid in imce_edges.imce_const_edges.keys():
+      const_edge_list = imce_edges.imce_const_edges[hid]
+      for edge in const_edge_list:
+        if edge in const_edges:
+          self.add_send_block(edge, CodePhase.INIT)
 
     # send param edge interleaved
     #TODO: if edge count is more than one, interleave them
