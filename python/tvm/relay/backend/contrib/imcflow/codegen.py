@@ -379,8 +379,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # send param edge interleaved
     #TODO: if edge count is more than one, interleave them
-    for edge in param_edges:
-      self.add_send_block(edge, CodePhase.EXEC)
+    if len(param_edges) == 1:
+      self.add_send_block(param_edges[0], CodePhase.EXEC)
+    else:
+      self.add_send_block_interleaved(param_edges, CodePhase.EXEC)
 
     # recv output edge interleaved
     #TODO: if edge count is more than one, interleave them
@@ -403,17 +405,44 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       inner_node = CustomIDToNode()[gid]
       for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
         self.add_send_block(inner_edge, phase, db)
-      return
+        # return
 
-    if out_edge_info.fifo_id < 0:
-      pass
-    assert out_edge_info.fifo_id >= 0, "fifo id should be assigned to a positive id"
     annotation = f"send - {edge}, {out_edge_info.policy_info[0].router_id.name} -> {out_edge_info.policy_info[-1].router_id.name}"
-    block = SendBlock(db, out_edge_info.fifo_id, annotation)
+    block = SendBlock(db, out_edge_info, annotation)
     self.codeblocks.append(hid, block, phase)
   
-  def add_send_block_interleaved(self, edge_list):
-    pass
+  def add_send_block_interleaved(self, edge_list, phase: CodePhase):
+    dbs = []
+    edge_infos = []
+    # FIXME: change this if multiple inodes send params
+    hids = [self.get_hid(edge.src_id) for edge in edge_list]
+    assert all(hid == hids[0] for hid in hids), "all edges should have same starting inode for interleaved"
+    hid = hids[0]
+
+    def append_edgeinfo_and_db(edge: TensorEdge, edge_infos: List, dbs: List):
+      out_edge_info = DevConfig().get_tensor_edge_info(edge)
+      edge_infos.append(out_edge_info)
+      dbs.append(db)
+      annotation = f"send - {edge}, {out_edge_info.policy_info[0].router_id.name} -> {out_edge_info.policy_info[-1].router_id.name}, "
+      return annotation
+
+
+    annotation = ""
+    for edge in edge_list:
+      gid = edge.dst_id.graph_node_id
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
+
+      # split handling
+      if CustomIDToNode()[gid].op.name == "split":
+        inner_node = CustomIDToNode()[gid]
+        for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
+          annotation += append_edgeinfo_and_db(inner_edge, edge_infos, dbs)
+          # break
+      else:
+        annotation += append_edgeinfo_and_db(edge, edge_infos, dbs)
+
+    block = SendBlockInterleaved(dbs, edge_infos, annotation)
+    self.codeblocks.append(hid, block, phase)
 
   def add_recv_block(self, edge, phase: CodePhase):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
