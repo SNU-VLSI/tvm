@@ -405,7 +405,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       inner_node = CustomIDToNode()[gid]
       for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
         self.add_send_block(inner_edge, phase, db)
-        # return
+        return
 
     annotation = f"send - {edge}, {out_edge_info.policy_info[0].router_id.name} -> {out_edge_info.policy_info[-1].router_id.name}"
     block = SendBlock(db, out_edge_info, annotation)
@@ -437,7 +437,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         inner_node = CustomIDToNode()[gid]
         for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
           annotation += append_edgeinfo_and_db(inner_edge, edge_infos, dbs)
-          # break
+          break
       else:
         annotation += append_edgeinfo_and_db(edge, edge_infos, dbs)
 
