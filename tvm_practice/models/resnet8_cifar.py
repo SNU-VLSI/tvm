@@ -200,7 +200,7 @@ def getModel_(input_shape):
   free_vars = relay.analysis.free_vars(y)
   var_info = {}
   for v in free_vars:
-    if v is input:
+    if v == input:
       continue
     name = v.name_hint
     # Deduplicate by name in case of separately-constructed Vars with the same name
