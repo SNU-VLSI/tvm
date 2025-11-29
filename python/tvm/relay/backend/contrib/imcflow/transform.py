@@ -286,6 +286,12 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.NCHW],
       ],
       LayoutType.NCHW,
+    ),
+    (
+      [
+        [LayoutType.MK],
+      ],
+      LayoutType.MK,
     )
   ],
   "imcflow.fused_batch_norm": [
@@ -343,7 +349,15 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.SCALAR, LayoutType.NCHW],
       ],
       LayoutType.NCHW,
-    )
+    ),
+    (
+      [
+        [LayoutType.MK, LayoutType.MK],
+        [LayoutType.MK, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.MK],
+      ],
+      LayoutType.MK,
+    ),
   ],
   "multiply": [
     (
@@ -376,7 +390,15 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.SCALAR, LayoutType.NCHW],
       ],
       LayoutType.NCHW,
-    )
+    ),
+    (
+      [
+        [LayoutType.MK, LayoutType.MK],
+        [LayoutType.MK, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.MK],
+      ],
+      LayoutType.MK,
+    ),
   ],
   "divide": [
     (
@@ -401,7 +423,15 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.SCALAR, LayoutType.NCHW],
       ],
       LayoutType.NCHW,
-    )
+    ),
+    (
+      [
+        [LayoutType.MK, LayoutType.MK],
+        [LayoutType.MK, LayoutType.SCALAR],
+        [LayoutType.SCALAR, LayoutType.MK],
+      ],
+      LayoutType.MK,
+    ),
   ],
   "split": [
     (
@@ -457,6 +487,12 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.NCHW, LayoutType.C, LayoutType.C, LayoutType.C, LayoutType.C]
       ],
       LayoutType.NCHW,
+    ),
+    (
+      [
+        [LayoutType.MK, LayoutType.C, LayoutType.C, LayoutType.C, LayoutType.C]
+      ],
+      LayoutType.MK,
     )
   ],
   "cast" : [
@@ -477,6 +513,12 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.NCHW],
       ],
       LayoutType.NCHW,
+    ),
+    (
+      [
+        [LayoutType.MK],
+      ],
+      LayoutType.MK,
     )
   ],
   "nn.bitpack" : [
@@ -509,6 +551,30 @@ REQUIRED_OP_LAYOUTS = {
         [LayoutType.NCHW],
       ],
       LayoutType.MK,
+    )
+  ],
+  "nn.softmax": [
+    (
+      [
+        [LayoutType.MK],
+      ],
+      LayoutType.MK,
+    )
+  ],
+  "nn.avg_pool2d": [
+    (
+      [
+        [LayoutType.NCHW],
+      ],
+      LayoutType.NCHW
+    )
+  ],
+  "nn.adaptive_avg_pool2d": [
+    (
+      [
+        [LayoutType.NCHW],
+      ],
+      LayoutType.NCHW
     )
   ]
 }
@@ -674,18 +740,43 @@ def get_required_layout_rules(call, cpu_node=False):
       [[src_layout]],
       dst_layout,
     )]
+  elif op_name == "reshape":
+    # src_shape = call.args[0]
+    new_shape = call.attrs['newshape']
+    # if len(src_shape) == 4:
+    #   input_layout  = LayoutType.NCHW
+    # elif len(src_shape) == 2:
+    #   input_layout  = LayoutType.MK
+    # else:
+    #   raise ValueError(f"reshape src shape rank {len(src_shape)} not supported.")
+    
+    if len(new_shape) == 4:
+      output_layout = LayoutType.NCHW
+    elif len(new_shape) == 2:
+      output_layout = LayoutType.MK
+    else:
+      raise ValueError(f"reshape new shape rank {len(new_shape)} not supported.")
+    rules = [(
+      [[LayoutType.MK],
+       [LayoutType.NCHW],
+       [LayoutType.NCHW16C],
+       [LayoutType.NCHW64C],
+      ],
+      output_layout,
+    )]
   elif op_name in REQUIRED_OP_LAYOUTS.keys():
     rules = REQUIRED_OP_LAYOUTS.get(op_name, None)
     if rules is None:
       raise ValueError(f"Layout requirement not defined for op {op_name}")
   else:
-    debug_print(f"[get_required_layout_rules] op_name {op_name} not found in REQUIRED_OP_LAYOUTS.")
-    debug_print(f"[get_required_layout_rules] fallback NCHW layout.")
-    in_num = len(call.args)
-    rules = [(
-      [[LayoutType.NCHW] * in_num],
-      LayoutType.NCHW,
-    )]
+    # debug_print(f"[get_required_layout_rules] op_name {op_name} not found in REQUIRED_OP_LAYOUTS.")
+    raise ValueError(f"Layout requirement not defined for op {op_name}.")
+    # debug_print(f"[get_required_layout_rules] fallback NCHW layout.")
+    # in_num = len(call.args)
+    # rules = [(
+    #   [[LayoutType.NCHW] * in_num],
+    #   LayoutType.NCHW,
+    # )]
   
   if not rules: raise ValueError(f"Layout requirement not defined for op {op_name} @ before cpu_node filter.")
 
@@ -828,7 +919,6 @@ def get_valid_output_layout_of_node(node, input_layouts, mod, cpu_node=False, la
           node_input_layouts.append(layout)
           if not isinstance(arg, relay.Constant):
             not_const_layouts.append(layout)
-
       elif isinstance(_node, relay.Tuple):
         for field in _node.fields:
           node_input_layouts.append(_get_layout(field))
@@ -5282,100 +5372,6 @@ def calculate_imcflow_func_type(func, func_name=None):
   updater = _ImcflowFunctionParamUpdater(func_name)
   return updater.run(func)
 
-def create_wrap_func(func, func_name, new_param_type, new_param_layout, new_ret_type, new_ret_layout):
-    """
-    param_specs: [(name, shape, dtype), ...]
-    """
-    ttype_map = {}
-    param_layouts = new_param_layout
-    ret_layouts = new_ret_layout
-
-    def _block_from_layout(layout_type):
-      if layout_type == LayoutType.NCHW16C:
-        return 16
-      if layout_type == LayoutType.NCHW64C:
-        return 64
-      raise ValueError(f"Layout type {layout_type} does not have block size")
-    
-    def _unpack_input_value(param, old_type, new_type, layout_type):
-      if layout_type == LayoutType.QCONV_INPUT:
-        arg = imcflow_mmquant_out_to_4d(param, old_type.shape[1])
-      elif layout_type in (LayoutType.NCHW16C, LayoutType.NCHW64C):
-        block = _block_from_layout(layout_type)
-        arg = relay.op.layout_transform(param, layout_type.value, "NCHW")
-        N, CG, H, W, _ = new_type.shape
-        c_converted = CG * block
-        if c_converted > old_type.shape[1]:
-          arg = relay.op.strided_slice(arg, begin=[0,0,0,0], end=[N, old_type.shape[1], H, W])
-      else:
-        assert layout_type == LayoutType.NCHW, "Only NCHW layout is supported for input"
-        arg = params[i]
-      return arg
-
-    def _pack_output_value(expr, layout_type):
-      if layout_type == LayoutType.QCONV_INPUT:
-        return imcflow_4d_to_qconv_input(expr)
-      if layout_type == LayoutType.NCHW16C:
-        return relay.op.layout_transform(expr, "NCHW", "NCHW16c")
-      if layout_type == LayoutType.NCHW64C:
-        return relay.op.layout_transform(expr, "NCHW", "NCHW64c")
-      
-      assert layout_type == LayoutType.NCHW, "Only NCHW layout is supported for packing"
-      return expr
-
-    params = []
-    old_param_names = [p.name_hint for p in func.params]
-    for i, typ in enumerate(new_param_type):
-        name  = f"{old_param_names[i]}_wrap"
-        shape = typ.shape
-        dtype = typ.dtype
-        params.append(relay.var(name, shape=shape, dtype=dtype))
-
-    old_params = func.params
-    old_ret_type = func.ret_type
-
-    #- check old param and new param shape and make args
-    args = []
-    for i in range(len(old_params)):
-        old_type = old_params[i].checked_type
-        new_type = new_param_type[i]
-        if i >= len(param_layouts): raise ValueError("param layout is not enough")
-        layout_type = param_layouts[i]
-        arg = _unpack_input_value(params[i], old_type, new_type, layout_type)
-        args.append(arg)
-        ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype, old_type.shape, old_type.dtype)
-
-    #- make function body
-    new_attr = tvm.ir.make_node("DictAttrs", Composite=f"{func_name}_impl", Compiler="imcflow")
-    func_no_attr = relay.Function(func.params, func.body, func.ret_type, attrs=new_attr)
-    body = func_no_attr(*args)
-
-    #- check old ret and new ret shape and make return value
-    if isinstance(new_ret_type, relay.TupleType):
-      outs = []
-      for i, field_type in enumerate(new_ret_type.fields):
-        if i >= len(ret_layouts): raise ValueError("return layout is not enough")
-        layout_type = ret_layouts[i]
-        gti = relay.TupleGetItem(body, i)
-        ret_field = _pack_output_value(gti, layout_type)
-        outs.append(ret_field)
-      body = relay.Tuple(outs)
-    elif isinstance(new_ret_type, relay.TensorType):
-      target_layout = ret_layouts if isinstance(ret_layouts, LayoutType) else (ret_layouts[0] if ret_layouts else LayoutType.NCHW)
-      body = _pack_output_value(body, target_layout)
-
-    if isinstance(old_ret_type, relay.TupleType):
-      temp = []
-      for i, field_type in enumerate(old_ret_type.fields):
-        old_type = field_type
-        new_type = new_ret_type.fields[i]
-        temp.append((new_type.shape, new_type.dtype, old_type.shape, old_type.dtype))
-      ttype_map[func_name] = temp
-    else:
-      ttype_map[func_name] = (new_ret_type.shape, new_ret_type.dtype, old_ret_type.shape, old_ret_type.dtype)
-
-    return relay.Function(params, body, new_ret_type, attrs=func.attrs), ttype_map
-
 class ImcflowLayoutLegalizer:
   """
   A pass that identifies boundary nodes between IMCFLOW and CPU execution domains.
@@ -5420,6 +5416,7 @@ class ImcflowLayoutLegalizer:
     return {
       LayoutType.SCALAR: 4,
       LayoutType.NCHW: 3,
+      LayoutType.MK: 3,
       LayoutType.NCHW16C: 2,
       LayoutType.NCHW64C: 1,
       LayoutType.QCONV_INPUT: 0,
@@ -5435,7 +5432,7 @@ class ImcflowLayoutLegalizer:
   def __init__(self):
     self.input_call_dict = {}
     self.output_call_dict = {}
-    self.imcflow_func_layout_map = {}
+    self.imcflow_func_interface_layout_map = {}
     self.layout_map = ImcflowDeviceConfig().LayoutMap
     self.layout_results = {}
 
@@ -5457,6 +5454,102 @@ class ImcflowLayoutLegalizer:
           _dump(child, indent + 1, seen)
 
     _dump(func.body, 0, set())
+
+  def create_wrap_func(self, func, func_name, new_param_type, new_param_layout, new_ret_type, new_ret_layout):
+      """
+      param_specs: [(name, shape, dtype), ...]
+      """
+      ttype_map = {}
+      param_layouts = new_param_layout
+      ret_layouts = new_ret_layout
+
+      def _block_from_layout(layout_type):
+        if layout_type == LayoutType.NCHW16C:
+          return 16
+        if layout_type == LayoutType.NCHW64C:
+          return 64
+        raise ValueError(f"Layout type {layout_type} does not have block size")
+      
+      def _unpack_input_value(param, old_type, new_type, layout_type):
+        if layout_type == LayoutType.QCONV_INPUT:
+          arg = imcflow_mmquant_out_to_4d(param, old_type.shape[1])
+        elif layout_type in (LayoutType.NCHW16C, LayoutType.NCHW64C):
+          block = _block_from_layout(layout_type)
+          arg = relay.op.layout_transform(param, layout_type.value, "NCHW")
+          N, CG, H, W, _ = new_type.shape
+          c_converted = CG * block
+          if c_converted > old_type.shape[1]:
+            arg = relay.op.strided_slice(arg, begin=[0,0,0,0], end=[N, old_type.shape[1], H, W])
+        else:
+          assert layout_type == LayoutType.NCHW, "Only NCHW layout is supported for input"
+          arg = params[i]
+        return arg
+
+      def _pack_output_value(expr, layout_type):
+        if layout_type == LayoutType.QCONV_INPUT:
+          return imcflow_4d_to_qconv_input(expr)
+        if layout_type == LayoutType.NCHW16C:
+          return relay.op.layout_transform(expr, "NCHW", "NCHW16c")
+        if layout_type == LayoutType.NCHW64C:
+          return relay.op.layout_transform(expr, "NCHW", "NCHW64c")
+        
+        assert layout_type == LayoutType.NCHW, "Only NCHW layout is supported for packing"
+        return expr
+
+      params = []
+      old_param_names = [p.name_hint for p in func.params]
+      for i, typ in enumerate(new_param_type):
+          name  = f"{old_param_names[i]}_wrap"
+          shape = typ.shape
+          dtype = typ.dtype
+          params.append(relay.var(name, shape=shape, dtype=dtype))
+
+      old_params = func.params
+      old_ret_type = func.ret_type
+
+      #- check old param and new param shape and make args
+      args = []
+      for i in range(len(old_params)):
+          old_type = old_params[i].checked_type
+          new_type = new_param_type[i]
+          if i >= len(param_layouts): raise ValueError("param layout is not enough")
+          layout_type = param_layouts[i]
+          arg = _unpack_input_value(params[i], old_type, new_type, layout_type)
+          args.append(arg)
+          ttype_map[old_params[i].name_hint] = (new_type.shape, new_type.dtype, old_type.shape, old_type.dtype)
+
+      #- make function body
+      new_attr = tvm.ir.make_node("DictAttrs", Composite=f"{func_name}_impl", Compiler="imcflow")
+      func_no_attr = relay.Function(func.params, func.body, func.ret_type, attrs=new_attr)
+      body = func_no_attr(*args)
+      for func_impl_param, layout in zip(func_no_attr.params, new_param_layout):
+        self.layout_results[func_impl_param] = layout
+
+      #- check old ret and new ret shape and make return value
+      if isinstance(new_ret_type, relay.TupleType):
+        outs = []
+        for i, field_type in enumerate(new_ret_type.fields):
+          if i >= len(ret_layouts): raise ValueError("return layout is not enough")
+          layout_type = ret_layouts[i]
+          gti = relay.TupleGetItem(body, i)
+          ret_field = _pack_output_value(gti, layout_type)
+          outs.append(ret_field)
+        body = relay.Tuple(outs)
+      elif isinstance(new_ret_type, relay.TensorType):
+        target_layout = ret_layouts if isinstance(ret_layouts, LayoutType) else (ret_layouts[0] if ret_layouts else LayoutType.NCHW)
+        body = _pack_output_value(body, target_layout)
+
+      if isinstance(old_ret_type, relay.TupleType):
+        temp = []
+        for i, field_type in enumerate(old_ret_type.fields):
+          old_type = field_type
+          new_type = new_ret_type.fields[i]
+          temp.append((new_type.shape, new_type.dtype, old_type.shape, old_type.dtype))
+        ttype_map[func_name] = temp
+      else:
+        ttype_map[func_name] = (new_ret_type.shape, new_ret_type.dtype, old_ret_type.shape, old_ret_type.dtype)
+
+      return relay.Function(params, body, new_ret_type, attrs=func.attrs), ttype_map
 
   def transform_mod(self, mod):
     """
@@ -5481,19 +5574,15 @@ class ImcflowLayoutLegalizer:
         print(mod[function_names[i]])
         print('-------------------------------------------------------')
         param_type, param_layout, ret_type, ret_layout, layout_results = calculate_imcflow_func_type(mod[function_names[i]], function_names[i])
-        self.imcflow_func_layout_map[function_names[i]] = (param_layout, ret_layout)
+        self.imcflow_func_interface_layout_map[function_names[i]] = (param_layout, ret_layout)
         self.layout_results[function_names[i]] = layout_results
         print("Created wrapper function for", function_names[i])
-        print("  Param Types and Layouts:")
-        print(param_type)
-        print(param_layout)
-        print("  Return Type and Layout:")
-        print(ret_type)
-        print(ret_layout)
+        print("  Param Types and Layouts:", param_type,param_layout)
+        print("  Return Type and Layout:", ret_type,ret_layout)
         print("  Layout Results:")
         self._dump_layout_results(mod[function_names[i]], layout_results)
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
-        wrap_func, ttype_map = create_wrap_func(mod[function_names[i]], function_names[i], param_type, param_layout, ret_type, ret_layout)
+        wrap_func, ttype_map = self.create_wrap_func(mod[function_names[i]], function_names[i], param_type, param_layout, ret_type, ret_layout)
         temp_mod = tvm.IRModule.from_expr(wrap_func)
         temp_mod = relay.transform.InferType()(temp_mod)
         wrap_func = temp_mod[list(temp_mod.get_global_vars())[0]]
@@ -5514,13 +5603,9 @@ class ImcflowLayoutLegalizer:
     print(mod.astext())
 
     mod = self.replace_imcflow_gv(mod, new_gv_map)
-    mod = self._insert_packing_unpacking(mod, real_tensor_type_map, self.imcflow_func_layout_map)
+    mod = self._insert_packing_unpacking(mod, real_tensor_type_map, self.imcflow_func_interface_layout_map)
+    self.layout_map.update(self.layout_results)
 
-    #- make layout map of main and imcflow_impl functions. exclude imcflow_wrap function's local node.
-    #- they are just glue nodes.
-    # self._build_layout_map(mod)
-
-    # return transformed_func
     return mod, real_tensor_type_map
 
   def replace_imcflow_gv(self, mod, new_gv_map):
@@ -5742,6 +5827,7 @@ class ImcflowLayoutLegalizer:
           layout_str = self._layout_to_str(target_layout)
           expr = relay.op.layout_transform(expr, "NCHW", layout_str)
           return expr, target_layout
+
         if curr_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C) and target_layout == LayoutType.NCHW:
           layout_str = self._layout_to_str(curr_layout)
           expr = relay.op.layout_transform(expr, layout_str, "NCHW")
@@ -5752,22 +5838,26 @@ class ImcflowLayoutLegalizer:
               if C > channel_hint:
                 expr = relay.op.strided_slice(expr, begin=[0, 0, 0, 0], end=[N, channel_hint, H, W])
           return expr, target_layout
+
         if curr_layout == LayoutType.NCHW and target_layout == LayoutType.QCONV_INPUT:
           expr = imcflow_4d_to_qconv_input(expr)
           return expr, target_layout
+
         if curr_layout == LayoutType.QCONV_INPUT and target_layout == LayoutType.NCHW:
           channels = channel_hint if channel_hint is not None else self._channels_from_expr(expr)
           channels = channels if channels is not None else 0
           expr = imcflow_mmquant_out_to_4d(expr, channels)
           return expr, target_layout
+
         if curr_layout == LayoutType.NCHW16C and target_layout == LayoutType.NCHW64C:
           expr = relay.op.layout_transform(expr, "NCHW16c", "NCHW64c")
           return expr, target_layout
+
         if curr_layout == LayoutType.NCHW64C and target_layout == LayoutType.NCHW16C:
           expr = relay.op.layout_transform(expr, "NCHW64c", "NCHW16c")
           return expr, target_layout
 
-        raise ValueError(f"Unsupported layout conversion from {curr_layout} to {target_layout}")
+        raise ValueError(f"node : {getNodeDebugID(expr)}. Unsupported layout conversion from {curr_layout} to {target_layout}")
 
       def visit_var(self, var):
         layout = self._infer_layout_from_type(var.type_annotation)
@@ -5818,7 +5908,11 @@ class ImcflowLayoutLegalizer:
                 tgt_layout = r
                 break
             if tgt_layout is None and req_layouts:
-              tgt_layout = req_layouts[0]
+              #TODO: if multiple required layouts, choose the best one
+              if LayoutType.MK in req_layouts and LayoutType.NCHW in req_layouts:
+                tgt_layout = req_layouts[req_layouts.index(LayoutType.NCHW)]
+              else:
+                tgt_layout = req_layouts[0]
             new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout)
             transformed_args.append(new_arg)
             target_arg_layouts[i] = new_layout
