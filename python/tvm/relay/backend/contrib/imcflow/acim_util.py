@@ -157,7 +157,13 @@ class ConfigData(dict):
     stride_val = extract_single(stride)
     W = to_int(data_shape[3])
     H = to_int(data_shape[2])
-    
+
+    # assert for HW validity
+    assert (ksel in [1, 3, 5, 7]), f"Invalid ksel value: {ksel}"
+    assert (pad <= ksel), f"Padding {pad} exceeds ksel {ksel}"
+    assert (stride_val in [1, 2]), f"Invalid stride value: {stride_val}"
+    assert (W <= 128) and (H <= 128), f"H and W must be less than or equal to 128, got W={W}, H={H}"
+
     super().__init__({
         "ksel": ksel,
         "pad": pad,
