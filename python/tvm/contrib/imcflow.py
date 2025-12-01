@@ -27,26 +27,26 @@ SMALL_DEBUG = 0
 
 
 class NodeID(Enum):
-  inode_0 = 0
-  imce_0 = 1
-  imce_1 = 2
-  imce_2 = 3
-  imce_3 = 4
-  inode_1 = 5
-  imce_4 = 6
-  imce_5 = 7
-  imce_6 = 8
-  imce_7 = 9
-  inode_2 = 10
-  imce_8 = 11
-  imce_9 = 12
-  imce_10 = 13
-  imce_11 = 14
-  inode_3 = 15
-  imce_12 = 16
-  imce_13 = 17
-  imce_14 = 18
-  imce_15 = 19
+  inode_0_0 = 0
+  imce_0_1 = 1
+  imce_0_2 = 2
+  imce_0_3 = 3
+  imce_0_4 = 4
+  inode_1_0 = 5
+  imce_1_1 = 6
+  imce_1_2 = 7
+  imce_1_3 = 8
+  imce_1_4 = 9
+  inode_2_0 = 10
+  imce_2_1 = 11
+  imce_2_2 = 12
+  imce_2_3 = 13
+  imce_2_4 = 14
+  inode_3_0 = 15
+  imce_3_1 = 16
+  imce_3_2 = 17
+  imce_3_3 = 18
+  imce_3_4 = 19
 
   @staticmethod
   def from_coord(x: int, y: int) -> 'NodeID':
@@ -371,7 +371,7 @@ class FuncMemoryLayout(UserDict):
     return aggregated
 
   def __getitem__(self, key: str) -> 'MemoryRegion':
-    """Get a memory region by name (e.g., 'inode_0_data')"""
+    """Get a memory region by name (e.g., 'inode_0_0_data')"""
     return self.data[key]
 
   def get_data_block_by_edge(self, edge: Union[str, TensorEdge]):
@@ -591,14 +591,14 @@ class ImcflowDeviceConfig:
     self.InstEdgeInfoDict = {}
     self.MemLayout = MemoryLayout(
         MemoryRegionEntry("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
-        MemoryRegionEntry("inode_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegionEntry("inode_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegionEntry("inode_1_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegionEntry("inode_1_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegionEntry("inode_2_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegionEntry("inode_2_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
-        MemoryRegionEntry("inode_3_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
-        MemoryRegionEntry("inode_3_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_0_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_0_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_1_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_1_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_2_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_2_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
+        MemoryRegionEntry("inode_3_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
+        MemoryRegionEntry("inode_3_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
     self.ActiveIMCEPerFunc = {}
     self.NoCPaths = {}

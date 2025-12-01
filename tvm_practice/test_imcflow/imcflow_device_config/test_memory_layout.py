@@ -23,25 +23,25 @@ from tvm.contrib.imcflow import MemoryLayout, MemoryRegion, DataBlock
 def test_memory_layout():
   my_layout = MemoryLayout(
     MemoryRegion("state_regs", 128),
-    MemoryRegion("inode_0_inst", 1024),
-    MemoryRegion("inode_0_data", 65536),
-    MemoryRegion("inode_1_inst", 1024),
-    MemoryRegion("inode_1_data", 65536),
-    MemoryRegion("inode_2_inst", 1024),
-    MemoryRegion("inode_2_data", 65536),
-    MemoryRegion("inode_3_inst", 1024),
-    MemoryRegion("inode_3_data", 65536),
+    MemoryRegion("inode_0_0_inst", 1024),
+    MemoryRegion("inode_0_0_data", 65536),
+    MemoryRegion("inode_1_0_inst", 1024),
+    MemoryRegion("inode_1_0_data", 65536),
+    MemoryRegion("inode_2_0_inst", 1024),
+    MemoryRegion("inode_2_0_data", 65536),
+    MemoryRegion("inode_3_0_inst", 1024),
+    MemoryRegion("inode_3_0_data", 65536),
   )
 
   state_regs = my_layout["state_regs"]
-  inode_0_data = my_layout["inode_0_data"]
+  inode_0_0_data = my_layout["inode_0_0_data"]
 
   state_regs.allocate(DataBlock("block_0", 64))
-  inode_0_data.allocate(DataBlock("block_0", 1024))
-  inode_0_data.allocate(DataBlock("block_1", 256))
+  inode_0_0_data.allocate(DataBlock("block_0", 1024))
+  inode_0_0_data.allocate(DataBlock("block_1", 256))
 
   # Test addresses
-  address = my_layout["inode_0_data"]["block_1"].base_address
+  address = my_layout["inode_0_0_data"]["block_1"].base_address
   assert address == 128 + 1024 + 1024, f"Expected {128 + 1024 + 1024}, got {address}"
   print(my_layout)
 

@@ -263,7 +263,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   
   def sync_inrt_clear(self, codephase: CodePhase):
     # standby and intrt
-    inode_master = NodeID.inode_3
+    inode_master = NodeID.inode_3_0
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
     block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
     self.codeblocks.append(inode_master, block, codephase)
@@ -326,8 +326,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
   def finalize(self):
     # standby and intrt
-    # FIXME: hardcoded inode_3
-    inode_master = NodeID.inode_3
+    # FIXME: hardcoded inode_3_0
+    inode_master = NodeID.inode_3_0
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
     block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
     self.codeblocks.append(inode_master, block, CodePhase.END)

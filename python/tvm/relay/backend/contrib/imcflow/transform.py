@@ -3702,7 +3702,7 @@ class MemoryAllocator:
 
             _, inode_tensorid = self.is_inode_in_edge(edge)
             hw_node_id = self.hwnodemap[getInnerNodeID(inode_tensorid.graph_node_id)]
-            inode_name = hw_node_id.name  # ex) inode_3
+            inode_name = hw_node_id.name  # ex) inode_3_0
             
             if inode_name not in inode_tensors:
               inode_tensors[inode_name] = {
