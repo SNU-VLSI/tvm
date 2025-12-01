@@ -491,6 +491,10 @@ class TensorEdgeInfo(EdgeInfo):
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id
 
+  @property
+  def node_info_str(self):
+    return f"{self.policy_info[0].router_id.name} -> {self.policy_info[-1].router_id.name}"
+
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"
     return f"TensorEdgeInfo([{policy_info_str}], {self.data_block}, {self.fifo_id})"

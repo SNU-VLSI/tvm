@@ -4063,8 +4063,8 @@ class PolicyTableGenerator:
                     #append entry to router's policy table
                     entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0}, \
                       "North": {"enable": False, "addr": 0}, \
-                      "South": {"enable": False, "addr": 0}, \
                       "East": {"enable": False, "addr": 0},  \
+                      "South": {"enable": False, "addr": 0}, \
                       "West": {"enable": False, "addr": 0}}
 
                     target_addr = len(policy_tables[next_node])
@@ -4082,8 +4082,8 @@ class PolicyTableGenerator:
                 # insert entry for destination node
                 entry = {"Local": {"enable": True, "chunk_index": dest_index, "addr": 0}, \
                   "North": {"enable": False, "addr": 0}, \
-                  "South": {"enable": False, "addr": 0}, \
                   "East": {"enable": False, "addr": 0},  \
+                  "South": {"enable": False, "addr": 0}, \
                   "West": {"enable": False, "addr": 0}}
 
                 policy_tables[dest_node].append(entry)

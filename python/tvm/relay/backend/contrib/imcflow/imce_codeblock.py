@@ -4,7 +4,7 @@ from copy import copy
 import math
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
-from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge
+from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -63,6 +63,10 @@ class ImceCallCodeBlock(ImceCodeBlock):
   def num_blocks(self) -> int:
     return 4 if self.prev_op else 1
 
+  @property
+  def num_out_blocks(self) -> int:
+    return 4 if self.prev_op else 1
+
   def __repr__(self):
     return f"{self.__class__.__name__}(gid: {self.call.get_gid()})"
 
@@ -70,16 +74,19 @@ class ImceCallCodeBlock(ImceCodeBlock):
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
 
-  def __init__(self, count: int, repeat: int, fifo_id: int, annotation: str = ""):
+  def __init__(self, count: int, repeat: int, edge: TensorEdge, edge_info: TensorEdgeInfo, annotation: str = ""):
     super().__init__(annotation)
     self.count = count
     self.repeat = repeat
-    self.fifo_id = fifo_id
+    self.edge = edge
+    self.edge_info = edge_info
 
   def _content(self) -> CodeBlock:
     code = TextBlock("")
+    load_fifo_id = self.edge_info.fifo_id
+    annotation = f"{self.edge}, {self.edge_info.node_info_str}"
     for _ in range(self.repeat):
-      code += f"__builtin_IMCE_LOAD_LB({self.fifo_id});"
+      code += f"__builtin_IMCE_LOAD_LB({load_fifo_id}); // {annotation}"
     return SimpleFor(self.count, code, "load_block")
 
 
@@ -219,6 +226,10 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     super().__init__(call, annotation)
     self.o_split_idx = o_split_idx
 
+  @property
+  def num_out_blocks(self) -> int:
+    return 4  # FIXED in MinmaxQuantBlock
+
   def _content(self) -> CodeBlock:
     """Generate only computation, no RECV/SEND."""
     src_mask = 15
@@ -246,7 +257,7 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     # We put MM_QUANTs block first, then GET_QREGS.
     # Otherwise, it results in llvm artifact of moving qregs into vector registers.
     # e.g. vaddi %v3 %qreg2 0
-    for i in range(self.num_blocks):
+    for i in range(self.num_out_blocks):
       # Get QREG result for this block
       var_o = UniqueVar((self, i))
       code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
@@ -334,6 +345,10 @@ class ConvBlock(ImceCallCodeBlock):
   def num_blocks(self) -> int:
     return 4  # FIXED in ConvBlock
 
+  @property
+  def num_out_blocks(self) -> int:
+    return 4  # FIXED in ConvBlock
+
   def _loop_body_content(self, recv_count: int) -> CodeBlock:
 
     load_info = []
@@ -352,11 +367,10 @@ class ConvBlock(ImceCallCodeBlock):
 
     assert len(load_info) == 1, "there should be exactly one load edge"
     load_edge = load_info[0]["edge"]
-    load_fifo_id = load_info[0]["te_info"].fifo_id
-
+    load_edge_info = load_info[0]["te_info"]
 
     code = TextBlock("")
-    code += LoadLBBlock(recv_count, self.num_blocks, load_fifo_id)
+    code += LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info)
     code += "__builtin_IMCE_STEP();\n"
 
     for i in range(self.num_blocks):
@@ -385,7 +399,7 @@ class ConvBlock(ImceCallCodeBlock):
       send_edges = self.out_edges
       send_block = self
 
-    code = RecvSendWrapper(code, self.num_blocks, send_block, recv_edges, send_edges)
+    code = RecvSendWrapper(code, self.num_blocks, self.num_out_blocks, send_block, recv_edges, send_edges)
 
     return code
 
@@ -467,7 +481,7 @@ class RecvSendWrapper(ImceCodeBlock):
   Wrapper that adds RECV and SEND operations around a computation block.
   """
 
-  def __init__(self, body: TextBlock, num_blocks: int, send_block: ImceCodeBlock,
+  def __init__(self, body: TextBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
                in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = ""):
     """Wrap a computation block with RECV/SEND operations.
 
@@ -480,6 +494,7 @@ class RecvSendWrapper(ImceCodeBlock):
     super().__init__(annotation)
     self.body = body
     self.num_blocks = num_blocks
+    self.num_out_blocks = num_out_blocks
     self.in_edges = in_edges
     self.out_edges = out_edges
     self.send_block = send_block
@@ -492,8 +507,9 @@ class RecvSendWrapper(ImceCodeBlock):
     in_edges = codeblock.in_edges
     out_edges = codeblock.out_edges
     num_blocks = codeblock.num_blocks
+    num_out_blocks = codeblock.num_out_blocks
 
-    return cls(body, num_blocks, send_block, in_edges, out_edges, annotation)
+    return cls(body, num_blocks, num_out_blocks, send_block, in_edges, out_edges, annotation)
 
   def _content(self) -> CodeBlock:
     """Generate RECV -> body -> SEND."""
@@ -528,7 +544,7 @@ class RecvSendWrapper(ImceCodeBlock):
             continue
           if te_info.fifo_id == 0:
             continue
-          annotation = f"{edge}, {te_info.policy_info[0].router_id.name} -> {te_info.policy_info[-1].router_id.name}"
+          annotation = f"{edge}, {te_info.node_info_str}"
           code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
   
     # Add the inner block's computation
@@ -549,11 +565,11 @@ class RecvSendWrapper(ImceCodeBlock):
           te_out_infos = [te_out_infos[0]]
       
       # Generate SEND for all output edges (supports merged case above)
-      for i in range(self.num_blocks):
+      for i in range(self.num_out_blocks):
         for te_out_info in te_out_infos:
           var_o = UniqueVar((self.send_block, i))
           if te_out_info:
-            annotation = f"{te_out_info.policy_info[0].router_id.name} -> {te_out_info.policy_info[-1].router_id.name}"
+            annotation = f"{te_out_info.node_info_str}"
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
 
     return code
