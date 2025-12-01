@@ -355,7 +355,10 @@ def getModel_from_pretrained_weight(small_debug=False):
   import torch
   import re
   
-  out, var_dict = getModel_([1, 3, 32, 32])
+  if small_debug:
+    out, var_dict = getModel_([1, 3, 8, 8])
+  else:
+    out, var_dict = getModel_([1, 3, 32, 32])
   
   # Load checkpoint
   checkpoint_path = '/root/project/tvm/tvm_practice/models/checkpoint.pth.tar' # with int16 conversion, CIM/tree/deploy/models_checkpoint/A4W4%2BPS6/2025-Sep-24-01-20-40/imcflow/2025-Oct-28-17-49-32
