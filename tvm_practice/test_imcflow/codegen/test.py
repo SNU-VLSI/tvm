@@ -244,6 +244,11 @@ def run_test_evl(test_name, mod, param_dict):
     pprint.pprint(DevConfig().PolicyTableDict, stream=f)
 
   imcflow_transform.generateNoCVisualizations(eval_mod, eval_dir + "/noc_visualizations")
+  
+  fifo_monitor = imcflow_transform.FIFOConflictMonitor()
+  fifo_monitor.run(eval_mod)
+  fifo_monitor.print_conflict_summary()
+  fifo_monitor.export_conflict_table(f"{eval_dir}/fifo_conflict_table.txt")
 
   # get the config
   config = DevConfig()
