@@ -610,6 +610,7 @@ class ImcflowDeviceConfig:
     self.ImcflowFuncMap = {}  # {func_name: FunctionInfo}
     self.use_def_chain = {}   # {func_name: use-def mapping}
     self.LayoutMap={}
+    self.FIFOConflictTable = {}
 
   def clear(self):
     self._initialize()

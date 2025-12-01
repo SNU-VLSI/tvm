@@ -29,6 +29,7 @@ from tvm import relay
 UNKNOWN_TYPE = "unknown"
 
 from tvm.relay.op.contrib.imcflow import HashToCustomID
+from tvm.contrib.imcflow import ImcflowDeviceConfig
 
 def addCustomID(node, node_detail):
   id_dict = HashToCustomID()
@@ -41,6 +42,16 @@ def addCustomID(node, node_detail):
       raise ValueError("node_detail must be either str or list for custom ID")
   return node_detail
 
+def addCustomLayout(node, node_detail):
+  layout_dict = ImcflowDeviceConfig().LayoutMap
+  if node in layout_dict:
+    if isinstance(node_detail, str):
+      node_detail += f"\nCustomLayout : {layout_dict[node]}"
+    elif isinstance(node_detail, list):
+      node_detail.append(f"CustomLayout : {layout_dict[node]}")
+    else:
+      raise ValueError("node_detail must be either str or list for custom layout")
+  return node_detail
 
 class VizNode:
     """VizNode carry node information for `VizGraph` interface.
@@ -216,6 +227,7 @@ class DefaultVizParser(VizParser):
                 node_detail = f"{node_detail}\ntype_annotation: {node.type_annotation}"
 
         node_detail = addCustomID(node, node_detail)
+        node_detail = addCustomLayout(node, node_detail)
 
         # only node
         viz_node = VizNode(node_id, node_type, node_detail)
@@ -237,6 +249,7 @@ class DefaultVizParser(VizParser):
             name = ""
 
         node_detail = addCustomID(node, node_detail)
+        node_detail = addCustomLayout(node, node_detail)
         node_id = node_to_id[node]
 
         try:
@@ -276,6 +289,7 @@ class DefaultVizParser(VizParser):
             op_name = str(type(node.op)).split(".")[-1].split("'")[0]
 
         node_detail = addCustomID(node, node_detail)
+        node_detail = addCustomLayout(node, node_detail)
         try:
           node_detail.append(f"checked_type: {node.checked_type}")
         except:
@@ -320,6 +334,7 @@ class DefaultVizParser(VizParser):
         node_detail = f"shape: {node.data.shape}, dtype: {node.data.dtype}"
 
         node_detail = addCustomID(node, node_detail)
+        node_detail = addCustomLayout(node, node_detail)
 
         # only node
         viz_node = VizNode(node_id, "Const", node_detail)

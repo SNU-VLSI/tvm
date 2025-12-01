@@ -804,14 +804,14 @@ def get_required_layout_rules(call, cpu_node=False):
       new_rule = deepcopy(rule)
       delete_input_options = []
       inputs_options, outputs_layout = rule
-      if outputs_layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C]:
-        continue
-      for input_option in inputs_options:
-        if any([layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C] for layout in input_option]):
-          delete_input_options.append(input_option)
+      # if outputs_layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C]:
+      #   continue
+      # for input_option in inputs_options:
+      #   if any([layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C] for layout in input_option]):
+      #     delete_input_options.append(input_option)
       
-      for input_option in delete_input_options:
-        inputs_options.remove(input_option)
+      # for input_option in delete_input_options:
+      #   inputs_options.remove(input_option)
       if inputs_options:
         new_rules.append((inputs_options, outputs_layout))
     if new_rules:
@@ -976,31 +976,27 @@ def get_valid_output_layout_of_node(node, input_layouts, mod, cpu_node=False, la
       return _get_layout(expr)
 
     output = _resolve(func.body) 
-    if layout_results is not None:
-      layout_results[node] = output
+    layout_results[node] = output
     debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {output}")
     return output
   elif isinstance(node, relay.Tuple):
-    if layout_results is not None:
-      layout_results[node] = tuple(input_layouts)
+    layout_results[node] = tuple(input_layouts)
     debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {tuple(input_layouts)}")
     return tuple(input_layouts)
   elif isinstance(node, relay.TupleGetItem):
     if isinstance(input_layouts, (list, tuple)):
       if len(input_layouts) == 1:
-        if layout_results is not None:
-          layout_results[node] = input_layouts[0]
+        layout_results[node] = input_layouts[0]
         debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts[0]}")
         return input_layouts[0]
-      if len(input_layouts) > node.index:
-        if layout_results is not None:
-          layout_results[node] = input_layouts[node.index]
+      elif len(input_layouts) > node.index:
+        layout_results[node] = input_layouts[node.index]
         debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts[node.index]}")
         return input_layouts[node.index]
-    if layout_results is not None:
-      layout_results[node] = input_layouts
-    debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts}")
-    return input_layouts
+      else:
+        raise ValueError(f"input_layouts length {len(input_layouts)} is less than index {node.index} for TupleGetItem.")
+    else:
+      raise ValueError("input_layouts must be list or tuple for TupleGetItem node.")
 
 def getNodeID(node) -> int:
   id_dict = HashToCustomID()
@@ -3971,6 +3967,8 @@ class PolicyTableGenerator:
                     node = NodeID.from_coord(coord[0],coord[1])
                     if len(policy_tables[node]) >= self.table_capacity:
                         if explored_router_list is not None and coord in explored_router_list:
+                            # This is only for multicast case, allow reusing existing path
+                            # For single path case, this won't be triggered as the explored_router_list is None
                             continue
                         else:
                             return False
@@ -4029,7 +4027,7 @@ class PolicyTableGenerator:
                 if isinstance(edge, NodeID):
                   src_node_data = f"instruction_{edge.name}"
                 else:
-                  src_node_data = edge.src_id
+                  src_node_data = edge.src_id.graph_node_id
 
                 source_coord = NodeID.to_coord(source_node)
                 dest_coord = NodeID.to_coord(dest_node)
@@ -4039,19 +4037,19 @@ class PolicyTableGenerator:
                     router_entry_list= []
                     if source_coord == dest_coord: # if same node, return
                         return
-                    # check if there's previous path with same source and same tensor type, which means multicast
-                    elif (source_node, src_node_data) in self.start_addr_dict:
+                    # check if there's previous path with same source and same source tensor id, which means multicast(i.e. split operation)
+                    elif any(k[0] == source_node and k[2] == src_node_data for k in self.start_addr_dict.keys()):
                         handle_multicast(edge, mapping_info)
                         return
                     else:
-                        self.start_addr_dict[(source_node, src_node_data)] = entry_addr # each source can have several tensor type
+                        self.start_addr_dict[(source_node, dest_node, src_node_data)] = entry_addr # each source can have several tensor type
 
                 # Try X-Y routing first
                 path_coords = get_path_coords(source_coord, dest_coord, True)
-                if (source_node, src_node_data) not in self.explored_router_list:
-                    self.explored_router_list[(source_node, src_node_data)] = path_coords
+                if (source_node, dest_node, src_node_data) not in self.explored_router_list:
+                    self.explored_router_list[(source_node, dest_node, src_node_data)] = path_coords
                 else:
-                    self.explored_router_list[(source_node, src_node_data)].extend(path_coords)
+                    self.explored_router_list[(source_node, dest_node, src_node_data)].extend(path_coords)
 
                 current_coord = source_coord
                 current_node = source_node
@@ -4102,14 +4100,22 @@ class PolicyTableGenerator:
                 if isinstance(edge, NodeID):
                   src_node_data = f"instruction_{edge.name}"
                 else:
-                  src_node_data = edge.src_id
+                  src_node_data = edge.src_id.graph_node_id
                 router_entry_list= []
 
                 if source_node == dest_node: # if same node, return
                     return
 
                 # Follow existing path and modify at divergence point
-                entry_addr = self.start_addr_dict[(source_node, src_node_data)]
+                previous_path_key = None
+                for k in self.start_addr_dict.keys():
+                  if k[0] == source_node and k[2] == src_node_data:
+                    previous_path_key = k
+                    break
+                if previous_path_key is None:
+                  raise ValueError("No previous path found for multicast handling.")
+
+                entry_addr = self.start_addr_dict[previous_path_key]
                 current_node = source_node
                 current_coord = NodeID.to_coord(current_node)
                 dest_coord = NodeID.to_coord(dest_node)
@@ -4119,7 +4125,7 @@ class PolicyTableGenerator:
                     entry = policy_tables[current_node][entry_addr] # current policy table entry
 
                     # Find which direction to go next.
-                    path_coords = get_path_coords(current_coord, dest_coord, self.explored_router_list[(source_node, src_node_data)])
+                    path_coords = get_path_coords(current_coord, dest_coord, self.explored_router_list[previous_path_key])
                     next_coord = path_coords[0]
                     next_node = NodeID.from_coord(next_coord[0],next_coord[1])
                     direction = get_direction(current_coord, next_coord)
@@ -4220,7 +4226,7 @@ class PolicyTableGenerator:
                           if fifo_id_cnt[dest_node] >= 8:
                             raise ValueError("FIFO ID cannot be over 7!")
 
-                      elif edge.src_id.tensor_type in ["odata", "weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]:
+                      elif edge.src_id.tensor_type in ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]:
                         # if const, FIFO ID = 1
                         edgeinfo = TensorEdgeInfo(router_entry_list, None, 1)
                         ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
@@ -5436,24 +5442,26 @@ class ImcflowLayoutLegalizer:
     self.layout_map = ImcflowDeviceConfig().LayoutMap
     self.layout_results = {}
 
-  def _dump_layout_results(self, func, layout_results):
+  def _dump_layout_results(self, func, layout_results, annotate=False):
     """Pretty-print layout results following graph structure via use-def."""
     parser = UseDefChainParser()
     parser.visit(func.body)
     layout_by_debugid = {getNodeDebugID(n): l for n, l in layout_results.items()}
 
-    def _dump(node, indent, seen):
+    def _dump(node, indent, seen, annotate=False):
       indent_str = "  " * indent
       layout = layout_results.get(node, layout_by_debugid.get(getNodeDebugID(node), "unknown"))
-      print(f"{indent_str}{getNodeDebugID(node)}: {layout}")
-      if node in seen:
-        return
-      seen.add(node)
+      debug_print(f"{indent_str}{getNodeDebugID(node)}: {layout}")
+      if annotate:
+        setattr(node, "debug_layout", str(layout))
+      # if node in seen:
+      #   return
+      # seen.add(node)
       for child in parser.get_uses(node):
         if isinstance(child, (relay.Call, relay.Tuple, relay.TupleGetItem, relay.Var, relay.Constant)):
-          _dump(child, indent + 1, seen)
+          _dump(child, indent + 1, seen, annotate)
 
-    _dump(func.body, 0, set())
+    _dump(func.body, 0, set(), annotate)
 
   def create_wrap_func(self, func, func_name, new_param_type, new_param_layout, new_ret_type, new_ret_layout):
       """
@@ -5570,16 +5578,16 @@ class ImcflowLayoutLegalizer:
 
     for i in range(num_func):
       if isImcflowFunc(mod[function_names[i]], mod):
-        print('--------------------Legalize---------------------------')
-        print(mod[function_names[i]])
-        print('-------------------------------------------------------')
+        debug_print('--------------------Legalize---------------------------')
+        debug_print(mod[function_names[i]])
+        debug_print('-------------------------------------------------------')
         param_type, param_layout, ret_type, ret_layout, layout_results = calculate_imcflow_func_type(mod[function_names[i]], function_names[i])
         self.imcflow_func_interface_layout_map[function_names[i]] = (param_layout, ret_layout)
         self.layout_results[function_names[i]] = layout_results
-        print("Created wrapper function for", function_names[i])
-        print("  Param Types and Layouts:", param_type,param_layout)
-        print("  Return Type and Layout:", ret_type,ret_layout)
-        print("  Layout Results:")
+        debug_print("Created wrapper function for", function_names[i])
+        debug_print("  Param Types and Layouts:", param_type,param_layout)
+        debug_print("  Return Type and Layout:", ret_type,ret_layout)
+        debug_print("  Layout Results:")
         self._dump_layout_results(mod[function_names[i]], layout_results)
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
         wrap_func, ttype_map = self.create_wrap_func(mod[function_names[i]], function_names[i], param_type, param_layout, ret_type, ret_layout)
@@ -5594,17 +5602,20 @@ class ImcflowLayoutLegalizer:
         mod[new_gv] = wrap_func
         new_gv_map[old_gv] = new_gv
 
-        print("Wrap function created for", function_names[i])
-        print(wrap_func)
+        debug_print("Wrap function created for", function_names[i])
+        debug_print(wrap_func)
 
-    # printModel(".", mod, {}, "after_imcflow_layout_legalizer")
-    print("-"*40)
-    print("imcflow function interface update results:")
-    print(mod.astext())
+    debug_print("-"*40)
+    debug_print("imcflow function interface update results:")
+    debug_print(mod.astext())
 
     mod = self.replace_imcflow_gv(mod, new_gv_map)
     mod = self._insert_packing_unpacking(mod, real_tensor_type_map, self.imcflow_func_interface_layout_map)
-    self.layout_map.update(self.layout_results)
+    self.construct_layout_map(mod)
+
+    # dump layout with graph structure
+    debug_print("[FINAL LAYOUT RESULTS] Dump layout results with graph structure:")
+    self.dump_mod(mod)
 
     return mod, real_tensor_type_map
 
@@ -5826,35 +5837,44 @@ class ImcflowLayoutLegalizer:
         if curr_layout == LayoutType.NCHW and target_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C):
           layout_str = self._layout_to_str(target_layout)
           expr = relay.op.layout_transform(expr, "NCHW", layout_str)
+          self.layout_map[expr] = target_layout
           return expr, target_layout
 
         if curr_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C) and target_layout == LayoutType.NCHW:
           layout_str = self._layout_to_str(curr_layout)
           expr = relay.op.layout_transform(expr, layout_str, "NCHW")
+          self.layout_map[expr] = target_layout
           if channel_hint is not None:
             ttype = _get_type(self.module, expr)
             if isinstance(ttype, TensorType) and len(ttype.shape) == 4:
               N, C, H, W = [int(x) for x in ttype.shape]
               if C > channel_hint:
                 expr = relay.op.strided_slice(expr, begin=[0, 0, 0, 0], end=[N, channel_hint, H, W])
+                self.layout_map[expr] = target_layout
           return expr, target_layout
 
         if curr_layout == LayoutType.NCHW and target_layout == LayoutType.QCONV_INPUT:
-          expr = imcflow_4d_to_qconv_input(expr)
-          return expr, target_layout
+          new_expr = imcflow_4d_to_qconv_input(expr)
+          if new_expr == expr:
+             debug_print(f"Warning: imcflow_4d_to_qconv_input returned identity for {getNodeDebugID(expr)}")
+          self.layout_map[new_expr] = target_layout
+          return new_expr, target_layout
 
         if curr_layout == LayoutType.QCONV_INPUT and target_layout == LayoutType.NCHW:
           channels = channel_hint if channel_hint is not None else self._channels_from_expr(expr)
           channels = channels if channels is not None else 0
-          expr = imcflow_mmquant_out_to_4d(expr, channels)
-          return expr, target_layout
+          new_expr = imcflow_mmquant_out_to_4d(expr, channels)
+          self.layout_map[new_expr] = target_layout
+          return new_expr, target_layout
 
         if curr_layout == LayoutType.NCHW16C and target_layout == LayoutType.NCHW64C:
           expr = relay.op.layout_transform(expr, "NCHW16c", "NCHW64c")
+          self.layout_map[expr] = target_layout
           return expr, target_layout
 
         if curr_layout == LayoutType.NCHW64C and target_layout == LayoutType.NCHW16C:
           expr = relay.op.layout_transform(expr, "NCHW64c", "NCHW16c")
+          self.layout_map[expr] = target_layout
           return expr, target_layout
 
         raise ValueError(f"node : {getNodeDebugID(expr)}. Unsupported layout conversion from {curr_layout} to {target_layout}")
@@ -5869,6 +5889,7 @@ class ImcflowLayoutLegalizer:
         layout = self._infer_layout_from_type(const.checked_type)
         if not layout: raise ValueError(f"Cannot infer layout from constant type: {const.checked_type}")
         self.layout_map[const] = layout
+        debug_print("[insert_packing_unpacking] Constant: layout:", layout)
         return const
 
       def visit_tuple(self, tup):
@@ -5876,14 +5897,31 @@ class ImcflowLayoutLegalizer:
         layout = tuple(self.layout_map[f] for f in new_fields)
         new_tup = relay.Tuple(new_fields)
         self.layout_map[new_tup] = layout
+        debug_print("[insert_packing_unpacking] Tuple: In layouts:", [self.layout_map[f] for f in new_fields], " | Out layout:", layout)
         return new_tup
 
       def visit_tuple_getitem(self, tgi):
         new_val = self.visit(tgi.tuple_value)
         val_layout = self.layout_map[new_val]
-        layout = val_layout[tgi.index] if isinstance(val_layout, (tuple, list)) else val_layout
+        
+        if isinstance(val_layout, (tuple, list)):
+            if tgi.index < len(val_layout):
+                layout = val_layout[tgi.index]
+            else:
+                # Fallback if index out of bounds (should not happen for valid IR)
+                layout = val_layout[0]
+        else:
+            # If val_layout is a single layout, assume it applies to all fields
+            # This handles cases where a Tuple might be treated as having a single layout (e.g. QCONV_INPUT)
+            layout = val_layout
+
         new_tgi = relay.TupleGetItem(new_val, tgi.index)
+        if new_tgi in self.layout_map:
+          # raise ValueError("Layout already exists for TupleGetItem node.")
+          pass # Allow revisiting if memoization didn't catch it (though it should)
+        
         self.layout_map[new_tgi] = layout
+        debug_print("[insert_packing_unpacking] TupleGetItem: index", tgi.index, " | In layout:", val_layout, " | Out layout:", layout)
         return new_tgi
 
       def visit_call(self, call):
@@ -5960,11 +5998,145 @@ class ImcflowLayoutLegalizer:
     mod["main"] = relay.Function(new_main.params, new_main.body, None, new_main.type_params, new_main.attrs)
     mod = relay.transform.InferType()(mod)
     return mod
+
+  def _find_impl_func(self, func):
+    class _Visitor(relay.ExprVisitor):
+      def __init__(self):
+        super().__init__()
+        self.impl_func = None
+
+      def visit_call(self, call):
+        if isinstance(call.op, relay.Function): 
+          self.impl_func = call.op
+        else:
+          super().visit_call(call)
+    visitor = _Visitor()
+    visitor.visit(func.body)
+    return visitor.impl_func
   
-  def set_layout_map(self):
+  def dump_mod(self, mod):
     """
-    build imcflow function layout map.
+    dump layout map with graph structure by using _dump_layout_results.
+    dump main function first and loop global vars
+    """ 
+
+    debug_print("[FINAL LAYOUT RESULTS] main")
+    self._dump_layout_results(mod["main"], self.layout_map, True)
+    for gv in mod.get_global_vars():
+      if gv.name_hint == "main":
+        continue
+      func = mod[gv]
+      if isImcflowFunc(func, mod):
+        debug_print(f"[FINAL LAYOUT RESULTS] {gv.name_hint}")
+        impl_func = self._find_impl_func(func)
+        self._dump_layout_results(impl_func, self.layout_map, True)
+
+  def construct_layout_map(self, mod):
     """
+    Construct layout map of module.
+    We traverse imcflow functions first using imcflow_func_interface_layout_map.
+    We apply the input layouts to imcflow function params and construct layout map 
+    by propagating through the graph using get_valid_output_layout_of_node.
+    After that, we traverse main function (without recursing into global function calls).
+    Finally, clear and update ImcflowDeviceConfig().LayoutMap with the new map.
+    """
+    new_layout_map = {}
+
+    class LayoutPropagator(relay.ExprVisitor):
+      def __init__(self, layout_map, module, imcflow_func_layout_map):
+        super().__init__()
+        self.layout_map = layout_map
+        self.module = module
+        self.imcflow_func_layout_map = imcflow_func_layout_map
+        self.skip_global_calls = False  # Flag to skip recursing into global function calls
+
+      def visit_var(self, var):
+        if self.skip_global_calls:
+          layout = ImcflowLayoutLegalizer.infer_cpu_layout_from_type(var.type_annotation)
+          self.layout_map[var] = layout
+        else:
+          if var not in self.layout_map:
+            raise ValueError(f"Imcflow Variable layout not found in layout map: {var.name_hint}")
+
+      def visit_constant(self, const):
+        if self.skip_global_calls:
+          layout = ImcflowLayoutLegalizer.infer_cpu_layout_from_type(const.checked_type)
+          self.layout_map[const] = layout
+        else:
+          pass
+
+      def visit_call(self, call):
+        # Visit arguments first
+        for arg in call.args:
+          self.visit(arg)
+
+        # Handle global function calls (imcflow functions)
+        if isinstance(call.op, relay.GlobalVar):
+          if self.skip_global_calls:
+            # In main function: use interface layout map
+            if call.op.name_hint in self.imcflow_func_layout_map:
+              out_layout = self.imcflow_func_layout_map[call.op.name_hint][1]  # return layout
+              self.layout_map[call] = out_layout
+        else:
+          # Determine output layout based on operation and input layouts
+          arg_layouts = [self.layout_map[arg] for arg in call.args]
+          out_layout = get_valid_output_layout_of_node(call, arg_layouts, self.module, True, self.layout_map)
+          if out_layout is None: raise ValueError(f"Cannot determine output layout for call: {call.op}")
+          self.layout_map[call] = out_layout
+
+      def visit_tuple(self, tup):
+        for field in tup.fields:
+          self.visit(field)
+        # Tuple layout is tuple of field layouts
+        field_layouts = tuple(self.layout_map[f] for f in tup.fields)
+        self.layout_map[tup] = field_layouts
+
+      def visit_tuple_getitem(self, tgi):
+        self.visit(tgi.tuple_value)
+        tuple_layout = self.layout_map[tgi.tuple_value]
+        if isinstance(tuple_layout, (tuple, list)) and tgi.index < len(tuple_layout):
+          self.layout_map[tgi] = tuple_layout[tgi.index]
+        else:
+          self.layout_map[tgi] = tuple_layout
+
+      def visit_function(self, fn):
+        # Visit parameters
+        for param in fn.params:
+          self.visit(param)
+        # Visit body
+        self.visit(fn.body)
+        # Function layout is body layout
+        body_layout = self.layout_map[fn.body]
+        self.layout_map[fn] = body_layout
+
+    # Step 1: Process imcflow functions with known interface layouts
+    for gv in mod.get_global_vars():
+      if gv.name_hint == "main":
+        continue
+      func = mod[gv]
+      if isImcflowFunc(func, mod) and gv.name_hint in self.imcflow_func_interface_layout_map:
+        param_layouts, ret_layout = self.imcflow_func_interface_layout_map[gv.name_hint]
+        impl_func = self._find_impl_func(func)
+        if impl_func is None: raise ValueError(f"Cannot find implementation function inside imcflow function: {gv.name_hint}")
+        for i, param in enumerate(impl_func.params):
+          layout = param_layouts[i]
+          new_layout_map[param] = layout
+        out_layout = get_valid_output_layout_of_node(impl_func, param_layouts, mod, False, new_layout_map)
+        if isinstance(out_layout, tuple): out_layout = list(out_layout)
+        if out_layout != ret_layout: raise ValueError(f"Output layout mismatch for function {gv.name_hint}: expected {ret_layout}, got {out_layout}")
+
+    # Step 2: Process main function (skip recursing into global calls)
+    main_func = mod["main"]
+    propagator = LayoutPropagator(new_layout_map, mod, self.imcflow_func_interface_layout_map)
+    propagator.skip_global_calls = True  # Don't recurse into global function calls
+    propagator.visit(main_func)
+    debug_print(f"[construct_layout_map] Processed main function")
+
+    # Step 3: Update global layout map
+    ImcflowDeviceConfig().LayoutMap.clear()
+    ImcflowDeviceConfig().LayoutMap.update(new_layout_map)
+    self.layout_map = new_layout_map
+    debug_print(f"[construct_layout_map] Updated global LayoutMap with {len(new_layout_map)} entries")
 
 class ImcflowFuncInOutOrderSetup:
   """
@@ -6002,3 +6174,257 @@ def constructDataBlockDict(mod):
       output_node_id = getNodeID(target_func.func_node)
       const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
       ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
+
+class FIFOConflictMonitor:
+    """
+    Monitor and detect FIFO ID conflicts where multiple tensor edges
+    are assigned to the same FIFO ID for a destination node.
+    
+    This should be executed after PolicyTableGenerator has assigned
+    FIFO IDs to all tensor edges.
+    
+    The monitor builds a conflict table that records:
+    - Destination tensor custom ID
+    - Destination HW node ID
+    - FIFO ID that has conflicts
+    - List of conflicting tensor edges with their source information
+    """
+    
+    def __init__(self):
+        self.conflict_table = {}  # {func_name: [conflict_entries]}
+    
+    def run(self, mod):
+        """
+        Analyze all imcflow functions and detect FIFO ID conflicts.
+        
+        Parameters
+        ----------
+        mod : tvm.IRModule
+            The module containing imcflow functions
+            
+        Returns
+        -------
+        dict
+            Conflict table with structure:
+            {
+              func_name: [
+                {
+                  'dst_custom_id': int,
+                  'dst_hw_node': NodeID,
+                  'fifo_id': int,
+                  'conflicting_edges': [
+                    {
+                      'src_custom_id': int,
+                      'src_hw_node': NodeID,
+                      'tensor_type': str,
+                      'edge': TensorEdge
+                    },
+                    ...
+                  ]
+                },
+                ...
+              ],
+              ...
+            }
+        """
+        imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
+        tensor_edge_to_info = ImcflowDeviceConfig().TensorEdgetoInfo
+        hw_node_map = ImcflowDeviceConfig().HWNodeMap
+        custom_id_to_name = CustomIDToName()
+        
+        for gv, func in mod.functions.items():
+            if not (isinstance(func, relay.Function) and 
+                   hasattr(func.attrs, "Compiler") and 
+                   func.attrs["Compiler"] == "imcflow"):
+                continue
+            
+            func_name = gv.name_hint
+            self.conflict_table[func_name] = []
+            
+            # Get tensor edges for this function
+            if func_name not in ImcflowDeviceConfig().TensorEdgeListDict:
+                continue
+            
+            tensor_edge_list = ImcflowDeviceConfig().TensorEdgeListDict[func_name]
+            
+            # Group tensor edges by destination node and FIFO ID
+            # Structure: {dst_tensor_id: {fifo_id: [edge_info_list]}}
+            # Note: We use the actual tensor ID (second element if tuple) as the key
+            dst_fifo_map = {}
+            
+            for edge in tensor_edge_list:
+                if not isinstance(edge, TensorEdge):
+                    continue
+                
+                # Get edge info to access FIFO ID
+                edge_info = tensor_edge_to_info.get(edge, None)
+                if edge_info is None:
+                    debug_print(f"Warning: No edge info found for edge {edge}")
+                    continue
+                
+                fifo_id = edge_info.fifo_id
+                if fifo_id == -1:
+                    # FIFO ID not assigned, skip
+                    continue
+                
+                # Extract the actual destination tensor ID
+                # If dst_id.graph_node_id is a tuple (composite_id, tensor_id), use tensor_id
+                # Otherwise, use the graph_node_id directly
+                dst_graph_node_id = edge.dst_id.graph_node_id
+                if isinstance(dst_graph_node_id, tuple):
+                    # Use the second element (actual tensor ID) as the grouping key
+                    dst_tensor_key = dst_graph_node_id[1]
+                else:
+                    dst_tensor_key = dst_graph_node_id
+                
+                # Initialize nested dict if needed
+                if dst_tensor_key not in dst_fifo_map:
+                    dst_fifo_map[dst_tensor_key] = {
+                        'dst_tensor_id': edge.dst_id,  # Store the full TensorID for later use
+                        'fifo_map': {}
+                    }
+                
+                if fifo_id not in dst_fifo_map[dst_tensor_key]['fifo_map']:
+                    dst_fifo_map[dst_tensor_key]['fifo_map'][fifo_id] = []
+                
+                # Store edge information
+                src_custom_id = getInnerNodeID(edge.src_id.graph_node_id)
+                dst_custom_id = getInnerNodeID(edge.dst_id.graph_node_id)
+                
+                # Get HW node IDs
+                src_hw_node = hw_node_map.get(src_custom_id, None)
+                dst_hw_node = hw_node_map.get(dst_custom_id, None)
+                
+                edge_data = {
+                    'src_custom_id': src_custom_id,
+                    'src_hw_node': src_hw_node,
+                    'src_name': custom_id_to_name.get(src_custom_id, "unknown"),
+                    'tensor_type': edge.src_id.tensor_type,
+                    'edge': edge
+                }
+                
+                dst_fifo_map[dst_tensor_key]['fifo_map'][fifo_id].append(edge_data)
+            
+            # Detect conflicts: FIFO IDs with multiple edges
+            for dst_tensor_key, dst_info in dst_fifo_map.items():
+                dst_tensor_id = dst_info['dst_tensor_id']
+                fifo_dict = dst_info['fifo_map']
+                dst_custom_id = getInnerNodeID(dst_tensor_id.graph_node_id)
+                dst_hw_node = hw_node_map.get(dst_custom_id, None)
+                dst_name = custom_id_to_name.get(dst_custom_id, "unknown")
+                
+                for fifo_id, edge_list in fifo_dict.items():
+                    if len(edge_list) > 1:
+                        # Conflict detected!
+                        conflict_entry = {
+                            'dst_custom_id': dst_custom_id,
+                            'dst_name': dst_name,
+                            'dst_hw_node': dst_hw_node,
+                            'dst_tensor_id': dst_tensor_id,
+                            'fifo_id': fifo_id,
+                            'num_conflicts': len(edge_list),
+                            'conflicting_edges': edge_list
+                        }
+                        
+                        self.conflict_table[func_name].append(conflict_entry)
+                        
+                        debug_print(f"[FIFO Conflict] Function: {func_name}")
+                        debug_print(f"  Destination: {dst_name} (CustomID: {dst_custom_id}, HW: {dst_hw_node})")
+                        debug_print(f"  FIFO ID: {fifo_id} has {len(edge_list)} edges:")
+                        for edge_data in edge_list:
+                            debug_print(f"    - Source: {edge_data['src_name']} "
+                                      f"(CustomID: {edge_data['src_custom_id']}, "
+                                      f"HW: {edge_data['src_hw_node']}, "
+                                      f"Type: {edge_data['tensor_type']})")
+        
+        # Store in device config for later access
+        ImcflowDeviceConfig().FIFOConflictTable = self.conflict_table
+        
+        return self.conflict_table
+    
+    def print_conflict_summary(self):
+        """
+        Print a summary of all detected FIFO conflicts.
+        """
+        total_conflicts = sum(len(conflicts) for conflicts in self.conflict_table.values())
+        
+        if total_conflicts == 0:
+            print("\n" + "="*60)
+            print("FIFO Conflict Monitor: No conflicts detected!")
+            print("="*60)
+            return
+        
+        print("\n" + "="*60)
+        print(f"FIFO Conflict Monitor: {total_conflicts} conflict(s) detected")
+        print("="*60)
+        
+        for func_name, conflicts in self.conflict_table.items():
+            if not conflicts:
+                continue
+            
+            print(f"\nFunction: {func_name}")
+            print(f"  Number of conflicts: {len(conflicts)}")
+            
+            for i, conflict in enumerate(conflicts, 1):
+                print(f"\n  Conflict #{i}:")
+                print(f"    Destination Node: {conflict['dst_name']} (CustomID: {conflict['dst_custom_id']})")
+                print(f"    HW Node: {conflict['dst_hw_node']}")
+                print(f"    FIFO ID: {conflict['fifo_id']}")
+                print(f"    Number of overlapping edges: {conflict['num_conflicts']}")
+                print(f"    Conflicting sources:")
+                
+                for j, edge_data in enumerate(conflict['conflicting_edges'], 1):
+                    print(f"      {j}. {edge_data['src_name']} "
+                          f"(CustomID: {edge_data['src_custom_id']}, "
+                          f"HW: {edge_data['src_hw_node']}, "
+                          f"Type: {edge_data['tensor_type']})")
+        
+        print("\n" + "="*60)
+    
+    def export_conflict_table(self, output_path):
+        """
+        Export the conflict table to a text file.
+        
+        Parameters
+        ----------
+        output_path : str
+            Path to the output file
+        """
+        with open(output_path, 'w') as f:
+            f.write("="*80 + "\n")
+            f.write("FIFO Conflict Monitor Report\n")
+            f.write("="*80 + "\n\n")
+            
+            total_conflicts = sum(len(conflicts) for conflicts in self.conflict_table.values())
+            f.write(f"Total conflicts detected: {total_conflicts}\n\n")
+            
+            for func_name, conflicts in self.conflict_table.items():
+                if not conflicts:
+                    f.write(f"Function: {func_name}\n")
+                    f.write("  No conflicts\n\n")
+                    continue
+                
+                f.write(f"Function: {func_name}\n")
+                f.write(f"  Number of conflicts: {len(conflicts)}\n")
+                
+                for i, conflict in enumerate(conflicts, 1):
+                    f.write(f"\n  Conflict #{i}:\n")
+                    f.write(f"    Destination Node: {conflict['dst_name']} (CustomID: {conflict['dst_custom_id']})\n")
+                    f.write(f"    HW Node: {conflict['dst_hw_node']}\n")
+                    f.write(f"    Destination Tensor ID: {conflict['dst_tensor_id']}\n")
+                    f.write(f"    FIFO ID: {conflict['fifo_id']}\n")
+                    f.write(f"    Number of overlapping edges: {conflict['num_conflicts']}\n")
+                    f.write(f"    Conflicting sources:\n")
+                    
+                    for j, edge_data in enumerate(conflict['conflicting_edges'], 1):
+                        f.write(f"      {j}. {edge_data['src_name']}\n")
+                        f.write(f"         CustomID: {edge_data['src_custom_id']}\n")
+                        f.write(f"         HW Node: {edge_data['src_hw_node']}\n")
+                        f.write(f"         Tensor Type: {edge_data['tensor_type']}\n")
+                        f.write(f"         Edge: {edge_data['edge']}\n")
+                
+                f.write("\n" + "-"*80 + "\n\n")
+        
+        debug_print(f"FIFO conflict table exported to: {output_path}")
+
+
