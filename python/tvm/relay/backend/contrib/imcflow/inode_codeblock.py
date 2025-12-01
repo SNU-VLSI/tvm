@@ -188,13 +188,14 @@ class SendBlockInterleaved(InodeCodeBlock):
 class IMCEComputeBlock(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
 
-  def __init__(self, annotation: str = ""):
+  def __init__(self, policy_addr, annotation: str = ""):
     super().__init__(annotation)
+    self.policy_addr = policy_addr
 
   def _content(self) -> Union[str, CodeBlock]:
     code = TextBlock("")
 
-    code += f"__builtin_INODE_IMCE_COMPUTE(0, 1);"
+    code += f"__builtin_INODE_IMCE_COMPUTE(0, {self.policy_addr});"
     code += ""
 
     return code

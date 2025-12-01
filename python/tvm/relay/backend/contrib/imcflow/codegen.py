@@ -304,9 +304,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # imce compute
     active_imces = DevConfig().ActiveIMCEPerFunc[self.codeblocks.func_name]
-    for imce in active_imces:
-      block = IMCEComputeBlock(f"{imce.name} compute")
-      self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+    for imce, inst_edge in DevConfig().InstEdgeInfoDict.items():
+      if imce in active_imces:
+        policy_addr = inst_edge.policy_info[0].address # get first policy address
+        block = IMCEComputeBlock(policy_addr, f"{imce.name} compute")
+        self.codeblocks.append(imce.master(), block, CodePhase.INIT)
     
     # wait all enable of imce
     for inode in NodeID.inodes():
