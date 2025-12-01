@@ -976,31 +976,27 @@ def get_valid_output_layout_of_node(node, input_layouts, mod, cpu_node=False, la
       return _get_layout(expr)
 
     output = _resolve(func.body) 
-    if layout_results is not None:
-      layout_results[node] = output
+    layout_results[node] = output
     debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {output}")
     return output
   elif isinstance(node, relay.Tuple):
-    if layout_results is not None:
-      layout_results[node] = tuple(input_layouts)
+    layout_results[node] = tuple(input_layouts)
     debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {tuple(input_layouts)}")
     return tuple(input_layouts)
   elif isinstance(node, relay.TupleGetItem):
     if isinstance(input_layouts, (list, tuple)):
       if len(input_layouts) == 1:
-        if layout_results is not None:
-          layout_results[node] = input_layouts[0]
+        layout_results[node] = input_layouts[0]
         debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts[0]}")
         return input_layouts[0]
-      if len(input_layouts) > node.index:
-        if layout_results is not None:
-          layout_results[node] = input_layouts[node.index]
+      elif len(input_layouts) > node.index:
+        layout_results[node] = input_layouts[node.index]
         debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts[node.index]}")
         return input_layouts[node.index]
-    if layout_results is not None:
-      layout_results[node] = input_layouts
-    debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, output layout: {input_layouts}")
-    return input_layouts
+      else:
+        raise ValueError(f"input_layouts length {len(input_layouts)} is less than index {node.index} for TupleGetItem.")
+    else:
+      raise ValueError("input_layouts must be list or tuple for TupleGetItem node.")
 
 def getNodeID(node) -> int:
   id_dict = HashToCustomID()
@@ -5445,7 +5441,7 @@ class ImcflowLayoutLegalizer:
     def _dump(node, indent, seen):
       indent_str = "  " * indent
       layout = layout_results.get(node, layout_by_debugid.get(getNodeDebugID(node), "unknown"))
-      print(f"{indent_str}{getNodeDebugID(node)}: {layout}")
+      debug_print(f"{indent_str}{getNodeDebugID(node)}: {layout}")
       if node in seen:
         return
       seen.add(node)
@@ -5570,16 +5566,16 @@ class ImcflowLayoutLegalizer:
 
     for i in range(num_func):
       if isImcflowFunc(mod[function_names[i]], mod):
-        print('--------------------Legalize---------------------------')
-        print(mod[function_names[i]])
-        print('-------------------------------------------------------')
+        debug_print('--------------------Legalize---------------------------')
+        debug_print(mod[function_names[i]])
+        debug_print('-------------------------------------------------------')
         param_type, param_layout, ret_type, ret_layout, layout_results = calculate_imcflow_func_type(mod[function_names[i]], function_names[i])
         self.imcflow_func_interface_layout_map[function_names[i]] = (param_layout, ret_layout)
         self.layout_results[function_names[i]] = layout_results
-        print("Created wrapper function for", function_names[i])
-        print("  Param Types and Layouts:", param_type,param_layout)
-        print("  Return Type and Layout:", ret_type,ret_layout)
-        print("  Layout Results:")
+        debug_print("Created wrapper function for", function_names[i])
+        debug_print("  Param Types and Layouts:", param_type,param_layout)
+        debug_print("  Return Type and Layout:", ret_type,ret_layout)
+        debug_print("  Layout Results:")
         self._dump_layout_results(mod[function_names[i]], layout_results)
         mod[function_names[i]] = self._mark_and_transform_imcflow_qconv(mod[function_names[i]])
         wrap_func, ttype_map = self.create_wrap_func(mod[function_names[i]], function_names[i], param_type, param_layout, ret_type, ret_layout)
@@ -5594,17 +5590,20 @@ class ImcflowLayoutLegalizer:
         mod[new_gv] = wrap_func
         new_gv_map[old_gv] = new_gv
 
-        print("Wrap function created for", function_names[i])
-        print(wrap_func)
+        debug_print("Wrap function created for", function_names[i])
+        debug_print(wrap_func)
 
-    # printModel(".", mod, {}, "after_imcflow_layout_legalizer")
-    print("-"*40)
-    print("imcflow function interface update results:")
-    print(mod.astext())
+    debug_print("-"*40)
+    debug_print("imcflow function interface update results:")
+    debug_print(mod.astext())
 
     mod = self.replace_imcflow_gv(mod, new_gv_map)
     mod = self._insert_packing_unpacking(mod, real_tensor_type_map, self.imcflow_func_interface_layout_map)
     self.layout_map.update(self.layout_results)
+
+    # dump layout with graph structure
+    debug_print("[FINAL LAYOUT RESULTS] Dump layout results with graph structure:")
+    self.dump_mod(mod)
 
     return mod, real_tensor_type_map
 
@@ -5826,35 +5825,44 @@ class ImcflowLayoutLegalizer:
         if curr_layout == LayoutType.NCHW and target_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C):
           layout_str = self._layout_to_str(target_layout)
           expr = relay.op.layout_transform(expr, "NCHW", layout_str)
+          self.layout_map[expr] = target_layout
           return expr, target_layout
 
         if curr_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C) and target_layout == LayoutType.NCHW:
           layout_str = self._layout_to_str(curr_layout)
           expr = relay.op.layout_transform(expr, layout_str, "NCHW")
+          self.layout_map[expr] = target_layout
           if channel_hint is not None:
             ttype = _get_type(self.module, expr)
             if isinstance(ttype, TensorType) and len(ttype.shape) == 4:
               N, C, H, W = [int(x) for x in ttype.shape]
               if C > channel_hint:
                 expr = relay.op.strided_slice(expr, begin=[0, 0, 0, 0], end=[N, channel_hint, H, W])
+                self.layout_map[expr] = target_layout
           return expr, target_layout
 
         if curr_layout == LayoutType.NCHW and target_layout == LayoutType.QCONV_INPUT:
-          expr = imcflow_4d_to_qconv_input(expr)
-          return expr, target_layout
+          new_expr = imcflow_4d_to_qconv_input(expr)
+          if new_expr == expr:
+             debug_print(f"Warning: imcflow_4d_to_qconv_input returned identity for {getNodeDebugID(expr)}")
+          self.layout_map[new_expr] = target_layout
+          return new_expr, target_layout
 
         if curr_layout == LayoutType.QCONV_INPUT and target_layout == LayoutType.NCHW:
           channels = channel_hint if channel_hint is not None else self._channels_from_expr(expr)
           channels = channels if channels is not None else 0
-          expr = imcflow_mmquant_out_to_4d(expr, channels)
-          return expr, target_layout
+          new_expr = imcflow_mmquant_out_to_4d(expr, channels)
+          self.layout_map[new_expr] = target_layout
+          return new_expr, target_layout
 
         if curr_layout == LayoutType.NCHW16C and target_layout == LayoutType.NCHW64C:
           expr = relay.op.layout_transform(expr, "NCHW16c", "NCHW64c")
+          self.layout_map[expr] = target_layout
           return expr, target_layout
 
         if curr_layout == LayoutType.NCHW64C and target_layout == LayoutType.NCHW16C:
           expr = relay.op.layout_transform(expr, "NCHW64c", "NCHW16c")
+          self.layout_map[expr] = target_layout
           return expr, target_layout
 
         raise ValueError(f"node : {getNodeDebugID(expr)}. Unsupported layout conversion from {curr_layout} to {target_layout}")
@@ -5869,6 +5877,7 @@ class ImcflowLayoutLegalizer:
         layout = self._infer_layout_from_type(const.checked_type)
         if not layout: raise ValueError(f"Cannot infer layout from constant type: {const.checked_type}")
         self.layout_map[const] = layout
+        debug_print("[insert_packing_unpacking] Constant: layout:", layout)
         return const
 
       def visit_tuple(self, tup):
@@ -5876,14 +5885,31 @@ class ImcflowLayoutLegalizer:
         layout = tuple(self.layout_map[f] for f in new_fields)
         new_tup = relay.Tuple(new_fields)
         self.layout_map[new_tup] = layout
+        debug_print("[insert_packing_unpacking] Tuple: In layouts:", [self.layout_map[f] for f in new_fields], " | Out layout:", layout)
         return new_tup
 
       def visit_tuple_getitem(self, tgi):
         new_val = self.visit(tgi.tuple_value)
         val_layout = self.layout_map[new_val]
-        layout = val_layout[tgi.index] if isinstance(val_layout, (tuple, list)) else val_layout
+        
+        if isinstance(val_layout, (tuple, list)):
+            if tgi.index < len(val_layout):
+                layout = val_layout[tgi.index]
+            else:
+                # Fallback if index out of bounds (should not happen for valid IR)
+                layout = val_layout[0]
+        else:
+            # If val_layout is a single layout, assume it applies to all fields
+            # This handles cases where a Tuple might be treated as having a single layout (e.g. QCONV_INPUT)
+            layout = val_layout
+
         new_tgi = relay.TupleGetItem(new_val, tgi.index)
+        if new_tgi in self.layout_map:
+          # raise ValueError("Layout already exists for TupleGetItem node.")
+          pass # Allow revisiting if memoization didn't catch it (though it should)
+        
         self.layout_map[new_tgi] = layout
+        debug_print("[insert_packing_unpacking] TupleGetItem: index", tgi.index, " | In layout:", val_layout, " | Out layout:", layout)
         return new_tgi
 
       def visit_call(self, call):
@@ -5961,10 +5987,21 @@ class ImcflowLayoutLegalizer:
     mod = relay.transform.InferType()(mod)
     return mod
   
-  def set_layout_map(self):
+  def dump_mod(self, mod):
     """
-    build imcflow function layout map.
-    """
+    dump layout map with graph structure by using _dump_layout_results.
+    dump main function first and loop global vars
+    """ 
+
+    debug_print("[FINAL LAYOUT RESULTS] main")
+    self._dump_layout_results(mod["main"], self.layout_map)
+    for gv in mod.get_global_vars():
+      if gv.name_hint == "main":
+        continue
+      func = mod[gv]
+      if isImcflowFunc(func, mod):
+        debug_print(f"[FINAL LAYOUT RESULTS] {gv.name_hint}")
+        self._dump_layout_results(func, self.layout_map)
 
 class ImcflowFuncInOutOrderSetup:
   """
