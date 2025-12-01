@@ -153,16 +153,16 @@ def run_test_evl(test_name, mod, param_dict):
   eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
 
-  eval_mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(eval_mod)
+  eval_mod = imcflow_transform.run_concat_distributor(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "4.5_after_concat_distributor")
 
   eval_mod = imcflow_transform.partitionRound(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")
 
-  eval_mod = imcflow.flattenImcflowTopFuncs(eval_mod)
+  eval_mod = imcflow_transform.flattenImcflowTopFuncs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "6_after_flatten")
 
-  eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
+  eval_mod = imcflow_transform.prune_imcflow_subgraphs(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "7_after_prune_model")
 
   eval_mod = imcflow_transform.annotateCustomId(eval_mod)
@@ -176,8 +176,7 @@ def run_test_evl(test_name, mod, param_dict):
     pprint.pprint(HashToCustomID(), stream=f)
   printModel(eval_dir, eval_mod, eval_param_dict, "7.6_with_custom_id")
 
-  layout_legalizer = imcflow_transform.ImcflowLayoutLegalizer()
-  eval_mod, ttype_map = layout_legalizer.transform_mod(eval_mod)
+  eval_mod, ttype_map = imcflow_transform.legalize_imcflow_layout(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "7.7_after_mark_in_out")
   print("-------------------- Real Tensor Type Map --------------------")
   pprint.pprint(ttype_map)
