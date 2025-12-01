@@ -900,7 +900,9 @@ def get_valid_output_layout_of_node(node, input_layouts, mod, cpu_node=False, la
         assert call is not None and idx is not None, "call and idx must be provided for constant layout deduction."
         assert not_const_layouts is not None, "not_const_layouts must be provided for constant layout deduction."
         debug_print(f"[get_valid_output_layout_of_node] node: {getNodeDebugID(node)}, constant layout deduced.")
-        return _deduce_layout_from_op_const(call, idx, not_const_layouts)
+        const_layout = _deduce_layout_from_op_const(call, idx, not_const_layouts)
+        layout_results[expr] = const_layout
+        return const_layout
       else:
         assert expr in layout_dict, "input layout not found for expr in layout dict."
         return layout_dict[expr]
@@ -4768,6 +4770,7 @@ def annotateCustomId(mod):
     def __init__(self):
       super().__init__()
       self.cnt = 0
+      self.layout_map = ImcflowDeviceConfig().LayoutMap
 
     def update_attrs(self, origin_attrs, updates):
       new_attr_dict = {}
@@ -4798,14 +4801,20 @@ def annotateCustomId(mod):
       self.cnt = self.cnt + 1
       origin_attrs = new_call.attrs
       new_attrs = self.update_attrs(origin_attrs, {"custom_id": self.cnt})
-      return _expr.CallWithFields(new_call, new_call.op, new_call.args, new_attrs, new_call.type_args, new_call.span)
+      new_call = _expr.CallWithFields(new_call, new_call.op, new_call.args, new_attrs, new_call.type_args, new_call.span)
+      if call in self.layout_map:
+        self.layout_map[new_call] = self.layout_map[call]
+      return new_call
 
     def visit_function(self, fn):
       new_fn = super().visit_function(fn)
       self.cnt = self.cnt + 1
       origin_attrs = new_fn.attrs
       new_attrs = self.update_attrs(origin_attrs, {"custom_id": self.cnt})
-      return FunctionWithFields(new_fn, list(new_fn.params), new_fn.body, new_fn.ret_type, new_fn.type_params, new_attrs)
+      new_fn = FunctionWithFields(new_fn, list(new_fn.params), new_fn.body, new_fn.ret_type, new_fn.type_params, new_attrs)
+      if fn in self.layout_map:
+        self.layout_map[new_fn] = self.layout_map[fn]
+      return new_fn
 
   visitor = _Visitor()
   for func_name in mod.functions:
@@ -5446,11 +5455,11 @@ class ImcflowLayoutLegalizer:
     """Pretty-print layout results following graph structure via use-def."""
     parser = UseDefChainParser()
     parser.visit(func.body)
-    layout_by_debugid = {getNodeDebugID(n): l for n, l in layout_results.items()}
+    # layout_by_debugid = {getNodeDebugID(n): l for n, l in layout_results.items()}
 
-    def _dump(node, indent, seen, annotate=False):
+    def _dump(node, indent, seen, annotate_=False):
       indent_str = "  " * indent
-      layout = layout_results.get(node, layout_by_debugid.get(getNodeDebugID(node), "unknown"))
+      layout = layout_results.get(node, "unknown")
       debug_print(f"{indent_str}{getNodeDebugID(node)}: {layout}")
       if annotate:
         setattr(node, "debug_layout", str(layout))
@@ -5459,7 +5468,7 @@ class ImcflowLayoutLegalizer:
       # seen.add(node)
       for child in parser.get_uses(node):
         if isinstance(child, (relay.Call, relay.Tuple, relay.TupleGetItem, relay.Var, relay.Constant)):
-          _dump(child, indent + 1, seen, annotate)
+          _dump(child, indent + 1, seen, annotate_)
 
     _dump(func.body, 0, set(), annotate)
 
