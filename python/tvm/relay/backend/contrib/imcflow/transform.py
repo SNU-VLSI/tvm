@@ -3971,6 +3971,8 @@ class PolicyTableGenerator:
                     node = NodeID.from_coord(coord[0],coord[1])
                     if len(policy_tables[node]) >= self.table_capacity:
                         if explored_router_list is not None and coord in explored_router_list:
+                            # This is only for multicast case, allow reusing existing path
+                            # For single path case, this won't be triggered as the explored_router_list is None
                             continue
                         else:
                             return False
@@ -4029,7 +4031,7 @@ class PolicyTableGenerator:
                 if isinstance(edge, NodeID):
                   src_node_data = f"instruction_{edge.name}"
                 else:
-                  src_node_data = edge.src_id
+                  src_node_data = edge.src_id.graph_node_id
 
                 source_coord = NodeID.to_coord(source_node)
                 dest_coord = NodeID.to_coord(dest_node)
@@ -4039,19 +4041,19 @@ class PolicyTableGenerator:
                     router_entry_list= []
                     if source_coord == dest_coord: # if same node, return
                         return
-                    # check if there's previous path with same source and same tensor type, which means multicast
-                    elif (source_node, src_node_data) in self.start_addr_dict:
+                    # check if there's previous path with same source and same source tensor id, which means multicast(i.e. split operation)
+                    elif any(k[0] == source_node and k[2] == src_node_data for k in self.start_addr_dict.keys()):
                         handle_multicast(edge, mapping_info)
                         return
                     else:
-                        self.start_addr_dict[(source_node, src_node_data)] = entry_addr # each source can have several tensor type
+                        self.start_addr_dict[(source_node, dest_node, src_node_data)] = entry_addr # each source can have several tensor type
 
                 # Try X-Y routing first
                 path_coords = get_path_coords(source_coord, dest_coord, True)
-                if (source_node, src_node_data) not in self.explored_router_list:
-                    self.explored_router_list[(source_node, src_node_data)] = path_coords
+                if (source_node, dest_node, src_node_data) not in self.explored_router_list:
+                    self.explored_router_list[(source_node, dest_node, src_node_data)] = path_coords
                 else:
-                    self.explored_router_list[(source_node, src_node_data)].extend(path_coords)
+                    self.explored_router_list[(source_node, dest_node, src_node_data)].extend(path_coords)
 
                 current_coord = source_coord
                 current_node = source_node
@@ -4102,14 +4104,22 @@ class PolicyTableGenerator:
                 if isinstance(edge, NodeID):
                   src_node_data = f"instruction_{edge.name}"
                 else:
-                  src_node_data = edge.src_id
+                  src_node_data = edge.src_id.graph_node_id
                 router_entry_list= []
 
                 if source_node == dest_node: # if same node, return
                     return
 
                 # Follow existing path and modify at divergence point
-                entry_addr = self.start_addr_dict[(source_node, src_node_data)]
+                previous_path_key = None
+                for k in self.start_addr_dict.keys():
+                  if k[0] == source_node and k[2] == src_node_data:
+                    previous_path_key = k
+                    break
+                if previous_path_key is None:
+                  raise ValueError("No previous path found for multicast handling.")
+
+                entry_addr = self.start_addr_dict[previous_path_key]
                 current_node = source_node
                 current_coord = NodeID.to_coord(current_node)
                 dest_coord = NodeID.to_coord(dest_node)
@@ -4119,7 +4129,7 @@ class PolicyTableGenerator:
                     entry = policy_tables[current_node][entry_addr] # current policy table entry
 
                     # Find which direction to go next.
-                    path_coords = get_path_coords(current_coord, dest_coord, self.explored_router_list[(source_node, src_node_data)])
+                    path_coords = get_path_coords(current_coord, dest_coord, self.explored_router_list[previous_path_key])
                     next_coord = path_coords[0]
                     next_node = NodeID.from_coord(next_coord[0],next_coord[1])
                     direction = get_direction(current_coord, next_coord)
@@ -4220,7 +4230,7 @@ class PolicyTableGenerator:
                           if fifo_id_cnt[dest_node] >= 8:
                             raise ValueError("FIFO ID cannot be over 7!")
 
-                      elif edge.src_id.tensor_type in ["odata", "weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]:
+                      elif edge.src_id.tensor_type in ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]:
                         # if const, FIFO ID = 1
                         edgeinfo = TensorEdgeInfo(router_entry_list, None, 1)
                         ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
