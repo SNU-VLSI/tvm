@@ -6195,3 +6195,257 @@ def constructDataBlockDict(mod):
       output_node_id = getNodeID(target_func.func_node)
       const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
       ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
+
+class FIFOConflictMonitor:
+    """
+    Monitor and detect FIFO ID conflicts where multiple tensor edges
+    are assigned to the same FIFO ID for a destination node.
+    
+    This should be executed after PolicyTableGenerator has assigned
+    FIFO IDs to all tensor edges.
+    
+    The monitor builds a conflict table that records:
+    - Destination tensor custom ID
+    - Destination HW node ID
+    - FIFO ID that has conflicts
+    - List of conflicting tensor edges with their source information
+    """
+    
+    def __init__(self):
+        self.conflict_table = {}  # {func_name: [conflict_entries]}
+    
+    def run(self, mod):
+        """
+        Analyze all imcflow functions and detect FIFO ID conflicts.
+        
+        Parameters
+        ----------
+        mod : tvm.IRModule
+            The module containing imcflow functions
+            
+        Returns
+        -------
+        dict
+            Conflict table with structure:
+            {
+              func_name: [
+                {
+                  'dst_custom_id': int,
+                  'dst_hw_node': NodeID,
+                  'fifo_id': int,
+                  'conflicting_edges': [
+                    {
+                      'src_custom_id': int,
+                      'src_hw_node': NodeID,
+                      'tensor_type': str,
+                      'edge': TensorEdge
+                    },
+                    ...
+                  ]
+                },
+                ...
+              ],
+              ...
+            }
+        """
+        imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
+        tensor_edge_to_info = ImcflowDeviceConfig().TensorEdgetoInfo
+        hw_node_map = ImcflowDeviceConfig().HWNodeMap
+        custom_id_to_name = CustomIDToName()
+        
+        for gv, func in mod.functions.items():
+            if not (isinstance(func, relay.Function) and 
+                   hasattr(func.attrs, "Compiler") and 
+                   func.attrs["Compiler"] == "imcflow"):
+                continue
+            
+            func_name = gv.name_hint
+            self.conflict_table[func_name] = []
+            
+            # Get tensor edges for this function
+            if func_name not in ImcflowDeviceConfig().TensorEdgeListDict:
+                continue
+            
+            tensor_edge_list = ImcflowDeviceConfig().TensorEdgeListDict[func_name]
+            
+            # Group tensor edges by destination node and FIFO ID
+            # Structure: {dst_tensor_id: {fifo_id: [edge_info_list]}}
+            # Note: We use the actual tensor ID (second element if tuple) as the key
+            dst_fifo_map = {}
+            
+            for edge in tensor_edge_list:
+                if not isinstance(edge, TensorEdge):
+                    continue
+                
+                # Get edge info to access FIFO ID
+                edge_info = tensor_edge_to_info.get(edge, None)
+                if edge_info is None:
+                    debug_print(f"Warning: No edge info found for edge {edge}")
+                    continue
+                
+                fifo_id = edge_info.fifo_id
+                if fifo_id == -1:
+                    # FIFO ID not assigned, skip
+                    continue
+                
+                # Extract the actual destination tensor ID
+                # If dst_id.graph_node_id is a tuple (composite_id, tensor_id), use tensor_id
+                # Otherwise, use the graph_node_id directly
+                dst_graph_node_id = edge.dst_id.graph_node_id
+                if isinstance(dst_graph_node_id, tuple):
+                    # Use the second element (actual tensor ID) as the grouping key
+                    dst_tensor_key = dst_graph_node_id[1]
+                else:
+                    dst_tensor_key = dst_graph_node_id
+                
+                # Initialize nested dict if needed
+                if dst_tensor_key not in dst_fifo_map:
+                    dst_fifo_map[dst_tensor_key] = {
+                        'dst_tensor_id': edge.dst_id,  # Store the full TensorID for later use
+                        'fifo_map': {}
+                    }
+                
+                if fifo_id not in dst_fifo_map[dst_tensor_key]['fifo_map']:
+                    dst_fifo_map[dst_tensor_key]['fifo_map'][fifo_id] = []
+                
+                # Store edge information
+                src_custom_id = getInnerNodeID(edge.src_id.graph_node_id)
+                dst_custom_id = getInnerNodeID(edge.dst_id.graph_node_id)
+                
+                # Get HW node IDs
+                src_hw_node = hw_node_map.get(src_custom_id, None)
+                dst_hw_node = hw_node_map.get(dst_custom_id, None)
+                
+                edge_data = {
+                    'src_custom_id': src_custom_id,
+                    'src_hw_node': src_hw_node,
+                    'src_name': custom_id_to_name.get(src_custom_id, "unknown"),
+                    'tensor_type': edge.src_id.tensor_type,
+                    'edge': edge
+                }
+                
+                dst_fifo_map[dst_tensor_key]['fifo_map'][fifo_id].append(edge_data)
+            
+            # Detect conflicts: FIFO IDs with multiple edges
+            for dst_tensor_key, dst_info in dst_fifo_map.items():
+                dst_tensor_id = dst_info['dst_tensor_id']
+                fifo_dict = dst_info['fifo_map']
+                dst_custom_id = getInnerNodeID(dst_tensor_id.graph_node_id)
+                dst_hw_node = hw_node_map.get(dst_custom_id, None)
+                dst_name = custom_id_to_name.get(dst_custom_id, "unknown")
+                
+                for fifo_id, edge_list in fifo_dict.items():
+                    if len(edge_list) > 1:
+                        # Conflict detected!
+                        conflict_entry = {
+                            'dst_custom_id': dst_custom_id,
+                            'dst_name': dst_name,
+                            'dst_hw_node': dst_hw_node,
+                            'dst_tensor_id': dst_tensor_id,
+                            'fifo_id': fifo_id,
+                            'num_conflicts': len(edge_list),
+                            'conflicting_edges': edge_list
+                        }
+                        
+                        self.conflict_table[func_name].append(conflict_entry)
+                        
+                        debug_print(f"[FIFO Conflict] Function: {func_name}")
+                        debug_print(f"  Destination: {dst_name} (CustomID: {dst_custom_id}, HW: {dst_hw_node})")
+                        debug_print(f"  FIFO ID: {fifo_id} has {len(edge_list)} edges:")
+                        for edge_data in edge_list:
+                            debug_print(f"    - Source: {edge_data['src_name']} "
+                                      f"(CustomID: {edge_data['src_custom_id']}, "
+                                      f"HW: {edge_data['src_hw_node']}, "
+                                      f"Type: {edge_data['tensor_type']})")
+        
+        # Store in device config for later access
+        ImcflowDeviceConfig().FIFOConflictTable = self.conflict_table
+        
+        return self.conflict_table
+    
+    def print_conflict_summary(self):
+        """
+        Print a summary of all detected FIFO conflicts.
+        """
+        total_conflicts = sum(len(conflicts) for conflicts in self.conflict_table.values())
+        
+        if total_conflicts == 0:
+            print("\n" + "="*60)
+            print("FIFO Conflict Monitor: No conflicts detected!")
+            print("="*60)
+            return
+        
+        print("\n" + "="*60)
+        print(f"FIFO Conflict Monitor: {total_conflicts} conflict(s) detected")
+        print("="*60)
+        
+        for func_name, conflicts in self.conflict_table.items():
+            if not conflicts:
+                continue
+            
+            print(f"\nFunction: {func_name}")
+            print(f"  Number of conflicts: {len(conflicts)}")
+            
+            for i, conflict in enumerate(conflicts, 1):
+                print(f"\n  Conflict #{i}:")
+                print(f"    Destination Node: {conflict['dst_name']} (CustomID: {conflict['dst_custom_id']})")
+                print(f"    HW Node: {conflict['dst_hw_node']}")
+                print(f"    FIFO ID: {conflict['fifo_id']}")
+                print(f"    Number of overlapping edges: {conflict['num_conflicts']}")
+                print(f"    Conflicting sources:")
+                
+                for j, edge_data in enumerate(conflict['conflicting_edges'], 1):
+                    print(f"      {j}. {edge_data['src_name']} "
+                          f"(CustomID: {edge_data['src_custom_id']}, "
+                          f"HW: {edge_data['src_hw_node']}, "
+                          f"Type: {edge_data['tensor_type']})")
+        
+        print("\n" + "="*60)
+    
+    def export_conflict_table(self, output_path):
+        """
+        Export the conflict table to a text file.
+        
+        Parameters
+        ----------
+        output_path : str
+            Path to the output file
+        """
+        with open(output_path, 'w') as f:
+            f.write("="*80 + "\n")
+            f.write("FIFO Conflict Monitor Report\n")
+            f.write("="*80 + "\n\n")
+            
+            total_conflicts = sum(len(conflicts) for conflicts in self.conflict_table.values())
+            f.write(f"Total conflicts detected: {total_conflicts}\n\n")
+            
+            for func_name, conflicts in self.conflict_table.items():
+                if not conflicts:
+                    f.write(f"Function: {func_name}\n")
+                    f.write("  No conflicts\n\n")
+                    continue
+                
+                f.write(f"Function: {func_name}\n")
+                f.write(f"  Number of conflicts: {len(conflicts)}\n")
+                
+                for i, conflict in enumerate(conflicts, 1):
+                    f.write(f"\n  Conflict #{i}:\n")
+                    f.write(f"    Destination Node: {conflict['dst_name']} (CustomID: {conflict['dst_custom_id']})\n")
+                    f.write(f"    HW Node: {conflict['dst_hw_node']}\n")
+                    f.write(f"    Destination Tensor ID: {conflict['dst_tensor_id']}\n")
+                    f.write(f"    FIFO ID: {conflict['fifo_id']}\n")
+                    f.write(f"    Number of overlapping edges: {conflict['num_conflicts']}\n")
+                    f.write(f"    Conflicting sources:\n")
+                    
+                    for j, edge_data in enumerate(conflict['conflicting_edges'], 1):
+                        f.write(f"      {j}. {edge_data['src_name']}\n")
+                        f.write(f"         CustomID: {edge_data['src_custom_id']}\n")
+                        f.write(f"         HW Node: {edge_data['src_hw_node']}\n")
+                        f.write(f"         Tensor Type: {edge_data['tensor_type']}\n")
+                        f.write(f"         Edge: {edge_data['edge']}\n")
+                
+                f.write("\n" + "-"*80 + "\n\n")
+        
+        debug_print(f"FIFO conflict table exported to: {output_path}")
+
+
