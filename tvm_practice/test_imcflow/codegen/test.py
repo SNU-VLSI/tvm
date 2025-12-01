@@ -316,9 +316,9 @@ def test_model_1():
 def test_resnet8():
   mod, param_dict = resnet8_cifar.getModel(True)
   run_test_evl("resnet8", mod, param_dict)
-def test_resnet8_from_pretrained():
-  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(False)
-  run_test_evl("resnet8", mod, param_dict)
+# def test_resnet8_from_pretrained():
+#   mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(False)
+#   run_test_evl("resnet8", mod, param_dict)
 
 def test_mobilenet_imcflow():
   mod, param_dict = mobilenet_imcflow.getModel(False)

@@ -5432,24 +5432,26 @@ class ImcflowLayoutLegalizer:
     self.layout_map = ImcflowDeviceConfig().LayoutMap
     self.layout_results = {}
 
-  def _dump_layout_results(self, func, layout_results):
+  def _dump_layout_results(self, func, layout_results, annotate=False):
     """Pretty-print layout results following graph structure via use-def."""
     parser = UseDefChainParser()
     parser.visit(func.body)
     layout_by_debugid = {getNodeDebugID(n): l for n, l in layout_results.items()}
 
-    def _dump(node, indent, seen):
+    def _dump(node, indent, seen, annotate=False):
       indent_str = "  " * indent
       layout = layout_results.get(node, layout_by_debugid.get(getNodeDebugID(node), "unknown"))
       debug_print(f"{indent_str}{getNodeDebugID(node)}: {layout}")
-      if node in seen:
-        return
-      seen.add(node)
+      if annotate:
+        setattr(node, "debug_layout", str(layout))
+      # if node in seen:
+      #   return
+      # seen.add(node)
       for child in parser.get_uses(node):
         if isinstance(child, (relay.Call, relay.Tuple, relay.TupleGetItem, relay.Var, relay.Constant)):
-          _dump(child, indent + 1, seen)
+          _dump(child, indent + 1, seen, annotate)
 
-    _dump(func.body, 0, set())
+    _dump(func.body, 0, set(), annotate)
 
   def create_wrap_func(self, func, func_name, new_param_type, new_param_layout, new_ret_type, new_ret_layout):
       """
@@ -5986,6 +5988,21 @@ class ImcflowLayoutLegalizer:
     mod["main"] = relay.Function(new_main.params, new_main.body, None, new_main.type_params, new_main.attrs)
     mod = relay.transform.InferType()(mod)
     return mod
+
+  def _find_impl_func(self, func):
+    class _Visitor(relay.ExprVisitor):
+      def __init__(self):
+        super().__init__()
+        self.impl_func = None
+
+      def visit_call(self, call):
+        if isinstance(call.op, relay.Function): 
+          self.impl_func = call.op
+        else:
+          super().visit_call(call)
+    visitor = _Visitor()
+    visitor.visit(func.body)
+    return visitor.impl_func
   
   def dump_mod(self, mod):
     """
@@ -5994,14 +6011,15 @@ class ImcflowLayoutLegalizer:
     """ 
 
     debug_print("[FINAL LAYOUT RESULTS] main")
-    self._dump_layout_results(mod["main"], self.layout_map)
+    self._dump_layout_results(mod["main"], self.layout_map, True)
     for gv in mod.get_global_vars():
       if gv.name_hint == "main":
         continue
       func = mod[gv]
       if isImcflowFunc(func, mod):
         debug_print(f"[FINAL LAYOUT RESULTS] {gv.name_hint}")
-        self._dump_layout_results(func, self.layout_map)
+        impl_func = self._find_impl_func(func)
+        self._dump_layout_results(impl_func, self.layout_map, True)
 
   def construct_layout_map(self, mod):
     """
@@ -6082,29 +6100,17 @@ class ImcflowLayoutLegalizer:
         self.layout_map[fn] = body_layout
 
     # Step 1: Process imcflow functions with known interface layouts
-    def _find_impl_func(func):
-      class _Visitor(relay.ExprVisitor):
-        def __init__(self):
-          super().__init__()
-          self.impl_func = None
-
-        def visit_call(self, call):
-          if isinstance(call.op, relay.Function): 
-            self.impl_func = call.op
-          else:
-            super().visit_call(call)
-      visitor = _Visitor()
-      visitor.visit(func.body)
-      return visitor.impl_func
-
     for gv in mod.get_global_vars():
       if gv.name_hint == "main":
         continue
       func = mod[gv]
       if isImcflowFunc(func, mod) and gv.name_hint in self.imcflow_func_interface_layout_map:
         param_layouts, ret_layout = self.imcflow_func_interface_layout_map[gv.name_hint]
-        impl_func = _find_impl_func(func)
+        impl_func = self._find_impl_func(func)
         if impl_func is None: raise ValueError(f"Cannot find implementation function inside imcflow function: {gv.name_hint}")
+        for i, param in enumerate(impl_func.params):
+          layout = param_layouts[i]
+          new_layout_map[param] = layout
         out_layout = get_valid_output_layout_of_node(impl_func, param_layouts, mod, False, new_layout_map)
         if isinstance(out_layout, tuple): out_layout = list(out_layout)
         if out_layout != ret_layout: raise ValueError(f"Output layout mismatch for function {gv.name_hint}: expected {ret_layout}, got {out_layout}")
