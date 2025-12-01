@@ -804,14 +804,14 @@ def get_required_layout_rules(call, cpu_node=False):
       new_rule = deepcopy(rule)
       delete_input_options = []
       inputs_options, outputs_layout = rule
-      if outputs_layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C]:
-        continue
-      for input_option in inputs_options:
-        if any([layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C] for layout in input_option]):
-          delete_input_options.append(input_option)
+      # if outputs_layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C]:
+      #   continue
+      # for input_option in inputs_options:
+      #   if any([layout not in [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.MK, LayoutType.C] for layout in input_option]):
+      #     delete_input_options.append(input_option)
       
-      for input_option in delete_input_options:
-        inputs_options.remove(input_option)
+      # for input_option in delete_input_options:
+      #   inputs_options.remove(input_option)
       if inputs_options:
         new_rules.append((inputs_options, outputs_layout))
     if new_rules:
@@ -5599,7 +5599,7 @@ class ImcflowLayoutLegalizer:
 
     mod = self.replace_imcflow_gv(mod, new_gv_map)
     mod = self._insert_packing_unpacking(mod, real_tensor_type_map, self.imcflow_func_interface_layout_map)
-    self.layout_map.update(self.layout_results)
+    self.construct_layout_map(mod)
 
     # dump layout with graph structure
     debug_print("[FINAL LAYOUT RESULTS] Dump layout results with graph structure:")
@@ -6002,6 +6002,125 @@ class ImcflowLayoutLegalizer:
       if isImcflowFunc(func, mod):
         debug_print(f"[FINAL LAYOUT RESULTS] {gv.name_hint}")
         self._dump_layout_results(func, self.layout_map)
+
+  def construct_layout_map(self, mod):
+    """
+    Construct layout map of module.
+    We traverse imcflow functions first using imcflow_func_interface_layout_map.
+    We apply the input layouts to imcflow function params and construct layout map 
+    by propagating through the graph using get_valid_output_layout_of_node.
+    After that, we traverse main function (without recursing into global function calls).
+    Finally, clear and update ImcflowDeviceConfig().LayoutMap with the new map.
+    """
+    new_layout_map = {}
+
+    class LayoutPropagator(relay.ExprVisitor):
+      def __init__(self, layout_map, module, imcflow_func_layout_map):
+        super().__init__()
+        self.layout_map = layout_map
+        self.module = module
+        self.imcflow_func_layout_map = imcflow_func_layout_map
+        self.skip_global_calls = False  # Flag to skip recursing into global function calls
+
+      def visit_var(self, var):
+        if self.skip_global_calls:
+          layout = ImcflowLayoutLegalizer.infer_cpu_layout_from_type(var.type_annotation)
+          self.layout_map[var] = layout
+        else:
+          if var not in self.layout_map:
+            raise ValueError(f"Imcflow Variable layout not found in layout map: {var.name_hint}")
+
+      def visit_constant(self, const):
+        if self.skip_global_calls:
+          layout = ImcflowLayoutLegalizer.infer_cpu_layout_from_type(const.checked_type)
+          self.layout_map[const] = layout
+        else:
+          pass
+
+      def visit_call(self, call):
+        # Visit arguments first
+        for arg in call.args:
+          self.visit(arg)
+
+        # Handle global function calls (imcflow functions)
+        if isinstance(call.op, relay.GlobalVar):
+          if self.skip_global_calls:
+            # In main function: use interface layout map
+            if call.op.name_hint in self.imcflow_func_layout_map:
+              out_layout = self.imcflow_func_layout_map[call.op.name_hint][1]  # return layout
+              self.layout_map[call] = out_layout
+        else:
+          # Determine output layout based on operation and input layouts
+          arg_layouts = [self.layout_map[arg] for arg in call.args]
+          out_layout = get_valid_output_layout_of_node(call, arg_layouts, self.module, True, self.layout_map)
+          if out_layout is None: raise ValueError(f"Cannot determine output layout for call: {call.op}")
+          self.layout_map[call] = out_layout
+
+      def visit_tuple(self, tup):
+        for field in tup.fields:
+          self.visit(field)
+        # Tuple layout is tuple of field layouts
+        field_layouts = tuple(self.layout_map[f] for f in tup.fields)
+        self.layout_map[tup] = field_layouts
+
+      def visit_tuple_getitem(self, tgi):
+        self.visit(tgi.tuple_value)
+        tuple_layout = self.layout_map[tgi.tuple_value]
+        if isinstance(tuple_layout, (tuple, list)) and tgi.index < len(tuple_layout):
+          self.layout_map[tgi] = tuple_layout[tgi.index]
+        else:
+          self.layout_map[tgi] = tuple_layout
+
+      def visit_function(self, fn):
+        # Visit parameters
+        for param in fn.params:
+          self.visit(param)
+        # Visit body
+        self.visit(fn.body)
+        # Function layout is body layout
+        body_layout = self.layout_map[fn.body]
+        self.layout_map[fn] = body_layout
+
+    # Step 1: Process imcflow functions with known interface layouts
+    def _find_impl_func(func):
+      class _Visitor(relay.ExprVisitor):
+        def __init__(self):
+          super().__init__()
+          self.impl_func = None
+
+        def visit_call(self, call):
+          if isinstance(call.op, relay.Function): 
+            self.impl_func = call.op
+          else:
+            super().visit_call(call)
+      visitor = _Visitor()
+      visitor.visit(func.body)
+      return visitor.impl_func
+
+    for gv in mod.get_global_vars():
+      if gv.name_hint == "main":
+        continue
+      func = mod[gv]
+      if isImcflowFunc(func, mod) and gv.name_hint in self.imcflow_func_interface_layout_map:
+        param_layouts, ret_layout = self.imcflow_func_interface_layout_map[gv.name_hint]
+        impl_func = _find_impl_func(func)
+        if impl_func is None: raise ValueError(f"Cannot find implementation function inside imcflow function: {gv.name_hint}")
+        out_layout = get_valid_output_layout_of_node(impl_func, param_layouts, mod, False, new_layout_map)
+        if isinstance(out_layout, tuple): out_layout = list(out_layout)
+        if out_layout != ret_layout: raise ValueError(f"Output layout mismatch for function {gv.name_hint}: expected {ret_layout}, got {out_layout}")
+
+    # Step 2: Process main function (skip recursing into global calls)
+    main_func = mod["main"]
+    propagator = LayoutPropagator(new_layout_map, mod, self.imcflow_func_interface_layout_map)
+    propagator.skip_global_calls = True  # Don't recurse into global function calls
+    propagator.visit(main_func)
+    debug_print(f"[construct_layout_map] Processed main function")
+
+    # Step 3: Update global layout map
+    ImcflowDeviceConfig().LayoutMap.clear()
+    ImcflowDeviceConfig().LayoutMap.update(new_layout_map)
+    self.layout_map = new_layout_map
+    debug_print(f"[construct_layout_map] Updated global LayoutMap with {len(new_layout_map)} entries")
 
 class ImcflowFuncInOutOrderSetup:
   """
