@@ -1,2 +1,2 @@
-alias run="python test.py     -k "test_residual_model" -s 2>&1 | tee ./logs/test_residual_model.log"
-alias dbg="python_dbg test.py -k "test_residual_model" -s 2>&1 | tee ./logs/test_residual_model.log"
+alias run="python test.py     -k \"test_resnet8 and pretrain\" -s 2>&1 | tee ./logs/test_resnet8_and_pretrain.log"
+alias dbg="python_dbg test.py -k \"test_resnet8 and pretrain\" -s 2>&1 | tee ./logs/test_resnet8_and_pretrain.log"

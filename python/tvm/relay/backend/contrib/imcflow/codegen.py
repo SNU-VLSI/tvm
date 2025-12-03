@@ -51,6 +51,55 @@ class CodegenSuite:
     with open(f"{build_dir}/common_decl.h", "w") as file:
       file.write(common_decl)
 
+  def validate_recv_send_consistency(self, func_name, imce_builder, inode_builder):
+    """
+    Validate that send and recv counts match for each edge.
+    For each edge: inode_send + imce_send == inode_recv + imce_recv
+    """
+    print("="*40)
+    print(f"Validating recv/send consistency for function {func_name}")
+    
+    all_edges = set()
+    all_edges.update(imce_builder.send_map.keys())
+    all_edges.update(imce_builder.recv_map.keys())
+    all_edges.update(inode_builder.send_map.keys())
+    all_edges.update(inode_builder.recv_map.keys())
+    
+    inconsistencies = []
+    for edge in all_edges:
+      imce_send  = imce_builder.send_map.get(edge, 0)
+      imce_recv  = imce_builder.recv_map.get(edge, 0)
+      inode_send = inode_builder.send_map.get(edge, 0)
+      inode_recv = inode_builder.recv_map.get(edge, 0)
+      
+      total_send = int(imce_send) + int(inode_send)
+      total_recv = int(imce_recv) + int(inode_recv)
+      
+      if total_send != total_recv:
+        inconsistencies.append({
+          'edge': edge,
+          'imce_send': imce_send,
+          'imce_recv': imce_recv,
+          'inode_send': inode_send,
+          'inode_recv': inode_recv,
+          'total_send': total_send,
+          'total_recv': total_recv
+        })
+    
+    if inconsistencies:
+      print(f"\nFound {len(inconsistencies)} inconsistencies:")
+      for item in inconsistencies:
+        print(f"\n  Edge: {item['edge']}")
+        print(f"    IMCE  - Send: {item['imce_send']}, Recv: {item['imce_recv']}")
+        print(f"    Inode - Send: {item['inode_send']}, Recv: {item['inode_recv']}")
+        print(f"    Total - Send: {item['total_send']}, Recv: {item['total_recv']}")
+        print(f"    Mismatch: {item['total_send']} sends vs {item['total_recv']} recvs")
+      print("\n" + "="*40)
+      raise AssertionError(f"Recv/Send consistency check failed for function {func_name}")
+    else:
+      print(f"✓ All edges have consistent send/recv counts")
+      print("="*40)
+
   def transform_function(self, _, func):
     # Note: the function name strips off the "_impl" suffix to match the original funcion name
     # which is the parent func's global_symbol attribute (prior: func.attsr.global_symbol).
@@ -72,38 +121,52 @@ class CodegenSuite:
     IMCECodeBlockInfo().clear()
 
     # generate code blocks for each node
-    builder = ImceCodeBlockBuilder(self.module, func_name, annotator.edges)
-    builder.visit(func)
+    imce_builder = ImceCodeBlockBuilder(self.module, func_name, annotator.edges)
+    imce_builder.visit(func)
 
     # add stop block for active imces
     for hid in DevConfig().ActiveIMCEPerFunc[func_name]:
       block = CtrlBlock("STOP")
-      builder.codeblocks.append(hid, block, CodePhase.END)
+      imce_builder.codeblocks.append(hid, block, CodePhase.END)
     
     # dump recv/send map and check consistency
-    builder.construct_recv_send_map()
+    imce_builder.construct_recv_send_map()
     print("-"*40)
-    print(f"Function {func_name} Recv Map:")
-    for edge, recv_info in builder.recv_map.items():
+    print(f"Function {func_name} IMCE Recv Map:")
+    for edge, recv_info in imce_builder.recv_map.items():
       print(f"  {edge} : {recv_info}")
-    print(f"Function {func_name} Send Map:")
-    for edge, send_info in builder.send_map.items():
+    print(f"Function {func_name} IMCE Send Map:")
+    for edge, send_info in imce_builder.send_map.items():
       print(f"  {edge} : {send_info}")
     print("-"*40)
 
     DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
-        func_name, builder.codeblocks)
+        func_name, imce_builder.codeblocks)
 
-    builder = InodeCodeBlockBuilder(func_name, annotator.edges)
-    builder.visit(func)
+    inode_builder = InodeCodeBlockBuilder(func_name, annotator.edges)
+    inode_builder.visit(func)
 
     # add sync logic after INIT Phase
-    builder.sync_inrt_clear(CodePhase.INIT)
+    inode_builder.sync_inrt_clear(CodePhase.INIT)
+
+    # dump recv/send map and check consistency
+    inode_builder.construct_recv_send_map()
+    print("-"*40)
+    print(f"Function {func_name} Inode Recv Map:")
+    for edge, recv_count in inode_builder.recv_map.items():
+      print(f"  {edge} : {recv_count}")
+    print(f"Function {func_name} Inode Send Map:")
+    for edge, send_count in inode_builder.send_map.items():
+      print(f"  {edge} : {send_count}")
+    print("-"*40)
 
     DeviceCodegen("inode", self.build_dir, self.host_isa).handle_code_generation(
-        func_name, builder.codeblocks)
+        func_name, inode_builder.codeblocks)
 
     PolicyTableCodegen(func_name, self.build_dir, self.host_isa).generate(func_name)
+
+    # Validate recv/send consistency
+    self.validate_recv_send_consistency(func_name, imce_builder, inode_builder)
 
     # Clear the codegen context when done
     CodegenContext().clear()
@@ -287,6 +350,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.codeblocks = InodeCodeBlockManager(func_name)
     # Track which hardware nodes already have an IMCE compute block added
     self._imce_compute_added = set()
+    self.send_map = {}
+    self.recv_map = {}
     self.initialize()
     self.curr_composite_id = None
     self.finalize()
@@ -420,6 +485,43 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     #TODO: if edge count is more than one, interleave them
     for edge in output_edges:
       self.add_recv_block(edge, CodePhase.EXEC)
+
+  def construct_recv_send_map(self):
+    """
+    Iterate code blocks and find SendBlock, SendBlockInterleaved, and RecvBlock.
+    Aggregate send and recv counts per edge by counting actual loop iterations.
+    """
+    import math
+    def add_to_map(map, edges, count):
+      if isinstance(edges, list):
+        for edge in edges:
+          if edge not in map:
+            map[edge] = 0
+          map[edge] += count
+      else:
+        edge = edges
+        if edge not in map:
+          map[edge] = 0
+        map[edge] += count
+
+    all_blocks = self.codeblocks.get_blocks()
+    for block in all_blocks:
+      if isinstance(block, SendBlock):
+        edge = block.block.id
+        # Calculate actual number of send operations (loop count)
+        send_count = math.ceil(block.block.size / 32)
+        add_to_map(self.send_map, edge, send_count)
+      elif isinstance(block, SendBlockInterleaved):
+        # For interleaved sends, each block sends in parallel in the same loop
+        for db in block.blocks:
+          edge = db.id
+          send_count = math.ceil(db.size / 32)
+          add_to_map(self.send_map, edge, send_count)
+      elif isinstance(block, RecvBlock):
+        edge = block.block.id
+        # Calculate actual number of recv operations (loop count)
+        recv_count = math.ceil(block.block.size / 32)
+        add_to_map(self.recv_map, edge, recv_count)
 
   def add_send_block(self, edge, phase: CodePhase, db=None):
     out_edge_info = DevConfig().get_tensor_edge_info(edge)

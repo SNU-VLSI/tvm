@@ -109,6 +109,9 @@ class RecvConstBlock(ImceCodeBlock):
       self.iter = True
       self.iter_num = iter_num
       self.total_num = self.num * iter_num
+    
+    def __int__(self):
+      return self.total_num
 
   def __init__(self, in_edge: TensorEdge, annotation: str = ""):
     super().__init__(annotation)
@@ -521,6 +524,9 @@ class RecvSendWrapper(ImceCodeBlock):
       self.iter = True
       self.iter_num = iter_num
       self.total_num = self.num * iter_num
+    
+    def __int__(self):
+      return self.total_num
 
   def __init__(self, body: TextBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
                in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = ""):
