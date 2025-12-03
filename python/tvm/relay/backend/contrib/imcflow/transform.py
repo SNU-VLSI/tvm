@@ -4491,3 +4491,308 @@ class FIFOConflictMonitor:
         debug_print(f"FIFO conflict table exported to: {output_path}")
 
 
+class NoCDeadlockDetector:
+    """
+    Detect potential deadlocks in NoC (Network on Chip) transfers by identifying
+    circular dependencies in the transfer graph.
+    
+    A deadlock can occur when there is a cycle in the dependency graph formed by
+    tensor transfers. This detector considers only the source and destination endpoints
+    of each transfer, ignoring intermediate routing nodes.
+    
+    For example, if:
+    - Tensor i is transferred from IMCE2 to IMCE4 (source->dest)
+    - Tensor j is transferred from IMCE4 to IMCE2 (source->dest)
+    
+    This forms a cycle: IMCE2 -> IMCE4 -> IMCE2, which could lead to deadlock.
+    
+    The detector analyzes NoCPaths dictionary which maps tensor edges to their
+    source and destination hardware nodes, and identifies all cycles in the
+    resulting directed graph.
+    """
+    
+    def __init__(self):
+        self.deadlock_table = {}  # {func_name: [deadlock_cycles]}
+        self.transfer_graph = {}  # {func_name: {src_node: [dst_nodes]}}
+    
+    def run(self, mod):
+        """
+        Analyze all imcflow functions and detect potential deadlock cycles.
+        
+        Parameters
+        ----------
+        mod : tvm.IRModule
+            The module containing imcflow functions
+            
+        Returns
+        -------
+        dict
+            Deadlock table with structure:
+            {
+              func_name: [
+                {
+                  'cycle': [NodeID, ...],  # List of nodes forming the cycle
+                  'transfers': [           # Transfers involved in the cycle
+                    {
+                      'src_node': NodeID,
+                      'dst_node': NodeID,
+                      'edges': [TensorEdge, ...]  # Edges involved in this transfer
+                    },
+                    ...
+                  ]
+                },
+                ...
+              ],
+              ...
+            }
+        """
+        noc_paths = ImcflowDeviceConfig().NoCPaths
+        custom_id_to_name = CustomIDToName()
+        hw_node_map = ImcflowDeviceConfig().HWNodeMap
+        
+        for gv, func in mod.functions.items():
+            if not (isinstance(func, relay.Function) and 
+                   hasattr(func.attrs, "Compiler") and 
+                   func.attrs["Compiler"] == "imcflow"):
+                continue
+            
+            func_name = gv.name_hint
+            self.deadlock_table[func_name] = []
+            self.transfer_graph[func_name] = {}
+            
+            # Get NoC paths for this function
+            if func_name not in noc_paths:
+                continue
+            
+            func_noc_paths = noc_paths[func_name]
+            
+            # Build transfer graph: {src_node: {dst_node: [edges]}}
+            transfer_map = {}  # {(src, dst): [edges]}
+            
+            for key, path_info in func_noc_paths.items():
+                # Skip instruction paths (which have NodeID as key instead of TensorEdge)
+                if isinstance(key, NodeID):
+                    continue
+                
+                # path_info is a tuple: (src_hw_node, dst_hw_node, split_idx)
+                if not isinstance(path_info, tuple) or len(path_info) < 2:
+                    continue
+                
+                src_node = path_info[0]
+                dst_node = path_info[1]
+                
+                # Only consider transfers between different nodes
+                if src_node == dst_node:
+                    continue
+                
+                # Store the edge for this transfer
+                transfer_key = (src_node, dst_node)
+                if transfer_key not in transfer_map:
+                    transfer_map[transfer_key] = []
+                transfer_map[transfer_key].append(key)  # key is the TensorEdge
+            
+            # Build adjacency list for cycle detection
+            adjacency = {}
+            for (src, dst), edges in transfer_map.items():
+                if src not in adjacency:
+                    adjacency[src] = []
+                if dst not in adjacency[src]:
+                    adjacency[src].append(dst)
+            
+            # Detect cycles using DFS
+            cycles = self._detect_cycles(adjacency)
+            
+            # Build detailed cycle information
+            for cycle_nodes in cycles:
+                cycle_info = {
+                    'cycle': cycle_nodes,
+                    'transfers': []
+                }
+                
+                # For each edge in the cycle, find the corresponding transfers
+                for i in range(len(cycle_nodes)):
+                    src = cycle_nodes[i]
+                    dst = cycle_nodes[(i + 1) % len(cycle_nodes)]
+                    
+                    transfer_key = (src, dst)
+                    if transfer_key in transfer_map:
+                        transfer_edges = transfer_map[transfer_key]
+                        
+                        cycle_info['transfers'].append({
+                            'src_node': src,
+                            'dst_node': dst,
+                            'edges': transfer_edges
+                        })
+                
+                self.deadlock_table[func_name].append(cycle_info)
+                
+                # Debug output
+                debug_print(f"[NoC Deadlock] Function: {func_name}")
+                debug_print(f"  Cycle detected: {' -> '.join(str(n) for n in cycle_nodes)} -> {cycle_nodes[0]}")
+                debug_print(f"  Transfers in cycle:")
+                for transfer in cycle_info['transfers']:
+                    debug_print(f"    {transfer['src_node']} -> {transfer['dst_node']}: "
+                              f"{len(transfer['edges'])} edge(s)")
+        
+        # Store in device config for later access
+        ImcflowDeviceConfig().NoCDeadlockTable = self.deadlock_table
+        
+        return self.deadlock_table
+    
+    def _detect_cycles(self, adjacency):
+        """
+        Detect all cycles in a directed graph using DFS.
+        
+        Parameters
+        ----------
+        adjacency : dict
+            Adjacency list representation: {node: [neighbor_nodes]}
+            
+        Returns
+        -------
+        list
+            List of cycles, where each cycle is a list of nodes
+        """
+        cycles = []
+        visited = set()
+        rec_stack = set()  # Recursion stack to track current path
+        path = []  # Current path being explored
+        
+        def dfs(node):
+            visited.add(node)
+            rec_stack.add(node)
+            path.append(node)
+            
+            if node in adjacency:
+                for neighbor in adjacency[node]:
+                    if neighbor not in visited:
+                        dfs(neighbor)
+                    elif neighbor in rec_stack:
+                        # Cycle detected! Extract the cycle from path
+                        cycle_start_idx = path.index(neighbor)
+                        cycle = path[cycle_start_idx:]
+                        
+                        # Normalize cycle (start from smallest node to avoid duplicates)
+                        min_idx = cycle.index(min(cycle, key=lambda x: x.value if isinstance(x, NodeID) else x))
+                        normalized_cycle = cycle[min_idx:] + cycle[:min_idx]
+                        
+                        # Check if this cycle is already found
+                        if normalized_cycle not in cycles:
+                            cycles.append(normalized_cycle)
+            
+            path.pop()
+            rec_stack.remove(node)
+        
+        # Explore from all nodes
+        all_nodes = set(adjacency.keys())
+        for node in adjacency.values():
+            all_nodes.update(node)
+        
+        for node in all_nodes:
+            if node not in visited:
+                dfs(node)
+        
+        return cycles
+    
+    def print_deadlock_summary(self):
+        """
+        Print a summary of all detected potential deadlocks.
+        """
+        total_deadlocks = sum(len(cycles) for cycles in self.deadlock_table.values())
+        
+        if total_deadlocks == 0:
+            print("\n" + "="*60)
+            print("NoC Deadlock Detector: No potential deadlocks detected!")
+            print("="*60)
+            return
+        
+        print("\n" + "="*60)
+        print(f"NoC Deadlock Detector: {total_deadlocks} potential deadlock(s) detected")
+        print("="*60)
+        print("\nWARNING: Circular dependencies detected in NoC transfers!")
+        print("These cycles could potentially lead to deadlock situations.")
+        
+        for func_name, cycles in self.deadlock_table.items():
+            if not cycles:
+                continue
+            
+            print(f"\nFunction: {func_name}")
+            print(f"  Number of cycles: {len(cycles)}")
+            
+            for i, cycle_info in enumerate(cycles, 1):
+                cycle_nodes = cycle_info['cycle']
+                transfers = cycle_info['transfers']
+                
+                print(f"\n  Cycle #{i}:")
+                cycle_str = ' -> '.join(str(n) for n in cycle_nodes)
+                print(f"    Path: {cycle_str} -> {cycle_nodes[0]}")
+                print(f"    Transfers involved:")
+                
+                for j, transfer in enumerate(transfers, 1):
+                    print(f"      {j}. {transfer['src_node']} -> {transfer['dst_node']}")
+                    print(f"         Number of tensor edges: {len(transfer['edges'])}")
+                    for edge in transfer['edges'][:3]:  # Show first 3 edges
+                        print(f"           {edge}")
+                    if len(transfer['edges']) > 3:
+                        print(f"           ... and {len(transfer['edges']) - 3} more edge(s)")
+        
+        print("\n" + "="*60)
+    
+    def export_deadlock_table(self, output_path):
+        """
+        Export the deadlock detection results to a text file.
+        
+        Parameters
+        ----------
+        output_path : str
+            Path to the output file
+        """
+        with open(output_path, 'w') as f:
+            f.write("="*80 + "\n")
+            f.write("NoC Deadlock Detection Report\n")
+            f.write("="*80 + "\n\n")
+            
+            total_deadlocks = sum(len(cycles) for cycles in self.deadlock_table.values())
+            f.write(f"Total potential deadlocks detected: {total_deadlocks}\n")
+            
+            if total_deadlocks > 0:
+                f.write("\nWARNING: Circular dependencies detected in NoC transfers!\n")
+                f.write("These cycles could potentially lead to deadlock situations.\n")
+            
+            f.write("\n")
+            
+            for func_name, cycles in self.deadlock_table.items():
+                if not cycles:
+                    f.write(f"Function: {func_name}\n")
+                    f.write("  No deadlocks detected\n\n")
+                    continue
+                
+                f.write(f"Function: {func_name}\n")
+                f.write(f"  Number of cycles: {len(cycles)}\n")
+                
+                for i, cycle_info in enumerate(cycles, 1):
+                    cycle_nodes = cycle_info['cycle']
+                    transfers = cycle_info['transfers']
+                    
+                    f.write(f"\n  Cycle #{i}:\n")
+                    cycle_str = ' -> '.join(str(n) for n in cycle_nodes)
+                    f.write(f"    Path: {cycle_str} -> {cycle_nodes[0]}\n")
+                    f.write(f"    Number of nodes in cycle: {len(cycle_nodes)}\n")
+                    f.write(f"    Transfers involved:\n")
+                    
+                    for j, transfer in enumerate(transfers, 1):
+                        f.write(f"\n      Transfer #{j}:\n")
+                        f.write(f"        Source Node: {transfer['src_node']}\n")
+                        f.write(f"        Destination Node: {transfer['dst_node']}\n")
+                        f.write(f"        Number of tensor edges: {len(transfer['edges'])}\n")
+                        f.write(f"        Edges:\n")
+                        
+                        for edge in transfer['edges']:
+                            f.write(f"          {edge}\n")
+                
+                f.write("\n" + "-"*80 + "\n\n")
+        
+        debug_print(f"NoC deadlock table exported to: {output_path}")
+
+
+

@@ -249,6 +249,11 @@ def run_test_evl(test_name, mod, param_dict):
   fifo_monitor.print_conflict_summary()
   fifo_monitor.export_conflict_table(f"{eval_dir}/fifo_conflict_table.txt")
 
+  deadlock_detector = imcflow_transform.NoCDeadlockDetector()
+  deadlock_detector.run(eval_mod)
+  deadlock_detector.print_deadlock_summary()
+  deadlock_detector.export_deadlock_table(f"{eval_dir}/noc_deadlock_table.txt")
+
   # get the config
   config = DevConfig()
 

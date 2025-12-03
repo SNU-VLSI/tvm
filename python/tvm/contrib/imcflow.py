@@ -611,6 +611,7 @@ class ImcflowDeviceConfig:
     self.use_def_chain = {}   # {func_name: use-def mapping}
     self.LayoutMap={}
     self.FIFOConflictTable = {}
+    self.NoCDeadlockTable = {}
 
   def clear(self):
     self._initialize()
