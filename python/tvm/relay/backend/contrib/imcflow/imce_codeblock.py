@@ -271,6 +271,8 @@ class ConcatBlock(ImceCallCodeBlock):
   """
   Code block for concatenating multiple tensors
   FIXME: needs to look upon, since concat can happen not only in bitplanes...
+         concat is occured in channel axis. it means store data in register file.
+         We don't need to OR at this situation.
   """
 
   def __init__(self, call: 'BuilderContext', annotation: str = ""):

@@ -176,8 +176,7 @@ def run_test_evl(test_name, mod, param_dict):
     pprint.pprint(HashToCustomID(), stream=f)
   printModel(eval_dir, eval_mod, eval_param_dict, "7.6_with_custom_id")
 
-  layout_legalizer = imcflow_transform.ImcflowLayoutLegalizer()
-  eval_mod, ttype_map = layout_legalizer.transform_mod(eval_mod)
+  eval_mod, ttype_map = imcflow_transform.legalizeImcflowLayout(eval_mod)
   printModel(eval_dir, eval_mod, eval_param_dict, "7.7_after_mark_in_out")
   print("-------------------- Real Tensor Type Map --------------------")
   pprint.pprint(ttype_map)
