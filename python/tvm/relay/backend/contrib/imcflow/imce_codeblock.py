@@ -8,6 +8,8 @@ from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import *
+from tvm.relay.backend.contrib.imcflow.layout import apply_layout_to_type
+from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID, getOuterNodeID, get_type
 from tvm.relay.dataflow_pattern import *
 from textwrap import indent
 import logging
@@ -227,6 +229,10 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     self.o_split_idx = o_split_idx
 
   @property
+  def num_blocks(self) -> int:
+    return 4
+
+  @property
   def num_out_blocks(self) -> int:
     return 4  # FIXED in MinmaxQuantBlock
 
@@ -237,6 +243,10 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
         edge for edge in self.in_edges if edge.dst_id.tensor_type == "data")
 
     code = TextBlock("")
+
+    # arg = CustomIDToNode()[getInnerNodeID(data_edge.src_id.graph_node_id)]
+    # arg_shape = get_type(call.module, arg).shape
+    # arg_layout = DevConfig().LayoutMap[arg]
 
     for i in range(self.num_blocks):
       var_i = self._make_unique_input_var_for_post_op(data_edge, i)
@@ -577,7 +587,7 @@ class RecvSendWrapper(ImceCodeBlock):
     return code
 
 
-  def create_loop_from_call(self, call_ctx, to_process_in_edges=None):
+  def create_loop_from_call(self, call_ctx : 'BuilderContext', to_process_in_edges=None):
     """Wrap the content in a loop based on call's type_args.
 
     Returns self to allow method chaining.
@@ -599,17 +609,45 @@ class RecvSendWrapper(ImceCodeBlock):
     if datablock:
       count = math.ceil(datablock.size / 32.0)
     else:
-      edge_shape = None
+      args = []
       for idx, arg in enumerate(call.args):
         if ConstPat.match(arg):
           continue
         else:
-          if edge_shape is not None:
-            assert (
-                edge_shape == call.type_args[idx].shape), "all input args should have the same shape"
-          else:
-            edge_shape = call.type_args[idx].shape
-      count = edge_shape[-2] * edge_shape[-1]
+          args.append(arg)
+
+      real_ttype = None
+      for arg in args:
+        layout = DevConfig().LayoutMap[arg]
+        real_ttype_ = apply_layout_to_type(get_type(call_ctx.module, arg), layout)
+        if real_ttype and real_ttype != real_ttype_:
+          raise RuntimeError("Mismatched real tensor types among input args")
+        real_ttype = real_ttype_
+      
+      elem_count = math.prod(list(real_ttype.shape))
+      if isinstance(elem_count, tvm.tir.expr.IntImm):
+        elem_count = elem_count.value
+      dtype = real_ttype.dtype
+      if "int8" in dtype or "uint8" in dtype:
+        bytes_per_elem = 1
+      elif "int16" in dtype or "uint16" in dtype:
+        bytes_per_elem = 2
+      elif "int32" in dtype or "uint32" in dtype or "float32" in dtype:
+        bytes_per_elem = 4
+      else:
+        raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
+      total_bytes = elem_count * bytes_per_elem
+
+      byte_per_iter = self.num_blocks * 32
+      count = math.ceil(total_bytes / byte_per_iter)
+
+      # edge_shape = None
+      # if edge_shape is not None:
+      #   assert (
+      #       edge_shape == call.type_args[idx].shape), "all input args should have the same shape"
+      # else:
+      #   edge_shape = call.type_args[idx].shape
+      # count = edge_shape[-2] * edge_shape[-1]
 
     # Store the loop-wrapped content in the _loop_wrapper attribute
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")

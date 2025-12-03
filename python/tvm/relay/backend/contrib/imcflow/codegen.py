@@ -37,9 +37,10 @@ ConstPat = is_constant()
 class CodegenSuite:
   """A pass that generates/compiles code for IMCFlow functions"""
 
-  def __init__(self, build_dir, host_isa="arm"):
+  def __init__(self, build_dir, module, host_isa="arm"):
     self.build_dir = build_dir
     self.host_isa = host_isa
+    self.module = module
     if not os.path.exists(build_dir):
       os.makedirs(build_dir)
 
@@ -71,7 +72,7 @@ class CodegenSuite:
     IMCECodeBlockInfo().clear()
 
     # generate code blocks for each node
-    builder = ImceCodeBlockBuilder(func_name, annotator.edges)
+    builder = ImceCodeBlockBuilder(self.module, func_name, annotator.edges)
     builder.visit(func)
 
     # add stop block for active imces
@@ -222,9 +223,10 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   Handlers receive a BuilderContext that wraps each call with helper methods.
   """
 
-  def __init__(self, func_name, edges):
+  def __init__(self, module, func_name, edges):
     super().__init__()
     # Shared state accessed by handlers through BuilderContext
+    self.module = module
     self.edges = edges
     self.codeblocks = ImceCodeBlockManager(func_name)
     self.curr_composite_id = None

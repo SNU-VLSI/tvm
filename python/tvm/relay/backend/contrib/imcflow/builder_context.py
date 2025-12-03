@@ -13,6 +13,7 @@ Usage in handlers:
 
 import re
 from typing import Optional, List, Dict, Any
+import tvm
 from tvm import relay
 from tvm.contrib.imcflow import TensorID, TensorEdge
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
@@ -46,7 +47,9 @@ class BuilderContext:
   def __init__(self, call: relay.Call, edges: set, codeblocks,
                curr_composite_id: Optional[int] = None,
                curr_conv_block: Optional[ConvBlock] = None,
-               last_tuple_idx: Optional[int] = None):
+               last_tuple_idx: Optional[int] = None,
+               module : Optional[tvm.ir.IRModule] = None,
+               func_name : Optional[str] = None ):
     """Initialize context with call and shared state.
 
     Args:
@@ -63,6 +66,12 @@ class BuilderContext:
     self.curr_composite_id = curr_composite_id
     self.curr_conv_block = curr_conv_block
     self.last_tuple_idx = last_tuple_idx
+    self.module = module
+    self.func_name = func_name
+    if module and func_name:
+      self.func = module[func_name]
+    else:
+      self.func = None
 
   def fork(self, call: relay.Call) -> 'BuilderContext':
     """Create a new context for a different call, preserving shared state.

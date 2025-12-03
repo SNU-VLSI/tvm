@@ -1158,6 +1158,78 @@ def modify_call_node_attrs(call_node, in_node=None, out_node=None, const_packed_
 
   return Call(call_node.op, call_node.args, new_attrs, call_node.type_args, call_node.span)
 
+def apply_layout_to_type(original_type, layout_type):
+  """
+  Apply layout to tensor type. it reshape tensor.
+  args:
+    - original_type: relay.TensorType
+                      original tensor type.
+    - layout_type: LayoutType
+                    layout type to be applied.
+  return:
+    - new_type: relay.TensorType
+                new tensor type with applied layout.
+  """
+  if not isinstance(original_type, TensorType):
+    raise ValueError("Variable type must be TensorType")
+
+  if layout_type == LayoutType.NCHW:
+    assert isinstance(original_type, TensorType) and len(original_type.shape) == 4, "NCHW layout requires 4D tensor"
+    return original_type
+  
+  if layout_type == LayoutType.SCALAR:
+    assert len(original_type.shape) == 0 or (len(original_type.shape) == 1 and original_type.shape[0] == 1) , f"SCALAR layout requires 0D tensor or shape [1]. input : {original_type}"
+    return original_type
+
+  original_shape = original_type.shape
+  original_dtype = original_type.dtype
+
+  if layout_type == LayoutType.NCHW16C:
+    if len(original_shape) != 4:
+      raise ValueError(f"Unsupported shape for NCHW16c layout: {original_shape}")
+    N, C, H, W = original_shape
+    C_ceil = (C + 15) // 16
+    new_shape = [N, C_ceil, H, W, 16]
+    new_dtype = original_dtype
+  elif layout_type == LayoutType.NCHW64C:
+    if len(original_shape) != 4:
+      raise ValueError(f"Unsupported shape for NCHW64c layout: {original_shape}")
+    N, C, H, W = original_shape
+    C_ceil = (C + 63) // 64
+    new_shape = [N, C_ceil, H, W, 64]
+    new_dtype = original_dtype
+  elif layout_type == LayoutType.QCONV_INPUT:
+    if len(original_shape) != 4:
+      raise ValueError(f"Unsupported shape for qconv_input layout: {original_shape}")
+    N, C, H, W = original_shape
+    C_ceil = (C + 255) // 256
+    IB = 4
+    new_shape = [N, C_ceil, H, W, IB, 8]
+    new_dtype = "uint32"
+  elif layout_type == LayoutType.QCONV_WEIGHT:
+    if len(original_shape) != 4:
+      raise ValueError(f"Unsupported shape for qconv_weight layout: {original_shape}")
+    out_channels, in_channels, kh, kw = original_shape
+    ic = 256 // (kh * kw)
+    new_shape = [
+      (out_channels + 63) // 64,
+      (in_channels + ic - 1) // ic,
+      256,
+      8,
+    ]
+    new_dtype = "int32"
+  elif layout_type == LayoutType.QDCONV_WEIGHT:
+    if len(original_shape) != 4:
+      raise ValueError(f"Unsupported shape for qdwconv_weight layout: {original_shape}")
+    out_channels, _, kh, kw = original_shape
+    # mirror packing logic used in qdwconv path (uint32)
+    new_shape = [math.ceil(out_channels / 16), 8, 8]
+    new_dtype = "uint32"
+  else:
+    raise ValueError(f"Unknown layout type: {layout_type}")
+
+  return relay.TensorType(new_shape, new_dtype)
+
 
 def calculate_imcflow_func_type(func, func_name=None):
   """
@@ -1234,7 +1306,7 @@ def calculate_imcflow_func_type(func, func_name=None):
       for idx, param in enumerate(func.params):
         layout = input_layouts[param]
         param_layouts.append(layout)
-        param_types.append(self._apply_layout_to_type(param.checked_type, layout))
+        param_types.append(apply_layout_to_type(param.checked_type, layout))
       return param_types, param_layouts
 
     def _build_return_type(self, func, layout):
@@ -1249,84 +1321,12 @@ def calculate_imcflow_func_type(func, func_name=None):
             field_type = body.checked_type.fields[idx]
           layout = output_layout[idx]
           ret_layouts.append(layout)
-          ret_types.append(self._apply_layout_to_type(field_type, layout))
+          ret_types.append(apply_layout_to_type(field_type, layout))
         return relay.TupleType(ret_types), ret_layouts
       else:
         layout = output_layout
-        ret_type = self._apply_layout_to_type(body.checked_type, layout)
+        ret_type = apply_layout_to_type(body.checked_type, layout)
         return ret_type, layout
-
-    def _apply_layout_to_type(self, original_type, layout_type):
-      """
-      Apply layout to tensor type. it reshape tensor.
-      args:
-        - original_type: relay.TensorType
-                         original tensor type.
-        - layout_type: LayoutType
-                       layout type to be applied.
-      return:
-        - new_type: relay.TensorType
-                    new tensor type with applied layout.
-      """
-      if not isinstance(original_type, TensorType):
-        raise ValueError("Variable type must be TensorType")
-
-      if layout_type == LayoutType.NCHW:
-        assert isinstance(original_type, TensorType) and len(original_type.shape) == 4, "NCHW layout requires 4D tensor"
-        return original_type
-      
-      if layout_type == LayoutType.SCALAR:
-        assert len(original_type.shape) == 0 or (len(original_type.shape) == 1 and original_type.shape[0] == 1) , f"SCALAR layout requires 0D tensor or shape [1]. input : {original_type}"
-        return original_type
-
-      original_shape = original_type.shape
-      original_dtype = original_type.dtype
-
-      if layout_type == LayoutType.NCHW16C:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for NCHW16c layout: {original_shape}")
-        N, C, H, W = original_shape
-        C_ceil = (C + 15) // 16
-        new_shape = [N, C_ceil, H, W, 16]
-        new_dtype = original_dtype
-      elif layout_type == LayoutType.NCHW64C:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for NCHW64c layout: {original_shape}")
-        N, C, H, W = original_shape
-        C_ceil = (C + 63) // 64
-        new_shape = [N, C_ceil, H, W, 64]
-        new_dtype = original_dtype
-      elif layout_type == LayoutType.QCONV_INPUT:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for qconv_input layout: {original_shape}")
-        N, C, H, W = original_shape
-        C_ceil = (C + 255) // 256
-        IB = 4
-        new_shape = [N, C_ceil, H, W, IB, 8]
-        new_dtype = "uint32"
-      elif layout_type == LayoutType.QCONV_WEIGHT:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for qconv_weight layout: {original_shape}")
-        out_channels, in_channels, kh, kw = original_shape
-        ic = 256 // (kh * kw)
-        new_shape = [
-          (out_channels + 63) // 64,
-          (in_channels + ic - 1) // ic,
-          256,
-          8,
-        ]
-        new_dtype = "int32"
-      elif layout_type == LayoutType.QDCONV_WEIGHT:
-        if len(original_shape) != 4:
-          raise ValueError(f"Unsupported shape for qdwconv_weight layout: {original_shape}")
-        out_channels, _, kh, kw = original_shape
-        # mirror packing logic used in qdwconv path (uint32)
-        new_shape = [math.ceil(out_channels / 16), 8, 8]
-        new_dtype = "uint32"
-      else:
-        raise ValueError(f"Unknown layout type: {layout_type}")
-
-      return relay.TensorType(new_shape, new_dtype)
 
   updater = _ImcflowFunctionParamUpdater(func_name)
   return updater.run(func)
