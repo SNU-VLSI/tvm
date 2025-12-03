@@ -151,6 +151,7 @@ class OperationHandlerRegistry:
           curr_conv_block=builder.curr_conv_block,
           last_tuple_idx=builder.last_tuple_idx
       )
+      call_ctx.builder = builder
 
       # Call handler with wrapped context (builder already set)
       handler.handle(call_ctx)

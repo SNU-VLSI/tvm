@@ -270,3 +270,23 @@ class NodeCodeBlockManager:
     end = self.end_block()
 
     return start + indent(body, '  ') + end
+  
+  def get_blocks(self, phase :List[CodePhase] = None , nodes : List[NodeID] = None) -> List[CodeBlock]:
+    """Get all INIT code blocks for the specified nodes.
+
+    Args:
+        nodes: List of NodeID instances to get INIT blocks for.
+               If None, gets INIT blocks for all nodes.
+    Returns:
+        List of INIT CodeBlock instances.
+    """
+    if nodes is None:
+      nodes = self.nodes
+    if phase is None:
+      phase = [CodePhase.INIT, CodePhase.EXEC, CodePhase.END]
+
+    init_blocks = []
+    for node in nodes:
+      for phase_ in phase:
+        init_blocks.extend(self.blocks[node][phase_])
+    return init_blocks

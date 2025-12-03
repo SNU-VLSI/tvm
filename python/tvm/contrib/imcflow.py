@@ -487,6 +487,7 @@ class TensorEdgeInfo(EdgeInfo):
   def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
+    self.owner = None
 
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id
@@ -633,12 +634,13 @@ class ImcflowDeviceConfig:
     return self.TensorIDtoEdge.get(tensor_id, None)
 
   def add_tensor_edge_info(self, tensor_edge: TensorEdge, tensor_edge_info: TensorEdgeInfo):
+    tensor_edge_info.owner = tensor_edge
     self.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
 
   def get_tensor_edge_info(self, tensor_edge: TensorEdge):
     return self.TensorEdgetoInfo.get(tensor_edge, None)
 
-  def get_tensor_edge_info_with_id_dir(self, tensor_id: TensorID, dir: str):
+  def get_tensor_edge_info_with_id_dir(self, tensor_id: TensorID, dir: str) -> List[TensorEdgeInfo]:
     edge_infos = []
     if dir == "in":
       for edge in self.TensorEdgetoInfo.keys():

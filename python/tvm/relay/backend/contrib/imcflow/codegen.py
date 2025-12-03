@@ -79,6 +79,17 @@ class CodegenSuite:
     for hid in DevConfig().ActiveIMCEPerFunc[func_name]:
       block = CtrlBlock("STOP")
       builder.codeblocks.append(hid, block, CodePhase.END)
+    
+    # dump recv/send map and check consistency
+    builder.construct_recv_send_map()
+    print("-"*40)
+    print(f"Function {func_name} Recv Map:")
+    for edge, recv_info in builder.recv_map.items():
+      print(f"  {edge} : {recv_info}")
+    print(f"Function {func_name} Send Map:")
+    for edge, send_info in builder.send_map.items():
+      print(f"  {edge} : {send_info}")
+    print("-"*40)
 
     DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
         func_name, builder.codeblocks)
@@ -233,6 +244,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.curr_conv_block = None
     self.last_tuple_idx = None
     self._handler_registry = get_handler_registry()
+    self.send_map = {}
+    self.recv_map = {}
 
   def visit_tuple(self, tup):
     for idx, x in enumerate(tup.fields):
@@ -250,6 +263,21 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # Fallback for unhandled operations
     if not handled:
       self.visit(call.op)
+  
+  def construct_recv_send_map(self):
+    """
+    Iterate code blocks and find recv_send_wrapper and RecvConstBlock block.
+    recv_send_wrapper block has local recv, send map. Aggregate it.
+    """
+    all_blocks = self.codeblocks.get_blocks()
+    for block in all_blocks:
+      if isinstance(block, (RecvSendWrapper, RecvConstBlock)):
+        local_recv_map = block.recv_map
+        self.recv_map.update(local_recv_map)
+        if isinstance(block, RecvSendWrapper):
+          local_send_map = block.send_map
+          self.send_map.update(local_send_map)
+        
 
 
 class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):

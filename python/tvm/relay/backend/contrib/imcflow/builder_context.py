@@ -72,6 +72,7 @@ class BuilderContext:
       self.func = module[func_name]
     else:
       self.func = None
+    self.builder =None
 
   def fork(self, call: relay.Call) -> 'BuilderContext':
     """Create a new context for a different call, preserving shared state.

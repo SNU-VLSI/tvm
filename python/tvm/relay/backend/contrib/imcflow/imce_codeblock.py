@@ -14,6 +14,7 @@ from tvm.relay.dataflow_pattern import *
 from textwrap import indent
 import logging
 import pdb
+from dataclasses import dataclass
 
 if TYPE_CHECKING:
   from .builder_context import BuilderContext
@@ -97,9 +98,22 @@ class RecvConstBlock(ImceCodeBlock):
   # FIXME: Add support for initializing QREGs to zero
   num_in_edges = 1
 
+  @dataclass
+  class RecvNum:
+    iter      : bool = False
+    num       : int  = 1
+    iter_num  : int  = 1
+    total_num : int  = 1
+
+    def set_iter(self, iter_num):
+      self.iter = True
+      self.iter_num = iter_num
+      self.total_num = self.num * iter_num
+
   def __init__(self, in_edge: TensorEdge, annotation: str = ""):
     super().__init__(annotation)
     self.in_edge = in_edge
+    self.recv_map = {}
 
   def _content(self) -> CodeBlock:
     code = TextBlock("")
@@ -115,6 +129,9 @@ class RecvConstBlock(ImceCodeBlock):
         self.in_edge).base_address
     assert base_addr % 32 == 0, "Base address must be a multiple of 32"
     recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
+
+    owner_edge = te_info.owner
+    self.recv_map[owner_edge] = RecvConstBlock.RecvNum(False, recv_count, 1, recv_count)
 
     for i in range(recv_count):
       var = UniqueVar((self.in_edge, i))
@@ -493,6 +510,18 @@ class RecvSendWrapper(ImceCodeBlock):
   Wrapper that adds RECV and SEND operations around a computation block.
   """
 
+  @dataclass
+  class RecvSendNum:
+    iter      : bool = False
+    num       : int  = 1
+    iter_num  : int  = 1
+    total_num : int  = 1
+
+    def set_iter(self, iter_num):
+      self.iter = True
+      self.iter_num = iter_num
+      self.total_num = self.num * iter_num
+
   def __init__(self, body: TextBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
                in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = ""):
     """Wrap a computation block with RECV/SEND operations.
@@ -511,6 +540,8 @@ class RecvSendWrapper(ImceCodeBlock):
     self.out_edges = out_edges
     self.send_block = send_block
     self._loop_wrapper = None  # Store the loop wrapper if create_loop_from_call is used
+    self.send_map = {}
+    self.recv_map = {}
 
   @classmethod
   def from_codeblock(cls, codeblock: ImceCallCodeBlock, annotation: str=""):
@@ -558,6 +589,8 @@ class RecvSendWrapper(ImceCodeBlock):
             continue
           annotation = f"{edge}, {te_info.node_info_str}"
           code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
+          owner_edge = te_info.owner
+          self.recv_map[owner_edge] = RecvSendWrapper.RecvSendNum(False, 1, 1, 1)
   
     # Add the inner block's computation
     code += str(self.body)
@@ -579,10 +612,12 @@ class RecvSendWrapper(ImceCodeBlock):
       # Generate SEND for all output edges (supports merged case above)
       for i in range(self.num_out_blocks):
         for te_out_info in te_out_infos:
+          owner_edge = te_out_info.owner
           var_o = UniqueVar((self.send_block, i))
           if te_out_info:
             annotation = f"{te_out_info.node_info_str}"
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
+            self.send_map[owner_edge] = RecvSendWrapper.RecvSendNum(False, 1, 1, 1)
 
     return code
 
@@ -651,6 +686,10 @@ class RecvSendWrapper(ImceCodeBlock):
 
     # Store the loop-wrapped content in the _loop_wrapper attribute
     self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")
+    for send_edge, val in self.send_map.items():
+      val.set_iter(count)
+    for recv_edge, val in self.recv_map.items():
+      val.set_iter(count)
 
     return self
 
