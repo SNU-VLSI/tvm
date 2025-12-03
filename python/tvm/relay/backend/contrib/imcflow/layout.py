@@ -109,18 +109,18 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW64C,
     ),
-    (
-      [
-        [LayoutType.NCHW, LayoutType.C],
-      ],
-      LayoutType.NCHW,
-    ),
-    (
-      [
-        [LayoutType.MK, LayoutType.C],
-      ],
-      LayoutType.MK,
-    ),
+    # (
+    #   [
+    #     [LayoutType.NCHW, LayoutType.C],
+    #   ],
+    #   LayoutType.NCHW,
+    # ),
+    # (
+    #   [
+    #     [LayoutType.MK, LayoutType.C],
+    #   ],
+    #   LayoutType.MK,
+    # ),
   ],
   "nn.relu": [
     (
@@ -135,18 +135,18 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW64C,
     ),
-    (
-      [
-        [LayoutType.NCHW],
-      ],
-      LayoutType.NCHW,
-    ),
-    (
-      [
-        [LayoutType.MK],
-      ],
-      LayoutType.MK,
-    )
+    # (
+    #   [
+    #     [LayoutType.NCHW],
+    #   ],
+    #   LayoutType.NCHW,
+    # ),
+    # (
+    #   [
+    #     [LayoutType.MK],
+    #   ],
+    #   LayoutType.MK,
+    # )
   ],
   "imcflow.fused_batch_norm": [
     (
@@ -581,6 +581,14 @@ CPU_REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW
     )
+  ],
+  "strided_slice": [
+    (
+      [
+        [LayoutType.NCHW],
+      ],
+      LayoutType.NCHW
+    )
   ]
 }
 
@@ -828,7 +836,7 @@ def get_required_layout_rules(call, cpu_node=False):
     if rules is None:
       raise ValueError(f"Layout requirement not defined for op {op_name} at IMCFLOW")
   else:
-    raise ValueError(f"Layout requirement not defined for op {op_name}.")
+    raise ValueError(f"Layout requirement not defined for op {op_name}. at {'CPU' if cpu_node else 'IMCFLOW'}")
   
   if not rules: raise ValueError(f"Layout requirement not defined for op {op_name}.")
 
