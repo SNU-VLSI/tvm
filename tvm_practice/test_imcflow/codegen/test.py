@@ -342,6 +342,11 @@ def test_ds_cnn_imcflow():
   mod, param_dict = ds_cnn_imcflow.getModel(False)
   run_test_evl("ds_cnn_imcflow", mod, param_dict)
 
+def test_residual_model():
+  """Generate evaluation for residual model"""
+  mod, param_dict = models_for_test.getResidualModel()
+  run_test_evl("residual_model", mod, param_dict)
+
 if __name__ == "__main__":
   tvm.testing.main()
   # test_resnet8()

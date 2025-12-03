@@ -2403,8 +2403,8 @@ def constructTensorEdgeList(mod):
             return True
           else:
               if isinstance(SrcGraphNode, Var):
-                # self.VarProperties[SrcGraphNode]["src_tag"] = SrcTag
-                self.VarProperties[SrcGraphNode]["src_tag"] = "var"
+                self.VarProperties[SrcGraphNode]["src_tag"] = SrcTag
+                # self.VarProperties[SrcGraphNode]["src_tag"] = "var"
                 self.VarProperties[SrcGraphNode]["dst_tag"] = DstTag
                 self.VarProperties[SrcGraphNode]["dst_graph_node_id"] = DstGraphNodeID
               if isinstance(SrcGraphNode, Constant):
