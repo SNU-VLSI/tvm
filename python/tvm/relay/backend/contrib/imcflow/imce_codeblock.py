@@ -49,13 +49,13 @@ class RecvSendNum:
 def add_to_map(edge, count, is_send=True):
   outer_loop_count = 1 if len(SimpleFor.count_stack) == 0 else int(math.prod(SimpleFor.count_stack))
   target_map = send_num_map if is_send else recv_num_map
+  old_count = count.total_num
   count.set_iter(outer_loop_count)
   if edge in target_map:
-    print(f"[recv send map] warning : Edge {edge} already in map with different count. Add!")
-    count.total_num += target_map[edge].total_num
-  
-  target_map[edge] = count
-  print(f"Added edge {edge} with count {count} to {'send_map' if is_send else 'recv_map'}. iter_count={outer_loop_count}")
+    target_map[edge].total_num += count.total_num
+  else:
+    target_map[edge] = count
+  print(f"[recv send map] {'send_map' if is_send else 'recv_map'} | {edge} | {target_map[edge].total_num} | {old_count}*{outer_loop_count}={count.total_num}")
 
 
 class ImceCodeBlock(CodeBlock):
@@ -407,6 +407,9 @@ class ConvBlock(ImceCallCodeBlock):
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
     self.post_ops = post_ops if post_ops is not None else []
+    self.total_in_read_counts = self.conv.get_total_input_read_counts()
+    self.origin_hw = shapes["data"][2] * shapes["data"][3]  # H * W
+    self.remain = self.origin_hw - self.total_in_read_counts
     
     # Link post-ops
     prev = self
@@ -443,6 +446,7 @@ class ConvBlock(ImceCallCodeBlock):
     assert len(load_info) == 1, "there should be exactly one load edge"
     load_edge = load_info[0]["edge"]
     load_edge_info = load_info[0]["te_info"]
+    self.load_edge_info = load_edge_info
 
     comp = CompositeBlock()
     comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info))
@@ -493,7 +497,8 @@ class ConvBlock(ImceCallCodeBlock):
     ]
     """
     row_pattern = self.conv.extract_2d_pattern()
-    pprint(f"[ConvBlock] row pattern: {row_pattern}")
+    pprint(f"[ConvBlock] row pattern for node {getNodeID(self.call.call)}:")
+    pprint(row_pattern)
     root = CompositeBlock()
     for idx, row_pat in enumerate(row_pattern):
       # row_pat["count"] : number of rows that share the same pattern
@@ -510,6 +515,13 @@ class ConvBlock(ImceCallCodeBlock):
 
       outer_loop = SimpleFor(row_pat["count"], outer_body, f"{tag}_outer_loop(iterate row offset)")
       root.add(outer_loop)
+    
+    # read remaining pixels if any
+    if self.remain > 0:
+      print(f"[ConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
+      tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")
+      tail_loop = SimpleFor(self.remain, tail_body, f"{self.annotation}_tail_loop")
+      root.add(tail_loop)
 
     return root
 
@@ -633,7 +645,8 @@ class RecvSendWrapper(ImceCodeBlock):
       src_id = out_edge_src_ids.pop()
       te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(
           src_id, "out")
-      
+
+      output_edges=self.out_edges
       if not te_out_infos:
         dst_node = CustomIDToNode()[getInnerNodeID(self.out_edges[0].dst_id.graph_node_id)]
         if not dst_node.op.name == "split":
@@ -643,6 +656,7 @@ class RecvSendWrapper(ImceCodeBlock):
           split_node_graph_id = self.out_edges[0].dst_id.graph_node_id
           target_tensor_id = TensorID(split_node_graph_id, "odata")
           te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(target_tensor_id, "out")
+          output_edges = [edge for edge in DevConfig().TensorEdgetoInfo.keys() if getInnerNodeID(edge.src_id.graph_node_id) == getInnerNodeID(target_tensor_id.graph_node_id)]
           print(f"Info: got {len(te_out_infos)} tensor edge infos from split dst edge")
 
       if te_out_infos:
@@ -658,7 +672,7 @@ class RecvSendWrapper(ImceCodeBlock):
           if te_out_info:
             annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
-            for out_edge in self.out_edges:
+            for out_edge in output_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
     return code

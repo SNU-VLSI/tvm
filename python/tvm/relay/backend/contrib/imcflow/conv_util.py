@@ -60,6 +60,10 @@ class ConvUtil:
             target_row, target_col)
 
     return read_counts
+  
+  def get_total_input_read_counts(self):
+    read_counts = self.calculate_input_read_counts()
+    return read_counts.sum().item()
 
   def extract_pattern(self, matrix):
     groups = []

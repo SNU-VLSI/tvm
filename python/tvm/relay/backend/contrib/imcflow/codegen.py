@@ -581,20 +581,35 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         if edge not in map:
           map[edge] = 0
         map[edge] += count
+    
+    def _add_send_map(send_map, block, edge):
+      if isinstance(edge, list):
+        for e in edge:
+          _add_send_map(send_map, block, e)
+      else:
+        dst_node_graph_id = edge.dst_id.graph_node_id
+        dst_node = CustomIDToNode()[getInnerNodeID(dst_node_graph_id)]
+        if dst_node.op.name == "split":
+          split_out_tensor_id = TensorID(dst_node_graph_id, "odata")
+          output_edges = [edge for edge in DevConfig().TensorEdgetoInfo.keys() if getInnerNodeID(edge.src_id.graph_node_id) == getInnerNodeID(split_out_tensor_id.graph_node_id)]
+          for output_edge in output_edges:
+            send_count = math.ceil(block.size / 32)
+            add_to_map(send_map, output_edge, send_count)
+        else:
+          send_count = math.ceil(block.size / 32)
+          add_to_map(send_map, edge, send_count)
+
 
     all_blocks = self.codeblocks.get_blocks()
     for block in all_blocks:
       if isinstance(block, SendBlock):
         edge = block.block.id
-        # Calculate actual number of send operations (loop count)
-        send_count = math.ceil(block.block.size / 32)
-        add_to_map(self.send_map, edge, send_count)
+        _add_send_map(self.send_map, block.block, edge)
       elif isinstance(block, SendBlockInterleaved):
         # For interleaved sends, each block sends in parallel in the same loop
         for db in block.blocks:
           edge = db.id
-          send_count = math.ceil(db.size / 32)
-          add_to_map(self.send_map, edge, send_count)
+          _add_send_map(self.send_map, db, edge)
       elif isinstance(block, RecvBlock):
         edge = block.block.id
         # Calculate actual number of recv operations (loop count)
