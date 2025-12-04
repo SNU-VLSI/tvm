@@ -257,12 +257,16 @@ def run_test_evl(test_name, mod, param_dict):
   # get the config
   config = DevConfig()
 
-  with open(f"{eval_dir}/final_imcflow_config.txt", "w") as f:
-    print("------------------------------- FE RESULTS ----------------------------------", file=f)
-    pprint.pprint(f"nodemap: {config.HWNodeMap}", stream=f)
-    pprint.pprint(f"edgeinfo: {config.TensorEdgetoInfo}", stream=f)
-    pprint.pprint(f"idtoedge: {config.TensorIDtoEdge}", stream=f)
-    pprint.pprint(f"policy_table: {config.PolicyTableDict}", stream=f)
+  def _dump(title, dict):
+    with open(f"{eval_dir}/final_imcflow_config_{title}.txt", "w") as f:
+      print(f"----------------------- {title} ------------------------", file=f)
+      for key, value in dict.items():
+        pprint.pprint(f"{key} : {value}", stream=f)
+
+  _dump("HWNodeMap", config.HWNodeMap)
+  _dump("TensorEdgetoInfo", config.TensorEdgetoInfo)
+  _dump("TensorIDtoEdge", config.TensorIDtoEdge)
+  _dump("PolicyTableDict", config.PolicyTableDict)
 
   CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build", eval_mod, host_isa=DevConfig().HOST_ISA)
   CodegenSuite(eval_mod)

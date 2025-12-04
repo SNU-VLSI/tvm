@@ -3851,8 +3851,9 @@ def annotateCustomId(mod):
       return new_fn
 
   visitor = _Visitor()
-  for func_name in mod.functions:
-    mod[func_name] = visitor.visit(mod[func_name])
+  # Sort functions by name to ensure deterministic order
+  for gv, func in sorted(mod.functions.items(), key=lambda x: x[0].name_hint):
+    mod[gv] = visitor.visit(func)
 
   return mod
 
@@ -3916,8 +3917,9 @@ def constructUsefulMappings(mod):
       super().visit_constant(const)
 
   vis = _Visitor()
-  for func_name in mod.functions:
-    vis.visit(mod[func_name])
+  # Sort functions by name to ensure deterministic order
+  for gv, func in sorted(mod.functions.items(), key=lambda x: x[0].name_hint):
+    vis.visit(func)
 
 def constructCustomIDInFunc(mod):
   data = CustomIDInFunc()

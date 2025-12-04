@@ -21,6 +21,39 @@ if TYPE_CHECKING:
 
 ConstPat = is_constant()
 
+# for debugging
+send_num_map = {}
+recv_num_map = {}
+@dataclass
+class RecvSendNum:
+  dir       : str  = ""  # "recv" or "send"
+  iter      : bool = False
+  num       : int  = 1
+  iter_num  : int  = 1
+  total_num : int  = 1
+
+  def set_iter(self, iter_num):
+    self.iter = True
+    self.iter_num = iter_num
+    self.total_num = self.num * iter_num
+  
+  def __int__(self):
+    return self.total_num
+  
+  def __eq__(self, other):
+    if not isinstance(other, RecvSendNum):
+      return False
+    return (self.iter == other.iter and
+            self.num == other.num and
+            self.iter_num == other.iter_num and
+            self.total_num == other.total_num)
+def add_to_map(edge, count, is_send=True):
+  target_map = send_num_map if is_send else recv_num_map
+  if edge in target_map:
+    assert target_map[edge] == count, f"Edge {edge} already in map with different count"
+  target_map[edge] = count
+  print(f"Added edge {edge} with count {count} to {'send_map' if is_send else 'recv_map'}")
+
 
 class ImceCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
@@ -98,26 +131,11 @@ class RecvConstBlock(ImceCodeBlock):
   # FIXME: Add support for initializing QREGs to zero
   num_in_edges = 1
 
-  @dataclass
-  class RecvNum:
-    iter      : bool = False
-    num       : int  = 1
-    iter_num  : int  = 1
-    total_num : int  = 1
-
-    def set_iter(self, iter_num):
-      self.iter = True
-      self.iter_num = iter_num
-      self.total_num = self.num * iter_num
-    
-    def __int__(self):
-      return self.total_num
-
   def __init__(self, in_edge: TensorEdge, annotation: str = ""):
     super().__init__(annotation)
     self.in_edge = in_edge
     self.recv_map = {}
-
+  
   def _content(self) -> CodeBlock:
     code = TextBlock("")
     te_info = DevConfig().get_tensor_edge_info_with_id_dir(
@@ -134,7 +152,7 @@ class RecvConstBlock(ImceCodeBlock):
     recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
     owner_edge = te_info.owner
-    self.recv_map[owner_edge] = RecvConstBlock.RecvNum(False, recv_count, 1, recv_count)
+    add_to_map(owner_edge, RecvSendNum("recv", False, recv_count, 1, recv_count), is_send=False)
 
     for i in range(recv_count):
       var = UniqueVar((self.in_edge, i))
@@ -513,21 +531,6 @@ class RecvSendWrapper(ImceCodeBlock):
   Wrapper that adds RECV and SEND operations around a computation block.
   """
 
-  @dataclass
-  class RecvSendNum:
-    iter      : bool = False
-    num       : int  = 1
-    iter_num  : int  = 1
-    total_num : int  = 1
-
-    def set_iter(self, iter_num):
-      self.iter = True
-      self.iter_num = iter_num
-      self.total_num = self.num * iter_num
-    
-    def __int__(self):
-      return self.total_num
-
   def __init__(self, body: TextBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
                in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = ""):
     """Wrap a computation block with RECV/SEND operations.
@@ -548,7 +551,7 @@ class RecvSendWrapper(ImceCodeBlock):
     self._loop_wrapper = None  # Store the loop wrapper if create_loop_from_call is used
     self.send_map = {}
     self.recv_map = {}
-
+  
   @classmethod
   def from_codeblock(cls, codeblock: ImceCallCodeBlock, annotation: str=""):
     body = codeblock.content()  # Call the method to get the actual CodeBlock
@@ -596,7 +599,7 @@ class RecvSendWrapper(ImceCodeBlock):
           annotation = f"{edge}, {te_info.node_info_str}"
           code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
           owner_edge = te_info.owner
-          self.recv_map[owner_edge] = RecvSendWrapper.RecvSendNum(False, 1, 1, 1)
+          add_to_map(owner_edge, RecvSendNum("recv", False, self.num_blocks, 1, self.num_blocks), is_send=False)
   
     # Add the inner block's computation
     code += str(self.body)
@@ -605,8 +608,23 @@ class RecvSendWrapper(ImceCodeBlock):
       out_edge_src_ids = {edge.src_id for edge in self.out_edges}
       assert len(out_edge_src_ids) == 1, "out_edge_src_ids should have only one element"
 
+      src_id = out_edge_src_ids.pop()
       te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(
-          out_edge_src_ids.pop(), "out")
+          src_id, "out")
+      
+      if not te_out_infos:
+        # there is no tensor edge info when dst node is split. check
+        # when consumer is split, we grab output edges of split node and process here
+        dst_node = CustomIDToNode()[getInnerNodeID(self.out_edges[0].dst_id.graph_node_id)]
+        if not dst_node.op.name == "split":
+          print(f"Warning: no tensor edge info found for src_id {src_id}, dst_node op: {dst_node.op.name}")
+        else:
+          print(f"Info: no tensor edge info found for src_id {src_id}, dst_node is split, checking its output edges")
+          split_node_graph_id = self.out_edges[0].dst_id.graph_node_id
+          target_tensor_id = TensorID(split_node_graph_id, "odata")
+          te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(target_tensor_id, "out")
+          print(f"Info: got {len(te_out_infos)} tensor edge infos from split dst edge")
+
       # If all policy addresses are identical, merge into a single SEND (dedupe)
       if te_out_infos:
         addresses = {info.policy_info[0].address for info in te_out_infos}
@@ -618,12 +636,13 @@ class RecvSendWrapper(ImceCodeBlock):
       # Generate SEND for all output edges (supports merged case above)
       for i in range(self.num_out_blocks):
         for te_out_info in te_out_infos:
-          owner_edge = te_out_info.owner
+          # owner_edge = te_out_info.owner
           var_o = UniqueVar((self.send_block, i))
           if te_out_info:
-            annotation = f"{te_out_info.node_info_str}"
+            annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
-            self.send_map[owner_edge] = RecvSendWrapper.RecvSendNum(False, 1, 1, 1)
+            for out_edge in self.out_edges:
+              add_to_map(out_edge, RecvSendNum("send", False, self.num_out_blocks, 1, self.num_blocks), is_send=True)
 
     return code
 

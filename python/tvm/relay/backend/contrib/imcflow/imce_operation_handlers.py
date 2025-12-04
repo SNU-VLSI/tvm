@@ -52,8 +52,8 @@ class CompositeHandler(OperationHandler):
     self.builder.curr_composite_id = None
 
     # Visit arguments
-    for a in call.call.args:
-      self.builder.visit(a)
+    # for a in call.call.args:
+    #   self.builder.visit(a)
 
 
 @register_operation_handler
@@ -76,6 +76,7 @@ class ConvHandler(OperationHandler):
   def handle(self, call: 'BuilderContext') -> None:
     # Get hid and shapes
     hid = call.get_hid()
+    graph_node_id = getNodeID(call.call)
     shapes = call.get_arg_shape_dict()
     shapes["output"] = infer_shape(call.call)
 

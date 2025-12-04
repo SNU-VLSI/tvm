@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from enum import Enum
 import pdb
 
-
 class UniqueVar:
   _instances = {}
   _counter = 0
@@ -135,6 +134,7 @@ class TextBlock(CodeBlock):
 
 class SimpleFor(CodeBlock):
   scope = 0
+  count_stack=[]
 
   def __init__(self, count: int, body: Union[str, CodeBlock], annotation: str = ""):
     super().__init__()
@@ -145,10 +145,12 @@ class SimpleFor(CodeBlock):
   @contextmanager
   def manage_scope(self):
     SimpleFor.scope += 1
+    SimpleFor.count_stack.append(self.count)
     try:
       yield f"i{SimpleFor.scope}"
     finally:
       SimpleFor.scope -= 1
+      SimpleFor.count_stack.pop()
   
   @property
   def annotation_str(self):
