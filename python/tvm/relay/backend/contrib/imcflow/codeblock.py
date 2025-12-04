@@ -71,7 +71,6 @@ class CodePhase(Enum):
   EXEC = "EXEC"
   END = "END"
 
-
 class CodeBlock(metaclass=ABCMeta):
   def __init__(self):
     self.next = None

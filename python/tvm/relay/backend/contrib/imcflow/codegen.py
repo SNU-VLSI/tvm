@@ -18,6 +18,7 @@ from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
+from tvm.relay.backend.contrib.imcflow import imce_codeblock
 from tvm.relay.backend.contrib.imcflow.operation_handlers import get_handler_registry
 import pdb
 
@@ -130,6 +131,9 @@ class CodegenSuite:
     for hid in DevConfig().ActiveIMCEPerFunc[func_name]:
       block = CtrlBlock("STOP")
       imce_builder.codeblocks.append(hid, block, CodePhase.END)
+    
+    # dump block structures
+    imce_builder.dump_block_structure()
     
     DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
         func_name, imce_builder.codeblocks)
@@ -340,8 +344,49 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     print("[IMCE CODE BUILDER] Visited tuple_getitem:", getNodeID(t), getNodeDebugID(t))
   
   def visit_function(self, fn):
+    imce_codeblock.send_num_map = {}
+    imce_codeblock.recv_num_map = {}
     super().visit_function(fn)
     print("[IMCE CODE BUILDER] Visited function")
+
+  def dump_block_structure(self):
+    print("="*40)
+    print("[IMCE CODE BUILDER] Dumping block structure")
+    
+    # Sort hids for deterministic output
+    sorted_hids = sorted(self.codeblocks.blocks.keys(), key=lambda x: str(x))
+    
+    for hid in sorted_hids:
+      phases = self.codeblocks.blocks[hid]
+      print(f"Node: {hid}")
+      for phase in sorted(phases.keys(), key=lambda x: ["INIT", "EXEC", "END"].index(x.name)):
+        blocks = phases[phase]
+        if not blocks: continue
+        print(f"  Phase: {phase}")
+        for block in blocks:
+          self._print_block(block, indent=4)
+    print("="*40)
+
+  def _print_block(self, block, indent=0):
+    prefix = " " * indent
+    block_type = type(block).__name__
+    try:
+      graph_node_id = block.get_graph_node_id()
+    except:
+      graph_node_id = "N/A"
+    annotation = getattr(block, "annotation", "")
+    annotation += f" (graph_node_id: {graph_node_id})"
+    print(f"{prefix}- {block_type} : {annotation}")
+    
+    if isinstance(block, CompositeBlock):
+      for child in block.blocks:
+        self._print_block(child, indent + 2)
+    elif isinstance(block, SimpleFor):
+      self._print_block(block.body, indent + 2)
+    elif isinstance(block, RecvSendWrapper):
+      self._print_block(block.body, indent + 2)
+    elif isinstance(block, ConvBlock):
+      self._print_block(block.body, indent + 2)
   
   def construct_recv_send_map(self):
     """
@@ -350,27 +395,29 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     """
     print("-"*40)
     print("[IMCE CODE BUILDER] Constructing recv/send map")
-    all_blocks = self.codeblocks.get_blocks()
+    self.recv_map.update(imce_codeblock.recv_num_map)
+    self.send_map.update(imce_codeblock.send_num_map)
+    # all_blocks = self.codeblocks.get_blocks()
 
-    def _find(block, builder):
-      print(f"[IMCE CODE BUILDER] Examining block: {type(block).__name__}")
-      if isinstance(block, RecvSendWrapper):
-        local_recv_map = block.recv_map
-        builder.recv_map.update(local_recv_map)
-        local_send_map = block.send_map
-        print(f"[IMCE CODE BUILDER] send_map: {local_send_map}")
-        builder.send_map.update(local_send_map)
-      elif isinstance(block, RecvConstBlock):
-        local_recv_map = block.recv_map
-        builder.recv_map.update(local_recv_map)
-      elif isinstance(block, SimpleFor):
-        print(f"[IMCE CODE BUILDER] traverse SimpleFor body")
-        _find(block.body, builder)
-      elif isinstance(block, ConvBlock):
-        pass
+    # def _find(block, builder):
+    #   print(f"[IMCE CODE BUILDER] Examining block: {type(block).__name__}")
+    #   if isinstance(block, RecvSendWrapper):
+    #     local_recv_map = block.recv_map
+    #     builder.recv_map.update(local_recv_map)
+    #     local_send_map = block.send_map
+    #     print(f"[IMCE CODE BUILDER] send_map: {local_send_map}")
+    #     builder.send_map.update(local_send_map)
+    #   elif isinstance(block, RecvConstBlock):
+    #     local_recv_map = block.recv_map
+    #     builder.recv_map.update(local_recv_map)
+    #   elif isinstance(block, SimpleFor):
+    #     print(f"[IMCE CODE BUILDER] traverse SimpleFor body")
+    #     _find(block.body, builder)
+    #   elif isinstance(block, ConvBlock):
+    #     pass
 
-    for block in all_blocks:
-      _find(block, self)
+    # for block in all_blocks:
+    #   _find(block, self)
 
 class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name, edges):

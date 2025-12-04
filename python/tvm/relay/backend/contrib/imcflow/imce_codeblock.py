@@ -9,7 +9,7 @@ from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.relay.backend.contrib.imcflow.layout import apply_layout_to_type
-from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID, getOuterNodeID, get_type
+from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID, getOuterNodeID, get_type, getNodeID
 from tvm.relay.dataflow_pattern import *
 from textwrap import indent
 import logging
@@ -75,6 +75,23 @@ class ImceCodeBlock(CodeBlock):
     pass
 
 
+class CompositeBlock(ImceCodeBlock):
+  """A block that holds a list of blocks and renders them sequentially."""
+  def __init__(self, blocks: List[CodeBlock] = None, annotation: str = ""):
+    super().__init__(annotation)
+    self.blocks = blocks if blocks is not None else []
+
+  def add(self, block: CodeBlock):
+    self.blocks.append(block)
+    return self
+
+  def _content(self) -> CodeBlock:
+    code = TextBlock("")
+    for block in self.blocks:
+      code += block.content()
+    return code
+
+
 class ImceCallCodeBlock(ImceCodeBlock):
   num_in_edges = None
 
@@ -86,6 +103,9 @@ class ImceCallCodeBlock(ImceCodeBlock):
     self.prev_op = None
     if self.num_in_edges is not None:
       assert len(self.in_edges) == self.num_in_edges
+  
+  def get_graph_node_id(self) -> NodeID:
+    return getNodeID(self.call.call)
 
   def _make_unique_input_var_for_post_op(self, edge, i=None):
     if self.prev_op and (edge in self.prev_op.out_edges):
@@ -377,19 +397,20 @@ class ConvBlock(ImceCallCodeBlock):
   num_in_edges = 3
 
   def __init__(self, call: 'BuilderContext', shapes: dict, conv_attrs: Conv2DAttrs,
-               annotation: str = ""):
+               post_ops: List[ImceCallCodeBlock] = None, annotation: str = ""):
     super().__init__(call, annotation)
     self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
-    self.post_op_chain = []
-
-  def add_post_op(self, code: ImceCallCodeBlock):
-    if self.post_op_chain:
-      code.prev_op = self.post_op_chain[-1]
-    else:
-      code.prev_op = self
-    self.post_op_chain.append(code)
+    self.post_ops = post_ops if post_ops is not None else []
+    
+    # Link post-ops
+    prev = self
+    for op in self.post_ops:
+      op.prev_op = prev
+      prev = op
+      
+    self.body = self._build_structure()
 
   @property
   def num_blocks(self) -> int:
@@ -399,7 +420,7 @@ class ConvBlock(ImceCallCodeBlock):
   def num_out_blocks(self) -> int:
     return 4  # FIXED in ConvBlock
 
-  def _loop_body_content(self, recv_count: int) -> CodeBlock:
+  def _build_loop_body(self, recv_count: int) -> CodeBlock:
 
     load_info = []
     for edge in self.in_edges:
@@ -419,51 +440,38 @@ class ConvBlock(ImceCallCodeBlock):
     load_edge = load_info[0]["edge"]
     load_edge_info = load_info[0]["te_info"]
 
-    code = TextBlock("")
-    code += LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info)
-    code += "__builtin_IMCE_STEP();\n"
+    comp = CompositeBlock()
+    comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info))
+    comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
 
+    creg_code = TextBlock("")
     for i in range(self.num_blocks):
       var_o = UniqueVar((self, i))
-      code += f"{var_o} = __builtin_IMCE_GET_CREG((short){i});"
+      creg_code += f"{var_o} = __builtin_IMCE_GET_CREG((short){i});"
+    comp.add(creg_code)
 
-    for op in self.post_op_chain:
-      code += "\n"
-      code += copy(op)
+    for op in self.post_ops:
+      comp.add(op)
 
-    code += "\n"
-
-    if self.post_op_chain:
+    if self.post_ops:
       all_in_edges = copy(self.in_edges)
       all_out_edges = copy(self.out_edges)
-      for op in self.post_op_chain:
+      for op in self.post_ops:
         all_in_edges += op.in_edges
         all_out_edges += op.out_edges
       recv_edges = list(set(all_in_edges) - set(all_out_edges) - set(self.out_edges) - set([load_edge]))
       send_edges = list(set(all_out_edges) - set(all_in_edges))
-      last_out_edges = self.post_op_chain[-1].out_edges
+      last_out_edges = self.post_ops[-1].out_edges
       assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
-      send_block = self.post_op_chain[-1]
+      send_block = self.post_ops[-1]
     else:
       recv_edges = self.in_edges
       send_edges = self.out_edges
       send_block = self
 
-    code = RecvSendWrapper(code, self.num_blocks, self.num_out_blocks, send_block, recv_edges, send_edges)
+    return RecvSendWrapper(comp, self.num_blocks, self.num_out_blocks, send_block, recv_edges, send_edges)
 
-    return code
-
-  def _inner_loop_content(self, loop_count: int, recv_count: int, tag="") -> CodeBlock:
-    return SimpleFor(loop_count, self._loop_body_content(recv_count), f"{tag}_inner_loop(iterate col offset. load inputs)")
-
-  def _outer_loop_content(self, loop_count: int, loop_pattern: dict, tag="") -> CodeBlock:
-    code = TextBlock("")
-    for idx, pat in enumerate(loop_pattern):
-      code += self._inner_loop_content(pat["count"], pat["pattern"], f"{tag}_col_group{idx}")
-
-    return SimpleFor(loop_count, code, f"{tag}_outer_loop(iterate row offset)")
-
-  def _content(self) -> CodeBlock:
+  def _build_structure(self) -> CodeBlock:
     """
     row pattern example:
     [
@@ -479,13 +487,27 @@ class ConvBlock(ImceCallCodeBlock):
     ]
     """
     row_pattern = self.conv.extract_2d_pattern()
-    code = TextBlock("")
+    root = CompositeBlock()
     for idx, row_pat in enumerate(row_pattern):
       # row_pat["count"] : number of rows that share the same pattern
       # row_pat["pattern"] : pattern for a row. list of {count, pattern}. pattern is the read count for a output pixel
-      code += self._outer_loop_content(row_pat["count"], row_pat["pattern"], self.annotation + f"_row_group{idx}")
+      
+      outer_body = CompositeBlock()
+      tag = self.annotation + f"_row_group{idx}"
+      
+      for inner_idx, pat in enumerate(row_pat["pattern"]):
+         inner_loop = SimpleFor(pat["count"], 
+                                self._build_loop_body(pat["pattern"]), 
+                                f"{tag}_col_group{inner_idx}")
+         outer_body.add(inner_loop)
 
-    return code
+      outer_loop = SimpleFor(row_pat["count"], outer_body, f"{tag}_outer_loop(iterate row offset)")
+      root.add(outer_loop)
+
+    return root
+
+  def _content(self) -> CodeBlock:
+    return self.body.content()
 
 
 class BatchNormBlock(ImceCallCodeBlock):
@@ -531,12 +553,12 @@ class RecvSendWrapper(ImceCodeBlock):
   Wrapper that adds RECV and SEND operations around a computation block.
   """
 
-  def __init__(self, body: TextBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
+  def __init__(self, body: CodeBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
                in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = ""):
     """Wrap a computation block with RECV/SEND operations.
 
     Args:
-        code:
+        body: The inner CodeBlock (usually a CompositeBlock or ImceCallCodeBlock)
         in_edges:
         out_edges:
         annotation: Optional annotation string
@@ -548,13 +570,13 @@ class RecvSendWrapper(ImceCodeBlock):
     self.in_edges = in_edges
     self.out_edges = out_edges
     self.send_block = send_block
-    self._loop_wrapper = None  # Store the loop wrapper if create_loop_from_call is used
     self.send_map = {}
     self.recv_map = {}
   
   @classmethod
   def from_codeblock(cls, codeblock: ImceCallCodeBlock, annotation: str=""):
-    body = codeblock.content()  # Call the method to get the actual CodeBlock
+    # Instead of calling content(), we wrap the codeblock itself
+    body = codeblock 
     send_block = codeblock
     in_edges = codeblock.in_edges
     out_edges = codeblock.out_edges
@@ -565,20 +587,11 @@ class RecvSendWrapper(ImceCodeBlock):
 
   def _content(self) -> CodeBlock:
     """Generate RECV -> body -> SEND."""
-    # If a loop wrapper was created via create_loop_from_call, return that instead
-    if self._loop_wrapper is not None:
-      return self._loop_wrapper
-
     code = TextBlock("")
 
-    # Get tensor edge info for inputs and outputs
+    # --- 1. Generate RECVs ---
     if self.in_edges:
-      # te_in_infos = [DevConfig().get_tensor_edge_info_with_id_dir(
-      #     edge.dst_id, "in")[0] for edge in self.in_edges
-      #     if DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in") != []]
-      # Generate RECV for non-constant input edges
       for i in range(self.num_blocks):
-        # for edge, te_info in zip(self.in_edges, te_in_infos):
         for edge in self.in_edges:
           te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
           assert len(te_infos) == 1, "more than one te_info found!"
@@ -589,7 +602,6 @@ class RecvSendWrapper(ImceCodeBlock):
             if ConstPat.match(CustomIDToNode()[arg_id]):
               continue
           except KeyError:
-            # If the node is not found in CustomIDToNode, treat it as non-constant
             pass
           var_i = UniqueVar((edge, i))
           if not te_info or var_i.static:
@@ -601,9 +613,11 @@ class RecvSendWrapper(ImceCodeBlock):
           owner_edge = te_info.owner
           add_to_map(owner_edge, RecvSendNum("recv", False, self.num_blocks, 1, self.num_blocks), is_send=False)
   
-    # Add the inner block's computation
-    code += str(self.body)
+    # --- 2. Generate Body ---
+    # Here we call content() on the child block(s)
+    code += self.body.content()
 
+    # --- 3. Generate SENDs ---
     if self.out_edges:
       out_edge_src_ids = {edge.src_id for edge in self.out_edges}
       assert len(out_edge_src_ids) == 1, "out_edge_src_ids should have only one element"
@@ -613,8 +627,6 @@ class RecvSendWrapper(ImceCodeBlock):
           src_id, "out")
       
       if not te_out_infos:
-        # there is no tensor edge info when dst node is split. check
-        # when consumer is split, we grab output edges of split node and process here
         dst_node = CustomIDToNode()[getInnerNodeID(self.out_edges[0].dst_id.graph_node_id)]
         if not dst_node.op.name == "split":
           print(f"Warning: no tensor edge info found for src_id {src_id}, dst_node op: {dst_node.op.name}")
@@ -625,7 +637,6 @@ class RecvSendWrapper(ImceCodeBlock):
           te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(target_tensor_id, "out")
           print(f"Info: got {len(te_out_infos)} tensor edge infos from split dst edge")
 
-      # If all policy addresses are identical, merge into a single SEND (dedupe)
       if te_out_infos:
         addresses = {info.policy_info[0].address for info in te_out_infos}
         if len(addresses) == 1:
@@ -633,10 +644,8 @@ class RecvSendWrapper(ImceCodeBlock):
           assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
           te_out_infos = [te_out_infos[0]]
       
-      # Generate SEND for all output edges (supports merged case above)
       for i in range(self.num_out_blocks):
         for te_out_info in te_out_infos:
-          # owner_edge = te_out_info.owner
           var_o = UniqueVar((self.send_block, i))
           if te_out_info:
             annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
@@ -650,20 +659,16 @@ class RecvSendWrapper(ImceCodeBlock):
   def create_loop_from_call(self, call_ctx : 'BuilderContext', to_process_in_edges=None):
     """Wrap the content in a loop based on call's type_args.
 
-    Returns self to allow method chaining.
+    Returns a SimpleFor object.
     """
-    # Wrap in a loop based on calls' type_args
     call = call_ctx.call
-    code = self._content()  # Get the current content (RECV/SEND wrapped code)
-
+    
     # FIXME: this is a quick fix for ruling out the constant edges using to_process_in_edges
     in_edges = to_process_in_edges or self.in_edges
 
     data_edge = next(
         edge for edge in in_edges if edge.dst_id.tensor_type in ["data", "rhs", "lhs"])
 
-    # count = (edge_shape[0] * math.ceil(float(edge_shape[1].value)/16) * edge_shape[2] * edge_shape[3]) // self.num_blocks
-    print(f"Warning: create_loop_from_call is used, double-check the loop count calculation!")
     datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(data_edge)
 
     if datablock:
@@ -701,22 +706,16 @@ class RecvSendWrapper(ImceCodeBlock):
       byte_per_iter = self.num_blocks * 32
       count = math.ceil(total_bytes / byte_per_iter)
 
-      # edge_shape = None
-      # if edge_shape is not None:
-      #   assert (
-      #       edge_shape == call.type_args[idx].shape), "all input args should have the same shape"
-      # else:
-      #   edge_shape = call.type_args[idx].shape
-      # count = edge_shape[-2] * edge_shape[-1]
-
-    # Store the loop-wrapped content in the _loop_wrapper attribute
-    self._loop_wrapper = SimpleFor(count, code, f"call_created_loop")
+    # Create a new RecvSendWrapper that represents the inner logic
+    inner = RecvSendWrapper(self.body, self.num_blocks, self.num_out_blocks, 
+                            self.send_block, self.in_edges, self.out_edges, self.annotation)
+    
     for send_edge, val in self.send_map.items():
       val.set_iter(count)
     for recv_edge, val in self.recv_map.items():
       val.set_iter(count)
 
-    return self
+    return SimpleFor(count, inner, f"call_created_loop")
 
 
 class ImceCodeBlockManager(NodeCodeBlockManager):

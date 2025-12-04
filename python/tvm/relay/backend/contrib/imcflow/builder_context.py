@@ -49,7 +49,9 @@ class BuilderContext:
                curr_conv_block: Optional[ConvBlock] = None,
                last_tuple_idx: Optional[int] = None,
                module : Optional[tvm.ir.IRModule] = None,
-               func_name : Optional[str] = None ):
+               func_name : Optional[str] = None,
+               post_op_stack: Optional[List[Any]] = None,
+               conv_pending_info: Optional[Dict[str, Any]] = None):
     """Initialize context with call and shared state.
 
     Args:
@@ -59,6 +61,8 @@ class BuilderContext:
         curr_composite_id: Current composite context (optional)
         curr_conv_block: Current ConvBlock (optional)
         last_tuple_idx: Last tuple index (optional)
+        post_op_stack: Stack for accumulating post-ops (optional)
+        conv_pending_info: Dictionary to store pending convolution info (optional)
     """
     self.call = call
     self.edges = edges
@@ -73,6 +77,8 @@ class BuilderContext:
     else:
       self.func = None
     self.builder =None
+    self.post_op_stack = post_op_stack if post_op_stack is not None else []
+    self.conv_pending_info = conv_pending_info
 
   def fork(self, call: relay.Call) -> 'BuilderContext':
     """Create a new context for a different call, preserving shared state.
@@ -91,7 +97,11 @@ class BuilderContext:
         codeblocks=self.codeblocks,
         curr_composite_id=self.curr_composite_id,
         curr_conv_block=self.curr_conv_block,
-        last_tuple_idx=self.last_tuple_idx
+        last_tuple_idx=self.last_tuple_idx,
+        module=self.module,
+        func_name=self.func_name,
+        post_op_stack=self.post_op_stack,
+        conv_pending_info=self.conv_pending_info
     )
 
   # Hardware and node mapping helpers

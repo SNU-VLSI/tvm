@@ -43,13 +43,31 @@ class CompositeHandler(OperationHandler):
     composite_id = getNodeID(call.call)
     call.curr_composite_id = composite_id
     self.builder.curr_composite_id = composite_id
+    
+    # Initialize stack and pending info
+    call.post_op_stack = []
+    call.conv_pending_info = {}
 
     # Visit the body of the composite function using self.builder
     self.builder.visit(call.call.op.body)
 
+    # Assemble ConvBlock if pending info exists
+    if call.conv_pending_info:
+        info = call.conv_pending_info
+        conv_ctx = info['ctx']
+        shapes = info['shapes']
+        attrs = info['attrs']
+        hid = info['hid']
+        annotation = info['annotation']
+        
+        block = ConvBlock(conv_ctx, shapes, attrs, post_ops=call.post_op_stack, annotation=annotation)
+        call.codeblocks.append(hid, block, CodePhase.EXEC)
+
     # Clear composite context on both BuilderContext and builder
     call.curr_composite_id = None
     self.builder.curr_composite_id = None
+    call.post_op_stack = []
+    call.conv_pending_info = None
 
     # Visit arguments
     # for a in call.call.args:
@@ -96,11 +114,21 @@ class ConvHandler(OperationHandler):
 
     # write weights => on INODE
 
-    block = ConvBlock(call, shapes, call.call.attrs, f"conv exec{ConvHandler.uid}")
+    if call.curr_composite_id:
+        # Defer ConvBlock creation if inside composite
+        call.conv_pending_info = {
+            'ctx': call,
+            'shapes': shapes,
+            'attrs': call.call.attrs,
+            'hid': hid,
+            'annotation': f"conv exec{ConvHandler.uid}"
+        }
+    else:
+        # Standalone Conv
+        block = ConvBlock(call, shapes, call.call.attrs, post_ops=[], annotation=f"conv exec{ConvHandler.uid}")
+        call.codeblocks.append(hid, block, CodePhase.EXEC)
+        
     ConvHandler.uid += 1
-    # FIXME: this assumes that convblock is called first... we don't want that
-    call.curr_conv_block = block
-    call.codeblocks.append(hid, block, CodePhase.EXEC)
 
 
 @register_operation_handler
@@ -121,7 +149,7 @@ class AddHandler(OperationHandler):
     assert call.curr_composite_id, "Add must be inside a composite function"
 
     block = AddBlock(call, "add")
-    call.curr_conv_block.add_post_op(block)
+    call.post_op_stack.append(block)
 
 
 @register_operation_handler
@@ -158,7 +186,7 @@ class MultHandler(OperationHandler):
 
     block = MultlBlock(call, "multl")
     if call.curr_composite_id is not None:
-      call.curr_conv_block.add_post_op(block)
+      call.post_op_stack.append(block)
     else:
       wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone").create_loop_from_call(call, to_process_in_edges)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
@@ -182,7 +210,7 @@ class DivideHandler(OperationHandler):
     # TODO: divide block should be replaced later
     assert call.curr_composite_id, "Divide must be inside a composite function"
     block = DivBlock(call, "div")
-    call.curr_conv_block.add_post_op(block)
+    call.post_op_stack.append(block)
 
 
 @register_operation_handler
@@ -200,11 +228,8 @@ class ConcatHandler(OperationHandler):
     return call.op == op.get("concatenate")
 
   def handle(self, call: 'BuilderContext') -> None:
-    hid = call.get_hid()
-    conv_block = call.get_conv_block_by_hid(hid)
-
     block = ConcatBlock(call, "concat")
-    conv_block.add_post_op(block)
+    call.post_op_stack.append(block)
 
 
 @register_operation_handler
@@ -225,13 +250,8 @@ class SplitHandler(OperationHandler):
     return
     hid = call.get_hid()
     if hid.is_imce():
-      conv_block = call.get_conv_block_by_hid(hid)
-
-      in_edge = call.get_input_edge()
-      out_edges = call.get_output_edges()
-
-      block = SplitBlock(in_edge, out_edges, "split")
-      conv_block.add_post_op(block)
+      block = SplitBlock(call.get_input_edge(), call.get_output_edges(), "split")
+      call.post_op_stack.append(block)
 
 
 @register_operation_handler
@@ -271,7 +291,7 @@ class MinMaxQuantizeHandler(OperationHandler):
     # set o_split_idx to 0 when last_tuple_idx is None
     block = MinmaxQuantBlock(call, call.last_tuple_idx or 0, "min_max_quantize")
     if call.curr_composite_id is not None:
-      call.curr_conv_block.add_post_op(block)
+      call.post_op_stack.append(block)
     else:
       # Standalone minmax quantize needs RECV/SEND wrapper
       wrapped_block = RecvSendWrapper.from_codeblock(block, "min_max_quantize_standalone").create_loop_from_call(call)
@@ -300,7 +320,7 @@ class ReLUHandler(OperationHandler):
 
     # Wrap with RECV/SEND if standalone, or add as post-op if in composite
     if call.curr_composite_id is not None:
-      call.curr_conv_block.add_post_op(block)
+      call.post_op_stack.append(block)
     else:
       # Standalone ReLU needs RECV/SEND wrapper
       wrapped_block = RecvSendWrapper.from_codeblock(block, "relu_standalone").create_loop_from_call(call)
@@ -337,7 +357,7 @@ class BiasAddHandler(OperationHandler):
     IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)
 
     block = AddBlock(call, "add_bias")
-    call.curr_conv_block.add_post_op(block)
+    call.post_op_stack.append(block)
 
 
 @register_operation_handler
@@ -372,7 +392,7 @@ class BatchNormHandler(OperationHandler):
 
     # TODO: how to scale?
     block = BatchNormBlock(call, "batch_norm")
-    call.curr_conv_block.add_post_op(block)
+    call.post_op_stack.append(block)
 
 
 @register_operation_handler
