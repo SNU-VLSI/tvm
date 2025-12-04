@@ -89,6 +89,9 @@ class CodeBlock(metaclass=ABCMeta):
   def content(self) -> str:
     pass
 
+  def dump(self) -> str:
+    return "CodeBlock"
+
   def __str__(self) -> str:
     if not self.next:
       return str(self.content())
@@ -140,6 +143,9 @@ class SimpleFor(CodeBlock):
     self.annotation = annotation
     self.count = int(count)
     self.body = body
+  
+  def dump(self) -> str:
+    return f"SimpleFor(count={self.count}, annotation={self.annotation})"
 
   @contextmanager
   def manage_scope(self):
@@ -241,6 +247,7 @@ class NodeCodeBlockManager:
     pass
 
   def append(self, hid, block, block_type: CodePhase = CodePhase.EXEC):
+    print(f"[IMCE CODE BLOCK MANAGER] append block to hid={hid}, type={block_type}, block={type(block).__name__}")
     self.blocks[hid][block_type].append(block)
 
   def generate_body(self) -> str:

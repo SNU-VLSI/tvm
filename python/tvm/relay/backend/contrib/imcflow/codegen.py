@@ -73,7 +73,27 @@ class CodegenSuite:
       imce_recv  = imce_builder.recv_map.get(edge, 0)
       inode_send = inode_builder.send_map.get(edge, 0)
       inode_recv = inode_builder.recv_map.get(edge, 0)
+
+      try:
+        imce_send = int(imce_send)
+      except:
+        imce_send = imce_send.value
       
+      try:
+        imce_recv = int(imce_recv)
+      except:
+        imce_recv = imce_recv.value
+      
+      try:
+        inode_send = int(inode_send)
+      except:
+        inode_send = inode_send.value
+
+      try:
+        inode_recv = int(inode_recv)
+      except:
+        inode_recv = inode_recv.value 
+
       total_send = int(imce_send) + int(inode_send)
       total_recv = int(imce_recv) + int(inode_recv)
       
@@ -312,6 +332,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.curr_composite_id = None
     self.curr_conv_block = None
     self.last_tuple_idx = None
+    self.post_op_stack = None
+    self.conv_pending_info = None
     self._handler_registry = get_handler_registry()
     self.send_map = {}
     self.recv_map = {}
@@ -327,13 +349,13 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.visit(a)
 
     # Dispatch to handler registry (automatically wraps call in BuilderContext)
+    print("[IMCE CODE BUILDER] Visit call:", getNodeID(call), getNodeDebugID(call))
     handled = self._handler_registry.handle(call, self)
 
     # Fallback for unhandled operations
     if not handled:
+      print("[IMCE CODE BUILDER] FAIL Visit call:", getNodeID(call), getNodeDebugID(call))
       self.visit(call.op)
-
-    print("[IMCE CODE BUILDER] Visited call:", getNodeID(call), getNodeDebugID(call))
   
   def visit_var(self, var):
     super().visit_var(var)
@@ -376,6 +398,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
       graph_node_id = "N/A"
     annotation = getattr(block, "annotation", "")
     annotation += f" (graph_node_id: {graph_node_id})"
+    annotation += f", {block.dump()}"
     print(f"{prefix}- {block_type} : {annotation}")
     
     if isinstance(block, CompositeBlock):
@@ -397,27 +420,6 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     print("[IMCE CODE BUILDER] Constructing recv/send map")
     self.recv_map.update(imce_codeblock.recv_num_map)
     self.send_map.update(imce_codeblock.send_num_map)
-    # all_blocks = self.codeblocks.get_blocks()
-
-    # def _find(block, builder):
-    #   print(f"[IMCE CODE BUILDER] Examining block: {type(block).__name__}")
-    #   if isinstance(block, RecvSendWrapper):
-    #     local_recv_map = block.recv_map
-    #     builder.recv_map.update(local_recv_map)
-    #     local_send_map = block.send_map
-    #     print(f"[IMCE CODE BUILDER] send_map: {local_send_map}")
-    #     builder.send_map.update(local_send_map)
-    #   elif isinstance(block, RecvConstBlock):
-    #     local_recv_map = block.recv_map
-    #     builder.recv_map.update(local_recv_map)
-    #   elif isinstance(block, SimpleFor):
-    #     print(f"[IMCE CODE BUILDER] traverse SimpleFor body")
-    #     _find(block.body, builder)
-    #   elif isinstance(block, ConvBlock):
-    #     pass
-
-    # for block in all_blocks:
-    #   _find(block, self)
 
 class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def __init__(self, func_name, edges):

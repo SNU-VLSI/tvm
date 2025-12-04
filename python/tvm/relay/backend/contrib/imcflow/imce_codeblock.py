@@ -2,6 +2,7 @@ from abc import *
 from typing import *
 from copy import copy
 import math
+from pprint import pprint
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
@@ -27,32 +28,34 @@ recv_num_map = {}
 @dataclass
 class RecvSendNum:
   dir       : str  = ""  # "recv" or "send"
-  iter      : bool = False
-  num       : int  = 1
-  iter_num  : int  = 1
   total_num : int  = 1
 
   def set_iter(self, iter_num):
-    self.iter = True
-    self.iter_num = iter_num
-    self.total_num = self.num * iter_num
+    self.total_num = self.total_num * iter_num
   
   def __int__(self):
+    try:
+      self.total_num = int(self.total_num)
+    except:
+      self.total_num = self.total_num.value
     return self.total_num
   
   def __eq__(self, other):
     if not isinstance(other, RecvSendNum):
       return False
-    return (self.iter == other.iter and
-            self.num == other.num and
-            self.iter_num == other.iter_num and
+    return (self.dir == other.dir and
             self.total_num == other.total_num)
+
 def add_to_map(edge, count, is_send=True):
+  outer_loop_count = 1 if len(SimpleFor.count_stack) == 0 else int(math.prod(SimpleFor.count_stack))
   target_map = send_num_map if is_send else recv_num_map
+  count.set_iter(outer_loop_count)
   if edge in target_map:
-    assert target_map[edge] == count, f"Edge {edge} already in map with different count"
+    print(f"[recv send map] warning : Edge {edge} already in map with different count. Add!")
+    count.total_num += target_map[edge].total_num
+  
   target_map[edge] = count
-  print(f"Added edge {edge} with count {count} to {'send_map' if is_send else 'recv_map'}")
+  print(f"Added edge {edge} with count {count} to {'send_map' if is_send else 'recv_map'}. iter_count={outer_loop_count}")
 
 
 class ImceCodeBlock(CodeBlock):
@@ -137,13 +140,17 @@ class LoadLBBlock(ImceCodeBlock):
     self.edge = edge
     self.edge_info = edge_info
 
-  def _content(self) -> CodeBlock:
-    code = TextBlock("")
+    body = CompositeBlock()
     load_fifo_id = self.edge_info.fifo_id
     annotation = f"{self.edge}, {self.edge_info.node_info_str}"
     for _ in range(self.repeat):
-      code += f"__builtin_IMCE_LOAD_LB({load_fifo_id}); // {annotation}"
-    return SimpleFor(self.count, code, "load_block")
+      body.add(TextBlock(f"__builtin_IMCE_LOAD_LB({load_fifo_id}); // {annotation}"))
+    
+    self.body = SimpleFor(self.count, body, "load_block")
+
+  def _content(self) -> CodeBlock:
+    add_to_map(self.edge, RecvSendNum("recv", self.count * self.repeat), is_send=False)
+    return self.body.content()
 
 
 class RecvConstBlock(ImceCodeBlock):
@@ -155,9 +162,7 @@ class RecvConstBlock(ImceCodeBlock):
     super().__init__(annotation)
     self.in_edge = in_edge
     self.recv_map = {}
-  
-  def _content(self) -> CodeBlock:
-    code = TextBlock("")
+
     te_info = DevConfig().get_tensor_edge_info_with_id_dir(
         self.in_edge.dst_id, "in")  # a hack to get the tensor edge info
     assert te_info, "Tensor edge info not found"
@@ -169,29 +174,28 @@ class RecvConstBlock(ImceCodeBlock):
     base_addr = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(
         self.in_edge).base_address
     assert base_addr % 32 == 0, "Base address must be a multiple of 32"
-    recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
-    owner_edge = te_info.owner
-    add_to_map(owner_edge, RecvSendNum("recv", False, recv_count, 1, recv_count), is_send=False)
+    self.te_info = te_info
+    self.recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
-    for i in range(recv_count):
+  def _content(self) -> CodeBlock:
+    owner_edge = self.te_info.owner
+    add_to_map(owner_edge, RecvSendNum("recv",  self.recv_count), is_send=False)
+    code = TextBlock("")
+    for i in range(self.recv_count):
       var = UniqueVar((self.in_edge, i))
       var.set_static()
       if self.annotation == "min write":
-        # code += f"{var} = __builtin_IMCE_RECV_MIN({te_info.fifo_id});"
-        code += f"__builtin_IMCE_RECV_MIN({te_info.fifo_id});"
+        code += f"__builtin_IMCE_RECV_MIN({self.te_info.fifo_id});"
       elif self.annotation == "max write":
-        # code += f"{var} = __builtin_IMCE_RECV_MAX({te_info.fifo_id});"
-        code += f"__builtin_IMCE_RECV_MAX({te_info.fifo_id});"
+        code += f"__builtin_IMCE_RECV_MAX({self.te_info.fifo_id});"
       elif self.annotation == "config write":
-        # code += f"{var} = __builtin_IMCE_RECV_CFG({te_info.fifo_id});"
-        code += f"__builtin_IMCE_RECV_CFG({te_info.fifo_id});"
+        code += f"__builtin_IMCE_RECV_CFG({self.te_info.fifo_id});"
       elif self.annotation == "scan write":
-        # code += f"{var} = __builtin_IMCE_RECV_SREG{i}({te_info.fifo_id});"
-        code += f"{var}_{i} = __builtin_IMCE_RECV({te_info.fifo_id});"
+        code += f"{var}_{i} = __builtin_IMCE_RECV({self.te_info.fifo_id});"
         code += f"{var}_{i} = __builtin_IMCE_SCAN_RW({var}_{i});"
       else:
-        code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id});"
+        code += f"{var} = __builtin_IMCE_RECV({self.te_info.fifo_id});"
     return code
 
 
@@ -464,6 +468,8 @@ class ConvBlock(ImceCallCodeBlock):
       last_out_edges = self.post_ops[-1].out_edges
       assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
       send_block = self.post_ops[-1]
+
+      print(f"[ConvBlock] with post ops : recv_edges: {recv_edges}, send_edges: {send_edges}, send_block: {type(send_block).__name__}")
     else:
       recv_edges = self.in_edges
       send_edges = self.out_edges
@@ -487,6 +493,7 @@ class ConvBlock(ImceCallCodeBlock):
     ]
     """
     row_pattern = self.conv.extract_2d_pattern()
+    pprint(f"[ConvBlock] row pattern: {row_pattern}")
     root = CompositeBlock()
     for idx, row_pat in enumerate(row_pattern):
       # row_pat["count"] : number of rows that share the same pattern
@@ -534,6 +541,7 @@ class BatchNormBlock(ImceCallCodeBlock):
       elif edge.dst_id.tensor_type == "data":
         data_edge = edge
 
+    print("[BatchNormBlock] num blocks:", self.num_blocks)
     for i in range(self.num_blocks):
       var_data = self._make_unique_input_var_for_post_op(data_edge, i)
       var_scale = UniqueVar((scale_edge, i))
@@ -611,7 +619,7 @@ class RecvSendWrapper(ImceCodeBlock):
           annotation = f"{edge}, {te_info.node_info_str}"
           code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
           owner_edge = te_info.owner
-          add_to_map(owner_edge, RecvSendNum("recv", False, self.num_blocks, 1, self.num_blocks), is_send=False)
+          add_to_map(owner_edge, RecvSendNum("recv", 1), is_send=False)
   
     # --- 2. Generate Body ---
     # Here we call content() on the child block(s)
@@ -651,7 +659,7 @@ class RecvSendWrapper(ImceCodeBlock):
             annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
             for out_edge in self.out_edges:
-              add_to_map(out_edge, RecvSendNum("send", False, self.num_out_blocks, 1, self.num_blocks), is_send=True)
+              add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
     return code
 
@@ -671,8 +679,10 @@ class RecvSendWrapper(ImceCodeBlock):
 
     datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(data_edge)
 
+    assert self.num_blocks == self.num_out_blocks, "num_blocks and num_out_blocks must be equal in create_loop_from_call"
     if datablock:
       count = math.ceil(datablock.size / 32.0)
+      count = math.ceil(count / self.num_blocks)
     else:
       args = []
       for idx, arg in enumerate(call.args):
@@ -709,11 +719,6 @@ class RecvSendWrapper(ImceCodeBlock):
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, self.num_blocks, self.num_out_blocks, 
                             self.send_block, self.in_edges, self.out_edges, self.annotation)
-    
-    for send_edge, val in self.send_map.items():
-      val.set_iter(count)
-    for recv_edge, val in self.recv_map.items():
-      val.set_iter(count)
 
     return SimpleFor(count, inner, f"call_created_loop")
 

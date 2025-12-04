@@ -13,7 +13,7 @@ from tvm.relay.backend.contrib.imcflow.operation_handlers import (
     OperationHandler,
     register_operation_handler
 )
-from tvm.relay.backend.contrib.imcflow.transform import getNodeID
+from tvm.relay.backend.contrib.imcflow.transform import getNodeID, getNodeDebugID
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from typing import TYPE_CHECKING
@@ -48,6 +48,10 @@ class CompositeHandler(OperationHandler):
     call.post_op_stack = []
     call.conv_pending_info = {}
 
+    # Also set on builder so recursive visits see them
+    self.builder.post_op_stack = call.post_op_stack
+    self.builder.conv_pending_info = call.conv_pending_info
+
     # Visit the body of the composite function using self.builder
     self.builder.visit(call.call.op.body)
 
@@ -68,6 +72,8 @@ class CompositeHandler(OperationHandler):
     self.builder.curr_composite_id = None
     call.post_op_stack = []
     call.conv_pending_info = None
+    self.builder.post_op_stack = None
+    self.builder.conv_pending_info = None
 
     # Visit arguments
     # for a in call.call.args:
@@ -107,7 +113,7 @@ class ConvHandler(OperationHandler):
     # config reg
     # TODO: add config reg code block
     edge = call.get_tensor_edge_from_tag("config")
-    block = RecvConstBlock(edge, f"config write")
+    block = RecvConstBlock(edge, f"{edge}, config write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(edge, hid)
@@ -116,13 +122,13 @@ class ConvHandler(OperationHandler):
 
     if call.curr_composite_id:
         # Defer ConvBlock creation if inside composite
-        call.conv_pending_info = {
+        call.conv_pending_info.update({
             'ctx': call,
             'shapes': shapes,
             'attrs': call.call.attrs,
             'hid': hid,
             'annotation': f"conv exec{ConvHandler.uid}"
-        }
+        })
     else:
         # Standalone Conv
         block = ConvBlock(call, shapes, call.call.attrs, post_ops=[], annotation=f"conv exec{ConvHandler.uid}")
@@ -271,6 +277,7 @@ class MinMaxQuantizeHandler(OperationHandler):
     return call.op == op.get("qnn.imcflow_min_max_quantize")
 
   def handle(self, call: 'BuilderContext') -> None:
+    print(f"[IMCE CODE BUILDER] handle MinMaxQuantize: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
     hid = call.get_hid()
 
     # Generate RecvConst blocks for min/max parameters
@@ -278,7 +285,7 @@ class MinMaxQuantizeHandler(OperationHandler):
       edge = call.get_tensor_edge_from_tag(tag)
       # TODO: inode code block needs to put appropriate address for min/max reg.
       # TODO: two ways to set min/max reg. RecvConst vs. ADDI
-      block = RecvConstBlock(edge, f"{tag} write")
+      block = RecvConstBlock(edge, f"{edge}, {tag} write")
       call.codeblocks.append(hid, block, CodePhase.INIT)
       # add constedge info to codeblock info
       IMCECodeBlockInfo().append_const_edge_info(edge, hid)
@@ -375,17 +382,19 @@ class BatchNormHandler(OperationHandler):
     return call.op == op.get("imcflow.fused_batch_norm")
 
   def handle(self, call: 'BuilderContext') -> None:
+    print(f"[IMCE CODE BUILDER] handle BatchNorm: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
     assert call.curr_composite_id, \
         f"BatchNorm must be inside a composite function, got gid: {call.get_gid()}"
     hid = call.get_hid()
     scale_edge = call.get_tensor_edge_from_tag("fused_scale")
     bias_edge = call.get_tensor_edge_from_tag("fused_bias")
 
-    block = RecvConstBlock(scale_edge, "fused_scale write")
+    print(f"[IMCE CODE BUILDER] BatchNormHandler: append recv const block hid={hid}, scale_edge={scale_edge}, bias_edge={bias_edge}")
+    block = RecvConstBlock(scale_edge, f"{scale_edge}, fused_scale write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(scale_edge, hid)
-    block = RecvConstBlock(bias_edge, "fused_bias write")
+    block = RecvConstBlock(bias_edge, f"{bias_edge}, fused_bias write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)

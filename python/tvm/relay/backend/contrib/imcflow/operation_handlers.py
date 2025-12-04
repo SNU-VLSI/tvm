@@ -149,7 +149,9 @@ class OperationHandlerRegistry:
           codeblocks=builder.codeblocks,
           curr_composite_id=builder.curr_composite_id,
           curr_conv_block=builder.curr_conv_block,
-          last_tuple_idx=builder.last_tuple_idx
+          last_tuple_idx=builder.last_tuple_idx,
+          post_op_stack=builder.post_op_stack,
+          conv_pending_info=builder.conv_pending_info
       )
       call_ctx.builder = builder
 
