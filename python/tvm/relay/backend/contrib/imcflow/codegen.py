@@ -44,8 +44,7 @@ class CodegenSuite:
     self.build_dir = f"{model_dir}/build"
     self.host_isa = host_isa
     self.module = module
-    if not os.path.exists(self.build_dir):
-      os.makedirs(self.build_dir)
+    os.makedirs(self.build_dir, exist_ok=True)
 
     common_decl = f"""
       typedef short short16 __attribute__((ext_vector_type(16)));
