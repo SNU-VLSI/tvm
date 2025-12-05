@@ -68,20 +68,26 @@ class WriteIMEMBlock(InodeCodeBlock):
     self.edge_info = edge_info
 
   def _content(self) -> Union[str, CodeBlock]:
-    code = TextBlock("")
+    root = SequentialBlock()
 
+    code = TextBlock("")
     db = self.edge_info.data_block
     policy_addr = self.edge_info.policy_info[0].address # get first policy address
 
     var = UniqueVar("imem_start_address", dtype="int")
     code += f"{var} = {db.offset};"
     code += f"__builtin_INODE_SET_ADDR_CNT(0);"
-    code += SimpleFor(math.ceil(db.size / 32),
+    root.add(code)
+
+    code = SimpleFor(math.ceil(db.size / 32),
                       lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr});")
                       # rs1, imm, policy
-    code += ""
+    root.add(code)
 
-    return code
+    code = TextBlock("")
+    root.add(code)
+
+    return root.content()
 
 
 class WriteIMCUBlock(InodeCodeBlock):

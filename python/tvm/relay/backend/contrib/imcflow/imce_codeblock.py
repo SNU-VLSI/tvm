@@ -71,28 +71,11 @@ class ImceCodeBlock(CodeBlock):
       code += f"// endgenerate: {self.annotation}"
       return code
     else:
-      return self._content()
+      return self
 
   @abstractmethod
   def _content(self) -> CodeBlock:
     pass
-
-
-class CompositeBlock(ImceCodeBlock):
-  """A block that holds a list of blocks and renders them sequentially."""
-  def __init__(self, blocks: List[CodeBlock] = None, annotation: str = ""):
-    super().__init__(annotation)
-    self.blocks = blocks if blocks is not None else []
-
-  def add(self, block: CodeBlock):
-    self.blocks.append(block)
-    return self
-
-  def _content(self) -> CodeBlock:
-    code = TextBlock("")
-    for block in self.blocks:
-      code += block.content()
-    return code
 
 
 class ImceCallCodeBlock(ImceCodeBlock):
@@ -140,7 +123,7 @@ class LoadLBBlock(ImceCodeBlock):
     self.edge = edge
     self.edge_info = edge_info
 
-    body = CompositeBlock()
+    body = SequentialBlock()
     load_fifo_id = self.edge_info.fifo_id
     annotation = f"{self.edge}, {self.edge_info.node_info_str}"
     for _ in range(self.repeat):
@@ -150,7 +133,7 @@ class LoadLBBlock(ImceCodeBlock):
 
   def _content(self) -> CodeBlock:
     add_to_map(self.edge, RecvSendNum("recv", self.count * self.repeat), is_send=False)
-    return self.body.content()
+    return self.body
 
 
 class RecvConstBlock(ImceCodeBlock):
@@ -458,7 +441,7 @@ class ConvBlock(ImceCallCodeBlock):
     load_edge_info = load_info[0]["te_info"]
     self.load_edge_info = load_edge_info
 
-    comp = CompositeBlock()
+    comp = SequentialBlock()
     comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info))
     comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
 
@@ -509,12 +492,12 @@ class ConvBlock(ImceCallCodeBlock):
     row_pattern = self.conv.extract_2d_pattern()
     pprint(f"[ConvBlock] row pattern for node {getNodeID(self.call.call)}:")
     pprint(row_pattern)
-    root = CompositeBlock()
+    root = SequentialBlock()
     for idx, row_pat in enumerate(row_pattern):
       # row_pat["count"] : number of rows that share the same pattern
       # row_pat["pattern"] : pattern for a row. list of {count, pattern}. pattern is the read count for a output pixel
       
-      outer_body = CompositeBlock()
+      outer_body = SequentialBlock()
       tag = self.annotation + f"_row_group{idx}"
       
       for inner_idx, pat in enumerate(row_pat["pattern"]):
@@ -588,7 +571,7 @@ class RecvSendWrapper(ImceCodeBlock):
     """Wrap a computation block with RECV/SEND operations.
 
     Args:
-        body: The inner CodeBlock (usually a CompositeBlock or ImceCallCodeBlock)
+        body: The inner CodeBlock (usually a SequentialBlock or ImceCallCodeBlock)
         in_edges:
         out_edges:
         annotation: Optional annotation string
@@ -645,7 +628,7 @@ class RecvSendWrapper(ImceCodeBlock):
   
     # --- 2. Generate Body ---
     # Here we call content() on the child block(s)
-    code += self.body.content()
+    code += self.body
 
     # --- 3. Generate SENDs ---
     if self.out_edges:

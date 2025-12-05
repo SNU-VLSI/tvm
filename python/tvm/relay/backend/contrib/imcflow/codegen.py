@@ -423,7 +423,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     annotation += f", {block.dump()}"
     output_lines.append(f"{prefix}- {block_type} : {annotation}")
 
-    if isinstance(block, CompositeBlock):
+    if isinstance(block, SequentialBlock):
       for child in block.blocks:
         self._collect_block_lines(child, output_lines, indent + 2)
     elif isinstance(block, SimpleFor):

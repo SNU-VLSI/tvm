@@ -90,14 +90,27 @@ class CodeBlock(metaclass=ABCMeta):
     pass
 
   def dump(self) -> str:
-    return "CodeBlock"
+    return self.__class__.__name__
 
   def __str__(self) -> str:
-    if not self.next:
-      return str(self.content())
-    if not self.content():
-      return str(self.next)
-    return str(self.content()) + "\n" + str(self.next)
+    # Iterative implementation to avoid recursion depth issues
+    parts = []
+    curr = self
+    while curr:
+      c = curr.content()
+      # Safety check: if content() returns self, avoid infinite recursion
+      if c is curr:
+        if hasattr(curr, 'text'):
+          parts.append(str(curr.text))
+        elif hasattr(curr, '_content'):
+          parts.append(str(curr._content()))
+        else:
+          parts.append(f"<{curr.__class__.__name__}: content is self>")
+      elif c:
+        parts.append(str(c))
+      
+      curr = curr.next
+    return "\n".join(parts)
 
   def __add__(self, other):
     if isinstance(other, str):
@@ -124,15 +137,70 @@ class CodeBlock(metaclass=ABCMeta):
     raise TypeError(
         f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
 
+class SequentialBlock(CodeBlock):
+  """A block that holds a list of blocks and renders them sequentially."""
+  def __init__(self, blocks: List[CodeBlock] = None, annotation: str = ""):
+    super().__init__()
+    self.annotation = annotation
+    self.blocks = blocks if blocks is not None else []
+
+  def add(self, block: CodeBlock):
+    self.blocks.append(block)
+    return self
+
+  def _content(self) -> str:
+    code = TextBlock("")
+    for block in self.blocks:
+      code += str(block)
+    return str(code)
+
+  def content(self) -> CodeBlock:
+    if self.annotation:
+      code = TextBlock("")
+      code += f"// generate: {self.annotation}"
+      code += copy(self._content())
+      code += f"// endgenerate: {self.annotation}"
+      return code
+    else:
+      return self._content()
+
 
 class TextBlock(CodeBlock):
   def __init__(self, text: str):
     super().__init__()
     self.text = text
+  
+  def dump(self) -> str:
+    mess = str(self)
+    mess = mess.replace("\n", r"\n")
+    max_len = 100
+    if len(mess) > max_len:
+      mess = mess[:max_len] + "..."
+    return f"{mess}"
 
   def content(self) -> str:
     return self.text
+  
+  # def __add__(self, other):
+  #   if isinstance(other, str):
+  #     other = TextBlock(other)
+  #   if isinstance(other, TextBlock):
+  #     me = self.text
+  #     new = TextBlock(me + "\n" + other.text)
+  #     return new
+  #   else:
+  #     raise TypeError(
+  #         f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
 
+  # def __iadd__(self, other):
+  #   if isinstance(other, str):
+  #     other = TextBlock(other)
+  #   if isinstance(other, TextBlock):
+  #     self.text += ("\n" + other.text)
+  #     return self
+  #   else:
+  #     raise TypeError(
+  #         f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
 
 class SimpleFor(CodeBlock):
   scope = 0
@@ -161,7 +229,7 @@ class SimpleFor(CodeBlock):
   def annotation_str(self):
     return f" : {self.annotation}" if self.annotation else ""
 
-  def content(self) -> CodeBlock:
+  def content(self) -> str:
     if self.count == 0:
       return TextBlock(f"// loop ignored with loop count == 0{self.annotation_str}\n")
 
@@ -198,7 +266,7 @@ class CtrlBlock(CodeBlock):
     self.ctrl = ctrl
     assert ctrl == "STOP", "only STOP CtrlBlock is supported for now. we to extend"
 
-  def content(self) -> CodeBlock:
+  def content(self) -> str:
     if self.annotation:
       code = TextBlock("")
       code += f"// generate: {self.annotation}"
@@ -206,13 +274,13 @@ class CtrlBlock(CodeBlock):
       code += f"// endgenerate: {self.annotation}"
       return code
     else:
-      return self._content()
+      return self
 
-  def _content(self) -> CodeBlock:
+  def _content(self) -> str:
     code = TextBlock("")
     if self.ctrl == "STOP":
       code += "__builtin_IMCE_STOP();"
-    return code
+    return code.content()
 
 
 
