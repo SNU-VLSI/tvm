@@ -208,7 +208,7 @@ class PolicyTableCodegen:
     return bytes(bin_data)
 
   def generate(self, func_name):
-    for node_name, entries in sorted(transform.ImcflowDeviceConfig().PolicyTableDict.items(), key=lambda x: x[0].name):
+    for node_name, entries in sorted(transform.ImcflowDeviceConfig().PolicyTableDict[func_name].items(), key=lambda x: x[0].name):
       policytable_path = os.path.join(
           self.func_dir, f"{node_name.name}_policy")
       policytable_bin_file = f"{policytable_path}.bin"
