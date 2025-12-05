@@ -158,9 +158,17 @@ class RecvConstBlock(ImceCodeBlock):
   # FIXME: Add support for initializing QREGs to zero
   num_in_edges = 1
 
-  def __init__(self, in_edge: TensorEdge, annotation: str = ""):
+  class ConstType(Enum):
+    MIN = "MIN"
+    MAX = "MAX"
+    CONFIG = "CONFIG"
+    SCAN = "SCAN"
+    NORMAL = "NORMAL"
+
+  def __init__(self, in_edge: TensorEdge, type : ConstType, annotation: str = ""):
     super().__init__(annotation)
     self.in_edge = in_edge
+    self.type = type
     self.recv_map = {}
 
     te_info = DevConfig().get_tensor_edge_info_with_id_dir(
@@ -185,17 +193,19 @@ class RecvConstBlock(ImceCodeBlock):
     for i in range(self.recv_count):
       var = UniqueVar((self.in_edge, i))
       var.set_static()
-      if self.annotation == "min write":
+      if self.type == RecvConstBlock.ConstType.MIN:
         code += f"__builtin_IMCE_RECV_MIN({self.te_info.fifo_id});"
-      elif self.annotation == "max write":
+      elif self.type == RecvConstBlock.ConstType.MAX:
         code += f"__builtin_IMCE_RECV_MAX({self.te_info.fifo_id});"
-      elif self.annotation == "config write":
+      elif self.type == RecvConstBlock.ConstType.CONFIG:
         code += f"__builtin_IMCE_RECV_CFG({self.te_info.fifo_id});"
-      elif self.annotation == "scan write":
+      elif self.type == RecvConstBlock.ConstType.SCAN:
         code += f"{var}_{i} = __builtin_IMCE_RECV({self.te_info.fifo_id});"
         code += f"{var}_{i} = __builtin_IMCE_SCAN_RW({var}_{i});"
-      else:
+      elif self.type == RecvConstBlock.ConstType.NORMAL:
         code += f"{var} = __builtin_IMCE_RECV({self.te_info.fifo_id});"
+      else:
+        raise ValueError(f"Unknown ConstType: {self.type}")
     return code
 
 

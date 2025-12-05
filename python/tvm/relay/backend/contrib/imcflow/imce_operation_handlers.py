@@ -113,7 +113,7 @@ class ConvHandler(OperationHandler):
     # config reg
     # TODO: add config reg code block
     edge = call.get_tensor_edge_from_tag("config")
-    block = RecvConstBlock(edge, f"{edge}, config write")
+    block = RecvConstBlock(edge, RecvConstBlock.ConstType.CONFIG, f"{edge}, config write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(edge, hid)
@@ -181,7 +181,7 @@ class MultHandler(OperationHandler):
       arg_gid = in_edge.src_id.graph_node_id
       try:
         if ConstPat.match(CustomIDToNode()[arg_gid]):
-          block = RecvConstBlock(in_edge, f"mult const")
+          block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"mult const")
           call.codeblocks.append(hid, block, CodePhase.INIT)
           # add constedge info to codeblock info
           IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
@@ -285,7 +285,8 @@ class MinMaxQuantizeHandler(OperationHandler):
       edge = call.get_tensor_edge_from_tag(tag)
       # TODO: inode code block needs to put appropriate address for min/max reg.
       # TODO: two ways to set min/max reg. RecvConst vs. ADDI
-      block = RecvConstBlock(edge, f"{edge}, {tag} write")
+      const_type = RecvConstBlock.ConstType.MIN if tag == "min" else RecvConstBlock.ConstType.MAX
+      block = RecvConstBlock(edge, const_type, f"{edge}, {tag} write")
       call.codeblocks.append(hid, block, CodePhase.INIT)
       # add constedge info to codeblock info
       IMCECodeBlockInfo().append_const_edge_info(edge, hid)
@@ -357,7 +358,7 @@ class BiasAddHandler(OperationHandler):
     hid = call.get_hid()
 
     bias_edge = call.get_tensor_edge_from_tag("bias")
-    block = RecvConstBlock(bias_edge, "bias write")
+    block = RecvConstBlock(bias_edge, RecvConstBlock.ConstType.NORMAL, "bias write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
 
     # add constedge info to codeblock info
@@ -390,11 +391,11 @@ class BatchNormHandler(OperationHandler):
     bias_edge = call.get_tensor_edge_from_tag("fused_bias")
 
     print(f"[IMCE CODE BUILDER] BatchNormHandler: append recv const block hid={hid}, scale_edge={scale_edge}, bias_edge={bias_edge}")
-    block = RecvConstBlock(scale_edge, f"{scale_edge}, fused_scale write")
+    block = RecvConstBlock(scale_edge, RecvConstBlock.ConstType.NORMAL, f"{scale_edge}, fused_scale write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(scale_edge, hid)
-    block = RecvConstBlock(bias_edge, f"{bias_edge}, fused_bias write")
+    block = RecvConstBlock(bias_edge, RecvConstBlock.ConstType.NORMAL, f"{bias_edge}, fused_bias write")
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)
