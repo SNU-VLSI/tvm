@@ -232,7 +232,7 @@ class PolicyTableCodegen:
     return bytes(bin_data)
 
   def generate(self, func_name):
-    for node_name, entries in sorted(transform.ImcflowDeviceConfig().PolicyTableDict.items(), key=lambda x: x[0].name):
+    for node_name, entries in sorted(transform.ImcflowDeviceConfig().PolicyTableDict[func_name].items(), key=lambda x: x[0].name):
       policytable_path = os.path.join(
           self.func_dir, f"{node_name.name}_policy")
       policytable_bin_file = f"{policytable_path}.bin"
@@ -466,7 +466,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.sync_inrt_clear(CodePhase.INIT)
 
     # imem write
-    for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict.items(), key=lambda x: x[0].name):
+    func_name = self.codeblocks.func_name
+    for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
       block = WriteIMEMBlock(inst_edge, f"imem write: {imce.name}")
       self.codeblocks.append(imce.master(), block, CodePhase.INIT)
 
@@ -476,8 +477,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.codeblocks.append(node, block, CodePhase.INIT)
 
     # imce compute
-    active_imces = DevConfig().ActiveIMCEPerFunc[self.codeblocks.func_name]
-    for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict.items(), key=lambda x: x[0].name):
+    active_imces = DevConfig().ActiveIMCEPerFunc[func_name]
+    for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
       if imce in active_imces:
         policy_addr = inst_edge.policy_info[0].address # get first policy address
         block = IMCEComputeBlock(policy_addr, f"{imce.name} compute")

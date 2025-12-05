@@ -2982,7 +2982,7 @@ class PolicyTableGenerator:
             self.SubFunctionNodeID = None
             self.VarProperties = {}
 
-        def generate_policy_table(self):
+        def generate_policy_table(self, func_name):
             # Initialize policy tables for all nodes using NodeID as keys
             policy_tables = {node_id: [] for node_id in NodeID}
 
@@ -3202,9 +3202,9 @@ class PolicyTableGenerator:
                 handle_single_path(edge, mapping_info)
 
             self.Policytable = policy_tables
-            ImcflowDeviceConfig().PolicyTableDict = policy_tables
+            ImcflowDeviceConfig().PolicyTableDict[func_name] = policy_tables
 
-        def add_EdgeInfo(self):
+        def add_EdgeInfo(self, func_name):
             # def get_meminfo(edge):
             #     if isinstance(edge.src_id, tuple):
             #         id = edge.src_id[1]
@@ -3272,7 +3272,7 @@ class PolicyTableGenerator:
                   else: # Instruction edge
                       # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
                       edgeinfo = InstEdgeInfo(router_entry_list, None)
-                      ImcflowDeviceConfig().add_inst_edge_info(edge, edgeinfo)
+                      ImcflowDeviceConfig().add_inst_edge_info(func_name, edge, edgeinfo)
 
         def allocate(self, func_name):
           # Allocate memory for policy tables
@@ -3286,8 +3286,8 @@ class PolicyTableGenerator:
 
         def update_device_config(self, func_name):
             # traverse input function by visit() to make PathDict and generate policy table for it
-            self.generate_policy_table()
-            self.add_EdgeInfo()
+            self.generate_policy_table(func_name)
+            self.add_EdgeInfo(func_name)
             self.allocate(func_name)
             return self.Policytable
 
@@ -4795,6 +4795,3 @@ class NoCDeadlockDetector:
                 f.write("\n" + "-"*80 + "\n\n")
         
         debug_print(f"NoC deadlock table exported to: {output_path}")
-
-
-
