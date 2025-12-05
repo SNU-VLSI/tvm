@@ -39,34 +39,36 @@ ConstPat = is_constant()
 class CodegenSuite:
   """A pass that generates/compiles code for IMCFlow functions"""
 
-  def __init__(self, build_dir, module, host_isa="arm"):
-    self.build_dir = build_dir
+  def __init__(self, model_dir, module, host_isa="arm"):
+    self.model_dir = model_dir
+    self.build_dir = f"{model_dir}/build_dir"
     self.host_isa = host_isa
     self.module = module
-    if not os.path.exists(build_dir):
-      os.makedirs(build_dir)
+    if not os.path.exists(self.build_dir):
+      os.makedirs(self.build_dir)
 
     common_decl = f"""
       typedef short short16 __attribute__((ext_vector_type(16)));
       __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
     """
-    with open(f"{build_dir}/common_decl.h", "w") as file:
+    with open(f"{self.build_dir}/common_decl.h", "w") as file:
       file.write(common_decl)
 
-  def validate_recv_send_consistency(self, func_name, imce_builder, inode_builder):
+  def validate_recv_send_consistency(self, func_name, imce_builder, inode_builder, model_dir):
     """
     Validate that send and recv counts match for each edge.
     For each edge: inode_send + imce_send == inode_recv + imce_recv
     """
-    print("="*40)
-    print(f"Validating recv/send consistency for function {func_name}")
-    
+    output_lines = []
+    output_lines.append("="*40)
+    output_lines.append(f"Validating recv/send consistency for function {func_name}")
+
     all_edges = set()
     all_edges.update(imce_builder.send_map.keys())
     all_edges.update(imce_builder.recv_map.keys())
     all_edges.update(inode_builder.send_map.keys())
     all_edges.update(inode_builder.recv_map.keys())
-    
+
     inconsistencies = []
     for edge in sorted(list(all_edges), key=lambda x: str(x)):
       imce_send  = imce_builder.send_map.get(edge, 0)
@@ -78,12 +80,12 @@ class CodegenSuite:
         imce_send = int(imce_send)
       except:
         imce_send = imce_send.value
-      
+
       try:
         imce_recv = int(imce_recv)
       except:
         imce_recv = imce_recv.value
-      
+
       try:
         inode_send = int(inode_send)
       except:
@@ -92,11 +94,11 @@ class CodegenSuite:
       try:
         inode_recv = int(inode_recv)
       except:
-        inode_recv = inode_recv.value 
+        inode_recv = inode_recv.value
 
       total_send = int(imce_send) + int(inode_send)
       total_recv = int(imce_recv) + int(inode_recv)
-      
+
       if total_send != total_recv:
         inconsistencies.append({
           'edge': edge,
@@ -107,20 +109,30 @@ class CodegenSuite:
           'total_send': total_send,
           'total_recv': total_recv
         })
-    
+
     if inconsistencies:
-      print(f"\nFound {len(inconsistencies)} inconsistencies:")
+      output_lines.append(f"\nFound {len(inconsistencies)} inconsistencies:")
       for item in inconsistencies:
-        print(f"\n  Edge: {item['edge']}")
-        print(f"    IMCE  - Send: {item['imce_send']}, Recv: {item['imce_recv']}")
-        print(f"    Inode - Send: {item['inode_send']}, Recv: {item['inode_recv']}")
-        print(f"    Total - Send: {item['total_send']}, Recv: {item['total_recv']}")
-        print(f"    Mismatch: {item['total_send']} sends vs {item['total_recv']} recvs")
-      print("\n" + "="*40)
+        output_lines.append(f"\n  Edge: {item['edge']}")
+        output_lines.append(f"    IMCE  - Send: {item['imce_send']}, Recv: {item['imce_recv']}")
+        output_lines.append(f"    Inode - Send: {item['inode_send']}, Recv: {item['inode_recv']}")
+        output_lines.append(f"    Total - Send: {item['total_send']}, Recv: {item['total_recv']}")
+        output_lines.append(f"    Mismatch: {item['total_send']} sends vs {item['total_recv']} recvs")
+      output_lines.append("\n" + "="*40)
       # raise AssertionError(f"Recv/Send consistency check failed for function {func_name}")
     else:
-      print(f"✓ All edges have consistent send/recv counts")
-      print("="*40)
+      output_lines.append(f"✓ All edges have consistent send/recv counts")
+      output_lines.append("="*40)
+
+    # Print to console
+    for line in output_lines:
+      print(line)
+
+    # Write to file (append mode to collect all functions)
+    output_file = os.path.join(model_dir, "recv_send_consistency.txt")
+    with open(output_file, "a") as f:
+      f.write("\n".join(output_lines) + "\n")
+    print(f"Recv/send consistency appended to: {output_file}")
 
   def transform_function(self, _, func):
     # Note: the function name strips off the "_impl" suffix to match the original funcion name
@@ -153,7 +165,7 @@ class CodegenSuite:
       imce_builder.codeblocks.append(hid, block, CodePhase.END)
     
     # dump block structures
-    imce_builder.dump_block_structure()
+    imce_builder.dump_block_structure(self.model_dir, func_name)
     
     DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
         func_name, imce_builder.codeblocks)
@@ -192,7 +204,7 @@ class CodegenSuite:
     print("-"*40)
 
     # Validate recv/send consistency
-    self.validate_recv_send_consistency(func_name, imce_builder, inode_builder)
+    self.validate_recv_send_consistency(func_name, imce_builder, inode_builder, self.model_dir)
 
     # Clear the codegen context when done
     CodegenContext().clear()
@@ -371,25 +383,36 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     super().visit_function(fn)
     print("[IMCE CODE BUILDER] Visited function")
 
-  def dump_block_structure(self):
-    print("="*40)
-    print("[IMCE CODE BUILDER] Dumping block structure")
-    
+  def dump_block_structure(self, dir_name, func_name):
+    output_lines = []
+    output_lines.append("="*40)
+    output_lines.append(f"[IMCE CODE BUILDER] Dumping block structure for {func_name}")
+
     # Sort hids for deterministic output
     sorted_hids = sorted(self.codeblocks.blocks.keys(), key=lambda x: str(x))
-    
+
     for hid in sorted_hids:
       phases = self.codeblocks.blocks[hid]
-      print(f"Node: {hid}")
+      output_lines.append(f"Node: {hid}")
       for phase in sorted(phases.keys(), key=lambda x: ["INIT", "EXEC", "END"].index(x.name)):
         blocks = phases[phase]
         if not blocks: continue
-        print(f"  Phase: {phase}")
+        output_lines.append(f"  Phase: {phase}")
         for block in blocks:
-          self._print_block(block, indent=4)
-    print("="*40)
+          self._collect_block_lines(block, output_lines, indent=4)
+    output_lines.append("="*40)
 
-  def _print_block(self, block, indent=0):
+    # Print to console
+    for line in output_lines:
+      print(line)
+
+    # Write to file (append mode to collect all functions)
+    output_file = os.path.join(dir_name, "block_structure.txt")
+    with open(output_file, "a") as f:
+      f.write("\n".join(output_lines) + "\n")
+    print(f"Block structure appended to: {output_file}")
+
+  def _collect_block_lines(self, block, output_lines, indent=0):
     prefix = " " * indent
     block_type = type(block).__name__
     try:
@@ -399,17 +422,17 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     annotation = getattr(block, "annotation", "")
     annotation += f" (graph_node_id: {graph_node_id})"
     annotation += f", {block.dump()}"
-    print(f"{prefix}- {block_type} : {annotation}")
-    
+    output_lines.append(f"{prefix}- {block_type} : {annotation}")
+
     if isinstance(block, CompositeBlock):
       for child in block.blocks:
-        self._print_block(child, indent + 2)
+        self._collect_block_lines(child, output_lines, indent + 2)
     elif isinstance(block, SimpleFor):
-      self._print_block(block.body, indent + 2)
+      self._collect_block_lines(block.body, output_lines, indent + 2)
     elif isinstance(block, RecvSendWrapper):
-      self._print_block(block.body, indent + 2)
+      self._collect_block_lines(block.body, output_lines, indent + 2)
     elif isinstance(block, ConvBlock):
-      self._print_block(block.body, indent + 2)
+      self._collect_block_lines(block.body, output_lines, indent + 2)
   
   def construct_recv_send_map(self):
     """

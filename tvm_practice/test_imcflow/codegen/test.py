@@ -16,6 +16,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
 from tvm.contrib.imcflow import DataBlock
 import os
+import shutil
 from tvm.relay.op.transform import imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 import tvm.relay as relay
 import pprint
@@ -25,6 +26,19 @@ from models import real_model, real_model2, test_models
 from models import small_model
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import models_for_test
+
+def setup_dir(dir_name):
+  if not os.path.exists(dir_name):
+    os.makedirs(dir_name)
+  else:
+    # clean up existing files and directories in the directory without removing the directory itself
+    for item in os.listdir(dir_name):
+      item_path = os.path.join(dir_name, item)
+      if os.path.isfile(item_path) or os.path.islink(item_path):
+        os.remove(item_path)
+      elif os.path.isdir(item_path):
+        shutil.rmtree(item_path)
+
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
@@ -68,7 +82,7 @@ def run_test_ref(test_name, mod, param_dict):
   print(f"{'='*60}")
 
   ref_dir = f"{test_name}_ref"
-  os.makedirs(ref_dir, exist_ok=True)
+  setup_dir(ref_dir)
 
   # Save original model
   printModel(ref_dir, mod, param_dict, "origin")
@@ -124,7 +138,7 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"{'='*60}")
 
   eval_dir = f"{test_name}_evl"
-  os.makedirs(eval_dir, exist_ok=True)
+  setup_dir(eval_dir)
 
   eval_mod, eval_param_dict = mod, param_dict
   DevConfig().clear()
@@ -268,7 +282,7 @@ def run_test_evl(test_name, mod, param_dict):
   _dump("TensorIDtoEdge", config.TensorIDtoEdge)
   _dump("PolicyTableDict", config.PolicyTableDict)
 
-  CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build", eval_mod, host_isa=DevConfig().HOST_ISA)
+  CodegenSuite = imcflow_codegen.CodegenSuite(eval_dir, eval_mod, host_isa=DevConfig().HOST_ISA)
   CodegenSuite(eval_mod)
 
   print(f"mem_layout: {config.MemLayout}")

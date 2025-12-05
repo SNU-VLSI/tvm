@@ -29,6 +29,11 @@ class DeviceCodegen:
     self.func_dir = os.path.join(self.build_dir, func_name)
     if not os.path.exists(self.func_dir):
       os.makedirs(self.func_dir)
+    else:
+      # clean up existing files in the directory
+      for f in os.listdir(self.func_dir):
+        os.remove(os.path.join(self.func_dir, f))
+
     logging.info(
         f"Generating {self.target} code for function: {func_name} in {self.func_dir}")
 

@@ -132,7 +132,7 @@ def run_test_evl(test_name, mod, param_dict):
   print(f"edgeinfo: {config.TensorEdgetoInfo}")
   print(f"idtoedge: {config.TensorIDtoEdge}")
 
-  CodegenSuite = imcflow_codegen.CodegenSuite(f"{eval_dir}/build")
+  CodegenSuite = imcflow_codegen.CodegenSuite(eval_dir)
   CodegenSuite(eval_mod)
 
   print(f"mem_layout: {config.MemLayout}")
