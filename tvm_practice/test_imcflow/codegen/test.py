@@ -28,16 +28,21 @@ from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, d
 from models import models_for_test
 
 def setup_dir(dir_name):
-  if not os.path.exists(dir_name):
-    os.makedirs(dir_name)
-  else:
-    # clean up existing files and directories in the directory without removing the directory itself
-    for item in os.listdir(dir_name):
-      item_path = os.path.join(dir_name, item)
+  def clean_dir_recursive(path):
+    """Recursively clean all files but keep all directory inodes intact"""
+    for item in os.listdir(path):
+      item_path = os.path.join(path, item)
       if os.path.isfile(item_path) or os.path.islink(item_path):
         os.remove(item_path)
       elif os.path.isdir(item_path):
-        shutil.rmtree(item_path)
+        # Recursively clean subdirectory but keep the directory itself
+        clean_dir_recursive(item_path)
+
+  if not os.path.exists(dir_name):
+    os.makedirs(dir_name)
+  else:
+    # clean up all files recursively but keep all directory structures intact
+    clean_dir_recursive(dir_name)
 
 
 def printModel(result_dir, mod, param_dict, mod_name):
