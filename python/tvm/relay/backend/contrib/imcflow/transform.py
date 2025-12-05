@@ -2958,13 +2958,12 @@ class MemoryAllocator:
           func_info = imcflow_func_map[gv.name_hint]
           self.run_(func_info.func_node, gv.name_hint, ttype_map[gv.name_hint])
 
-@relay.transform.function_pass(opt_level=0)
 class PolicyTableGenerator:
     def __init__(self, NoCPaths):
       self.NoCPaths = NoCPaths
       self.PolicyTable_2D = {}
 
-    def transform_function(self, func, mod, ctx):
+    def run(self, mod):
       class _PolicyTableGenerator(tvm.relay.ExprVisitor):
         def __init__(self, NoCPaths):
             super().__init__()
@@ -3298,7 +3297,7 @@ class PolicyTableGenerator:
           for x in self.PolicyTable_2D[gv.name_hint]:
             print(x)
 
-      return func
+      return mod
 
 class TensorPathVisualizer:
     """

@@ -257,7 +257,7 @@ def run_test_evl(test_name, mod, param_dict):
   with open(f"{eval_dir}/mem_layout.txt", "w") as f:
     pprint.pprint(DevConfig().MemLayout, stream=f)
 
-  imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths)(eval_mod)
+  imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths).run(eval_mod)
   with open(f"{eval_dir}/policy_table.txt", "w") as f:
     pprint.pprint(DevConfig().PolicyTableDict, stream=f)
 
