@@ -683,6 +683,9 @@ class RecvSendWrapper(ImceCodeBlock):
 
     Returns a SimpleFor object.
     """
+
+    assert len(self.out_edges) == 1, "Only single output edge is supported in create_loop_from_call"
+
     call = call_ctx.call
     
     # FIXME: this is a quick fix for ruling out the constant edges using to_process_in_edges
@@ -690,48 +693,78 @@ class RecvSendWrapper(ImceCodeBlock):
 
     data_edge = next(
         edge for edge in in_edges if edge.dst_id.tensor_type in ["data", "rhs", "lhs"])
+    out_edge = self.out_edges[0]
 
     datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(data_edge)
 
-    assert self.num_blocks == self.num_out_blocks, "num_blocks and num_out_blocks must be equal in create_loop_from_call"
-    if datablock:
-      count = math.ceil(datablock.size / 32.0)
-      count = math.ceil(count / self.num_blocks)
-    else:
-      args = []
-      for idx, arg in enumerate(call.args):
-        if ConstPat.match(arg):
-          continue
-        else:
-          args.append(arg)
-
-      real_ttype = None
-      for arg in args:
-        layout = DevConfig().LayoutMap[arg]
-        real_ttype_ = apply_layout_to_type(get_type(call_ctx.module, arg), layout)
-        if real_ttype and real_ttype != real_ttype_:
-          raise RuntimeError("Mismatched real tensor types among input args")
-        real_ttype = real_ttype_
-      
-      elem_count = math.prod(list(real_ttype.shape))
-      if isinstance(elem_count, tvm.tir.expr.IntImm):
-        elem_count = elem_count.value
-      dtype = real_ttype.dtype
-      if "int8" in dtype or "uint8" in dtype:
-        bytes_per_elem = 1
-      elif "int16" in dtype or "uint16" in dtype:
-        bytes_per_elem = 2
-      elif "int32" in dtype or "uint32" in dtype or "float32" in dtype:
-        bytes_per_elem = 4
+    # get input edge size
+    args = []
+    for idx, arg in enumerate(call.args):
+      if ConstPat.match(arg):
+        continue
       else:
-        raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
-      total_bytes = elem_count * bytes_per_elem
+        args.append(arg)
 
-      byte_per_iter = self.num_blocks * 32
-      count = math.ceil(total_bytes / byte_per_iter)
+    real_ttype = None
+    for arg in args:
+      layout = DevConfig().LayoutMap[arg]
+      real_ttype_ = apply_layout_to_type(get_type(call_ctx.module, arg), layout)
+      if real_ttype and real_ttype != real_ttype_:
+        raise RuntimeError("Mismatched real tensor types among input args")
+      real_ttype = real_ttype_
+    
+    elem_count = math.prod(list(real_ttype.shape))
+    if isinstance(elem_count, tvm.tir.expr.IntImm):
+      elem_count = elem_count.value
+    dtype = real_ttype.dtype
+    if "int8" in dtype or "uint8" in dtype:
+      bytes_per_elem = 1
+    elif "int16" in dtype or "uint16" in dtype:
+      bytes_per_elem = 2
+    elif "int32" in dtype or "uint32" in dtype or "float32" in dtype:
+      bytes_per_elem = 4
+    else:
+      raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
+    in_total_bytes = elem_count * bytes_per_elem
+
+    # get output edge size
+    layout = DevConfig().LayoutMap[call_ctx.call]
+    real_ttype = apply_layout_to_type(get_type(call_ctx.module, call_ctx.call), layout)
+    
+    elem_count = math.prod(list(real_ttype.shape))
+    if isinstance(elem_count, tvm.tir.expr.IntImm):
+      elem_count = elem_count.value
+    dtype = real_ttype.dtype
+    if "int8" in dtype or "uint8" in dtype:
+      bytes_per_elem = 1
+    elif "int16" in dtype or "uint16" in dtype:
+      bytes_per_elem = 2
+    elif "int32" in dtype or "uint32" in dtype or "float32" in dtype:
+      bytes_per_elem = 4
+    else:
+      raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
+    out_total_bytes = elem_count * bytes_per_elem
+
+    assert in_total_bytes % 32 == 0, "Input total bytes must be multiple of 32"
+    assert out_total_bytes % 32 == 0, "Output total bytes must be multiple of 32"
+    num_blocks=None
+    num_out_blocks=None
+    count=None
+    if out_total_bytes >= in_total_bytes:
+      ratio = float(out_total_bytes) / float(in_total_bytes)
+      assert ratio.is_integer(), "Output to input byte size ratio must be integer"
+      num_blocks=1
+      num_out_blocks=int(ratio)
+      count=in_total_bytes//32
+    else:
+      ratio = float(in_total_bytes) / float(out_total_bytes)
+      assert ratio.is_integer(), "Input to output byte size ratio must be integer"
+      num_blocks=int(ratio)
+      num_out_blocks=1
+      count=out_total_bytes//32
 
     # Create a new RecvSendWrapper that represents the inner logic
-    inner = RecvSendWrapper(self.body, self.num_blocks, self.num_out_blocks, 
+    inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks, 
                             self.send_block, self.in_edges, self.out_edges, self.annotation)
 
     return SimpleFor(count, inner, f"call_created_loop")
