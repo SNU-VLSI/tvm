@@ -41,7 +41,7 @@ class CodegenSuite:
 
   def __init__(self, model_dir, module, host_isa="arm"):
     self.model_dir = model_dir
-    self.build_dir = f"{model_dir}/build_dir"
+    self.build_dir = f"{model_dir}/build"
     self.host_isa = host_isa
     self.module = module
     if not os.path.exists(self.build_dir):
