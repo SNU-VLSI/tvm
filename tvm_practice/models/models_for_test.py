@@ -144,6 +144,7 @@ def getResnetCifar10Small_(input_shape):
   )
   IC, H, W = (16, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
 
+  """
   y = imcflow_batch_norm(y, relay.var("fused_scale1", shape=(16,), dtype="int16"), relay.var("fused_bias1", shape=(16,), dtype="int16"))
   y = imcflow_min_max_quantize(y, relay.var("quant_min_2", shape=(), dtype="int16"), relay.var("quant_max_2", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=16)
   y = imcflow_qconv2d(
@@ -267,6 +268,7 @@ def getResnetCifar10Small_(input_shape):
   y = relay.nn.batch_flatten(y) 
   y = relay.nn.dense(y, relay.var("dense_weight", shape=(10, 64), dtype="float32"))
   y = relay.nn.bias_add(y, relay.var("dense_bias", shape=(10,), dtype="float32"))
+  """
 
   # Collect parameter vars from the graph (exclude the input var)
   free_vars = relay.analysis.free_vars(y)

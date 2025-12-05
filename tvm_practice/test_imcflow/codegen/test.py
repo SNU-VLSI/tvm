@@ -353,7 +353,7 @@ def test_residual_model():
 
 def test_resnet_cifar10_small_pretrained():
   """Generate evaluation for resnet cifar10 small model"""
-  mod, param_dict = models_for_test.getResnetCifar10SmallPretrained()
+  mod, param_dict = models_for_test.getResnetCifar10SmallPretrained(True)
   run_test_evl("resnet_cifar10_small", mod, param_dict)
 
 if __name__ == "__main__":
