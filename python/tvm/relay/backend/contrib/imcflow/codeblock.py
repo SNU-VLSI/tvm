@@ -13,15 +13,12 @@ class UniqueVar:
 
   def __new__(cls, obj, dtype="short16"):
     """Ensure only one instance per unique obj and dtype combination."""
-    # Normalize the key: use _original for CodeBlock instances in tuples
     key = cls._normalize_key(obj)
 
     if key not in cls._instances:
       instance = super(UniqueVar, cls).__new__(cls)
       cls._instances[key] = instance
       cls._counter += 1
-
-      # set the instance variables
       instance.name = f"var{cls._counter}"
       instance.dtype = dtype
       instance.static = False
@@ -33,19 +30,15 @@ class UniqueVar:
 
   @staticmethod
   def _normalize_key(obj):
-    """Normalize key by using _original reference for CodeBlock instances."""
-    # Handle tuple keys like (CodeBlock, index) or (TensorEdge, index)
     if isinstance(obj, tuple):
       normalized = tuple(
         elem._original if hasattr(elem, '_original') else elem
         for elem in obj
       )
       return normalized
-    # Handle direct object keys
     return getattr(obj, '_original', obj)
 
   def set_static(self):
-    # FIXME: we don't know if set_static is always done prior to another variable use
     self.static = True
 
   def __str__(self):
@@ -71,98 +64,57 @@ class CodePhase(Enum):
   EXEC = "EXEC"
   END = "END"
 
-class CodeBlock(metaclass=ABCMeta):
-  def __init__(self):
-    self.next = None
+class CodeBlock(ABC):
+  def __init__(self, annotation: str = ""):
+    self.annotation = annotation
     self._original = self  # Track original object for UniqueVar
 
-  def __copy__(self):
-    """Shallow copy that preserves reference to original object."""
-    cls = self.__class__
-    new_obj = cls.__new__(cls)
-    new_obj.__dict__.update(self.__dict__)
-    new_obj._original = self._original  # Keep reference to original
-    # Don't reset next - preserve the linked list chain
-    return new_obj
+  def render(self) -> str:
+    """Render the block to a string. This is the public API."""
+    content = self._render()
+    if not content:
+      return ""
+    
+    if self.annotation:
+      return f"// generate: {self.annotation}\n{content}\n// endgenerate: {self.annotation}"
+    return content
 
   @abstractmethod
-  def content(self) -> str:
+  def _render(self) -> str:
+    """Implementation of rendering logic. Returns the raw string content."""
     pass
 
-  def dump(self) -> str:
-    return self.__class__.__name__
+  def dump(self, indent_level=0) -> str:
+    """Dump the structure of the block for debugging."""
+    indent_str = "  " * indent_level
+    return f"{indent_str}{self.__class__.__name__}(annotation='{self.annotation}')"
 
   def __str__(self) -> str:
-    # Iterative implementation to avoid recursion depth issues
-    parts = []
-    curr = self
-    while curr:
-      c = curr.content()
-      # Safety check: if content() returns self, avoid infinite recursion
-      if c is curr:
-        if hasattr(curr, 'text'):
-          parts.append(str(curr.text))
-        elif hasattr(curr, '_content'):
-          parts.append(str(curr._content()))
-        else:
-          parts.append(f"<{curr.__class__.__name__}: content is self>")
-      elif c:
-        parts.append(str(c))
-      
-      curr = curr.next
-    return "\n".join(parts)
+    return self.render()
 
   def __add__(self, other):
+    """Combine two blocks into a SequentialBlock."""
+    blocks = []
+    
+    # Flatten if self is already a SequentialBlock without annotation
+    if isinstance(self, SequentialBlock) and not self.annotation:
+      blocks.extend(self.blocks)
+    else:
+      blocks.append(self)
+      
     if isinstance(other, str):
       other = TextBlock(other)
-    if isinstance(other, CodeBlock):
-      new_block = copy(self)
-      ptr = new_block
-      while ptr.next is not None:
-        ptr = ptr.next
-      ptr.next = copy(other)
-      return new_block
-    raise TypeError(
-        f"unsupported operand type(s) for +: 'CodeBlock' and '{type(other)}'")
+      
+    # Flatten if other is already a SequentialBlock without annotation
+    if isinstance(other, SequentialBlock) and not other.annotation:
+      blocks.extend(other.blocks)
+    else:
+      blocks.append(other)
+      
+    return SequentialBlock(blocks)
 
   def __iadd__(self, other):
-    if isinstance(other, str):
-      other = TextBlock(other)
-    if isinstance(other, CodeBlock):
-      ptr = self
-      while ptr.next is not None:
-        ptr = ptr.next
-      ptr.next = other
-      return self
-    raise TypeError(
-        f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
-
-class SequentialBlock(CodeBlock):
-  """A block that holds a list of blocks and renders them sequentially."""
-  def __init__(self, blocks: List[CodeBlock] = None, annotation: str = ""):
-    super().__init__()
-    self.annotation = annotation
-    self.blocks = blocks if blocks is not None else []
-
-  def add(self, block: CodeBlock):
-    self.blocks.append(block)
-    return self
-
-  def _content(self) -> str:
-    code = TextBlock("")
-    for block in self.blocks:
-      code += str(block)
-    return str(code)
-
-  def content(self) -> CodeBlock:
-    if self.annotation:
-      code = TextBlock("")
-      code += f"// generate: {self.annotation}"
-      code += copy(self._content())
-      code += f"// endgenerate: {self.annotation}"
-      return code
-    else:
-      return self._content()
+    return self + other
 
 
 class TextBlock(CodeBlock):
@@ -170,51 +122,50 @@ class TextBlock(CodeBlock):
     super().__init__()
     self.text = text
   
-  def dump(self) -> str:
-    mess = str(self)
-    mess = mess.replace("\n", r"\n")
-    max_len = 100
-    if len(mess) > max_len:
-      mess = mess[:max_len] + "..."
-    return f"{mess}"
-
-  def content(self) -> str:
+  def _render(self) -> str:
     return self.text
   
-  # def __add__(self, other):
-  #   if isinstance(other, str):
-  #     other = TextBlock(other)
-  #   if isinstance(other, TextBlock):
-  #     me = self.text
-  #     new = TextBlock(me + "\n" + other.text)
-  #     return new
-  #   else:
-  #     raise TypeError(
-  #         f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
+  def dump(self, indent_level=0) -> str:
+    indent_str = "  " * indent_level
+    preview = self.text.replace("\n", "\\n")
+    if len(preview) > 50:
+      preview = preview[:47] + "..."
+    return f"{indent_str}TextBlock(text='{preview}')"
 
-  # def __iadd__(self, other):
-  #   if isinstance(other, str):
-  #     other = TextBlock(other)
-  #   if isinstance(other, TextBlock):
-  #     self.text += ("\n" + other.text)
-  #     return self
-  #   else:
-  #     raise TypeError(
-  #         f"unsupported operand type(s) for +=: 'CodeBlock' and '{type(other)}'")
+
+class SequentialBlock(CodeBlock):
+  """A block that holds a list of blocks and renders them sequentially."""
+  def __init__(self, blocks: List[CodeBlock] = None, annotation: str = ""):
+    super().__init__(annotation)
+    self.blocks = blocks if blocks is not None else []
+
+  def add(self, block: CodeBlock):
+    if isinstance(block, str):
+        block = TextBlock(block)
+    self.blocks.append(block)
+    return self
+
+  def _render(self) -> str:
+    return "\n".join([b.render() for b in self.blocks if b])
+
+  def dump(self, indent_level=0) -> str:
+    indent_str = "  " * indent_level
+    lines = [f"{indent_str}SequentialBlock(annotation='{self.annotation}')"]
+    return "\n".join(lines)
+
 
 class SimpleFor(CodeBlock):
   scope = 0
   count_stack=[]
 
   def __init__(self, count: int, body: Union[str, CodeBlock], annotation: str = ""):
-    super().__init__()
-    self.annotation = annotation
+    super().__init__(annotation)
     self.count = int(count)
-    self.body = body
+    if isinstance(body, str):
+      self.body = TextBlock(body)
+    else:
+      self.body = body
   
-  def dump(self) -> str:
-    return f"SimpleFor(count={self.count}, annotation={self.annotation})"
-
   @contextmanager
   def manage_scope(self):
     SimpleFor.scope += 1
@@ -229,66 +180,60 @@ class SimpleFor(CodeBlock):
   def annotation_str(self):
     return f" : {self.annotation}" if self.annotation else ""
 
-  def content(self) -> str:
+  def _render(self) -> str:
     if self.count == 0:
-      return TextBlock(f"// loop ignored with loop count == 0{self.annotation_str}\n")
+      return f"// loop ignored with loop count == 0{self.annotation_str}"
 
     if self.count == 1:
-      formatted_body = self.body(0) if callable(self.body) else str(self.body)
-      code = TextBlock("")
-      code += f"// generate{self.annotation_str}. loop count == 1"
-      code += formatted_body
-      code += f"// endgenerate{self.annotation_str}"
-      return code
+      # COMPATIBILITY FIX: If the user code passes a lambda, we execute it to get the string/block.
+      if callable(self.body):
+          formatted_body = self.body(0)
+          if isinstance(formatted_body, CodeBlock):
+              content = formatted_body.render()
+          else:
+              content = str(formatted_body)
+      else:
+          content = self.body.render()
+      return f"// generate{self.annotation_str}. loop count == 1\n{content}\n// endgenerate{self.annotation_str}"
 
     with self.manage_scope() as var_iter:
-      formatted_body = self.body(var_iter) if callable(
-          self.body) else str(self.body)
+      # COMPATIBILITY FIX: If the user code passes a lambda, we execute it to get the string/block.
+      if callable(self.body):
+          formatted_body = self.body(var_iter)
+          if isinstance(formatted_body, CodeBlock):
+              content = formatted_body.render()
+          else:
+              content = str(formatted_body)
+      else:
+          content = self.body.render()
 
-      code = TextBlock("")
-      code += f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate{self.annotation_str}"
-      # FIXME: explicit str is NOT the right way
-      # but currently is necessay for scope to work.
-      # since before current content exits, the body's content should be evaluated
-      code += indent(formatted_body, '  ')
-      code += f"}} // endgenerate{self.annotation_str}"
-    return code
+      code = f"for (int {var_iter} = 0; {var_iter} < {self.count}; {var_iter}++) {{ // generate{self.annotation_str}\n"
+      code += indent(content, '  ')
+      code += f"\n}} // endgenerate{self.annotation_str}"
+      return code
+      
+  def dump(self, indent_level=0) -> str:
+    indent_str = "  " * indent_level
+    lines = [f"{indent_str}SimpleFor(count={self.count}, annotation='{self.annotation}')"]
+    return "\n".join(lines)
 
 
 class CtrlBlock(CodeBlock):
-  """
-  DONE, HALT, INTRT, STANDBY, SET_ADDR_CNT, SET_FLAG
-  NOP, STEP, STOP
-  """
   def __init__(self, ctrl: str = "", annotation: str = ""):
-    super().__init__()
-    self.annotation = annotation
+    super().__init__(annotation)
     self.ctrl = ctrl
     assert ctrl == "STOP", "only STOP CtrlBlock is supported for now. we to extend"
 
-  def content(self) -> str:
-    if self.annotation:
-      code = TextBlock("")
-      code += f"// generate: {self.annotation}"
-      code += copy(self._content())
-      code += f"// endgenerate: {self.annotation}"
-      return code
-    else:
-      return self
-
-  def _content(self) -> str:
-    code = TextBlock("")
+  def _render(self) -> str:
     if self.ctrl == "STOP":
-      code += "__builtin_IMCE_STOP();"
-    return code.content()
-
+      return "__builtin_IMCE_STOP();"
+    return ""
 
 
 class NodeCodeBlockManager:
   """A class that manages and generates code blocks for each node."""
 
   def __init__(self):
-    # reset UniqueVar for each new instance of codeblocks
     UniqueVar.reset()
     self.blocks = {key: {CodePhase.INIT: [], CodePhase.EXEC: [], CodePhase.END: []}
                    for key in self.nodes}
@@ -305,9 +250,6 @@ class NodeCodeBlockManager:
 
   @abstractmethod
   def start_block(self) -> str:
-    """
-    The subclass should use UniqueVar.get_decls() to declare variables.
-    """
     pass
 
   @abstractmethod
@@ -324,38 +266,20 @@ class NodeCodeBlockManager:
     for node in self.nodes:
       condition = f"if" if first else f"else if"
       code += f"{condition} (hid == {node.to_coord(0)} && wid == {node.to_coord(1)}) {{ // {node.name}\n"
-      # Generate SETUP blocks first
-      for codeblock in self.blocks[node][CodePhase.INIT]:
-        code += f"{indent(str(codeblock), '  ')}\n"
-      # Generate COMPUTE blocks next
-      for codeblock in self.blocks[node][CodePhase.EXEC]:
-        code += f"{indent(str(codeblock), '  ')}\n"
-      # Generate END blocks last
-      for codeblock in self.blocks[node][CodePhase.END]:
-        code += f"{indent(str(codeblock), '  ')}\n"
+      for phase in [CodePhase.INIT, CodePhase.EXEC, CodePhase.END]:
+        for codeblock in self.blocks[node][phase]:
+          code += f"{indent(codeblock.render(), '  ')}\n"
       code += "}\n"
       first = False
     return code
 
   def generate(self) -> str:
-    # generate body first to determine variables first
-    # then generate start, where variables are declared
     body = self.generate_body()
-
     start = self.start_block()
     end = self.end_block()
-
     return start + indent(body, '  ') + end
   
   def get_blocks(self, phase :List[CodePhase] = None , nodes : List[NodeID] = None) -> List[CodeBlock]:
-    """Get all INIT code blocks for the specified nodes.
-
-    Args:
-        nodes: List of NodeID instances to get INIT blocks for.
-               If None, gets INIT blocks for all nodes.
-    Returns:
-        List of INIT CodeBlock instances.
-    """
     if nodes is None:
       nodes = self.nodes
     if phase is None:

@@ -60,21 +60,10 @@ def add_to_map(edge, count, is_send=True):
 
 class ImceCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
-    super().__init__()
-    self.annotation = annotation
-
-  def content(self) -> CodeBlock:
-    if self.annotation:
-      code = TextBlock("")
-      code += f"// generate: {self.annotation}"
-      code += copy(self._content())
-      code += f"// endgenerate: {self.annotation}"
-      return code
-    else:
-      return self
+    super().__init__(annotation)
 
   @abstractmethod
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     pass
 
 
@@ -131,9 +120,9 @@ class LoadLBBlock(ImceCodeBlock):
     
     self.body = SimpleFor(self.count, body, "load_block")
 
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     add_to_map(self.edge, RecvSendNum("recv", self.count * self.repeat), is_send=False)
-    return self.body
+    return self.body.render()
 
 
 class RecvConstBlock(ImceCodeBlock):
@@ -169,7 +158,7 @@ class RecvConstBlock(ImceCodeBlock):
     self.te_info = te_info
     self.recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     owner_edge = self.te_info.owner
     add_to_map(owner_edge, RecvSendNum("recv",  self.recv_count), is_send=False)
     code = TextBlock("")
@@ -189,7 +178,7 @@ class RecvConstBlock(ImceCodeBlock):
         code += f"{var} = __builtin_IMCE_RECV({self.te_info.fifo_id});"
       else:
         raise ValueError(f"Unknown ConstType: {self.type}")
-    return code
+    return code.render()
 
 
 class VecBlock(ImceCallCodeBlock):
@@ -213,7 +202,7 @@ class VecBlock(ImceCallCodeBlock):
   def _op_name(self) -> str:
     pass
 
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
 
@@ -226,7 +215,7 @@ class VecBlock(ImceCallCodeBlock):
       # e.g. __builtin_IMCE_ADD(a, b, 15);
       code += f"{var_o} = __builtin_IMCE_{self.op_name}({var_in_str}, {self.imm_value});"
 
-    return code
+    return code.render()
 
 
 class AddBlock(VecBlock):
@@ -291,7 +280,7 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
   def num_out_blocks(self) -> int:
     return 4  # FIXED in MinmaxQuantBlock
 
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
     src_mask = 15
     data_edge = next(
@@ -306,7 +295,7 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     for i in range(self.num_blocks):
       var_i = self._make_unique_input_var_for_post_op(data_edge, i)
       qreg_start_idx = i + 4 * self.o_split_idx
-      # min max quantization does not require $rs2
+      # min max quantization does not require 
       code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
     # NOTE: currently, it is not possible to have consequtive 4*(MM_QUANT -> QREG)s.
@@ -327,7 +316,7 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
       var_o = UniqueVar((self, i))
       code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
 
-    return code
+    return code.render()
 
 
 class ConcatBlock(ImceCallCodeBlock):
@@ -346,7 +335,7 @@ class ConcatBlock(ImceCallCodeBlock):
     assert len(
         self.in_edges) >= self.min_in_edges, "At least two input edges are required"
 
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     num_bitplanes = 4
     src_mask = 15
 
@@ -366,7 +355,7 @@ class ConcatBlock(ImceCallCodeBlock):
         code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
         code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
 
-    return code
+    return code.render()
 
 
 class SplitBlock(ImceCallCodeBlock):
@@ -385,8 +374,8 @@ class SplitBlock(ImceCallCodeBlock):
     assert all(fid == fifo_ids[0]
                for fid in fifo_ids), "All output edges must have the same fifo id"
 
-  def _content(self) -> CodeBlock:
-    return TextBlock("")
+  def _render(self) -> str:
+    return ""
 
 
 class ConvBlock(ImceCallCodeBlock):
@@ -518,8 +507,8 @@ class ConvBlock(ImceCallCodeBlock):
 
     return root
 
-  def _content(self) -> CodeBlock:
-    return self.body.content()
+  def _render(self) -> str:
+    return self.body.render()
 
 
 class BatchNormBlock(ImceCallCodeBlock):
@@ -533,7 +522,7 @@ class BatchNormBlock(ImceCallCodeBlock):
     """ Code block for batch normalization """
     super().__init__(call, annotation)
 
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
 
@@ -558,7 +547,7 @@ class BatchNormBlock(ImceCallCodeBlock):
       # e.g. __builtin_IMCE_ADD(out, bias, 15);
       code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);"
 
-    return code
+    return code.render()
 
 
 class RecvSendWrapper(ImceCodeBlock):
@@ -598,7 +587,7 @@ class RecvSendWrapper(ImceCodeBlock):
 
     return cls(body, num_blocks, num_out_blocks, send_block, in_edges, out_edges, annotation)
 
-  def _content(self) -> CodeBlock:
+  def _render(self) -> str:
     """Generate RECV -> body -> SEND."""
     code = TextBlock("")
 
@@ -668,7 +657,7 @@ class RecvSendWrapper(ImceCodeBlock):
             for out_edge in output_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
-    return code
+    return code.render()
 
 
   def create_loop_from_call(self, call_ctx : 'BuilderContext', to_process_in_edges=None):
