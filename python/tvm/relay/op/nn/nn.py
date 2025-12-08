@@ -3979,6 +3979,8 @@ def imcflow_qconv2d(
     kernel_layout="OIHW",
     out_layout="",
     out_dtype="",
+    adcmode=0,
+    vmode=0,
 ):
     if isinstance(kernel_size, int):
         kernel_size = (kernel_size, kernel_size)
@@ -4004,6 +4006,8 @@ def imcflow_qconv2d(
         kernel_layout,
         out_layout,
         out_dtype,
+        adcmode,
+        vmode,
     )
 
 

@@ -2054,6 +2054,7 @@ inline Expr MakeImcflowQConv(Expr data, Expr weight, Expr config, Array<IndexExp
                      Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                      Array<IndexExpr> kernel_size, std::string data_layout,
                      std::string kernel_layout, std::string out_layout, DataType out_dtype,
+                     int adcmode, int vmode,
                      std::string op_name) {
   auto attrs = make_object<ImcflowQConv2DAttrs>();
   attrs->strides = std::move(strides);
@@ -2067,6 +2068,8 @@ inline Expr MakeImcflowQConv(Expr data, Expr weight, Expr config, Array<IndexExp
   attrs->kernel_layout = std::move(kernel_layout);
   attrs->out_layout = std::move(out_layout);
   attrs->out_dtype = std::move(out_dtype);
+  attrs->adcmode = adcmode;
+  attrs->vmode = vmode;
   const Op& op = Op::Get(op_name);
   return Call(op, {data, weight, config}, Attrs(attrs), {});
 }
@@ -2075,9 +2078,10 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qconv")
     .set_body_typed([](Expr data, Expr weight, Expr config, Array<IndexExpr> strides, Array<IndexExpr> padding,
                        Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
-                       String out_layout, DataType out_dtype) {
+                       String out_layout, DataType out_dtype, int adcmode, int vmode) {
       return MakeImcflowQConv(data, weight, config, strides, padding, dilation, groups, channels, in_channels,
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
+                                   adcmode, vmode,
                                    "nn.imcflow_qconv");
     });
 
