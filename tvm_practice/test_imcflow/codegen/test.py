@@ -7,6 +7,7 @@ from tvm.contrib.utils import tempdir
 import tvm.testing
 from tvm.relay import pretty_print
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
+from tvm.contrib import graph_executor
 from tvm.relay.build_module import bind_params_by_name
 from tvm.relay import transform
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
@@ -57,7 +58,15 @@ def printModel(result_dir, mod, param_dict, mod_name):
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
 
-def generate_graph_executor(ref_mod, param_dict, dir_name):
+def run_cpu_reference(mod, param_dict, dir_name):
+  with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
+    graph, lib, params = tvm.relay.build(mod, target="llvm")
+  mod = graph_executor.create(graph, lib, tvm.cpu(0))
+  mod.set_input(**params)
+  mod.run()
+
+
+def generate_graph_executor(mod, param_dict, dir_name):
   executor_cfg = Executor("graph")
   runtime_cfg = Runtime("crt", {"system-lib": True})
   print("\n" + "="*40)
@@ -66,7 +75,7 @@ def generate_graph_executor(ref_mod, param_dict, dir_name):
 
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
     module = tvm.relay.build(
-      ref_mod,
+      mod,
       target="c",
       params=param_dict,
       executor=executor_cfg,
@@ -79,61 +88,157 @@ def generate_graph_executor(ref_mod, param_dict, dir_name):
   export_model_library_format(module, tar_path)
   return module, tar_path
 
+def transform_model_for_imcflow(mod, param_dict, dir, test_name):
+  DevConfig().clear()
 
-def run_test_ref(test_name, mod, param_dict):
-  """Generate reference TVM compilation results"""
-  print(f"\n{'='*60}")
-  print(f"GENERATING REFERENCE RESULTS FOR: {test_name}")
-  print(f"{'='*60}")
+  # origin
+  printModel(dir, mod, param_dict, "0_origin")
 
-  ref_dir = f"{test_name}_ref"
-  setup_dir(ref_dir)
+  # bind param
+  mod["main"] = bind_params_by_name(mod["main"], param_dict)
+  mod = transform.InferType()(mod)
+  printModel(dir, mod, param_dict, "1_after_bind")
 
-  # Save original model
-  printModel(ref_dir, mod, param_dict, "origin")
+  # first level imcflow graph partition
+  mod = imcflow_transform.partitionImcflowSubGraph(mod)
+  printModel(dir, mod, param_dict, "2_after_L1_partition")
 
-  # Create a new IRModule for reference (TVM IRModule doesn't have copy method)
-  ref_mod = tvm.IRModule({"main": mod["main"]})
+  # split imcflow function conv to atomic ops
+  mod, param_dict = imcflow_transform.split_conv_to_atomic(mod, param_dict)
+  printModel(dir, mod, param_dict, "2_after_atom_split")
 
-  # Check if model contains IMCFLOW operations - if so, skip reference generation
-  model_str = pretty_print(ref_mod)
-  if "imcflow" in model_str.lower():
-    print("⚠️  WARNING: Model contains IMCFLOW operations!")
-    print("Cannot generate standard TVM reference for model with IMCFLOW-specific operations.")
-    print("Skipping reference generation...")
+  # merge composite OPs
+  mod = imcflow_transform.merge_composite_ops(mod)
+  printModel(dir, mod, param_dict, "3_after_merge")
 
-    # Create a placeholder file to indicate this
-    with open(f"{ref_dir}/SKIPPED_IMCFLOW_MODEL.txt", "w") as f:
-      f.write("Reference generation skipped.\n")
-      f.write(
-          "Model contains IMCFLOW-specific operations that cannot be compiled with standard TVM.\n")
-      f.write("To generate a reference, use a model without IMCFLOW operations.\n")
+  # make split and concat super node
+  mod = imcflow_transform.makeSplitConcatDepsRegions(mod)
+  printModel(dir, mod, param_dict, "4_after_split_concat_partition")
 
-    print(f"Created placeholder: {ref_dir}/SKIPPED_IMCFLOW_MODEL.txt")
-    return ref_mod
+  mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(mod)
+  printModel(dir, mod, param_dict, "4.5_after_concat_distributor")
 
-  # Proceed with reference generation for clean models
-  ref_mod["main"] = bind_params_by_name(ref_mod["main"], param_dict)
-  ref_mod = transform.InferType()(ref_mod)
-  printModel(ref_dir, ref_mod, param_dict, "0_after_bind")
+  mod = imcflow_transform.partitionRound(mod)
+  printModel(dir, mod, param_dict, "5_after_annot")
 
-  # Apply only standard TVM optimizations (no IMCFLOW)
-  with tvm.transform.PassContext(opt_level=3):
-    ref_mod = transform.FoldConstant()(ref_mod)
-    ref_mod = transform.SimplifyInference()(ref_mod)
-    ref_mod = transform.FoldScaleAxis()(ref_mod)
-    ref_mod = transform.SimplifyExpr()(ref_mod)
-    ref_mod = transform.FoldConstant()(ref_mod)
+  mod = imcflow.flattenImcflowTopFuncs(mod)
+  printModel(dir, mod, param_dict, "6_after_flatten")
 
-  printModel(ref_dir, ref_mod, param_dict, "1_after_std_optimization")
+  mod = imcflow.prune_imcflow_subgraphs(mod)
+  printModel(dir, mod, param_dict, "7_after_prune_model")
 
-  generate_graph_executor(ref_mod, param_dict, ref_dir)
+  mod = imcflow_transform.annotateCustomId(mod)
+  printModel(dir, mod, param_dict, "7.5_after_annotate_custom_id")
+  imcflow_transform.constructUsefulMappings(mod)
+  print("-------------------- CustomID TO Name --------------------")
+  with open(f"{dir}/custom_id_to_name.txt", "w") as f:
+    pprint.pprint(imcflow.CustomIDToName(), stream=f)
+  print("-------------------- Node TO CustomID --------------------")
+  with open(f"{dir}/node_to_custom_id.txt", "w") as f:
+    pprint.pprint(HashToCustomID(), stream=f)
+  printModel(dir, mod, param_dict, "7.6_with_custom_id")
 
-  # Save final model state
-  printModel(ref_dir, ref_mod, param_dict, "2_final_ref_model")
+  mod, ttype_map = imcflow_transform.legalizeImcflowLayout(mod)
+  printModel(dir, mod, param_dict, "7.7_after_mark_in_out")
+  print("-------------------- Real Tensor Type Map --------------------")
+  pprint.pprint(ttype_map)
 
-  print(f"Reference generation completed for {test_name}")
-  return ref_mod
+  # -----------------------------------------------------------------
+  # annotate custom ID for debugging
+  # -----------------------------------------------------------------
+  mod = imcflow_transform.annotateCustomId(mod)
+  printModel(dir, mod, param_dict, "8.5_after_annotate_custom_id")
+  
+  imcflow_transform.constructUsefulMappings(mod)
+  imcflow_transform.constructCustomIDInFunc(mod)
+  imcflow_transform.constructImcflowFuncMap(mod)
+  print("-------------------- CustomID TO Name --------------------")
+  with open(f"{dir}/custom_id_to_name.txt", "w") as f:
+    pprint.pprint(imcflow.CustomIDToName(), stream=f)
+  print("-------------------- Node TO CustomID --------------------")
+  with open(f"{dir}/node_to_custom_id.txt", "w") as f:
+    pprint.pprint(HashToCustomID(), stream=f)
+  print("-------------------- func map --------------------")
+  with open(f"{dir}/func_map.txt", "w") as f:
+    pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
+  printModel(dir, mod, param_dict, "9_with_custom_id")
+
+  imcflow_transform.NodeMapper().run(mod)
+  print("------------------------------- HW MAP ----------------------------------")
+  with open(f"{dir}/hw_node_map.txt", "w") as f:
+    pprint.pprint(DevConfig().HWNodeMap, stream=f)
+
+  imcflow_transform.constructTensorEdgeList(mod)
+  print("------------------------------- Tensor Edge List --------------------------------------")
+  with open(f"{dir}/tensor_edge_list.txt", "w") as f:
+    for key, paths in DevConfig().TensorEdgeListDict.items():
+      print(key, file=f)
+      for path in paths:
+        print(path, file=f)
+
+  imcflow_transform.constructActiveIMCEDict(mod)
+  print("------------------------------  Active IMCE list ---------------------- ")
+  with open(f"{dir}/active_imce_list.txt", "w") as f:
+    pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
+
+  imcflow_transform.constructTensorIDToTensorEdgeDict()
+  print("Tensor ID to Tensor Edge")
+  with open(f"{dir}/tensor_id_to_edge.txt", "w") as f:
+    for key, paths in DevConfig().TensorIDtoEdge.items():
+      print(f"{key} : {paths}", file=f)
+
+  imcflow_transform.constructNoCPathDict(mod)
+  print("NoC Paths")
+  with open(f"{dir}/noc_paths.txt", "w") as f:
+    for key, paths in DevConfig().NoCPaths.items():
+      print(key, file=f)
+      for k, v in paths.items():
+        print(k, v, file=f)
+
+  imcflow_transform.MemoryAllocator().run(mod, ttype_map)
+  print("------------------------------- Memory Layout ----------------------------------")
+  with open(f"{dir}/mem_layout.txt", "w") as f:
+    pprint.pprint(DevConfig().MemLayout, stream=f)
+
+  imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths).run(mod)
+  with open(f"{dir}/policy_table.txt", "w") as f:
+    f.write(DevConfig().format_policy_table())
+
+  imcflow_transform.generateNoCVisualizations(mod, dir + "/noc_visualizations")
+  
+  fifo_monitor = imcflow_transform.FIFOConflictMonitor()
+  fifo_monitor.run(mod)
+  fifo_monitor.print_conflict_summary()
+  fifo_monitor.export_conflict_table(f"{dir}/fifo_conflict_table.txt")
+
+  deadlock_detector = imcflow_transform.NoCDeadlockDetector()
+  deadlock_detector.run(mod)
+  deadlock_detector.print_deadlock_summary()
+  deadlock_detector.export_deadlock_table(f"{dir}/noc_deadlock_table.txt")
+
+  # get the config
+  config = DevConfig()
+
+  def _dump(title, dict):
+    with open(f"{dir}/final_imcflow_config_{title}.txt", "w") as f:
+      print(f"----------------------- {title} ------------------------", file=f)
+      for key, value in dict.items():
+        pprint.pprint(f"{key} : {value}", stream=f)
+
+  _dump("HWNodeMap", config.HWNodeMap)
+  _dump("TensorEdgetoInfo", config.TensorEdgetoInfo)
+  _dump("TensorIDtoEdge", config.TensorIDtoEdge)
+  _dump("PolicyTableDict", config.PolicyTableDict)
+
+  CodegenSuite = imcflow_codegen.CodegenSuite(dir, mod, host_isa=DevConfig().HOST_ISA)
+  CodegenSuite(mod)
+
+  print(f"mem_layout: {config.MemLayout}")
+  print(f"Evaluation generation completed for {test_name}")
+
+  imcflow_transform.constructDataBlockDict(mod)
+  print(f"data_blocks: {config.DataBlocks}")
+  return mod, param_dict
 
 
 def run_test_evl(test_name, mod, param_dict):
@@ -145,158 +250,29 @@ def run_test_evl(test_name, mod, param_dict):
   eval_dir = f"{test_name}_evl"
   setup_dir(eval_dir)
 
-  eval_mod, eval_param_dict = mod, param_dict
-  DevConfig().clear()
+  # Transform the model for IMCFLOW
+  mod, param_dict = transform_model_for_imcflow(mod, param_dict, eval_dir, test_name)
 
-  # origin
-  printModel(eval_dir, eval_mod, eval_param_dict, "0_origin")
+  # Generate graph executor for the transformed model
+  generate_graph_executor(mod, param_dict, eval_dir)
 
-  # bind param
-  eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
-  eval_mod = transform.InferType()(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "1_after_bind")
 
-  # first level imcflow graph partition
-  eval_mod = imcflow_transform.partitionImcflowSubGraph(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "2_after_L1_partition")
+def run_test_ref(test_name, mod, param_dict):
+  """Generate reference TVM compilation results"""
+  print(f"\n{'='*60}")
+  print(f"GENERATING REFERENCE RESULTS FOR: {test_name}")
+  print(f"{'='*60}")
 
-  # split imcflow function conv to atomic ops
-  eval_mod, eval_param_dict = imcflow_transform.split_conv_to_atomic(eval_mod, eval_param_dict)
-  printModel(eval_dir, eval_mod, eval_param_dict, "2_after_atom_split")
+  ref_dir = f"{test_name}_ref"
+  setup_dir(ref_dir)
 
-  # merge composite OPs
-  eval_mod = imcflow_transform.merge_composite_ops(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "3_after_merge")
+  # Transform the model for IMCFLOW
+  mod, param_dict = transform_model_for_imcflow(mod, param_dict, ref_dir, test_name)
 
-  # make split and concat super node
-  eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
+  run_cpu_reference(mod, param_dict, ref_dir)
 
-  eval_mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "4.5_after_concat_distributor")
-
-  eval_mod = imcflow_transform.partitionRound(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")
-
-  eval_mod = imcflow.flattenImcflowTopFuncs(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "6_after_flatten")
-
-  eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "7_after_prune_model")
-
-  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "7.5_after_annotate_custom_id")
-  imcflow_transform.constructUsefulMappings(eval_mod)
-  print("-------------------- CustomID TO Name --------------------")
-  with open(f"{eval_dir}/custom_id_to_name.txt", "w") as f:
-    pprint.pprint(imcflow.CustomIDToName(), stream=f)
-  print("-------------------- Node TO CustomID --------------------")
-  with open(f"{eval_dir}/node_to_custom_id.txt", "w") as f:
-    pprint.pprint(HashToCustomID(), stream=f)
-  printModel(eval_dir, eval_mod, eval_param_dict, "7.6_with_custom_id")
-
-  eval_mod, ttype_map = imcflow_transform.legalizeImcflowLayout(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "7.7_after_mark_in_out")
-  print("-------------------- Real Tensor Type Map --------------------")
-  pprint.pprint(ttype_map)
-
-  # -----------------------------------------------------------------
-  # annotate custom ID for debugging
-  # -----------------------------------------------------------------
-  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
-  printModel(eval_dir, eval_mod, eval_param_dict, "8.5_after_annotate_custom_id")
-  
-  imcflow_transform.constructUsefulMappings(eval_mod)
-  imcflow_transform.constructCustomIDInFunc(eval_mod)
-  imcflow_transform.constructImcflowFuncMap(eval_mod)
-  print("-------------------- CustomID TO Name --------------------")
-  with open(f"{eval_dir}/custom_id_to_name.txt", "w") as f:
-    pprint.pprint(imcflow.CustomIDToName(), stream=f)
-  print("-------------------- Node TO CustomID --------------------")
-  with open(f"{eval_dir}/node_to_custom_id.txt", "w") as f:
-    pprint.pprint(HashToCustomID(), stream=f)
-  print("-------------------- func map --------------------")
-  with open(f"{eval_dir}/func_map.txt", "w") as f:
-    pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
-  printModel(eval_dir, eval_mod, eval_param_dict, "9_with_custom_id")
-
-  imcflow_transform.NodeMapper().run(eval_mod)
-  print("------------------------------- HW MAP ----------------------------------")
-  with open(f"{eval_dir}/hw_node_map.txt", "w") as f:
-    pprint.pprint(DevConfig().HWNodeMap, stream=f)
-
-  imcflow_transform.constructTensorEdgeList(eval_mod)
-  print("------------------------------- Tensor Edge List --------------------------------------")
-  with open(f"{eval_dir}/tensor_edge_list.txt", "w") as f:
-    for key, paths in DevConfig().TensorEdgeListDict.items():
-      print(key, file=f)
-      for path in paths:
-        print(path, file=f)
-
-  imcflow_transform.constructActiveIMCEDict(eval_mod)
-  print("------------------------------  Active IMCE list ---------------------- ")
-  with open(f"{eval_dir}/active_imce_list.txt", "w") as f:
-    pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
-
-  imcflow_transform.constructTensorIDToTensorEdgeDict()
-  print("Tensor ID to Tensor Edge")
-  with open(f"{eval_dir}/tensor_id_to_edge.txt", "w") as f:
-    for key, paths in DevConfig().TensorIDtoEdge.items():
-      print(f"{key} : {paths}", file=f)
-
-  imcflow_transform.constructNoCPathDict(eval_mod)
-  print("NoC Paths")
-  with open(f"{eval_dir}/noc_paths.txt", "w") as f:
-    for key, paths in DevConfig().NoCPaths.items():
-      print(key, file=f)
-      for k, v in paths.items():
-        print(k, v, file=f)
-
-  imcflow_transform.MemoryAllocator().run(eval_mod, ttype_map)
-  print("------------------------------- Memory Layout ----------------------------------")
-  with open(f"{eval_dir}/mem_layout.txt", "w") as f:
-    pprint.pprint(DevConfig().MemLayout, stream=f)
-
-  imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths).run(eval_mod)
-  with open(f"{eval_dir}/policy_table.txt", "w") as f:
-    f.write(DevConfig().format_policy_table())
-
-  imcflow_transform.generateNoCVisualizations(eval_mod, eval_dir + "/noc_visualizations")
-  
-  fifo_monitor = imcflow_transform.FIFOConflictMonitor()
-  fifo_monitor.run(eval_mod)
-  fifo_monitor.print_conflict_summary()
-  fifo_monitor.export_conflict_table(f"{eval_dir}/fifo_conflict_table.txt")
-
-  deadlock_detector = imcflow_transform.NoCDeadlockDetector()
-  deadlock_detector.run(eval_mod)
-  deadlock_detector.print_deadlock_summary()
-  deadlock_detector.export_deadlock_table(f"{eval_dir}/noc_deadlock_table.txt")
-
-  # get the config
-  config = DevConfig()
-
-  def _dump(title, dict):
-    with open(f"{eval_dir}/final_imcflow_config_{title}.txt", "w") as f:
-      print(f"----------------------- {title} ------------------------", file=f)
-      for key, value in dict.items():
-        pprint.pprint(f"{key} : {value}", stream=f)
-
-  _dump("HWNodeMap", config.HWNodeMap)
-  _dump("TensorEdgetoInfo", config.TensorEdgetoInfo)
-  _dump("TensorIDtoEdge", config.TensorIDtoEdge)
-  _dump("PolicyTableDict", config.PolicyTableDict)
-
-  CodegenSuite = imcflow_codegen.CodegenSuite(eval_dir, eval_mod, host_isa=DevConfig().HOST_ISA)
-  CodegenSuite(eval_mod)
-
-  print(f"mem_layout: {config.MemLayout}")
-  print(f"Evaluation generation completed for {test_name}")
-
-  imcflow_transform.constructDataBlockDict(eval_mod)
-  print(f"data_blocks: {config.DataBlocks}")
-
-  generate_graph_executor(eval_mod, eval_param_dict, eval_dir)
+  print(f"Reference generation completed for {test_name}")
+  return mod
 
 
 def test_big_ref():
@@ -329,6 +305,11 @@ def test_one_relu_evl():
   """Generate evaluation for relu model"""
   mod, param_dict = models_for_test.getOneReluModel()
   run_test_evl("one_relu", mod, param_dict)
+
+def test_one_conv_ref():
+  """Generate reference for conv model"""
+  mod, param_dict = models_for_test.getOneConvModel()
+  run_test_ref("one_conv", mod, param_dict)
 
 def test_one_conv_evl():
   """Generate evaluation for conv model"""
