@@ -2089,7 +2089,8 @@ RELAY_REGISTER_OP("nn.imcflow_qconv")
     .add_argument("weight", "Tensor", "The weight tensor.")
     .add_argument("config", "Tensor", "The config tensor.")
     .set_support_level(2)
-    .add_type_rel("ImcflowQConv2D", ImcflowQConv2DRel);
+    .add_type_rel("ImcflowQConv2D", ImcflowQConv2DRel)
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
 
 // relay.nn.imcflow_qdwconv
 TVM_REGISTER_NODE_TYPE(ImcflowQDwConv2DAttrs);
@@ -2227,7 +2228,8 @@ This operator performs depthwise convolution optimized for IMCFlow hardware.
     .add_argument("weight", "Tensor", "The weight tensor.")
     .add_argument("config", "Tensor", "The config tensor.")
     .set_support_level(2)
-    .add_type_rel("ImcflowQDwConv2D", ImcflowQDwConv2DRel);
+    .add_type_rel("ImcflowQDwConv2D", ImcflowQDwConv2DRel)
+    .set_attr<TOpPattern>("TOpPattern", kOutEWiseFusable);
 
 }  // namespace relay
 }  // namespace tvm

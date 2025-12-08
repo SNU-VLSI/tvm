@@ -4,7 +4,7 @@ from tvm import te
 
 def imcflow_qconv2d(
     input : te.Tensor,
-    filter : te.Tensor, 
+    filter : te.Tensor,
     strides, padding, dilation, data_layout="NCHW", kernel_layout="", out_dtype=None
 ):
 
@@ -23,7 +23,7 @@ def imcflow_qconv2d(
             (ww - padding[1]) < IW
           ),
           input[nn, cc, hh - padding[0], ww - padding[1]],
-          tvm.tir.const(0.0, "float32"),
+          tvm.tir.const(0, "uint8"),
       ),
       name="Apad",
   )
@@ -34,10 +34,13 @@ def imcflow_qconv2d(
   rx = te.reduce_axis((0, KW), name="rx")
 
   # Compute the convolution
+  # Cast to int16 for accumulation to prevent overflow
   B = te.compute(
       (batch, out_channel, OH, OW),
       lambda nn, ff, hh, ww: te.sum(
-          Apad[nn, rc, hh * strides[0] + ry, ww * strides[1] + rx] * filter[ff, rc, ry, rx], axis=[rc, ry, rx]
+          Apad[nn, rc, hh * strides[0] + ry, ww * strides[1] + rx].astype("int16") *
+          filter[ff, rc, ry, rx].astype("int16"),
+          axis=[rc, ry, rx]
       ),
       name="B",
   )

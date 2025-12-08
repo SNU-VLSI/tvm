@@ -302,9 +302,9 @@ def test_imcflow_qconv2d():
   kH, kW = 3, 3
   padding, stride = 1, 1
 
-  input_ = relay.var("input", shape=(N, IC, H, W))
-  weight_ = relay.var("weight", shape=(OC, IC, kH, kW))
-  config_ = ConfigData((N, IC, H, W), (OC, IC, kH, kW), padding=padding, stride=stride).get_as_const_tensor(),
+  input_ = relay.var("input", shape=(N, IC, H, W), dtype="uint8")
+  weight_ = relay.var("weight", shape=(OC, IC, kH, kW), dtype="int8")
+  config_ = ConfigData((N, IC, H, W), (OC, IC, kH, kW), padding=padding, stride=stride).get_as_const_tensor()
 
   y = imcflow_qconv2d(
     input_,
@@ -328,10 +328,13 @@ def test_imcflow_qconv2d():
   with tvm.transform.PassContext(opt_level=0):
     graph, lib, params = relay.build(mod, target=target)
   mod = graph_executor.create(graph, lib, device=ctx)
+  # Load constant parameters (config)
+  if params:
+    mod.load_params(tvm.runtime.save_param_dict(params))
 
 
-  input_data = np.random.rand(2, 32, 16, 16).astype("float32")
-  weight_data = np.random.rand(32, 32, 3, 3).astype("float32")
+  input_data = np.random.randint(0, 16, size=(2, 32, 16, 16)).astype("uint8")
+  weight_data = np.random.randint(-8, 7, size=(32, 32, 3, 3)).astype("int8")
 
   mod.set_input(input=input_data)
   mod.set_input(weight=weight_data)
@@ -339,13 +342,14 @@ def test_imcflow_qconv2d():
 
   res = mod.get_output(0).asnumpy()
   ref_res = torch.functional.F.conv2d(
-    input=torch.tensor(input_data),
-    weight=torch.tensor(weight_data),
+    input=torch.tensor(input_data, dtype=torch.float32),
+    weight=torch.tensor(weight_data, dtype=torch.float32),
     padding=(padding, padding),
     stride=(stride, stride)
   ).numpy()
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+
 
 def test_packing_unpacking():
   IC = 2

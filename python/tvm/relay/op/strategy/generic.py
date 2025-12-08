@@ -2205,7 +2205,7 @@ def wrap_compute_imcflow_qconv2d(
 def imcflow_qconv2d_strategy(attrs, inputs, out_type, target):
     """conv2d generic strategy"""
     strategy = _op.OpStrategy()
-    data, kernel = inputs
+    data, kernel, config = inputs
     dilation = get_const_tuple(attrs.dilation)
     groups = attrs.groups
     layout = attrs.data_layout
