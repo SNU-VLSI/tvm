@@ -221,11 +221,27 @@ int main(int argc, char** argv) {
   TVMGraphExecutor_Run(exec);
 #endif
 
+  // First, check what shape the executor actually has
+  uint32_t output_eid = TVMGraphExecutor_GetEntryId(exec, exec->outputs[0].node_id, exec->outputs[0].index);
+  DLTensor* internal_output = &(exec->data_entry[output_eid].dl_tensor);
+  fprintf(stderr, "dbg: internal output ndim=%d, shape=[", internal_output->ndim);
+  for (int i = 0; i < internal_output->ndim; ++i) {
+    fprintf(stderr, "%lld%s", (long long)internal_output->shape[i],
+            i < internal_output->ndim - 1 ? ", " : "");
+  }
+  fprintf(stderr, "]\n");
+
   DLTensor out = {0};
   out.device = dev;
-  int64_t oshape[1] = {OC,};
-  out.ndim = 1; out.shape = oshape; out.dtype = (DLDataType){kDLFloat, 32, 1};
-  size_t onumel = (size_t)oshape[0];
+  int64_t oshape[4] = {1, OC, 1, 1};  // Try matching internal shape
+  out.ndim = internal_output->ndim;  // Use actual ndim from executor
+  out.shape = oshape;
+  out.dtype = (DLDataType){kDLFloat, 32, 1};
+  size_t onumel = 1;
+  for (int i = 0; i < out.ndim; ++i) {
+    oshape[i] = internal_output->shape[i];  // Copy actual shape
+    onumel *= (size_t)internal_output->shape[i];
+  }
   size_t onbytes = onumel * sizeof(float);
   void* out_data = NULL; TVMPlatformMemoryAllocate(onbytes, dev, &out_data);
   out.data = out_data;
