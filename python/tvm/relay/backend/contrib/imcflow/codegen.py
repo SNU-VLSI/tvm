@@ -428,6 +428,8 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
         self._collect_block_lines(child, output_lines, indent + 2)
     elif isinstance(block, SimpleFor):
       self._collect_block_lines(block.body, output_lines, indent + 2)
+    elif isinstance(block, LoadLBBlock):
+      self._collect_block_lines(block.body, output_lines, indent + 2)
     elif isinstance(block, RecvSendWrapper):
       self._collect_block_lines(block.body, output_lines, indent + 2)
     elif isinstance(block, ConvBlock):
