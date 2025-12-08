@@ -73,7 +73,7 @@ def make_cpu_runnable(mod):
   """
   mod = clearCompilerAttr(mod)
   mod = clearPrimitiveTag(mod)
-  mod = relay.transform.Inline()(mod)
+  # mod = relay.transform.Inline()(mod)
 
   class WeightReverter(ExprMutator):
     def visit_call(self, call):
