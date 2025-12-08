@@ -3058,7 +3058,8 @@ class PolicyTableGenerator:
                 """Append new entries to policy tables for a single destination"""
                 source_node = mapping_info[0]
                 dest_node = mapping_info[1]
-                dest_index = mapping_info[2]
+                dest_index = mapping_info[2] or 0 # split index for destination node
+
                 if isinstance(edge, NodeID):
                   src_node_data = f"instruction_{edge.name}"
                 else:
