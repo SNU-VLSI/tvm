@@ -82,6 +82,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, output_dir):
   ctx = tvm.cpu(0)
 
   mod = cpu_run.make_cpu_runnable(mod)
+  printModel(output_dir, mod, param_dict, "cpu_runnable_model")
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
     graph, lib, params = tvm.relay.build(mod, target=target, params=param_dict)
   

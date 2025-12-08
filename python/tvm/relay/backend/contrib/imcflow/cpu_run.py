@@ -13,22 +13,30 @@ def clearPrimitiveTag(mod):
       fn = super().visit_function(fn)
 
       NewAttrs = {}
-      for key in fn.attrs.keys():
-        NewAttrs[key] = fn.attrs.get_str(key)
-      if "Primitive" in NewAttrs.keys():
-        del NewAttrs["Primitive"]
+      if fn.attrs:
+        for key in fn.attrs.keys():
+          NewAttrs[key] = fn.attrs[key]
+      
+      # for attr in ["Primitive", "Composite", "global_symbol", "Compiler"]:
+      for attr in ["Primitive", "Composite", "Compiler"]:
+        if attr in NewAttrs:
+          del NewAttrs[attr]
 
       return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs))
 
     def visit_call(self, call):
-      if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"]):
-        var_map = {}
-        for arg, param in zip(call.args, call.op.params):
-          var_map[param] = super().visit(arg)
-        new_body = relay.bind(super().visit(call.op.body), var_map)
-        return new_body
-      else:
-        return super().visit_call(call)
+      # Inline local functions with Composite attribute
+      if isinstance(call.op, relay.Function) and call.op.attrs and "Composite" in call.op.attrs:
+        # We want to inline this function.
+        # 1. Visit arguments
+        new_args = [self.visit(arg) for arg in call.args]
+        # 2. Visit body of the function
+        new_body = self.visit(call.op.body)
+        # 3. Bind parameters to arguments
+        bind_map = dict(zip(call.op.params, new_args))
+        return relay.bind(new_body, bind_map)
+      
+      return super().visit_call(call)
 
   for func_name in mod.functions:
     mod[func_name] = _Visitor().visit(mod[func_name])
@@ -41,9 +49,10 @@ def clearCompilerAttr(mod):
       fn = super().visit_function(fn)
 
       NewAttrs = {}
-      for key in fn.attrs.keys():
-        NewAttrs[key] = fn.attrs.get_str(key)
-      if "Compiler" in NewAttrs.keys():
+      if fn.attrs:
+        for key in fn.attrs.keys():
+          NewAttrs[key] = fn.attrs[key]
+      if "Compiler" in NewAttrs:
         del NewAttrs["Compiler"]
 
       return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs))
@@ -64,6 +73,7 @@ def make_cpu_runnable(mod):
   """
   mod = clearCompilerAttr(mod)
   mod = clearPrimitiveTag(mod)
+  mod = relay.transform.Inline()(mod)
 
   class WeightReverter(ExprMutator):
     def visit_call(self, call):
@@ -128,7 +138,12 @@ def make_cpu_runnable(mod):
             if len(new_type_args) > 1:
                 new_type_args[1] = relay.TensorType(restored_weight.data.shape, restored_weight.data.dtype)
 
-            return Call(new_call.op, new_args, new_call.attrs, new_type_args, new_call.span)
+            new_attrs = {}
+            for key in new_call.attrs.keys():
+                new_attrs[str(key)] = new_call.attrs[key]
+            new_attrs["const_packed_node"] = False
+            new_attr_node = tvm.ir.make_node("relay.attrs.ImcflowQConv2DAttrs", **new_attrs)
+            return Call(new_call.op, new_args, new_attr_node, new_type_args, new_call.span)
             
         elif new_call.op.name == "nn.imcflow_qdwconv":
           weight = new_call.args[1]
@@ -169,7 +184,12 @@ def make_cpu_runnable(mod):
             if len(new_type_args) > 1:
                 new_type_args[1] = relay.TensorType(restored_weight.data.shape, restored_weight.data.dtype)
 
-            return Call(new_call.op, new_args, new_call.attrs, new_type_args, new_call.span)
+            new_attrs = {}
+            for key in new_call.attrs.keys():
+                new_attrs[key] = new_call.attrs[key]
+            new_attrs["const_packed_node"] = False
+            new_attr_node = tvm.ir.make_node("relay.attrs.ImcflowQDwConv2DAttrs", **new_attrs)
+            return Call(new_call.op, new_args, new_attr_node, new_type_args, new_call.span)
 
       return new_call
 
