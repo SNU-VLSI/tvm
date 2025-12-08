@@ -63,13 +63,13 @@ def test_batchnorm():
   IC = 64
   IH, IW = 32, 32
 
-  data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
+  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
   fused_scale = relay.var("fused_scale", shape=(IC,), dtype="int16")
   fused_bias = relay.var("fused_bias", shape=(IC,), dtype="int16")
   y = imcflow_batch_norm(data, fused_scale, fused_bias, 1)
-  func = relay.Function([data, fused_scale, fused_bias], y[0])
+  func = relay.Function([data, fused_scale, fused_bias], y)
   
-  input_data = np.ones((1, IC, IH, IW), dtype="float32")
+  input_data = np.ones((1, IC, IH, IW), dtype="int16")
   fused_scale_data = np.ones((IC,), dtype="int16")
   fused_bias_data = np.ones((IC,), dtype="int16")
 
@@ -89,11 +89,11 @@ def test_batchnorm():
 
   res = mod.get_output(0).asnumpy()
   print(res)
-  ref_res = np.full((1, IC, IH, IW), 2, dtype="float32")
+  ref_res = np.full((1, IC, IH, IW), 2, dtype="int16")
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
-  out = tvm.IRModule.from_expr(y[0])
+  out = tvm.IRModule.from_expr(y)
   out = relay.transform.InferType()(out)
   print(out)
 

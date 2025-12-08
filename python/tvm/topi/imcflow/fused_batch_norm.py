@@ -70,11 +70,15 @@ def fused_batch_norm(
 
     shape = [1] * len(data.shape)
     shape[axis] = data.shape[axis]
-    fused_scale_fp32 = topi.cast(fused_scale, "float32")
-    fused_bias_fp32 = topi.cast(fused_bias, "float32")
 
-    fused_scale_rs = topi.reshape(fused_scale_fp32, shape)
-    fused_bias_rs = topi.reshape(fused_bias_fp32, shape)
+    # cast to float32 if data is float32
+    if data.dtype == "float32":
+      fused_scale = topi.cast(fused_scale, "float32")
+      fused_bias = topi.cast(fused_bias, "float32")
+
+    fused_scale_rs = topi.reshape(fused_scale, shape)
+    fused_bias_rs = topi.reshape(fused_bias, shape)
+
     out = data * fused_scale_rs + fused_bias_rs
 
     # placeholder reuse, we multiply by 1 and return them.
