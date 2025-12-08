@@ -1619,6 +1619,8 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
   Array<PrimExpr> meta_schedule_original_shape;  // The original shape of the weights
   DataType out_dtype;
   bool const_packed_node;
+  int adcmode;
+  int vmode;
 
   TVM_DECLARE_ATTRS(ImcflowQConv2DAttrs, "relay.attrs.ImcflowQConv2DAttrs") {
     TVM_ATTR_FIELD(strides)
@@ -1671,6 +1673,12 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
     TVM_ATTR_FIELD(const_packed_node)
         .set_default(false)
         .describe("Whether the weight is a constant packed node");
+    TVM_ATTR_FIELD(adcmode)
+        .set_default(0)
+        .describe("ADC mode for quantization.");
+    TVM_ATTR_FIELD(vmode)
+        .set_default(0)
+        .describe("Voltage mode for quantization.");
   }
 };
 
