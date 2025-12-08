@@ -65,12 +65,29 @@ class InputGenerator:
         input_data = np.random.randint(0, 256, size=(N, C, H, W), dtype='uint8')
         return {'input': input_data}
     
+    def generate_one_relu_input(self) -> Dict[str, np.ndarray]:
+        """Generate input for single ReLU test"""
+        # Match the test configuration from models_for_test.py
+        N, C, H, W = 1, 28, 4, 4
+
+        # Generate deterministic pattern with linear index
+        input_data = np.zeros((N, C, H, W), dtype='int16')
+        for c in range(C):
+            for h in range(H):
+                for w in range(W):
+                    idx = c * H * W + h * W + w
+                    input_data[0, c, h, w] = idx
+
+        return {'input': input_data}
+
     def generate_one_conv_input(self) -> Dict[str, np.ndarray]:
         """Generate input for single convolution test"""
         # Match the test configuration from models_for_test.py
-        N, C, H, W = 1, 32, 32, 32
-        input_data = np.random.randint(0, 16, size=(N, C, H, W), dtype='uint8')
-        return {'input': input_data}
+        N, C, H, W = 1, 28, 4, 4
+
+        # Generate simple constant pattern (value = 1)
+        input_data = np.ones((N, C, H, W), dtype='uint8')
+        return {'conv_input': input_data}
     
     def save_to_files(self, input_dict: Dict[str, np.ndarray], output_dir: str):
         """
@@ -138,6 +155,20 @@ def load_resnet8_input(input_dir: str) -> Dict[str, np.ndarray]:
     return {'model_input': data}
 
 
+def load_one_relu_input(input_dir: str) -> Dict[str, np.ndarray]:
+    """Load one ReLU input from files"""
+    gen = InputGenerator()
+    data = gen.load_from_files(input_dir, 'input')
+    return {'input': data}
+
+
+def load_one_conv_input(input_dir: str) -> Dict[str, np.ndarray]:
+    """Load one Conv input from files"""
+    gen = InputGenerator()
+    data = gen.load_from_files(input_dir, 'conv_input')
+    return {'conv_input': data}
+
+
 if __name__ == "__main__":
     # Example usage: Generate test inputs for all models
     print("="*60)
@@ -160,12 +191,17 @@ if __name__ == "__main__":
     print("\n--- MobileNet ---")
     mobilenet_inputs = gen.generate_mobilenet_input(small_debug=False)
     gen.save_to_files(mobilenet_inputs, "./test_inputs/mobilenet")
-    
-    # One conv test
+
+    # One ReLU test
+    print("\n--- One ReLU ---")
+    onerelu_inputs = gen.generate_one_relu_input()
+    gen.save_to_files(onerelu_inputs, "./test_inputs/one_relu")
+
+    # One Conv test
     print("\n--- One Conv ---")
     oneconv_inputs = gen.generate_one_conv_input()
     gen.save_to_files(oneconv_inputs, "./test_inputs/one_conv")
-    
+
     print("\n" + "="*60)
     print("✅ All test inputs generated successfully!")
     print("="*60)

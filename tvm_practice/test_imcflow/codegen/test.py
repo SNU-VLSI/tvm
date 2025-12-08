@@ -29,7 +29,7 @@ from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, d
 from models import models_for_test
 
 # Import shared input generator
-from input_generator import InputGenerator, load_resnet8_input
+from input_generator import InputGenerator, load_resnet8_input, load_one_relu_input, load_one_conv_input
 
 def setup_dir(dir_name):
   def clean_dir_recursive(path):
@@ -345,12 +345,40 @@ def test_one_conv_quant_evl():
 def test_one_relu_evl():
   """Generate evaluation for relu model"""
   mod, param_dict = models_for_test.getOneReluModel()
-  run_test_evl("one_relu", mod, param_dict)
+
+  # Generate and save test inputs if they don't exist
+  input_dir = "./test_inputs/one_relu"
+  import os
+  if not os.path.exists(f"{input_dir}/input.npy"):
+    print("Generating test inputs...")
+    gen = InputGenerator(seed=42)
+    inputs = gen.generate_one_relu_input()
+    gen.save_to_files(inputs, input_dir)
+
+  # Load shared test inputs for CPU validation
+  input_dict = load_one_relu_input(input_dir)
+
+  # Run with CPU validation enabled
+  run_test_evl("one_relu", mod, param_dict, input_data_dict=input_dict)
 
 def test_one_conv_evl():
   """Generate evaluation for conv model"""
   mod, param_dict = models_for_test.getOneConvModel()
-  run_test_evl("one_conv", mod, param_dict)
+
+  # Generate and save test inputs if they don't exist
+  input_dir = "./test_inputs/one_conv"
+  import os
+  if not os.path.exists(f"{input_dir}/conv_input.npy"):
+    print("Generating test inputs...")
+    gen = InputGenerator(seed=42)
+    inputs = gen.generate_one_conv_input()
+    gen.save_to_files(inputs, input_dir)
+
+  # Load shared test inputs for CPU validation
+  input_dict = load_one_conv_input(input_dir)
+
+  # Run with CPU validation enabled
+  run_test_evl("one_conv", mod, param_dict, input_data_dict=input_dict)
 
 def test_model_v2():
   """Generate evaluation for relu model"""
