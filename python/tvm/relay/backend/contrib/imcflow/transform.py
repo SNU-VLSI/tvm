@@ -3727,52 +3727,6 @@ def generateNoCVisualizations(mod, output_dir="noc_visualizations"):
     visualizer.visualize_all_functions(mod)
     debug_print(f"NoC visualizations saved to: {output_dir}")
 
-def clearPrimitiveTag(mod):
-  class _Visitor(tvm.relay.ExprMutator):
-    def visit_function(self, fn):
-      fn = super().visit_function(fn)
-
-      NewAttrs = {}
-      for key in fn.attrs.keys():
-        NewAttrs[key] = fn.attrs.get_str(key)
-      if "Primitive" in NewAttrs.keys():
-        del NewAttrs["Primitive"]
-
-      return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs))
-
-    def visit_call(self, call):
-      if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs and re.match(r"imcflow\..*", call.op.attrs["Composite"]):
-        var_map = {}
-        for arg, param in zip(call.args, call.op.params):
-          var_map[param] = super().visit(arg)
-        new_body = relay.bind(super().visit(call.op.body), var_map)
-        return new_body
-      else:
-        return super().visit_call(call)
-
-  for func_name in mod.functions:
-    mod[func_name] = _Visitor().visit(mod[func_name])
-
-  return mod
-
-def clearCompilerAttr(mod):
-  class _Visitor(tvm.relay.ExprMutator):
-    def visit_function(self, fn):
-      fn = super().visit_function(fn)
-
-      NewAttrs = {}
-      for key in fn.attrs.keys():
-        NewAttrs[key] = fn.attrs.get_str(key)
-      if "Compiler" in NewAttrs.keys():
-        del NewAttrs["Compiler"]
-
-      return FunctionWithFields(fn, list(fn.params), fn.body, fn.ret_type, fn.type_params, tvm.ir.make_node("DictAttrs", **NewAttrs))
-
-  for func_name in mod.functions:
-    mod[func_name] = _Visitor().visit(mod[func_name])
-
-  return mod
-
 def constructImcflowFuncMap(mod):
   from tvm.contrib.imcflow import FunctionInfo
   
