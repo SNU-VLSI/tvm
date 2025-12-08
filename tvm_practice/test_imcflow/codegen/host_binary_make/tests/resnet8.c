@@ -13,6 +13,9 @@
 // Direct call prototypes for generated kernels
 #include <tvm/runtime/c_backend_api.h>
 
+// Shared test input loader
+#include "test_input_loader.h"
+
 static char* read_entire_file(const char* path, size_t* out_size) {
   FILE* f = fopen(path, "rb");
   if (!f) return NULL;
@@ -118,6 +121,7 @@ static size_t nnz_tensor(const DLTensor* t) {
 int main(int argc, char** argv) {
   const char* graph_path = argc > 1 ? argv[1] : "mlf/executor-config/graph/default.graph";
   const char* params_path = argc > 2 ? argv[2] : "mlf/parameters/default.params";
+  const char* input_dir = argc > 3 ? argv[3] : "./test_inputs/resnet8_small";
 
   if (TVMPlatformInitialize() != kTvmErrorNoError) {
     fprintf(stderr, "Platform init failed\n");
@@ -168,24 +172,64 @@ int main(int argc, char** argv) {
   N = 1; C = 3; H = 8; W = 8;
   OC=10;
 
-  int64_t shape4[4] = {N, C, H, W};
+  // Try to load input from shared test files
   DLTensor x1 = {0};
-  x1.device = dev;
-  x1.ndim = 4;
-  x1.shape = shape4;
-  x1.dtype = (DLDataType){kDLInt, 8, 1};
-  size_t numel = (size_t)shape4[0]*shape4[1]*shape4[2]*shape4[3];
-  size_t nbytes = numel * sizeof(int8_t);
-  void* x1_data = NULL;
-  TVMPlatformMemoryAllocate(nbytes, dev, &x1_data);
-  x1.data = x1_data;
-  // Initialize like cpp_graph_deploy.cpp
-  fill_tensor_linear_chw_index(&x1);
-  printf("dbg: inputs prepared (%zu bytes each)\n", nbytes);
-  for(size_t i=0; i<numel; ++i) {
-    printf("%d ", ((int8_t*)x1_data)[i]);
-    if((i+1)%16 == 0) printf("\n");
+  fprintf(stderr, "Attempting to load input from: %s\n", input_dir);
+  
+  if (load_tensor_from_dir(input_dir, "model_input", dev, &x1) == 0) {
+    // Successfully loaded from file
+    fprintf(stderr, "✅ Loaded input from shared test files\n");
+    fprintf(stderr, "   Shape: [");
+    for (int i = 0; i < x1.ndim; ++i) {
+      fprintf(stderr, "%lld%s", (long long)x1.shape[i], 
+              i < x1.ndim - 1 ? ", " : "");
+    }
+    fprintf(stderr, "]\n");
+    fprintf(stderr, "   Dtype: int%d\n", x1.dtype.bits);
+    
+    size_t numel = num_elements_from_shape(&x1);
+    fprintf(stderr, "   Total elements: %zu\n", numel);
+    
+    // Print first 16 values for verification
+    fprintf(stderr, "   First 16 values: ");
+    size_t print_n = (numel < 16) ? numel : 16;
+    for (size_t i = 0; i < print_n; ++i) {
+      fprintf(stderr, "%d ", ((int8_t*)x1.data)[i]);
+    }
+    fprintf(stderr, "\n");
+  } else {
+    // Fallback: generate input manually
+    fprintf(stderr, "⚠️  Failed to load from file, generating input manually\n");
+    
+    int64_t shape4[4] = {N, C, H, W};
+    x1.device = dev;
+    x1.ndim = 4;
+    x1.shape = shape4;
+    x1.dtype = (DLDataType){kDLInt, 8, 1};
+    size_t numel = (size_t)shape4[0]*shape4[1]*shape4[2]*shape4[3];
+    size_t nbytes = numel * sizeof(int8_t);
+    void* x1_data = NULL;
+    TVMPlatformMemoryAllocate(nbytes, dev, &x1_data);
+    x1.data = x1_data;
+    
+    // Initialize with constant pattern (matches Python generator)
+    fill_tensor_linear_chw_index(&x1);
+    fprintf(stderr, "   Generated %zu bytes\n", nbytes);
   }
+  
+  // Print input summary for debugging
+  size_t numel = num_elements_from_shape(&x1);
+  printf("\nInput tensor prepared:\n");
+  printf("  Shape: [%lld, %lld, %lld, %lld]\n", 
+         (long long)x1.shape[0], (long long)x1.shape[1],
+         (long long)x1.shape[2], (long long)x1.shape[3]);
+  printf("  Total elements: %zu\n", numel);
+  printf("  First 32 values:\n  ");
+  for(size_t i = 0; i < numel && i < 32; ++i) {
+    printf("%d ", ((int8_t*)x1.data)[i]);
+    if((i+1) % 16 == 0) printf("\n  ");
+  }
+  printf("\n");
 
 #if 0
   // Optional input dumps for debugging
@@ -253,33 +297,36 @@ int main(int argc, char** argv) {
 
   // Print first 16 values and checksum (concise verification)
   float* out_f = (float*)out.data;
-  printf("Output tensor (%zu elements):\n", onumel);
-  for(int i=0; i<onumel; ++i) {
-    printf("%f ", out_f[i]);
+  printf("\nOutput tensor (%zu elements):\n", onumel);
+  printf("  Shape: [");
+  for (int i = 0; i < out.ndim; ++i) {
+    printf("%lld%s", (long long)out.shape[i], 
+           i < out.ndim - 1 ? ", " : "");
   }
+  printf("]\n");
+  printf("  Values: ");
+  for(size_t i = 0; i < onumel; ++i) {
+    printf("%f ", out_f[i]);
+    if((i+1) % 5 == 0 && i+1 < onumel) printf("\n          ");
+  }
+  printf("\n");
 
-  // prepare reference
-  //TODO: calculate reference
-  // int16_t ref[onumel];
-  // for (size_t i = 0; i < onumel; ++i) ref[i] = (((int16_t*)x1_data)[i] > 0) ? ((int16_t*)x1_data)[i] : 0;
-
-  // Verify against reference
-  // size_t nerr = 0;
-  // for (size_t i = 0; i < onumel; ++i) {
-  //   if (out_f[i] != ref[i]) {
-  //     if (nerr < 16) {
-  //       printf("mismatch at %zu: got %d, expected %d\n", i, out_f[i], ref[i]);
-  //     }
-  //     ++nerr;
-  //   }
-  // }
-  // if(nerr == 0) {
-  //   printf("PASS: all %zu values match reference\n", onumel);
-  // } else {
-  //   printf("FAIL: %zu mismatches found\n", nerr);
+  // TODO: Load and compare with Python CPU reference
+  // char ref_path[512];
+  // snprintf(ref_path, sizeof(ref_path), "../../resnet8_evl/cpu_reference_output.npy");
+  // if (access(ref_path, F_OK) == 0) {
+  //   float* ref_output = load_npy_float(ref_path);
+  //   compare_outputs(out_f, ref_output, onumel, 1e-3);
   // }
 
-  TVMPlatformMemoryFree(x1_data, dev);
+  printf("\n✅ Execution completed successfully\n");
+
+  // Cleanup
+  if (x1.shape && x1.shape != (int64_t[]){1, 3, 8, 8}) {
+    // Shape was dynamically allocated by load_tensor_from_dir
+    free(x1.shape);
+  }
+  TVMPlatformMemoryFree(x1.data, dev);
   TVMPlatformMemoryFree(out_data, dev);
   free(graph_json);
   free(params_buf);

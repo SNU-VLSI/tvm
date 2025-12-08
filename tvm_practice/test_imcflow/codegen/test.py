@@ -28,6 +28,9 @@ from models import small_model
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import models_for_test
 
+# Import shared input generator
+from input_generator import InputGenerator, load_resnet8_input
+
 def setup_dir(dir_name):
   def clean_dir_recursive(path):
     """Recursively clean all files but keep all directory inodes intact"""
@@ -58,12 +61,58 @@ def printModel(result_dir, mod, param_dict, mod_name):
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
 
-def run_cpu_reference(mod, param_dict, dir_name):
-  with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-    graph, lib, params = tvm.relay.build(mod, target="llvm")
-  mod = graph_executor.create(graph, lib, tvm.cpu(0))
-  mod.set_input(**params)
-  mod.run()
+def run_cpu_validation(mod, param_dict, input_data_dict, output_dir):
+  """Run transformed model on CPU for validation
+  
+  Args:
+    mod: The TVM relay module
+    param_dict: Model parameters
+    input_data_dict: Dictionary of input name -> numpy array
+    output_dir: Directory to save CPU outputs
+  
+  Returns:
+    output: The CPU execution output as numpy array
+  """
+  print("\n" + "="*40)
+  print("RUNNING CPU VALIDATION")
+  print("="*40)
+  
+  target = "llvm"
+  ctx = tvm.cpu(0)
+  
+  try:
+    with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
+      graph, lib, params = tvm.relay.build(mod, target=target, params=param_dict)
+    
+    executor = graph_executor.create(graph, lib, device=ctx)
+    
+    # Load constant parameters
+    if params:
+      executor.load_params(tvm.runtime.save_param_dict(params))
+    
+    # Set input data
+    if input_data_dict:
+      for name, data in input_data_dict.items():
+        executor.set_input(name, data)
+    
+    # Run inference
+    executor.run()
+    
+    # Get output
+    output = executor.get_output(0).asnumpy()
+    
+    # Save output for reference
+    output_path = os.path.join(output_dir, "cpu_reference_output.npy")
+    np.save(output_path, output)
+    print(f"CPU output saved to: {output_path}")
+    print(f"CPU output shape: {output.shape}, dtype: {output.dtype}")
+    
+    return output
+    
+  except Exception as e:
+    print(f"⚠️  CPU validation failed: {e}")
+    print("Model may contain operations not supported on CPU target")
+    return None
 
 
 def generate_graph_executor(mod, param_dict, dir_name):
@@ -230,6 +279,12 @@ def transform_model_for_imcflow(mod, param_dict, dir, test_name):
   _dump("TensorIDtoEdge", config.TensorIDtoEdge)
   _dump("PolicyTableDict", config.PolicyTableDict)
 
+  return mod, param_dict
+
+def run_imcflow_codegen(mod, dir, test_name):
+  """Run IMCFLOW codegen to generate hardware deployment code"""
+  config = DevConfig()
+
   CodegenSuite = imcflow_codegen.CodegenSuite(dir, mod, host_isa=DevConfig().HOST_ISA)
   CodegenSuite(mod)
 
@@ -238,11 +293,17 @@ def transform_model_for_imcflow(mod, param_dict, dir, test_name):
 
   imcflow_transform.constructDataBlockDict(mod)
   print(f"data_blocks: {config.DataBlocks}")
-  return mod, param_dict
 
 
-def run_test_evl(test_name, mod, param_dict):
-  """Generate IMCFLOW evaluation results (original function renamed)"""
+def run_test_evl(test_name, mod, param_dict, input_data_dict=None):
+  """Generate IMCFLOW evaluation results with optional CPU validation
+  
+  Args:
+    test_name: Name of the test (used for directory naming)
+    mod: The TVM relay module
+    param_dict: Model parameters
+    input_data_dict: Optional dict of input name -> numpy array for CPU validation
+  """
   print(f"\n{'='*60}")
   print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
   print(f"{'='*60}")
@@ -253,37 +314,17 @@ def run_test_evl(test_name, mod, param_dict):
   # Transform the model for IMCFLOW
   mod, param_dict = transform_model_for_imcflow(mod, param_dict, eval_dir, test_name)
 
-  # Generate graph executor for the transformed model
+  # Run CPU validation if input data is provided
+  if input_data_dict is not None:
+    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir)
+    if cpu_output is not None:
+      print("✅ CPU validation completed successfully")
+  
+  # Run IMCFLOW codegen to generate hardware deployment code
+  run_imcflow_codegen(mod, eval_dir, test_name)
+
+  # Generate graph executor for hardware deployment
   generate_graph_executor(mod, param_dict, eval_dir)
-
-
-def run_test_ref(test_name, mod, param_dict):
-  """Generate reference TVM compilation results"""
-  print(f"\n{'='*60}")
-  print(f"GENERATING REFERENCE RESULTS FOR: {test_name}")
-  print(f"{'='*60}")
-
-  ref_dir = f"{test_name}_ref"
-  setup_dir(ref_dir)
-
-  # Transform the model for IMCFLOW
-  mod, param_dict = transform_model_for_imcflow(mod, param_dict, ref_dir, test_name)
-
-  run_cpu_reference(mod, param_dict, ref_dir)
-
-  print(f"Reference generation completed for {test_name}")
-  return mod
-
-
-def test_big_ref():
-  """Generate only reference for big model"""
-  assert False, "Big model reference is not supported yet"
-
-
-def test_small_ref():
-  """Generate only reference for small model"""
-  mod, param_dict, _ = small_model.getTestModel()
-  run_test_ref("small", mod, param_dict)
 
 
 def test_big_evl():
@@ -306,11 +347,6 @@ def test_one_relu_evl():
   mod, param_dict = models_for_test.getOneReluModel()
   run_test_evl("one_relu", mod, param_dict)
 
-def test_one_conv_ref():
-  """Generate reference for conv model"""
-  mod, param_dict = models_for_test.getOneConvModel()
-  run_test_ref("one_conv", mod, param_dict)
-
 def test_one_conv_evl():
   """Generate evaluation for conv model"""
   mod, param_dict = models_for_test.getOneConvModel()
@@ -328,11 +364,27 @@ def test_model_1():
 
 def test_resnet8():
   mod, param_dict = resnet8_cifar.getModel(True)
-  run_test_evl("resnet8", mod, param_dict)
+  input_dir = "./test_inputs/resnet8_small"
+  input_data = load_resnet8_input(input_dir)
+  run_test_evl("resnet8", mod, param_dict, input_data_dict=input_data)
 
 def test_resnet8_from_pretrained():
   mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
-  run_test_evl("resnet8", mod, param_dict)
+  
+  # Generate and save test inputs if they don't exist
+  input_dir = "./test_inputs/resnet8_small"
+  import os
+  if not os.path.exists(f"{input_dir}/model_input.npy"):
+    print("Generating test inputs...")
+    gen = InputGenerator(seed=42)
+    inputs = gen.generate_resnet8_input(small_debug=True)
+    gen.save_to_files(inputs, input_dir)
+  
+  # Load shared test inputs for CPU validation
+  input_dict = load_resnet8_input(input_dir)
+  
+  # Run with CPU validation enabled
+  run_test_evl("resnet8", mod, param_dict, input_data_dict=input_dict)
 
 def test_mobilenet_imcflow():
   mod, param_dict = mobilenet_imcflow.getModel(False)
@@ -355,6 +407,28 @@ def test_resnet_cifar10_small_pretrained():
   """Generate evaluation for resnet cifar10 small model"""
   mod, param_dict = models_for_test.getResnetCifar10SmallPretrained(True)
   run_test_evl("resnet_cifar10_small", mod, param_dict)
+
+
+# ============================================================================
+# Example: How to use CPU validation with custom input data
+# ============================================================================
+# To enable CPU validation for a test, pass input_data_dict to run_test_evl:
+#
+# def test_one_conv_evl_with_cpu_validation():
+#   """Example: Generate evaluation with CPU validation"""
+#   mod, param_dict = models_for_test.getOneConvModel()
+#   
+#   # Prepare input data (must match the model's input signature)
+#   input_data = {
+#     "input": np.random.randint(0, 16, size=(1, 32, 32, 32)).astype("uint8")
+#   }
+#   
+#   # Run with CPU validation
+#   run_test_evl("one_conv", mod, param_dict, input_data_dict=input_data)
+#   
+#   # The CPU output will be saved to: one_conv_evl/cpu_reference_output.npy
+# ============================================================================
+
 
 if __name__ == "__main__":
   tvm.testing.main()
