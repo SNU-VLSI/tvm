@@ -30,6 +30,92 @@ def get_width(W, KW, padding, stride):
     out_w = (W + 2 * pad_w - KW) // stride + 1
     return out_w
 
+def rand_tensor(dtype: str, shape):
+  # Handle common dtypes with appropriate ranges
+  if dtype in ("float32", "float16", "float64"):
+    return np.random.uniform(-1, 1, shape).astype(dtype)
+  if dtype.startswith("int"):
+    # Parse bit width if available (e.g., int4, int8, int16, int32)
+    try:
+      bits = int(dtype.replace("int", ""))
+    except Exception:
+      bits = 32
+    if bits == 4:
+      # No native int4 in numpy; store in int8 within valid int4 range
+      return np.random.randint(-8, 8, size=shape, dtype=np.int8)
+    if bits == 8:
+      return np.random.randint(-128, 128, size=shape, dtype=np.int8)
+    if bits == 16:
+      return np.random.randint(-32768, 32768, size=shape, dtype=np.int16)
+    if bits == 32:
+      return np.random.randint(-2**31, 2**31, size=shape, dtype=np.int32)
+    if bits == 64:
+      return np.random.randint(-2**63, 2**63 - 1, size=shape, dtype=np.int64)
+    # Fallback: use int32
+    return np.random.randint(-2**31, 2**31, size=shape, dtype=np.int32)
+  if dtype.startswith("uint"):
+    try:
+      bits = int(dtype.replace("uint", ""))
+    except Exception:
+      bits = 32
+    if bits == 4:
+      return np.random.randint(0, 16, size=shape, dtype=np.uint8)
+    if bits == 8:
+      return np.random.randint(0, 256, size=shape, dtype=np.uint8)
+    if bits == 16:
+      return np.random.randint(0, 2**16, size=shape, dtype=np.uint16)
+    if bits == 32:
+      return np.random.randint(0, 2**32, size=shape, dtype=np.uint32)
+    if bits == 64:
+      # numpy uint64 randint high is exclusive and must be <= 2**64-1
+      return np.random.randint(0, np.iinfo(np.uint64).max, size=shape, dtype=np.uint64)
+    return np.random.randint(0, 2**32, size=shape, dtype=np.uint32)
+  # Default float32 if unrecognized
+  return np.random.uniform(-1, 1, shape).astype("float32")
+
+def one_tensor(dtype: str, shape):
+  # Handle common dtypes with appropriate ranges
+  if dtype in ("float32", "float16", "float64"):
+    return np.ones(shape).astype(dtype)
+  if dtype.startswith("int"):
+    # Parse bit width if available (e.g., int4, int8, int16, int32)
+    try:
+      bits = int(dtype.replace("int", ""))
+    except Exception:
+      bits = 32
+    if bits == 4:
+      # No native int4 in numpy; store in int8 within valid int4 range
+      return np.ones(shape, dtype=np.int8)
+    if bits == 8:
+      return np.ones(shape, dtype=np.int8)
+    if bits == 16:
+      return np.ones(shape, dtype=np.int16)
+    if bits == 32:
+      return np.ones(shape, dtype=np.int32)
+    if bits == 64:
+      return np.ones(shape, dtype=np.int64)
+    # Fallback: use int32
+    return np.ones(shape, dtype=np.int32)
+  if dtype.startswith("uint"):
+    try:
+      bits = int(dtype.replace("uint", ""))
+    except Exception:
+      bits = 32
+    if bits == 4:
+      return np.ones(shape, dtype=np.uint8)
+    if bits == 8:
+      return np.ones(shape, dtype=np.uint8)
+    if bits == 16:
+      return np.ones(shape, dtype=np.uint16)
+    if bits == 32:
+      return np.ones(shape, dtype=np.uint32)
+    if bits == 64:
+      # numpy uint64 with ones
+      return np.ones(shape, dtype=np.uint64)
+    return np.ones(shape, dtype=np.uint32)
+  # Default float32 if unrecognized
+  return np.ones(shape).astype("float32")
+
 def getOneReluModel():
   N, C, H, W = 1, 28, 4, 4
   input_ = relay.var("input", shape=(N,C,H,W), dtype="int16")
@@ -299,60 +385,20 @@ def getResnetCifar10Small_(input_shape):
 
   return out, var_info
 
-def getResnetCifar10Small(small_debug=False):
+def getResnetCifar10Small(small_debug=False, init_only_one=False):
   if small_debug:
     out, var_dict = getResnetCifar10Small_([1, 3, 8, 8])
   else:
     out, var_dict = getResnetCifar10Small_([1, 3, 32, 32])
 
-  def _rand_tensor(dtype: str, shape):
-    # Handle common dtypes with appropriate ranges
-    if dtype in ("float32", "float16", "float64"):
-      return np.random.uniform(-1, 1, shape).astype(dtype)
-    if dtype.startswith("int"):
-      # Parse bit width if available (e.g., int4, int8, int16, int32)
-      try:
-        bits = int(dtype.replace("int", ""))
-      except Exception:
-        bits = 32
-      if bits == 4:
-        # No native int4 in numpy; store in int8 within valid int4 range
-        return np.random.randint(-8, 8, size=shape, dtype=np.int8)
-      if bits == 8:
-        return np.random.randint(-128, 128, size=shape, dtype=np.int8)
-      if bits == 16:
-        return np.random.randint(-32768, 32768, size=shape, dtype=np.int16)
-      if bits == 32:
-        return np.random.randint(-2**31, 2**31, size=shape, dtype=np.int32)
-      if bits == 64:
-        return np.random.randint(-2**63, 2**63 - 1, size=shape, dtype=np.int64)
-      # Fallback: use int32
-      return np.random.randint(-2**31, 2**31, size=shape, dtype=np.int32)
-    if dtype.startswith("uint"):
-      try:
-        bits = int(dtype.replace("uint", ""))
-      except Exception:
-        bits = 32
-      if bits == 4:
-        return np.random.randint(0, 16, size=shape, dtype=np.uint8)
-      if bits == 8:
-        return np.random.randint(0, 256, size=shape, dtype=np.uint8)
-      if bits == 16:
-        return np.random.randint(0, 2**16, size=shape, dtype=np.uint16)
-      if bits == 32:
-        return np.random.randint(0, 2**32, size=shape, dtype=np.uint32)
-      if bits == 64:
-        # numpy uint64 randint high is exclusive and must be <= 2**64-1
-        return np.random.randint(0, np.iinfo(np.uint64).max, size=shape, dtype=np.uint64)
-      return np.random.randint(0, 2**32, size=shape, dtype=np.uint32)
-    # Default float32 if unrecognized
-    return np.random.uniform(-1, 1, shape).astype("float32")
-
   params_dict = {}
   # Sort by name for determinism
   for name in sorted(var_dict.keys()):
     info = var_dict[name]
-    params_dict[name] = _rand_tensor(info["dtype"], info["shape"])
+    if init_only_one:
+      params_dict[name] = one_tensor(info["dtype"], info["shape"])
+    else:
+      params_dict[name] = rand_tensor(info["dtype"], info["shape"])
 
   return out, params_dict
 
@@ -575,3 +621,53 @@ def getResnetCifar10SmallPretrained(small_debug=False):
 
   return out, params_dict
   
+def getMiniImcflowModel():
+  """
+  
+  """
+  N, IC, H, W = 1, 28, 1, 1
+  OC = 64
+  KH, KW = 3, 3
+  stride, padding = 1, 1
+
+  input = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
+
+  # y = imcflow_min_max_quantize(
+  #   input,
+  #   relay.var("quant_min", shape=(), dtype="int16"),
+  #   relay.var("quant_max", shape=(), dtype="int16"),
+  #   axis=1,
+  #   out_dtype="uint8",
+  #   channel=IC
+  # )
+
+  y = imcflow_qconv2d(
+    input,
+    relay.var("conv_weight", shape=(OC,IC,KH,KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+
+  y = imcflow_batch_norm(
+    y,
+    relay.var("fused_scale", shape=(OC,), dtype="int16"),
+    relay.var("fused_bias", shape=(OC,), dtype="int16"),
+    axis=1,
+    in_channels=OC
+  )
+
+  param_dict = {
+    "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+    "quant_min" : np.array(1, dtype="int16"),
+    "quant_max" : np.array(2, dtype="int16"),
+    "fused_scale": np.ones((OC,), dtype="int16"),
+    "fused_bias" : np.ones((OC,), dtype="int16"),
+  }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
