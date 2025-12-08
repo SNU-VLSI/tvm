@@ -30,6 +30,7 @@ from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig
+from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 
 from models import *
 
@@ -296,15 +297,23 @@ def test_imcflow_unpacking_2():
   print(out)
 
 def test_imcflow_qconv2d():
-  input_ = relay.var("input", shape=(2, 32, 16, 16))
-  weight_ = relay.var("weight", shape=(32, 32, 3, 3))
+  N, H, W = 2, 16, 16
+  IC, OC = 32, 32
+  kH, kW = 3, 3
+  padding, stride = 1, 1
+
+  input_ = relay.var("input", shape=(N, IC, H, W))
+  weight_ = relay.var("weight", shape=(OC, IC, kH, kW))
+  config_ = ConfigData((N, IC, H, W), (OC, IC, kH, kW), padding=padding, stride=stride).get_as_const_tensor(),
 
   y = imcflow_qconv2d(
     input_,
     weight_,
-    channels=32,
-    kernel_size=(3, 3),
-    padding=(1, 1),
+    config_,
+    channels=OC,
+    in_channels=IC,
+    kernel_size=(kH, kW),
+    padding=(padding, padding),
   )
 
   func = relay.Function([input_, weight_], y)
@@ -332,8 +341,8 @@ def test_imcflow_qconv2d():
   ref_res = torch.functional.F.conv2d(
     input=torch.tensor(input_data),
     weight=torch.tensor(weight_data),
-    padding=(1, 1),
-    stride=(1, 1)
+    padding=(padding, padding),
+    stride=(stride, stride)
   ).numpy()
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
