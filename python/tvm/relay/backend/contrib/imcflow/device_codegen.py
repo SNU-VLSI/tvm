@@ -171,15 +171,43 @@ class DeviceCodegen:
       f.write(data)
 
   def create_host_object(self, bin_file: str, host_obj_file: str):
+    # Extract function name from func_dir to use as symbol prefix
+    func_name = os.path.basename(self.func_dir)
+    temp_obj_file = f"{host_obj_file}.tmp"
+
+    # First, create the object file with default symbols
     if self.host_isa == "arm":
       command = ["aarch64-linux-gnu-ld", *
-                self.ld_options.split(), "-o", host_obj_file, bin_file]
+                self.ld_options.split(), "-o", temp_obj_file, bin_file]
     elif self.host_isa == "x86":
       command = ["ld", *self.ld_options.split(),
-                 "-o", host_obj_file, bin_file]
+                 "-o", temp_obj_file, bin_file]
     else:
       raise ValueError(f"Unknown host ISA: {self.host_isa}")
     subprocess.run(command, cwd=self.func_dir, check=True)
+
+    # Generate symbol name from binary filename (ld converts filename to symbol)
+    # e.g., "inode_0_0_imem.bin" -> "_binary_inode_0_0_imem_bin"
+    bin_name_base = bin_file.replace('.', '_')
+    old_symbol_prefix = f"_binary_{bin_name_base}"
+    new_symbol_prefix = f"_binary_{func_name}_{bin_name_base}"
+
+    # Create a redefine-sym file for objcopy
+    # redefine_file = os.path.join(self.func_dir, f"{host_obj_file}.redefine")
+    redefine_file = f"{host_obj_file}.redefine"
+    with open(os.path.join(self.func_dir, redefine_file), 'w') as f:
+      f.write(f"{old_symbol_prefix}_start {new_symbol_prefix}_start\n")
+      f.write(f"{old_symbol_prefix}_end {new_symbol_prefix}_end\n")
+      f.write(f"{old_symbol_prefix}_size {new_symbol_prefix}_size\n")
+
+    # Use objcopy to rename the symbols
+    objcopy_cmd = "aarch64-linux-gnu-objcopy" if self.host_isa == "arm" else "objcopy"
+    rename_command = [objcopy_cmd, f"--redefine-syms={redefine_file}", temp_obj_file, host_obj_file]
+    subprocess.run(rename_command, cwd=self.func_dir, check=True)
+
+    # Remove temporary files
+    os.remove(os.path.join(self.func_dir, temp_obj_file))
+    os.remove(os.path.join(self.func_dir, redefine_file))
 
   def get_object_size(self, obj_file: str, key: str = "text"):
     command = ["llvm-size", obj_file]

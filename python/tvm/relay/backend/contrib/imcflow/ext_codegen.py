@@ -189,9 +189,12 @@ def getCInputVarName(func, func_name, data_block):
   else:
     raise ValueError(f"Invalid node_type!: {node_type}")
 
-def getObjectFileName(data_block):
+def getObjectFileName(data_block, func_name=None):
   assert isinstance(data_block.id, str), "data_block.id must be string to get object file name"
-  return f"_binary_{data_block.id}_bin"
+  if func_name:
+    return f"_binary_{func_name}_{data_block.id}_bin"
+  else:
+    return f"_binary_{data_block.id}_bin"
 
 def generateToNpuTransferCode(func, func_name, blocks, address_macros):
   code = CodeWriter()
@@ -201,7 +204,7 @@ def generateToNpuTransferCode(func, func_name, blocks, address_macros):
     base_address_name = makeBaseAddrName(block)
     address_macros.update({base_address_name: base_address})
     if isinstance(block.id, str):
-      var_prefix = getObjectFileName(block)
+      var_prefix = getObjectFileName(block, func_name)
       code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
       code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){var_prefix}_start)[i];\n"
       code += f"}}\n"
@@ -241,7 +244,7 @@ def generateExternLink(func_name, compiled_blocks):
   code += 'extern "C" { \n'
   for block in compiled_blocks:
     if isinstance(block.id, str):
-      filename = f"_binary_{block.id}_bin"
+      filename = f"_binary_{func_name}_{block.id}_bin"
       code += f'  extern const int32_t {filename}_start[];\n'
       code += f'  extern const int32_t {filename}_end[];\n'
   code += '}\n'
