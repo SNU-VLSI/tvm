@@ -282,7 +282,8 @@ scale and zero point.
     .add_argument("min", "Expr", "min")
     .add_argument("max", "Expr", "max")
     .set_support_level(11)
-    .add_type_rel("ImcflowMinMaxQuantize", ImcflowMinMaxQuantizeRel);
+    .add_type_rel("ImcflowMinMaxQuantize", ImcflowMinMaxQuantizeRel)
+    .set_attr<TOpPattern>("TOpPattern", kElemWise);
 
 TVM_REGISTER_GLOBAL("relay.qnn.op._make.imcflow_min_max_quantize").set_body_typed(MakeImcflowMinMaxQuantize);
 

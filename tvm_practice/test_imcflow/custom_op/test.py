@@ -101,20 +101,22 @@ def test_min_max_quant():
   IC = 64
   IH, IW = 32, 32
 
-  data = relay.var("data", shape=(4, 2), dtype="float32")
+  # data = relay.var("data", shape=(4, 2), dtype="float32")
   # min = relay.var("min", type_annotation=relay.TensorType([1], "int16"))
   # max = relay.var("max", type_annotation=relay.TensorType([1], "int16"))
+  data = relay.var("data", shape=(1, IC, IH, IW), dtype="int16")
   min = relay.var("min", shape=(), dtype="int16")
   max = relay.var("max", shape=(), dtype="int16")
-  y = imcflow_min_max_quantize(data, min, max, 1, "float32", "int16")
+  y = imcflow_min_max_quantize(data, min, max, 1, "uint8", "int16")
   func = relay.Function([data, min, max], y)
   
   target = "llvm"
   ctx = tvm.cpu(0)
 
-  input_data = np.array([[1.2, 0.1], [0.7, 1.7], [-1.1, 5.1], [6.7, -4.6]], dtype="float32")
-  min_data = np.int16(-8)
-  max_data = np.int16(7)
+  # input_data = np.array([[1.2, 0.1], [0.7, 1.7], [-1.1, 5.1], [6.7, -4.6]], dtype="int16")
+  input_data = np.random.rand(1, IC, IH, IW).astype("int16")
+  min_data = np.int16(0)
+  max_data = np.int16(15)
 
   params = {"min": min_data, "max": max_data}
 
@@ -129,13 +131,19 @@ def test_min_max_quant():
 
   res = mod.get_output(0).asnumpy()
   print(res)
-  ref_res = np.array([[9.0, 8.0], [8.0, 9.0], [7.0, 13.0], [14.0, 4.0]], dtype="float32")
+  # ref_res = np.array([[9.0, 8.0], [8.0, 9.0], [7.0, 13.0], [14.0, 4.0]], dtype="float32")
+
+  # Compute reference result based on the quantization formula:
+  # scale = 15 / (max - min), quantized = clip(floor((data - min) * scale), 0, 15)
+  scale = 15.0 / (max_data - min_data)
+  ref_res = np.clip(np.floor((input_data.astype("float32") - min_data) * scale), 0.0, 15.0).astype("float32")
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
   out = tvm.IRModule.from_expr(y)
   out = relay.transform.InferType()(out)
   print(out)
+
 
 def test_nu_quant():
   IC = 64
