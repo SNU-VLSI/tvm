@@ -259,7 +259,7 @@ def run_test_evl(test_name, mod, param_dict):
 
   imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths).run(eval_mod)
   with open(f"{eval_dir}/policy_table.txt", "w") as f:
-    pprint.pprint(DevConfig().PolicyTableDict, stream=f)
+    f.write(DevConfig().format_policy_table())
 
   imcflow_transform.generateNoCVisualizations(eval_mod, eval_dir + "/noc_visualizations")
   

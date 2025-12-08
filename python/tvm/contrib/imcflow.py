@@ -684,6 +684,65 @@ class ImcflowDeviceConfig:
     """
     return self.MemLayout[CodegenContext().func_name]
 
+  def format_policy_table(self):
+    """
+    Format the PolicyTableDict into a hierarchical string representation.
+
+    Returns:
+      str: Formatted policy table with function names, node IDs, and compact policy entries.
+
+    Example format:
+      tvmgen_default_tvmgen_default_imcflow_main_47_round_imcflow_region1_main_0
+        <NodeID.inode_0_0: 0>
+          0:  L:(0, 0, 0), N:(1, 31), E:(0, 50), S:(1, 61), W:(0, 37)
+          1:  L:(0, 0, 0), N:(1, 31), E:(0, 50), S:(1, 61), W:(0, 37)
+    """
+    lines = []
+
+    for func_name, nodes in self.PolicyTableDict.items():
+      lines.append(f"{func_name}")
+
+      for node_id, policies in nodes.items():
+        lines.append(f"  {node_id}")
+
+        for idx, policy in enumerate(policies):
+          # Extract direction info
+          local = policy.get('Local', {})
+          north = policy.get('North', {})
+          east = policy.get('East', {})
+          south = policy.get('South', {})
+          west = policy.get('West', {})
+
+          # Format Local: (enable, addr, chunk_index)
+          local_str = ""
+          if local:
+            enable = int(local.get('enable', False))
+            addr = local.get('addr', 0)
+            chunk_index = local.get('chunk_index', 0)
+            local_str = f"L:({enable}, {addr}, {chunk_index})"
+
+          # Format other directions: (enable, addr)
+          def format_dir(dir_dict, name):
+            if dir_dict:
+              enable = int(dir_dict.get('enable', False))
+              addr = dir_dict.get('addr', 0)
+              return f"{name}:({enable}, {addr})"
+            return None
+
+          parts = []
+          if local_str:
+            parts.append(local_str)
+          for dir_data, dir_name in [(north, 'N'), (east, 'E'), (south, 'S'), (west, 'W')]:
+            formatted = format_dir(dir_data, dir_name)
+            if formatted:
+              parts.append(formatted)
+
+          lines.append(f"    {idx}:  {', '.join(parts)}")
+
+      lines.append("")  # Empty line between functions
+
+    return "\n".join(lines)
+
   def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None, const_node_ids=None):
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
     compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
