@@ -11,6 +11,7 @@ from tvm.contrib import graph_executor
 from tvm.relay.build_module import bind_params_by_name
 from tvm.relay import transform
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
+from tvm.relay.backend.contrib.imcflow import cpu_run as cpu_run
 from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
@@ -79,41 +80,36 @@ def run_cpu_validation(mod, param_dict, input_data_dict, output_dir):
   
   target = "llvm"
   ctx = tvm.cpu(0)
-  
-  try:
-    with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-      graph, lib, params = tvm.relay.build(mod, target=target, params=param_dict)
-    
-    executor = graph_executor.create(graph, lib, device=ctx)
-    
-    # Load constant parameters
-    if params:
-      executor.load_params(tvm.runtime.save_param_dict(params))
-    
-    # Set input data
-    if input_data_dict:
-      for name, data in input_data_dict.items():
-        executor.set_input(name, data)
-    
-    # Run inference
-    executor.run()
-    
-    # Get output
-    output = executor.get_output(0).asnumpy()
-    
-    # Save output for reference
-    output_path = os.path.join(output_dir, "cpu_reference_output.npy")
-    np.save(output_path, output)
-    print(f"CPU output saved to: {output_path}")
-    print(f"CPU output shape: {output.shape}, dtype: {output.dtype}")
-    
-    return output
-    
-  except Exception as e:
-    print(f"⚠️  CPU validation failed: {e}")
-    print("Model may contain operations not supported on CPU target")
-    return None
 
+  mod = cpu_run.make_cpu_runnable(mod)
+  with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
+    graph, lib, params = tvm.relay.build(mod, target=target, params=param_dict)
+  
+  executor = graph_executor.create(graph, lib, device=ctx)
+    
+  # Load constant parameters
+  if params:
+    executor.load_params(tvm.runtime.save_param_dict(params))
+  
+  # Set input data
+  if input_data_dict:
+    for name, data in input_data_dict.items():
+      executor.set_input(name, data)
+  
+  # Run inference
+  executor.run()
+  
+  # Get output
+  output = executor.get_output(0).asnumpy()
+  
+  # Save output for reference
+  output_path = os.path.join(output_dir, "cpu_reference_output.npy")
+  np.save(output_path, output)
+  print(f"CPU output saved to: {output_path}")
+  print(f"CPU output shape: {output.shape}, dtype: {output.dtype}")
+  
+  return output
+    
 
 def generate_graph_executor(mod, param_dict, dir_name):
   executor_cfg = Executor("graph")
