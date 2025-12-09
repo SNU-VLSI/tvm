@@ -79,6 +79,7 @@ def setup_dir(test_name, suffix="_evl"):
     # clean up all files recursively but keep all directory structures intact
     clean_dir_recursive(dir_name)
 
+  os.makedirs(os.path.join(dir_name, "logs"), exist_ok=True)
   os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
   os.makedirs(os.path.join(dir_name, "test_outputs"), exist_ok=True)
   os.makedirs(os.path.join(dir_name, "test_references"), exist_ok=True)
@@ -327,6 +328,122 @@ def run_imcflow_codegen(mod, dir):
   print(f"data_blocks: {config.DataBlocks}")
 
 
+def run_simulation(eval_dir):
+  """Run simulation by building and executing the graph with proper output streaming
+
+  Args:
+    eval_dir: Evaluation directory containing the model
+
+  Returns:
+    imcflow_output: The IMCFLOW simulation output as numpy array, or None if output file doesn't exist
+  """
+  log_dir = f"{eval_dir}/logs"
+
+  print("\n" + "="*60)
+  print("RUNNING SIMULATION")
+  print("="*60)
+
+  # Build the host binary
+  print("\n--- Building Host Binary ---")
+  host_build_dir = "./host_binary_make/build"
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86"]
+  build_log_path = os.path.join(log_dir, "build.log")
+
+  with open(build_log_path, "w") as log_file:
+    process = subprocess.Popen(
+      build_command,
+      cwd=host_build_dir,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True
+    )
+
+    # Stream output line by line to both terminal and log file
+    for line in process.stdout:
+      print(line, end='')
+      log_file.write(line)
+
+    process.wait()
+    if process.returncode != 0:
+      raise subprocess.CalledProcessError(process.returncode, build_command)
+
+  print(f"✅ Build completed, log saved to: {build_log_path}")
+
+  # Run gem5 simulation
+  print("\n--- Running gem5 Simulation ---")
+  imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow"
+  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir]
+  sim_log_path = os.path.join(log_dir, "gem5.log")
+
+  with open(sim_log_path, "w") as log_file:
+    process = subprocess.Popen(
+      sim_command,
+      cwd=imcflow_gem5_dir,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True
+    )
+
+    # Stream output line by line to both terminal and log file
+    for line in process.stdout:
+      print(line, end='')
+      log_file.write(line)
+
+    process.wait()
+    if process.returncode != 0:
+      raise subprocess.CalledProcessError(process.returncode, sim_command)
+
+  print(f"✅ Simulation completed, log saved to: {sim_log_path}")
+
+  # Load and return the simulation output
+  imcflow_output_path = os.path.abspath(os.path.join(eval_dir, "test_outputs", "output.npy"))
+  if os.path.exists(imcflow_output_path):
+    imcflow_output = np.load(imcflow_output_path)
+    print(f"✅ Loaded IMCFLOW output from: {imcflow_output_path}")
+    return imcflow_output
+  else:
+    print(f"⚠️  IMCFLOW output not found at: {imcflow_output_path}")
+    return None
+
+
+def compare_outputs(cpu_output, imcflow_output):
+  """Compare CPU reference output with IMCFLOW simulation output
+
+  Args:
+    cpu_output: CPU reference output as numpy array
+    imcflow_output: IMCFLOW simulation output as numpy array
+
+  Raises:
+    pytest.fail: If outputs don't match
+  """
+  print("\n" + "="*60)
+  print("COMPARING OUTPUTS")
+  print("="*60)
+
+  print(f"\n--- Output Comparison ---")
+  print(f"CPU output shape: {cpu_output.shape}, dtype: {cpu_output.dtype}")
+  print(f"IMCFLOW output shape: {imcflow_output.shape}, dtype: {imcflow_output.dtype}")
+
+  # Shape check
+  if cpu_output.shape != imcflow_output.shape:
+    pytest.fail(f"Output shape mismatch: CPU {cpu_output.shape} vs IMCFLOW {imcflow_output.shape}")
+
+  # Dtype check
+  if cpu_output.dtype != imcflow_output.dtype:
+    pytest.fail(f"Output dtype mismatch: CPU {cpu_output.dtype} vs IMCFLOW {imcflow_output.dtype}")
+
+  # Value comparison
+  if cpu_output.dtype in [np.float32, np.float64]:
+    if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
+      print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
+    else:
+      pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
+  elif np.array_equal(cpu_output, imcflow_output):
+    print("✅ IMCFLOW output matches CPU reference output (exact match)")
+  else:
+    pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
+
+
 def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None):
   """Generate IMCFLOW evaluation results with optional CPU validation
 
@@ -356,44 +473,15 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None):
   # Generate graph executor for hardware deployment
   generate_graph_executor(mod, param_dict, eval_dir)
 
-  # Run simulation using unified execute_graph.c
-  host_build_dir = "./host_binary_make/build"
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86", "2>&1", "|", "tee", "build.log"]
-  subprocess.run(build_command, cwd=host_build_dir, text=True, check=True)
-
-  imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow"
-  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir, "2>&1", "|", "tee", "gem5.log"]
-  subprocess.run(sim_command, cwd=imcflow_gem5_dir, text=True, check=True)
+  # Run simulation (build + gem5 execution)
+  imcflow_output = run_simulation(eval_dir)
 
   # Compare the reference CPU output with IMCFLOW simulated output
   if input_data_dict is not None:
-    imcflow_output_path = os.path.abspath(os.path.join(eval_dir, "test_outputs", "output.npy"))
-    if os.path.exists(imcflow_output_path):
-      imcflow_output = np.load(imcflow_output_path)
-      print(f"\n--- Output Comparison ---")
-      print(f"CPU output shape: {cpu_output.shape}, dtype: {cpu_output.dtype}")
-      print(f"IMCFLOW output shape: {imcflow_output.shape}, dtype: {imcflow_output.dtype}")
+    if imcflow_output is None:
+      pytest.fail(f"IMCFLOW output file missing, cannot compare outputs")
 
-      # Shape check
-      if cpu_output.shape != imcflow_output.shape:
-        pytest.fail(f"Output shape mismatch: CPU {cpu_output.shape} vs IMCFLOW {imcflow_output.shape}")
-
-      # Dtype check
-      if cpu_output.dtype != imcflow_output.dtype:
-        pytest.fail(f"Output dtype mismatch: CPU {cpu_output.dtype} vs IMCFLOW {imcflow_output.dtype}")
-
-      # Value comparison
-      if cpu_output.dtype in [np.float32, np.float64]:
-          if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
-            print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
-          else:
-            pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
-      elif np.array_equal(cpu_output, imcflow_output):
-        print("✅ IMCFLOW output matches CPU reference output (exact match)")
-      else:
-        pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
-    else:
-      pytest.fail(f"IMCFLOW output file missing at: {imcflow_output_path}, cannot compare outputs")
+    compare_outputs(cpu_output, imcflow_output)
 
 
 # ============================================================================
