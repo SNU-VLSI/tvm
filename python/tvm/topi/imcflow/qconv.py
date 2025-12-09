@@ -2,10 +2,12 @@ import numpy as np
 import tvm
 from tvm import te
 
-def imcflow_qconv2d(
+def imcflow_qconv2d_no_psum_quant(
     input : te.Tensor,
     filter : te.Tensor,
-    strides, padding, dilation, data_layout="NCHW", kernel_layout="", out_dtype=None
+    strides, padding, dilation, 
+    adcmode=0, vmode=0,
+    data_layout="NCHW", kernel_layout="", out_dtype=None
 ):
 
   batch, in_channel, IH, IW = input.shape
@@ -47,11 +49,11 @@ def imcflow_qconv2d(
 
   return B
 
-def imcflow_psum_qunat_qconv2d(
+def imcflow_qconv2d(
     input : te.Tensor,
     filter : te.Tensor,
     strides, padding, dilation, 
-    adcmode, vmode,
+    adcmode=0, vmode=0,
     data_layout="NCHW", kernel_layout="", out_dtype=None
 ):
   """

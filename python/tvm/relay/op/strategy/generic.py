@@ -2182,7 +2182,9 @@ def wrap_compute_imcflow_qconv2d(
         out_layout = attrs.get_str("out_layout")
         out_dtype = attrs.out_dtype
         out_dtype = inputs[0].dtype if out_dtype in ("same", "") else out_dtype
-        args = [inputs[0], inputs[1], strides, padding, dilation]
+        adcmode = attrs.adcmode
+        vmode = attrs.vmode
+        args = [inputs[0], inputs[1], strides, padding, dilation, adcmode, vmode]
         if has_groups:
             args.append(attrs.groups)
         if need_data_layout:
