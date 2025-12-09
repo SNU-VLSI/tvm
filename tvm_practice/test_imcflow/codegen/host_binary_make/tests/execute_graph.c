@@ -308,6 +308,14 @@ int main(int argc, char** argv) {
   DLTensor* loaded_inputs[16] = {NULL};  // Support up to 16 inputs
 
   for (int i = 0; i < num_inputs; i++) {
+    // Skip parameter inputs (they're loaded via LoadParams)
+    // Parameters typically follow naming pattern: p0, p1, p2, etc.
+    if (input_names[i][0] == 'p' && isdigit(input_names[i][1]) &&
+        (input_names[i][2] == '\0' || isdigit(input_names[i][2]))) {
+      fprintf(stderr, "⏭️  Skipping parameter '%s' (loaded via params file)\n", input_names[i]);
+      continue;
+    }
+
     DLTensor* input_tensor = (DLTensor*)malloc(sizeof(DLTensor));
     memset(input_tensor, 0, sizeof(DLTensor));
 

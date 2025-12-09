@@ -358,11 +358,11 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None):
 
   # Run simulation using unified execute_graph.c
   host_build_dir = "./host_binary_make/build"
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86"]
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86", "2>&1", "|", "tee", "build.log"]
   subprocess.run(build_command, cwd=host_build_dir, text=True, check=True)
 
   imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow"
-  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir]
+  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir, "2>&1", "|", "tee", "gem5.log"]
   subprocess.run(sim_command, cwd=imcflow_gem5_dir, text=True, check=True)
 
   # Compare the reference CPU output with IMCFLOW simulated output
@@ -386,6 +386,8 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None):
       if cpu_output.dtype in [np.float32, np.float64]:
           if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
             print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
+          else:
+            pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
       elif np.array_equal(cpu_output, imcflow_output):
         print("✅ IMCFLOW output matches CPU reference output (exact match)")
       else:
