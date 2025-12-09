@@ -220,14 +220,15 @@ static void print_tensor_info(const char* name, const DLTensor* tensor) {
 int main(int argc, char** argv) {
   // Parse command line arguments
   const char* test_name = argc > 1 ? argv[1] : "default_test";
-  const char* graph_path = argc > 2 ? argv[2] : "mlf/executor-config/graph/default.graph";
-  const char* params_path = argc > 3 ? argv[3] : "mlf/parameters/default.params";
+  const char* eval_dir = argc > 2 ? argv[2] : "/root/project/tvm/tvm_practice/test_imcflow/codegen";
+  const char* graph_path = argc > 3 ? argv[3] : "mlf/executor-config/graph/default.graph";
+  const char* params_path = argc > 4 ? argv[4] : "mlf/parameters/default.params";
 
   // Construct input and output directories based on test name
   char input_dir[256];
   char output_dir[256];
-  snprintf(input_dir, sizeof(input_dir), "test_inputs/%s", test_name);
-  snprintf(output_dir, sizeof(output_dir), "test_outputs/%s", test_name);
+  snprintf(input_dir, sizeof(input_dir), "%s/%s/test_inputs", eval_dir, test_name);
+  snprintf(output_dir, sizeof(output_dir), "%s/%s/test_outputs", eval_dir, test_name);
 
   fprintf(stderr, "\n");
   fprintf(stderr, "========================================\n");

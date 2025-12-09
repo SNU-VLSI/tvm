@@ -1,11 +1,8 @@
+import pytest
 import tvm
 import numpy as np
-import pathlib
 from tvm.micro import export_model_library_format
-from tvm.micro.testing import get_target
-from tvm.contrib.utils import tempdir
 import tvm.testing
-from tvm.relay import pretty_print
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 from tvm.contrib import graph_executor
 from tvm.relay.build_module import bind_params_by_name
@@ -16,24 +13,55 @@ from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
-from tvm.contrib.imcflow import DataBlock
 import os
 import subprocess
 import copy
-from tvm.relay.op.transform import imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
-import tvm.relay as relay
 import pprint
 
-from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
+from tvm.relay.op.contrib.imcflow import HashToCustomID
 from models import real_model, real_model2, test_models
-from models import small_model
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import models_for_test
 
 # Import shared input generator
 from input_generator import InputGenerator
 
-def setup_dir(dir_name):
+# ============================================================================
+# Model Registry
+# ============================================================================
+# Maps test_name -> (model_getter_function, input_pattern)
+# input_pattern: "random", "ones", "zeros", "linear"
+# NOTE: models should have _evl suffix for its directory to be ignored by git.
+MODEL_REGISTRY = {
+    # Simple test models
+    "one_relu": (models_for_test.getOneReluModel, "linear"),
+    "one_conv": (models_for_test.getOneConvModel, "ones"),
+    "residual_model": (models_for_test.getResidualModel, "ones"),
+    "mini_imcflow": (models_for_test.getMiniImcflowModel, "ones"),
+
+    # ResNet8 variants - all use small_debug=True
+    "resnet8_small": (lambda: resnet8_cifar.getModel(True), "ones"),
+    "resnet8_small_pretrained": (lambda: resnet8_cifar.getModel_from_pretrained_weight(True), "ones"),
+    "resnet_cifar10_small": (lambda: models_for_test.getResnetCifar10Small(small_debug=True), "ones"),
+    "resnet_cifar10_small_pretrained": (lambda: models_for_test.getResnetCifar10SmallPretrained(small_debug=True), "ones"),
+
+    # Other models
+    "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
+    "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
+    "ds_cnn_imcflow": (lambda: ds_cnn_imcflow.getModel(False), "random"),
+
+    # Legacy models (for backward compatibility)
+    "big": (real_model.getModel, "random"),
+    "small": (real_model2.getModel, "random"),
+    "one_conv_quant": (real_model2.getOneConvQuantModel, "ones"),
+    "model_v2": (real_model2.getModelV2, "random"),
+    "model_1": (test_models.get_model1, "random"),
+}
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+def setup_dir(test_name, suffix="_evl"):
   def clean_dir_recursive(path):
     """Recursively clean all files but keep all directory inodes intact"""
     for item in os.listdir(path):
@@ -44,11 +72,18 @@ def setup_dir(dir_name):
         # Recursively clean subdirectory but keep the directory itself
         clean_dir_recursive(item_path)
 
+  dir_name = f"{test_name}{suffix}"
   if not os.path.exists(dir_name):
     os.makedirs(dir_name)
   else:
     # clean up all files recursively but keep all directory structures intact
     clean_dir_recursive(dir_name)
+
+  os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
+  os.makedirs(os.path.join(dir_name, "test_outputs"), exist_ok=True)
+  os.makedirs(os.path.join(dir_name, "test_references"), exist_ok=True)
+
+  return dir_name
 
 
 def printModel(result_dir, mod, param_dict, mod_name):
@@ -63,56 +98,56 @@ def printModel(result_dir, mod, param_dict, mod_name):
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
 
-def run_cpu_validation(mod, param_dict, input_data_dict, output_dir):
+def run_cpu_validation(mod, param_dict, input_data_dict, model_dir):
   """Run transformed model on CPU for validation
-  
+
   Args:
     mod: The TVM relay module
     param_dict: Model parameters
     input_data_dict: Dictionary of input name -> numpy array
-    output_dir: Directory to save CPU outputs
-  
+    model_dir: Directory to save CPU outputs
+
   Returns:
     output: The CPU execution output as numpy array
   """
   print("\n" + "="*40)
   print("RUNNING CPU VALIDATION")
   print("="*40)
-  
+
   target = "llvm"
   ctx = tvm.cpu(0)
 
   cpu_mod = copy.deepcopy(mod)
   cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
-  printModel(output_dir, cpu_mod, param_dict, "cpu_runnable_model")
+  printModel(model_dir, cpu_mod, param_dict, "cpu_runnable_model")
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
     graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict)
 
   executor = graph_executor.create(graph, lib, device=ctx)
-    
+
   # Load constant parameters
   if params:
     executor.load_params(tvm.runtime.save_param_dict(params))
-  
+
   # Set input data
   if input_data_dict:
     for name, data in input_data_dict.items():
       executor.set_input(name, data)
-  
+
   # Run inference
   executor.run()
-  
+
   # Get output
   output = executor.get_output(0).asnumpy()
-  
+
   # Save output for reference
-  output_path = os.path.join(output_dir, "cpu_reference_output.npy")
-  np.save(output_path, output)
-  print(f"CPU output saved to: {output_path}")
+  output_dir = os.path.abspath(os.path.join(model_dir, "test_references"))
+  np.save(f"{output_dir}/cpu_reference_output.npy", output)
+  print(f"CPU output saved to: {output_dir}/cpu_reference_output.npy")
   print(f"CPU output shape: {output.shape}, dtype: {output.dtype}")
-  
+
   return output
-    
+
 
 def generate_graph_executor(mod, param_dict, dir_name):
   executor_cfg = Executor("graph")
@@ -136,7 +171,7 @@ def generate_graph_executor(mod, param_dict, dir_name):
   export_model_library_format(module, tar_path)
   return module, tar_path
 
-def transform_model_for_imcflow(mod, param_dict, dir, test_name):
+def transform_model_for_imcflow(mod, param_dict, dir):
   DevConfig().clear()
 
   # origin
@@ -196,7 +231,7 @@ def transform_model_for_imcflow(mod, param_dict, dir, test_name):
   # -----------------------------------------------------------------
   mod = imcflow_transform.annotateCustomId(mod)
   printModel(dir, mod, param_dict, "8.5_after_annotate_custom_id")
-  
+
   imcflow_transform.constructUsefulMappings(mod)
   imcflow_transform.constructCustomIDInFunc(mod)
   imcflow_transform.constructImcflowFuncMap(mod)
@@ -253,7 +288,7 @@ def transform_model_for_imcflow(mod, param_dict, dir, test_name):
     f.write(DevConfig().format_policy_table())
 
   imcflow_transform.generateNoCVisualizations(mod, dir + "/noc_visualizations")
-  
+
   fifo_monitor = imcflow_transform.FIFOConflictMonitor()
   fifo_monitor.run(mod)
   fifo_monitor.print_conflict_summary()
@@ -280,25 +315,24 @@ def transform_model_for_imcflow(mod, param_dict, dir, test_name):
 
   return mod, param_dict
 
-def run_imcflow_codegen(mod, dir, test_name):
+def run_imcflow_codegen(mod, dir):
   """Run IMCFLOW codegen to generate hardware deployment code"""
   config = DevConfig()
 
   CodegenSuite = imcflow_codegen.CodegenSuite(dir, mod, host_isa=DevConfig().HOST_ISA)
   CodegenSuite(mod)
-
   print(f"mem_layout: {config.MemLayout}")
-  print(f"Evaluation generation completed for {test_name}")
 
   imcflow_transform.constructDataBlockDict(mod)
   print(f"data_blocks: {config.DataBlocks}")
 
 
-def run_test_evl(test_name, mod, param_dict, input_data_dict=None):
+def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None):
   """Generate IMCFLOW evaluation results with optional CPU validation
-  
+
   Args:
-    test_name: Name of the test (used for directory naming)
+    test_name: Name of the test
+    eval_dir: evaluation directory name
     mod: The TVM relay module
     param_dict: Model parameters
     input_data_dict: Optional dict of input name -> numpy array for CPU validation
@@ -307,20 +341,17 @@ def run_test_evl(test_name, mod, param_dict, input_data_dict=None):
   print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
   print(f"{'='*60}")
 
-  eval_dir = f"{test_name}_evl"
-  setup_dir(eval_dir)
-
   # Transform the model for IMCFLOW
-  mod, param_dict = transform_model_for_imcflow(mod, param_dict, eval_dir, test_name)
+  mod, param_dict = transform_model_for_imcflow(mod, param_dict, eval_dir)
 
   # Run CPU validation if input data is provided
   if input_data_dict is not None:
     cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir)
     if cpu_output is not None:
       print("✅ CPU validation completed successfully")
-  
+
   # Run IMCFLOW codegen to generate hardware deployment code
-  run_imcflow_codegen(mod, eval_dir, test_name)
+  run_imcflow_codegen(mod, eval_dir)
 
   # Generate graph executor for hardware deployment
   generate_graph_executor(mod, param_dict, eval_dir)
@@ -328,176 +359,89 @@ def run_test_evl(test_name, mod, param_dict, input_data_dict=None):
   # Run simulation using unified execute_graph.c
   host_build_dir = "./host_binary_make/build"
   build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86"]
-  subprocess.run(build_command, cwd=host_build_dir, capture_output=True, text=True, check=True)
+  subprocess.run(build_command, cwd=host_build_dir, text=True, check=True)
 
   imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow"
-  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", test_name]
-  subprocess.run(sim_command, cwd=imcflow_gem5_dir, capture_output=True, text=True, check=True)
+  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir]
+  subprocess.run(sim_command, cwd=imcflow_gem5_dir, text=True, check=True)
 
-  # compare the reference CPU output with IMCFLOW simulated output
-  imcflow_output_path = os.path.join(imcflow_gem5_dir, "test_outputs", test_name, "output.npy")
-  if os.path.exists(imcflow_output_path):
-    imcflow_output = np.load(imcflow_output_path)
-    if np.array_equal(cpu_output, imcflow_output):
-      print("✅ IMCFLOW output matches CPU reference output")
+  # Compare the reference CPU output with IMCFLOW simulated output
+  if input_data_dict is not None:
+    imcflow_output_path = os.path.abspath(os.path.join(eval_dir, "test_outputs", "output.npy"))
+    if os.path.exists(imcflow_output_path):
+      imcflow_output = np.load(imcflow_output_path)
+      print(f"\n--- Output Comparison ---")
+      print(f"CPU output shape: {cpu_output.shape}, dtype: {cpu_output.dtype}")
+      print(f"IMCFLOW output shape: {imcflow_output.shape}, dtype: {imcflow_output.dtype}")
+
+      # Shape check
+      if cpu_output.shape != imcflow_output.shape:
+        pytest.fail(f"Output shape mismatch: CPU {cpu_output.shape} vs IMCFLOW {imcflow_output.shape}")
+
+      # Dtype check
+      if cpu_output.dtype != imcflow_output.dtype:
+        pytest.fail(f"Output dtype mismatch: CPU {cpu_output.dtype} vs IMCFLOW {imcflow_output.dtype}")
+
+      # Value comparison
+      if cpu_output.dtype in [np.float32, np.float64]:
+          if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
+            print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
+      elif np.array_equal(cpu_output, imcflow_output):
+        print("✅ IMCFLOW output matches CPU reference output (exact match)")
+      else:
+        pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
     else:
-      print("❌ IMCFLOW output does NOT match CPU reference output")
-      print(f"CPU output: {cpu_output}")
-      print(f"IMCFLOW output: {imcflow_output}")
-  else:
-    print(f"IMCFLOW output file not found at: {imcflow_output_path}. Skipping output comparison.")
+      pytest.fail(f"IMCFLOW output file missing at: {imcflow_output_path}, cannot compare outputs")
 
 
-def test_big_evl():
-  """Generate only evaluation for big model"""
-  mod, param_dict = real_model.getModel()
-  run_test_evl("big", mod, param_dict)
+# ============================================================================
+# Test Pipeline
+# ============================================================================
+def run_test_pipeline(test_name):
+  """
+  Test pipeline that:
+  1. Gets the model from registry
+  2. Generates and saves test inputs
+  3. Loads test inputs for CPU validation
+  4. Runs the full evaluation pipeline
 
+  Args:
+    test_name: Name of the test (must exist in MODEL_REGISTRY)
+  """
+  if test_name not in MODEL_REGISTRY:
+    raise ValueError(f"Unknown test: {test_name}. Available tests: {list(MODEL_REGISTRY.keys())}")
 
-def test_small_evl():
-  """Generate only evaluation for small model"""
-  mod, param_dict = real_model2.getModel()
-  run_test_evl("small", mod, param_dict)
+  dir_name = setup_dir(test_name, "_evl")
 
-def test_one_conv_quant_evl():
-  mod, param_dict = real_model2.getOneConvQuantModel()
-  run_test_evl("one_conv_quant", mod, param_dict)
-
-def test_one_relu_evl(skip_input_generate=False):
-  """Generate evaluation for relu model"""
-  mod, param_dict = models_for_test.getOneReluModel()
+  # Get model and input pattern from registry
+  model_getter, input_pattern = MODEL_REGISTRY[test_name]
+  mod, param_dict = model_getter()
 
   # Generate and save test inputs
-  input_dir = "./test_inputs/one_relu"
-  if not skip_input_generate:
-    print("Generating test inputs...")
-    gen = InputGenerator(mod=mod, seed=42)
-    inputs = gen.generate_input(pattern="linear")
-    gen.save_to_files(inputs, input_dir)
+  input_dir = f"./{dir_name}/test_inputs"
+  print(f"Generating test inputs for {test_name}...")
+  gen = InputGenerator(mod=mod, seed=42)
+  inputs = gen.generate_input(pattern=input_pattern)
+  gen.save_to_files(inputs, input_dir)
 
-  # Load shared test inputs for CPU validation
+  # Load test inputs for CPU validation
   gen = InputGenerator(mod=mod)
   input_name = list(gen.input_info.keys())[0]
   input_data = InputGenerator.load_from_files(input_dir, input_name)
   input_dict = {input_name: input_data}
 
   # Run with CPU validation enabled
-  run_test_evl("one_relu", mod, param_dict, input_data_dict=input_dict)
-
-def test_one_conv_evl(skip_input_generate=False):
-  """Generate evaluation for conv model"""
-  mod, param_dict = models_for_test.getOneConvModel()
-
-  # Generate and save test inputs
-  input_dir = "./test_inputs/one_conv"
-  if not skip_input_generate:
-    print("Generating test inputs...")
-    gen = InputGenerator(mod=mod, seed=42)
-    inputs = gen.generate_input(pattern="ones")
-    gen.save_to_files(inputs, input_dir)
-
-  # Load shared test inputs for CPU validation
-  gen = InputGenerator(mod=mod)
-  input_name = list(gen.input_info.keys())[0]
-  input_data = InputGenerator.load_from_files(input_dir, input_name)
-  input_dict = {input_name: input_data}
-
-  # Run with CPU validation enabled
-  run_test_evl("one_conv", mod, param_dict, input_data_dict=input_dict)
-
-def test_model_v2():
-  """Generate evaluation for relu model"""
-  mod, param_dict = real_model2.getModelV2()
-  run_test_evl("model_v2", mod, param_dict)
-
-def test_model_1():
-  """Generate evaluation for model 1"""
-  mod, param_dict = test_models.get_model1()
-  run_test_evl("model_1", mod, param_dict)
-
-def test_resnet8(skip_input_generate=False):
-  mod, param_dict = resnet8_cifar.getModel(True)
-
-  # Generate and save test inputs
-  input_dir = "./test_inputs/resnet8"
-  if not skip_input_generate:
-    print("Generating test inputs...")
-    gen = InputGenerator(mod=mod, seed=42)
-    inputs = gen.generate_input(pattern="ones")
-    gen.save_to_files(inputs, input_dir)
-
-  # Load shared test inputs for CPU validation
-  gen = InputGenerator(mod=mod)
-  input_name = list(gen.input_info.keys())[0]
-  input_data = InputGenerator.load_from_files(input_dir, input_name)
-  input_dict = {input_name: input_data}
-
-  run_test_evl("resnet8", mod, param_dict, input_data_dict=input_dict)
-
-def test_resnet8_from_pretrained(skip_input_generate=False):
-  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
-
-  # Generate and save test inputs
-  input_dir = "./test_inputs/resnet8"
-  if not skip_input_generate:
-    print("Generating test inputs...")
-    gen = InputGenerator(mod=mod, seed=42)
-    inputs = gen.generate_input(pattern="ones")
-    gen.save_to_files(inputs, input_dir)
-
-  # Load shared test inputs for CPU validation
-  gen = InputGenerator(mod=mod)
-  input_name = list(gen.input_info.keys())[0]
-  input_data = InputGenerator.load_from_files(input_dir, input_name)
-  input_dict = {input_name: input_data}
-
-  # Run with CPU validation enabled
-  run_test_evl("resnet8", mod, param_dict, input_data_dict=input_dict)
-
-def test_mobilenet_imcflow():
-  mod, param_dict = mobilenet_imcflow.getModel(False)
-  run_test_evl("mobilenet_imcflow", mod, param_dict)
-
-def test_deep_autoencoder_imcflow():
-  mod, param_dict = deep_autoencoder_imcflow.getModel(False)
-  run_test_evl("deep_autoencoder_imcflow", mod, param_dict)
-
-def test_ds_cnn_imcflow():
-  mod, param_dict = ds_cnn_imcflow.getModel(False)
-  run_test_evl("ds_cnn_imcflow", mod, param_dict)
-
-def test_residual_model():
-  """Generate evaluation for residual model"""
-  mod, param_dict = models_for_test.getResidualModel()
-  run_test_evl("residual_model", mod, param_dict)
-
-def test_resnet_cifar10_small_pretrained():
-  """Generate evaluation for resnet cifar10 small model"""
-  mod, param_dict = models_for_test.getResnetCifar10SmallPretrained(True)
-  run_test_evl("resnet_cifar10_small", mod, param_dict)
+  run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict)
 
 
 # ============================================================================
-# Example: How to use CPU validation with custom input data
+# Parametrized Tests
 # ============================================================================
-# To enable CPU validation for a test, pass input_data_dict to run_test_evl:
-#
-# def test_one_conv_evl_with_cpu_validation():
-#   """Example: Generate evaluation with CPU validation"""
-#   mod, param_dict = models_for_test.getOneConvModel()
-#   
-#   # Prepare input data (must match the model's input signature)
-#   input_data = {
-#     "input": np.random.randint(0, 16, size=(1, 32, 32, 32)).astype("uint8")
-#   }
-#   
-#   # Run with CPU validation
-#   run_test_evl("one_conv", mod, param_dict, input_data_dict=input_data)
-#   
-#   # The CPU output will be saved to: one_conv_evl/cpu_reference_output.npy
-# ============================================================================
+@pytest.mark.parametrize("test_name", list(MODEL_REGISTRY.keys()))
+def test_imcflow_model(test_name):
+  """Parametrized test for IMCFLOW models"""
+  run_test_pipeline(test_name)
 
 
 if __name__ == "__main__":
   tvm.testing.main()
-  # test_resnet8()
