@@ -7,7 +7,7 @@ and loaded by both Python (CPU validation) and C (hardware execution).
 
 import numpy as np
 import os
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 import tvm
 from tvm import relay
 
@@ -15,11 +15,12 @@ from tvm import relay
 class InputGenerator:
     """Generate and manage test input data for models"""
 
-    def __init__(self, mod: Optional[tvm.IRModule] = None, seed=42):
+    def __init__(self, mod: Optional[tvm.IRModule] = None, known_keys: List[str] = None, seed=42):
         """
         Args:
             mod: TVM IRModule to extract input information from. If provided,
                  the generator will automatically determine input names and shapes.
+            known_keys: Optional list of string of known parameter names
             seed: Random seed for reproducibility
         """
         self.seed = seed
@@ -28,14 +29,15 @@ class InputGenerator:
         self.input_info = None
 
         if mod is not None:
-            self.input_info = self._extract_input_info(mod)
+            self.input_info = self._extract_input_info(mod, known_keys)
 
-    def _extract_input_info(self, mod: tvm.IRModule) -> Dict[str, Dict]:
+    def _extract_input_info(self, mod: tvm.IRModule, known_keys: List[str] = None) -> Dict[str, Dict]:
         """
         Extract input variable information from the IRModule.
 
         Args:
             mod: TVM IRModule
+            known_keys: Optional list of string of known parameter names
 
         Returns:
             Dictionary mapping input name to {'shape': tuple, 'dtype': str}
@@ -47,11 +49,14 @@ class InputGenerator:
             # If no main, get the first function
             func = list(mod.functions.values())[0]
 
-        # Extract input parameters (those that are function params, not weights)
+        # Extract input parameters (those that are not in known_keys)
         input_info = {}
         for param in func.params:
             name = param.name_hint
             ttype = param.type_annotation
+
+            if name in (known_keys or []): # skip known params
+                continue
 
             if isinstance(ttype, relay.ty.TensorType):
                 # Convert TVM shape to Python ints

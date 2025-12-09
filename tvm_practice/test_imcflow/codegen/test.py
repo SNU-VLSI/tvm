@@ -605,14 +605,14 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   # Generate and save test inputs
   input_dir = f"./{dir_name}/test_inputs"
   print(f"Generating test inputs for {test_name} with pattern '{input_pattern}'...")
-  gen = InputGenerator(mod=mod, seed=42)
+  known_keys = param_dict.keys() if param_dict is not None else []
+  gen = InputGenerator(mod=mod, known_keys=known_keys, seed=42)
   inputs = gen.generate_input(pattern=input_pattern)
   gen.save_to_files(inputs, input_dir)
 
   # Load test inputs for CPU validation
-  gen = InputGenerator(mod=mod)
   input_name = list(gen.input_info.keys())[0]
-  input_data = InputGenerator.load_from_files(input_dir, input_name)
+  input_data = gen.load_from_files(input_dir, input_name)
   input_dict = {input_name: input_data}
 
   # Run with CPU validation enabled
