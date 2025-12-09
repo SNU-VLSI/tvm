@@ -7,20 +7,165 @@ and loaded by both Python (CPU validation) and C (hardware execution).
 
 import numpy as np
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
+import tvm
+from tvm import relay
 
 
 class InputGenerator:
     """Generate and manage test input data for models"""
-    
-    def __init__(self, seed=42):
+
+    def __init__(self, mod: Optional[tvm.IRModule] = None, seed=42):
         """
         Args:
+            mod: TVM IRModule to extract input information from. If provided,
+                 the generator will automatically determine input names and shapes.
             seed: Random seed for reproducibility
         """
         self.seed = seed
         np.random.seed(seed)
-    
+        self.mod = mod
+        self.input_info = None
+
+        if mod is not None:
+            self.input_info = self._extract_input_info(mod)
+
+    def _extract_input_info(self, mod: tvm.IRModule) -> Dict[str, Dict]:
+        """
+        Extract input variable information from the IRModule.
+
+        Args:
+            mod: TVM IRModule
+
+        Returns:
+            Dictionary mapping input name to {'shape': tuple, 'dtype': str}
+        """
+        # Get the main function
+        if "main" in mod:
+            func = mod["main"]
+        else:
+            # If no main, get the first function
+            func = list(mod.functions.values())[0]
+
+        # Extract input parameters (those that are function params, not weights)
+        input_info = {}
+        for param in func.params:
+            name = param.name_hint
+            ttype = param.type_annotation
+
+            if isinstance(ttype, relay.ty.TensorType):
+                # Convert TVM shape to Python ints
+                shape = []
+                for dim in ttype.shape:
+                    try:
+                        shape.append(int(dim))
+                    except Exception:
+                        # Fallback if dynamic: leave as-is
+                        shape.append(dim)
+
+                input_info[name] = {
+                    "shape": tuple(shape),
+                    "dtype": ttype.dtype
+                }
+
+        return input_info
+
+    def _generate_random_tensor(self, dtype: str, shape: Tuple) -> np.ndarray:
+        """
+        Generate a random tensor with appropriate range for the dtype.
+
+        Args:
+            dtype: Data type string (e.g., 'float32', 'int8', 'uint8')
+            shape: Shape of the tensor
+
+        Returns:
+            Random numpy array
+        """
+        if dtype in ("float32", "float16", "float64"):
+            return np.random.uniform(-1, 1, shape).astype(dtype)
+        if dtype.startswith("int"):
+            try:
+                bits = int(dtype.replace("int", ""))
+            except Exception:
+                bits = 32
+            if bits == 4:
+                return np.random.randint(-8, 8, size=shape, dtype=np.int8)
+            if bits == 8:
+                return np.random.randint(-128, 128, size=shape, dtype=np.int8)
+            if bits == 16:
+                return np.random.randint(-32768, 32768, size=shape, dtype=np.int16)
+            if bits == 32:
+                return np.random.randint(-2**31, 2**31, size=shape, dtype=np.int32)
+            if bits == 64:
+                return np.random.randint(-2**63, 2**63 - 1, size=shape, dtype=np.int64)
+            return np.random.randint(-2**31, 2**31, size=shape, dtype=np.int32)
+        if dtype.startswith("uint"):
+            try:
+                bits = int(dtype.replace("uint", ""))
+            except Exception:
+                bits = 32
+            if bits == 4:
+                return np.random.randint(0, 16, size=shape, dtype=np.uint8)
+            if bits == 8:
+                return np.random.randint(0, 256, size=shape, dtype=np.uint8)
+            if bits == 16:
+                return np.random.randint(0, 2**16, size=shape, dtype=np.uint16)
+            if bits == 32:
+                return np.random.randint(0, 2**32, size=shape, dtype=np.uint32)
+            if bits == 64:
+                return np.random.randint(0, np.iinfo(np.uint64).max, size=shape, dtype=np.uint64)
+            return np.random.randint(0, 2**32, size=shape, dtype=np.uint32)
+        # Default float32 if unrecognized
+        return np.random.uniform(-1, 1, shape).astype("float32")
+
+    def generate_input(self, pattern: str = "random") -> Dict[str, np.ndarray]:
+        """
+        Generate input data automatically based on the model's input info.
+
+        Args:
+            pattern: Type of pattern to generate:
+                     - 'random': Random values (default)
+                     - 'ones': All ones
+                     - 'zeros': All zeros
+                     - 'linear': Linear index pattern
+
+        Returns:
+            Dictionary mapping input name to numpy array
+
+        Raises:
+            ValueError: If no mod was provided in constructor
+        """
+        if self.input_info is None:
+            raise ValueError(
+                "Cannot generate input automatically: no model provided. "
+                "Please provide a mod parameter in the constructor."
+            )
+
+        inputs = {}
+        for name, info in self.input_info.items():
+            shape = info["shape"]
+            dtype = info["dtype"]
+
+            if pattern == "random":
+                inputs[name] = self._generate_random_tensor(dtype, shape)
+            elif pattern == "ones":
+                inputs[name] = np.ones(shape, dtype=dtype)
+            elif pattern == "zeros":
+                inputs[name] = np.zeros(shape, dtype=dtype)
+            elif pattern == "linear":
+                # Create a linear index pattern
+                total_elements = np.prod(shape)
+                if dtype.startswith("float"):
+                    arr = np.arange(total_elements, dtype=dtype)
+                    arr = arr / total_elements  # Normalize to [0, 1)
+                else:
+                    arr = np.arange(total_elements, dtype=dtype)
+                inputs[name] = arr.reshape(shape)
+            else:
+                raise ValueError(f"Unknown pattern: {pattern}")
+
+        return inputs
+
     def generate_resnet8_input(self, small_debug=False) -> Dict[str, np.ndarray]:
         """
         Generate input for ResNet8 CIFAR-10 model.

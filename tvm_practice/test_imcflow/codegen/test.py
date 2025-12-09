@@ -31,7 +31,7 @@ from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, d
 from models import models_for_test
 
 # Import shared input generator
-from input_generator import InputGenerator, load_resnet8_input, load_one_relu_input, load_one_conv_input
+from input_generator import InputGenerator
 
 def setup_dir(dir_name):
   def clean_dir_recursive(path):
@@ -331,8 +331,21 @@ def run_test_evl(test_name, mod, param_dict, input_data_dict=None):
   subprocess.run(build_command, cwd=host_build_dir, capture_output=True, text=True, check=True)
 
   imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow"
-  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no"]
+  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", test_name]
   subprocess.run(sim_command, cwd=imcflow_gem5_dir, capture_output=True, text=True, check=True)
+
+  # compare the reference CPU output with IMCFLOW simulated output
+  imcflow_output_path = os.path.join(imcflow_gem5_dir, "test_outputs", test_name, "output.npy")
+  if os.path.exists(imcflow_output_path):
+    imcflow_output = np.load(imcflow_output_path)
+    if np.array_equal(cpu_output, imcflow_output):
+      print("✅ IMCFLOW output matches CPU reference output")
+    else:
+      print("❌ IMCFLOW output does NOT match CPU reference output")
+      print(f"CPU output: {cpu_output}")
+      print(f"IMCFLOW output: {imcflow_output}")
+  else:
+    print(f"IMCFLOW output file not found at: {imcflow_output_path}. Skipping output comparison.")
 
 
 def test_big_evl():
@@ -350,40 +363,44 @@ def test_one_conv_quant_evl():
   mod, param_dict = real_model2.getOneConvQuantModel()
   run_test_evl("one_conv_quant", mod, param_dict)
 
-def test_one_relu_evl():
+def test_one_relu_evl(skip_input_generate=False):
   """Generate evaluation for relu model"""
   mod, param_dict = models_for_test.getOneReluModel()
 
-  # Generate and save test inputs if they don't exist
+  # Generate and save test inputs
   input_dir = "./test_inputs/one_relu"
-  import os
-  if not os.path.exists(f"{input_dir}/input.npy"):
+  if not skip_input_generate:
     print("Generating test inputs...")
-    gen = InputGenerator(seed=42)
-    inputs = gen.generate_one_relu_input()
+    gen = InputGenerator(mod=mod, seed=42)
+    inputs = gen.generate_input(pattern="linear")
     gen.save_to_files(inputs, input_dir)
 
   # Load shared test inputs for CPU validation
-  input_dict = load_one_relu_input(input_dir)
+  gen = InputGenerator(mod=mod)
+  input_name = list(gen.input_info.keys())[0]
+  input_data = InputGenerator.load_from_files(input_dir, input_name)
+  input_dict = {input_name: input_data}
 
   # Run with CPU validation enabled
   run_test_evl("one_relu", mod, param_dict, input_data_dict=input_dict)
 
-def test_one_conv_evl():
+def test_one_conv_evl(skip_input_generate=False):
   """Generate evaluation for conv model"""
   mod, param_dict = models_for_test.getOneConvModel()
 
-  # Generate and save test inputs if they don't exist
+  # Generate and save test inputs
   input_dir = "./test_inputs/one_conv"
-  import os
-  if not os.path.exists(f"{input_dir}/conv_input.npy"):
+  if not skip_input_generate:
     print("Generating test inputs...")
-    gen = InputGenerator(seed=42)
-    inputs = gen.generate_one_conv_input()
+    gen = InputGenerator(mod=mod, seed=42)
+    inputs = gen.generate_input(pattern="ones")
     gen.save_to_files(inputs, input_dir)
 
   # Load shared test inputs for CPU validation
-  input_dict = load_one_conv_input(input_dir)
+  gen = InputGenerator(mod=mod)
+  input_name = list(gen.input_info.keys())[0]
+  input_data = InputGenerator.load_from_files(input_dir, input_name)
+  input_dict = {input_name: input_data}
 
   # Run with CPU validation enabled
   run_test_evl("one_conv", mod, param_dict, input_data_dict=input_dict)
@@ -398,27 +415,42 @@ def test_model_1():
   mod, param_dict = test_models.get_model1()
   run_test_evl("model_1", mod, param_dict)
 
-def test_resnet8():
+def test_resnet8(skip_input_generate=False):
   mod, param_dict = resnet8_cifar.getModel(True)
-  input_dir = "./test_inputs/resnet8_small"
-  input_data = load_resnet8_input(input_dir)
-  run_test_evl("resnet8", mod, param_dict, input_data_dict=input_data)
 
-def test_resnet8_from_pretrained():
-  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
-  
-  # Generate and save test inputs if they don't exist
-  input_dir = "./test_inputs/resnet8_small"
-  import os
-  if not os.path.exists(f"{input_dir}/model_input.npy"):
+  # Generate and save test inputs
+  input_dir = "./test_inputs/resnet8"
+  if not skip_input_generate:
     print("Generating test inputs...")
-    gen = InputGenerator(seed=42)
-    inputs = gen.generate_resnet8_input(small_debug=True)
+    gen = InputGenerator(mod=mod, seed=42)
+    inputs = gen.generate_input(pattern="ones")
     gen.save_to_files(inputs, input_dir)
-  
+
   # Load shared test inputs for CPU validation
-  input_dict = load_resnet8_input(input_dir)
-  
+  gen = InputGenerator(mod=mod)
+  input_name = list(gen.input_info.keys())[0]
+  input_data = InputGenerator.load_from_files(input_dir, input_name)
+  input_dict = {input_name: input_data}
+
+  run_test_evl("resnet8", mod, param_dict, input_data_dict=input_dict)
+
+def test_resnet8_from_pretrained(skip_input_generate=False):
+  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
+
+  # Generate and save test inputs
+  input_dir = "./test_inputs/resnet8"
+  if not skip_input_generate:
+    print("Generating test inputs...")
+    gen = InputGenerator(mod=mod, seed=42)
+    inputs = gen.generate_input(pattern="ones")
+    gen.save_to_files(inputs, input_dir)
+
+  # Load shared test inputs for CPU validation
+  gen = InputGenerator(mod=mod)
+  input_name = list(gen.input_info.keys())[0]
+  input_data = InputGenerator.load_from_files(input_dir, input_name)
+  input_dict = {input_name: input_data}
+
   # Run with CPU validation enabled
   run_test_evl("resnet8", mod, param_dict, input_data_dict=input_dict)
 

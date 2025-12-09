@@ -8,7 +8,14 @@
  * - Optional validation against CPU reference outputs
  *
  * Usage:
- *   execute_graph <graph.json> <params.params> <input_dir> <output_dir>
+ *   execute_graph <test_name> [graph.json] [params.params]
+ *
+ * Arguments:
+ *   test_name     - Name of the test (used to construct input/output directories)
+ *                   Input dir:  test_inputs/<test_name>/
+ *                   Output dir: test_outputs/<test_name>/
+ *   graph.json    - Path to graph JSON (default: mlf/executor-config/graph/default.graph)
+ *   params.params - Path to params file (default: mlf/parameters/default.params)
  */
 
 #include <stdio.h>
@@ -212,15 +219,21 @@ static void print_tensor_info(const char* name, const DLTensor* tensor) {
 
 int main(int argc, char** argv) {
   // Parse command line arguments
-  const char* graph_path = argc > 1 ? argv[1] : "mlf/executor-config/graph/default.graph";
-  const char* params_path = argc > 2 ? argv[2] : "mlf/parameters/default.params";
-  const char* input_dir = argc > 3 ? argv[3] : "./test_inputs";
-  const char* output_dir = argc > 4 ? argv[4] : "./test_outputs";
+  const char* test_name = argc > 1 ? argv[1] : "default_test";
+  const char* graph_path = argc > 2 ? argv[2] : "mlf/executor-config/graph/default.graph";
+  const char* params_path = argc > 3 ? argv[3] : "mlf/parameters/default.params";
+
+  // Construct input and output directories based on test name
+  char input_dir[256];
+  char output_dir[256];
+  snprintf(input_dir, sizeof(input_dir), "test_inputs/%s", test_name);
+  snprintf(output_dir, sizeof(output_dir), "test_outputs/%s", test_name);
 
   fprintf(stderr, "\n");
   fprintf(stderr, "========================================\n");
   fprintf(stderr, "  TVM Unified Graph Executor\n");
   fprintf(stderr, "========================================\n");
+  fprintf(stderr, "Test:    %s\n", test_name);
   fprintf(stderr, "Graph:   %s\n", graph_path);
   fprintf(stderr, "Params:  %s\n", params_path);
   fprintf(stderr, "Inputs:  %s/\n", input_dir);
