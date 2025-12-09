@@ -18,6 +18,7 @@ import tvm.testing
 from tvm.contrib import utils, graph_executor
 from tvm import runtime as tvm_runtime
 
+from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 
@@ -171,6 +172,7 @@ def getOneConvQuantModel():
   y = imcflow_qconv2d(
     input,
     relay.var("weight", shape=(oc_gnum,ic_gnum,256,8), dtype="int32"),
+    ConfigData((N, IC, IH, IW), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
     channels=OC,
     in_channels=IC,
     kernel_size=(KH, KW),

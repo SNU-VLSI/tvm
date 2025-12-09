@@ -36,6 +36,7 @@ MODEL_REGISTRY = {
     # Simple test models
     "one_relu": (models_for_test.getOneReluModel, "linear"),
     "one_conv": (models_for_test.getOneConvModel, "random"),
+    "one_mmquant": (models_for_test.getOneMMQuantModel, "linear"),
     "residual_model": (models_for_test.getResidualModel, "ones"),
     "mini_imcflow": (models_for_test.getMiniImcflowModel, "ones"),
 

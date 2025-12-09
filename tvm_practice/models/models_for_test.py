@@ -152,6 +152,23 @@ def getOneConvModel():
 
   return out, param_dict
 
+def getOneMMQuantModel():
+  N, C, H, W = 1, 28, 4, 4
+  input = relay.var("input", shape=(N,C,H,W), dtype="int16")
+  y = imcflow_min_max_quantize(
+    input, 
+    relay.var("quant_min", shape=(), dtype="int16"), 
+    relay.var("quant_max", shape=(), dtype="int16"), 
+    axis=1, out_dtype="uint8", channel=16)
+  
+  param_dict = {
+    "quant_min": np.array(-128, dtype="int16"),
+    "quant_max": np.array(127, dtype="int16"),
+  }
+
+  out = tvm.IRModule.from_expr(y)
+  return out, param_dict
+
 def getResidualModel():
   N, IC, H, W = 1, 16, 1, 1
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
