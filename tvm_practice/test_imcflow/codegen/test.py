@@ -585,7 +585,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   # Setup directory: only clean/create if NOT skipping setup
   if not skip_setup:
     # Full setup: clean and recreate directory
-    setup_dir(test_name if input_pattern == default_input_pattern else f"{test_name}_{input_pattern}", "_evl")
+    setup_dir(dir_name)
   else:
     # Skip setup: directory must already exist, just ensure subdirs exist
     if not os.path.exists(dir_name):
