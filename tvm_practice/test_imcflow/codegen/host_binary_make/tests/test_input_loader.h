@@ -63,24 +63,27 @@ static int load_tensor_from_bin(const char* path, DLTensor* tensor) {
 }
 
 /**
- * Parse shape from metadata file.
- * 
+ * Parse metadata from metadata file.
+ *
  * @param meta_path Path to .meta.txt file
  * @param shape Output array for shape (must be pre-allocated)
  * @param max_ndim Maximum number of dimensions
  * @param out_ndim Output: actual number of dimensions
+ * @param out_dtype Output: DLDataType parsed from dtype field
  * @return 0 on success, -1 on failure
  */
-static int parse_shape_from_meta(const char* meta_path, int64_t* shape,
-                                  int max_ndim, int* out_ndim) {
+static int parse_meta(const char* meta_path, int64_t* shape,
+                      int max_ndim, int* out_ndim, DLDataType* out_dtype) {
   FILE* f = fopen(meta_path, "r");
   if (!f) {
     fprintf(stderr, "Failed to open metadata file: %s\n", meta_path);
     return -1;
   }
-  
+
   char line[256];
-  int found = 0;
+  int found_shape = 0;
+  int found_dtype = 0;
+
   while (fgets(line, sizeof(line), f)) {
     if (strncmp(line, "shape: ", 7) == 0) {
       // Parse comma-separated shape values
@@ -92,18 +95,44 @@ static int parse_shape_from_meta(const char* meta_path, int64_t* shape,
         token = strtok(NULL, ",");
       }
       *out_ndim = ndim;
-      found = 1;
-      break;
+      found_shape = 1;
+    } else if (strncmp(line, "dtype: ", 7) == 0) {
+      // Parse dtype string (e.g., "int8", "uint8", "float32")
+      char dtype_str[32];
+      sscanf(line + 7, "%31s", dtype_str);
+
+      // Parse dtype code and bits
+      if (strncmp(dtype_str, "int", 3) == 0) {
+        out_dtype->code = kDLInt;
+        out_dtype->bits = atoi(dtype_str + 3);
+      } else if (strncmp(dtype_str, "uint", 4) == 0) {
+        out_dtype->code = kDLUInt;
+        out_dtype->bits = atoi(dtype_str + 4);
+      } else if (strncmp(dtype_str, "float", 5) == 0) {
+        out_dtype->code = kDLFloat;
+        out_dtype->bits = atoi(dtype_str + 5);
+      } else {
+        fprintf(stderr, "Unsupported dtype: %s\n", dtype_str);
+        fclose(f);
+        return -1;
+      }
+      out_dtype->lanes = 1;
+      found_dtype = 1;
     }
   }
-  
+
   fclose(f);
-  
-  if (!found) {
+
+  if (!found_shape) {
     fprintf(stderr, "Shape not found in metadata file: %s\n", meta_path);
     return -1;
   }
-  
+
+  if (!found_dtype) {
+    fprintf(stderr, "Dtype not found in metadata file: %s\n", meta_path);
+    return -1;
+  }
+
   return 0;
 }
 
@@ -127,32 +156,40 @@ static int load_tensor_from_dir(const char* input_dir, const char* input_name,
   // Parse metadata
   int64_t shape[8];  // Support up to 8 dimensions
   int ndim = 0;
-  if (parse_shape_from_meta(meta_path, shape, 8, &ndim) != 0) {
+  DLDataType dtype;
+  if (parse_meta(meta_path, shape, 8, &ndim, &dtype) != 0) {
     return -1;
   }
-  
+
   fprintf(stderr, "Parsed shape: [");
   for (int i = 0; i < ndim; ++i) {
     fprintf(stderr, "%lld%s", (long long)shape[i], i < ndim - 1 ? ", " : "");
   }
   fprintf(stderr, "]\n");
-  
-  // Allocate tensor (assuming int8 dtype for now - can be extended)
+
+  const char* dtype_name = "unknown";
+  if (dtype.code == kDLInt) dtype_name = "int";
+  else if (dtype.code == kDLUInt) dtype_name = "uint";
+  else if (dtype.code == kDLFloat) dtype_name = "float";
+  fprintf(stderr, "Parsed dtype: %s%d\n", dtype_name, dtype.bits);
+
+  // Allocate tensor
   out_tensor->device = device;
   out_tensor->ndim = ndim;
-  
+
   // Allocate shape array
   out_tensor->shape = (int64_t*)malloc(ndim * sizeof(int64_t));
   memcpy(out_tensor->shape, shape, ndim * sizeof(int64_t));
-  
-  out_tensor->dtype = (DLDataType){kDLInt, 8, 1};  // int8
-  
+
+  out_tensor->dtype = dtype;
+
   // Calculate size and allocate data
   size_t numel = 1;
   for (int i = 0; i < ndim; ++i) {
     numel *= (size_t)shape[i];
   }
-  size_t nbytes = numel * sizeof(int8_t);
+  size_t elem_bytes = (dtype.bits + 7) / 8;
+  size_t nbytes = numel * elem_bytes;
   
   if (TVMPlatformMemoryAllocate(nbytes, device, &out_tensor->data) != 0) {
     fprintf(stderr, "Failed to allocate %zu bytes\n", nbytes);
