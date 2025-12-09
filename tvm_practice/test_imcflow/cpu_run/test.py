@@ -1,0 +1,331 @@
+import tvm
+import numpy as np
+import pathlib
+from tvm.micro import export_model_library_format
+from tvm.micro.testing import get_target
+from tvm.contrib.utils import tempdir
+import tvm.testing
+from tvm.relay import pretty_print
+from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
+from tvm.relay.build_module import bind_params_by_name
+from tvm.relay import transform
+from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
+from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
+from tvm.relay.backend.contrib.imcflow import cpu_run
+from tvm.relay.op.contrib import imcflow
+from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.relay.backend import Executor, Runtime
+from tvm.contrib.imcflow import DataBlock
+import os
+import shutil
+from tvm.relay.op.transform import imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
+import tvm.relay as relay
+import pprint
+from tvm.contrib import graph_executor
+
+from models import real_model, real_model2, test_models
+from models import small_model
+from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
+from models import models_for_test
+
+from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
+
+def setup_dir(dir_name):
+  def clean_dir_recursive(path):
+    """Recursively clean all files but keep all directory inodes intact"""
+    for item in os.listdir(path):
+      item_path = os.path.join(path, item)
+      if os.path.isfile(item_path) or os.path.islink(item_path):
+        os.remove(item_path)
+      elif os.path.isdir(item_path):
+        # Recursively clean subdirectory but keep the directory itself
+        clean_dir_recursive(item_path)
+
+  if not os.path.exists(dir_name):
+    os.makedirs(dir_name)
+  else:
+    # clean up all files recursively but keep all directory structures intact
+    clean_dir_recursive(dir_name)
+
+
+def printModel(result_dir, mod, param_dict, mod_name):
+  RelayVisualizer(
+      relay_mod=mod,
+      relay_param=param_dict,
+      plotter=DotPlotter(),
+      parser=DotVizParser(),
+  ).render(f"{result_dir}/{mod_name}")
+
+  with open(f"{result_dir}/{mod_name}.txt", "w") as f:
+    # f.write(pretty_print(mod))
+    f.write(mod.astext(show_meta_data=True))
+
+def generate_graph_executor(ref_mod, param_dict, dir_name):
+  executor_cfg = Executor("graph")
+  runtime_cfg = Runtime("crt", {"system-lib": True})
+  print("\n" + "="*40)
+  print("GENERATING GRAPH EXECUTOR")
+  print("="*40)
+
+  with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
+    module = tvm.relay.build(
+      ref_mod,
+      target="c",
+      params=param_dict,
+      executor=executor_cfg,
+      runtime=runtime_cfg,
+    )
+
+  script_dir = os.path.dirname(os.path.realpath(__file__))
+  tar_name = f"lib_graph_system-lib.tar"
+  tar_path = os.path.join(script_dir, dir_name, tar_name)
+  export_model_library_format(module, tar_path)
+  return module, tar_path
+
+
+def run_test_ref(test_name, mod, param_dict):
+  """Generate reference TVM compilation results"""
+  print(f"\n{'='*60}")
+  print(f"GENERATING REFERENCE RESULTS FOR: {test_name}")
+  print(f"{'='*60}")
+
+  ref_dir = f"{test_name}_ref"
+  setup_dir(ref_dir)
+
+  # Save original model
+  printModel(ref_dir, mod, param_dict, "origin")
+
+  # Create a new IRModule for reference (TVM IRModule doesn't have copy method)
+  ref_mod = tvm.IRModule({"main": mod["main"]})
+
+  # Check if model contains IMCFLOW operations - if so, skip reference generation
+  model_str = pretty_print(ref_mod)
+  if "imcflow" in model_str.lower():
+    print("⚠️  WARNING: Model contains IMCFLOW operations!")
+    print("Cannot generate standard TVM reference for model with IMCFLOW-specific operations.")
+    print("Skipping reference generation...")
+
+    # Create a placeholder file to indicate this
+    with open(f"{ref_dir}/SKIPPED_IMCFLOW_MODEL.txt", "w") as f:
+      f.write("Reference generation skipped.\n")
+      f.write(
+          "Model contains IMCFLOW-specific operations that cannot be compiled with standard TVM.\n")
+      f.write("To generate a reference, use a model without IMCFLOW operations.\n")
+
+    print(f"Created placeholder: {ref_dir}/SKIPPED_IMCFLOW_MODEL.txt")
+    return ref_mod
+
+  # Proceed with reference generation for clean models
+  ref_mod["main"] = bind_params_by_name(ref_mod["main"], param_dict)
+  ref_mod = transform.InferType()(ref_mod)
+  printModel(ref_dir, ref_mod, param_dict, "0_after_bind")
+
+  # Apply only standard TVM optimizations (no IMCFLOW)
+  with tvm.transform.PassContext(opt_level=3):
+    ref_mod = transform.FoldConstant()(ref_mod)
+    ref_mod = transform.SimplifyInference()(ref_mod)
+    ref_mod = transform.FoldScaleAxis()(ref_mod)
+    ref_mod = transform.SimplifyExpr()(ref_mod)
+    ref_mod = transform.FoldConstant()(ref_mod)
+
+  printModel(ref_dir, ref_mod, param_dict, "1_after_std_optimization")
+
+  generate_graph_executor(ref_mod, param_dict, ref_dir)
+
+  # Save final model state
+  printModel(ref_dir, ref_mod, param_dict, "2_final_ref_model")
+
+  print(f"Reference generation completed for {test_name}")
+  return ref_mod
+
+
+def run_test_evl(test_name, mod, param_dict, input_data_dict=None):
+  """Generate IMCFLOW evaluation results (original function renamed)"""
+  print(f"\n{'='*60}")
+  print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
+  print(f"{'='*60}")
+
+  eval_dir = f"{test_name}_evl"
+  setup_dir(eval_dir)
+
+  eval_mod, eval_param_dict = mod, param_dict
+  DevConfig().clear()
+
+  # origin
+  printModel(eval_dir, eval_mod, eval_param_dict, "0_origin")
+
+  # bind param
+  eval_mod["main"] = bind_params_by_name(eval_mod["main"], eval_param_dict)
+  eval_mod = transform.InferType()(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "1_after_bind")
+
+  # first level imcflow graph partition
+  eval_mod = imcflow_transform.partitionImcflowSubGraph(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "2_after_L1_partition")
+
+  # split imcflow function conv to atomic ops
+  eval_mod, eval_param_dict = imcflow_transform.split_conv_to_atomic(eval_mod, eval_param_dict)
+  printModel(eval_dir, eval_mod, eval_param_dict, "2_after_atom_split")
+
+  # merge composite OPs
+  eval_mod = imcflow_transform.merge_composite_ops(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "3_after_merge")
+
+  # make split and concat super node
+  eval_mod = imcflow_transform.makeSplitConcatDepsRegions(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "4_after_split_concat_partition")
+
+  eval_mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "4.5_after_concat_distributor")
+
+  eval_mod = imcflow_transform.partitionRound(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "5_after_annot")
+
+  eval_mod = imcflow.flattenImcflowTopFuncs(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "6_after_flatten")
+
+  eval_mod = imcflow.prune_imcflow_subgraphs(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "7_after_prune_model")
+
+  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "7.5_after_annotate_custom_id")
+  imcflow_transform.constructUsefulMappings(eval_mod)
+  print("-------------------- CustomID TO Name --------------------")
+  with open(f"{eval_dir}/custom_id_to_name.txt", "w") as f:
+    pprint.pprint(imcflow.CustomIDToName(), stream=f)
+  print("-------------------- Node TO CustomID --------------------")
+  with open(f"{eval_dir}/node_to_custom_id.txt", "w") as f:
+    pprint.pprint(HashToCustomID(), stream=f)
+  printModel(eval_dir, eval_mod, eval_param_dict, "7.6_with_custom_id")
+
+  eval_mod, ttype_map = imcflow_transform.legalizeImcflowLayout(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "7.7_after_mark_in_out")
+  print("-------------------- Real Tensor Type Map --------------------")
+  pprint.pprint(ttype_map)
+
+  # -----------------------------------------------------------------
+  # annotate custom ID for debugging
+  # -----------------------------------------------------------------
+  eval_mod = imcflow_transform.annotateCustomId(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "8.5_after_annotate_custom_id")
+  
+  imcflow_transform.constructUsefulMappings(eval_mod)
+  imcflow_transform.constructCustomIDInFunc(eval_mod)
+  imcflow_transform.constructImcflowFuncMap(eval_mod)
+  print("-------------------- CustomID TO Name --------------------")
+  with open(f"{eval_dir}/custom_id_to_name.txt", "w") as f:
+    pprint.pprint(imcflow.CustomIDToName(), stream=f)
+  print("-------------------- Node TO CustomID --------------------")
+  with open(f"{eval_dir}/node_to_custom_id.txt", "w") as f:
+    pprint.pprint(HashToCustomID(), stream=f)
+  print("-------------------- func map --------------------")
+  with open(f"{eval_dir}/func_map.txt", "w") as f:
+    pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
+  printModel(eval_dir, eval_mod, eval_param_dict, "9_with_custom_id")
+
+  eval_mod = cpu_run.make_cpu_runnable(eval_mod)
+  printModel(eval_dir, eval_mod, eval_param_dict, "10_cpu_runnable")
+
+  if input_data_dict is not None:
+    target = "llvm"
+    ctx = tvm.cpu(0)
+
+    with tvm.transform.PassContext(opt_level=0):
+      graph, lib, params = relay.build(mod, target=target)
+    graph_mod = graph_executor.create(graph, lib, device=ctx)
+    # Load constant parameters (config)
+    if params:
+      graph_mod.load_params(tvm.runtime.save_param_dict(params))
+
+    for name, data in input_data_dict.items():
+      graph_mod.set_input(name, data)
+    graph_mod.run()
+    out = graph_mod.get_output(0).asnumpy()
+    print("Output from CPU runnable model:\n", out)
+
+def test_big_ref():
+  """Generate only reference for big model"""
+  assert False, "Big model reference is not supported yet"
+
+
+def test_small_ref():
+  """Generate only reference for small model"""
+  mod, param_dict, _ = small_model.getTestModel()
+  run_test_ref("small", mod, param_dict)
+
+
+def test_big_evl():
+  """Generate only evaluation for big model"""
+  mod, param_dict = real_model.getModel()
+  run_test_evl("big", mod, param_dict)
+
+
+def test_small_evl():
+  """Generate only evaluation for small model"""
+  mod, param_dict = real_model2.getModel()
+  run_test_evl("small", mod, param_dict)
+
+def test_one_conv_quant_evl():
+  mod, param_dict = real_model2.getOneConvQuantModel()
+  run_test_evl("one_conv_quant", mod, param_dict)
+
+def test_one_relu_evl():
+  """Generate evaluation for relu model"""
+  mod, param_dict = models_for_test.getOneReluModel()
+  run_test_evl("one_relu", mod, param_dict)
+
+def test_one_conv_evl():
+  """Generate evaluation for conv model"""
+  mod, param_dict = models_for_test.getOneConvModel()
+  run_test_evl("one_conv", mod, param_dict)
+
+def test_model_v2():
+  """Generate evaluation for relu model"""
+  mod, param_dict = real_model2.getModelV2()
+  run_test_evl("model_v2", mod, param_dict)
+
+def test_model_1():
+  """Generate evaluation for model 1"""
+  mod, param_dict = test_models.get_model1()
+  run_test_evl("model_1", mod, param_dict)
+
+def test_resnet8():
+  mod, param_dict = resnet8_cifar.getModel(True)
+  run_test_evl("resnet8", mod, param_dict)
+
+def test_resnet8_from_pretrained():
+  mod, param_dict = resnet8_cifar.getModel_from_pretrained_weight(True)
+  run_test_evl("resnet8", mod, param_dict)
+
+def test_mobilenet_imcflow():
+  mod, param_dict = mobilenet_imcflow.getModel(False)
+  run_test_evl("mobilenet_imcflow", mod, param_dict)
+
+def test_deep_autoencoder_imcflow():
+  mod, param_dict = deep_autoencoder_imcflow.getModel(False)
+  run_test_evl("deep_autoencoder_imcflow", mod, param_dict)
+
+def test_ds_cnn_imcflow():
+  mod, param_dict = ds_cnn_imcflow.getModel(False)
+  run_test_evl("ds_cnn_imcflow", mod, param_dict)
+
+def test_residual_model():
+  """Generate evaluation for residual model"""
+  mod, param_dict = models_for_test.getResidualModel()
+  run_test_evl("residual_model", mod, param_dict)
+
+def test_resnet_cifar10_small_pretrained():
+  """Generate evaluation for resnet cifar10 small model"""
+  mod, param_dict = models_for_test.getResnetCifar10SmallPretrained(True)
+  run_test_evl("resnet_cifar10_small", mod, param_dict)
+
+def test_imcflow_minimal_model():
+  """Generate evaluation for imcflow minimal model"""
+  mod, param_dict = models_for_test.getMiniImcflowModel()
+  data_dict = {
+    "input" : np.ones((1, 28, 1, 1), dtype="uint8"),
+  }
+  run_test_evl("imcflow_minimal_model", mod, param_dict, data_dict)
+
+if __name__ == "__main__":
+  tvm.testing.main()

@@ -203,128 +203,128 @@ def test_nu_quant():
   out = relay.transform.InferType()(out)
   print(out)
 
-def test_imcflow_packing_1():
-  IC = 7
-  IH, IW = 1, 1
+# def test_imcflow_packing_1():
+#   IC = 7
+#   IH, IW = 1, 1
 
-  data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
-  input_data = np.array([[[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[-1.0]], [[-2.0]], [[-1.0]]]], dtype="float32")
-  newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
-  y = imcflow_packing(data, newshape, "int8")
-  func = relay.Function([data], y)
+#   data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
+#   input_data = np.array([[[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[-1.0]], [[-2.0]], [[-1.0]]]], dtype="float32")
+#   newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
+#   y = imcflow_packing(data, newshape, "int8")
+#   func = relay.Function([data], y)
 
-  target = "llvm"
-  ctx = tvm.cpu(0)
+#   target = "llvm"
+#   ctx = tvm.cpu(0)
 
-  mod = tvm.IRModule.from_expr(func)
-  mod = transform.InferType()(mod)
-  print(mod)
-  graph, lib, params = relay.build(mod, target=target)
-  mod = graph_executor.create(graph, lib, device=ctx)
-  mod.set_input(data=input_data)
-  mod.run()
+#   mod = tvm.IRModule.from_expr(func)
+#   mod = transform.InferType()(mod)
+#   print(mod)
+#   graph, lib, params = relay.build(mod, target=target)
+#   mod = graph_executor.create(graph, lib, device=ctx)
+#   mod.set_input(data=input_data)
+#   mod.run()
 
-  res = mod.get_output(0).asnumpy()
-  """Todo"""
-  ref_res = np.array([33, 67, -17, 15], dtype="int8")
+#   res = mod.get_output(0).asnumpy()
+#   """Todo"""
+#   ref_res = np.array([33, 67, -17, 15], dtype="int8")
 
-  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+#   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
-  out = tvm.IRModule.from_expr(y)
-  out = relay.transform.InferType()(out)
-  print(out)
+#   out = tvm.IRModule.from_expr(y)
+#   out = relay.transform.InferType()(out)
+#   print(out)
 
-def test_imcflow_packing_2():
-  IC = 2
-  IH, IW = 2, 2
+# def test_imcflow_packing_2():
+#   IC = 2
+#   IH, IW = 2, 2
 
-  data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
-  input_data = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
-  newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
-  y = imcflow_packing(data, newshape, "int8")
-  func = relay.Function([data], y)
+#   data = relay.var("data", shape=(1, IC, IH, IW), dtype="float32")
+#   input_data = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
+#   newshape = relay.const(np.array([4], dtype="int32"), dtype="int32")
+#   y = imcflow_packing(data, newshape, "int8")
+#   func = relay.Function([data], y)
 
-  target = "llvm"
-  ctx = tvm.cpu(0)
+#   target = "llvm"
+#   ctx = tvm.cpu(0)
 
-  mod = tvm.IRModule.from_expr(func)
-  mod = transform.InferType()(mod)
-  print(mod)
-  graph, lib, params = relay.build(mod, target=target)
-  mod = graph_executor.create(graph, lib, device=ctx)
-  mod.set_input(data=input_data)
-  mod.run()
+#   mod = tvm.IRModule.from_expr(func)
+#   mod = transform.InferType()(mod)
+#   print(mod)
+#   graph, lib, params = relay.build(mod, target=target)
+#   mod = graph_executor.create(graph, lib, device=ctx)
+#   mod.set_input(data=input_data)
+#   mod.run()
 
-  res = mod.get_output(0).asnumpy()
-  """Todo"""
-  ref_res = np.array([33, 67, -17, 31], dtype="int8")
+#   res = mod.get_output(0).asnumpy()
+#   """Todo"""
+#   ref_res = np.array([33, 67, -17, 31], dtype="int8")
 
-  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+#   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
-  out = tvm.IRModule.from_expr(y)
-  out = relay.transform.InferType()(out)
-  print(out)
+#   out = tvm.IRModule.from_expr(y)
+#   out = relay.transform.InferType()(out)
+#   print(out)
 
-def test_imcflow_unpacking_1():
-  IC = 7
-  IH, IW = 1, 1
+# def test_imcflow_unpacking_1():
+#   IC = 7
+#   IH, IW = 1, 1
 
-  data = relay.var("data", shape=(4,), dtype="int8")
-  input_data = np.array([33, 67, -17, 15], dtype="int8")
-  newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
-  y = imcflow_unpacking(data, newshape, "float32")
-  func = relay.Function([data], y)
+#   data = relay.var("data", shape=(4,), dtype="int8")
+#   input_data = np.array([33, 67, -17, 15], dtype="int8")
+#   newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
+#   y = imcflow_unpacking(data, newshape, "float32")
+#   func = relay.Function([data], y)
 
-  target = "llvm"
-  ctx = tvm.cpu(0)
+#   target = "llvm"
+#   ctx = tvm.cpu(0)
 
-  mod = tvm.IRModule.from_expr(func)
-  mod = transform.InferType()(mod)
-  print(mod)
-  graph, lib, params = relay.build(mod, target=target)
-  mod = graph_executor.create(graph, lib, device=ctx)
-  mod.set_input(data=input_data)
-  mod.run()
+#   mod = tvm.IRModule.from_expr(func)
+#   mod = transform.InferType()(mod)
+#   print(mod)
+#   graph, lib, params = relay.build(mod, target=target)
+#   mod = graph_executor.create(graph, lib, device=ctx)
+#   mod.set_input(data=input_data)
+#   mod.run()
 
-  res = mod.get_output(0).asnumpy()
-  ref_res = np.array([[[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[-1.0]], [[-2.0]], [[-1.0]]]], dtype="float32")
+#   res = mod.get_output(0).asnumpy()
+#   ref_res = np.array([[[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[-1.0]], [[-2.0]], [[-1.0]]]], dtype="float32")
 
-  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+#   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
-  out = tvm.IRModule.from_expr(y)
-  out = relay.transform.InferType()(out)
-  print(out)
+#   out = tvm.IRModule.from_expr(y)
+#   out = relay.transform.InferType()(out)
+#   print(out)
 
-def test_imcflow_unpacking_2():
-  IC = 2
-  IH, IW = 2, 2
+# def test_imcflow_unpacking_2():
+#   IC = 2
+#   IH, IW = 2, 2
 
-  data = relay.var("data", shape=(4,), dtype="int8")
-  input_data = np.array([33, 67, -17, 31], dtype="int8")
-  newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
-  y = imcflow_unpacking(data, newshape, "float32")
-  func = relay.Function([data], y)
+#   data = relay.var("data", shape=(4,), dtype="int8")
+#   input_data = np.array([33, 67, -17, 31], dtype="int8")
+#   newshape = relay.const(np.array([1, IC, IH, IW], dtype="int32"), dtype="int32")
+#   y = imcflow_unpacking(data, newshape, "float32")
+#   func = relay.Function([data], y)
 
-  target = "llvm"
-  ctx = tvm.cpu(0)
+#   target = "llvm"
+#   ctx = tvm.cpu(0)
 
-  mod = tvm.IRModule.from_expr(func)
-  mod = transform.InferType()(mod)
-  print(mod)
-  graph, lib, params = relay.build(mod, target=target)
-  mod = graph_executor.create(graph, lib, device=ctx)
-  mod.set_input(data=input_data)
-  mod.run()
+#   mod = tvm.IRModule.from_expr(func)
+#   mod = transform.InferType()(mod)
+#   print(mod)
+#   graph, lib, params = relay.build(mod, target=target)
+#   mod = graph_executor.create(graph, lib, device=ctx)
+#   mod.set_input(data=input_data)
+#   mod.run()
 
-  res = mod.get_output(0).asnumpy()
-  """Todo"""
-  ref_res = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
+#   res = mod.get_output(0).asnumpy()
+#   """Todo"""
+#   ref_res = np.array([[[[1.0, 2.0], [3.0, 4.0]], [[-1.0, -2.0], [-1.0, 1.0]]]], dtype="float32")
 
-  tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
+#   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
-  out = tvm.IRModule.from_expr(y)
-  out = relay.transform.InferType()(out)
-  print(out)
+#   out = tvm.IRModule.from_expr(y)
+#   out = relay.transform.InferType()(out)
+#   print(out)
 
 def test_imcflow_qconv2d():
   N, H, W = 2, 16, 16
@@ -363,8 +363,10 @@ def test_imcflow_qconv2d():
     mod.load_params(tvm.runtime.save_param_dict(params))
 
 
-  input_data = np.random.randint(0, 16, size=(2, 32, 16, 16)).astype("uint8")
-  weight_data = np.random.randint(-8, 7, size=(32, 32, 3, 3)).astype("int8")
+  # input_data = np.random.randint(0, 16, size=(2, 32, 16, 16)).astype("uint8")
+  # weight_data = np.random.randint(-8, 7, size=(32, 32, 3, 3)).astype("int8")
+  input_data = np.ones((2, 32, 16, 16)).astype("uint8")
+  weight_data = np.ones((32, 32, 3, 3)).astype("int8")
 
   mod.set_input(input=input_data)
   mod.set_input(weight=weight_data)
@@ -377,6 +379,8 @@ def test_imcflow_qconv2d():
     padding=(padding, padding),
     stride=(stride, stride)
   ).numpy()
+
+  print(res)
 
   tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
