@@ -29,13 +29,13 @@ from input_generator import InputGenerator
 # ============================================================================
 # Model Registry
 # ============================================================================
-# Maps test_name -> (model_getter_function, input_pattern)
-# input_pattern: "random", "ones", "zeros", "linear"
+# Maps test_name -> (model_getter_function, default_input_pattern)
+# default_input_pattern: "random", "ones", "zeros", "linear"
 # NOTE: models should have _evl suffix for its directory to be ignored by git.
 MODEL_REGISTRY = {
     # Simple test models
     "one_relu": (models_for_test.getOneReluModel, "linear"),
-    "one_conv": (models_for_test.getOneConvModel, "ones"),
+    "one_conv": (models_for_test.getOneConvModel, "random"),
     "residual_model": (models_for_test.getResidualModel, "ones"),
     "mini_imcflow": (models_for_test.getMiniImcflowModel, "ones"),
 
@@ -58,9 +58,63 @@ MODEL_REGISTRY = {
     "model_1": (test_models.get_model1, "random"),
 }
 
+# Available input patterns for testing
+INPUT_PATTERNS = ["random", "ones", "zeros", "linear", "default"]
+
 # ============================================================================
 # Utility Functions
 # ============================================================================
+def save_transformed_model(mod, param_dict, eval_dir):
+  """Save transformed model and parameters to file for reuse
+
+  Args:
+    mod: Transformed TVM relay module
+    param_dict: Transformed model parameters
+    eval_dir: Directory to save the model
+  """
+  import pickle
+  model_save_path = os.path.join(eval_dir, "transformed_model.pkl")
+
+  save_data = {
+    "mod": mod,
+    "param_dict": param_dict,
+  }
+
+  with open(model_save_path, "wb") as f:
+    pickle.dump(save_data, f)
+
+  print(f"💾 Saved transformed model to: {model_save_path}")
+
+
+def load_transformed_model(eval_dir):
+  """Load previously transformed model and parameters from file
+
+  Args:
+    eval_dir: Directory containing the saved model
+
+  Returns:
+    tuple: (mod, param_dict)
+
+  Raises:
+    FileNotFoundError: If transformed model file doesn't exist
+  """
+  import pickle
+  model_save_path = os.path.join(eval_dir, "transformed_model.pkl")
+
+  if not os.path.exists(model_save_path):
+    raise FileNotFoundError(
+      f"Transformed model not found at: {model_save_path}\n"
+      f"Cannot use skip_setup=True without a previous run.\n"
+      f"Run without --skip-setup first to compile and save the model."
+    )
+
+  with open(model_save_path, "rb") as f:
+    save_data = pickle.load(f)
+
+  print(f"📂 Loaded transformed model from: {model_save_path}")
+  return save_data["mod"], save_data["param_dict"]
+
+
 def setup_dir(test_name, suffix="_evl"):
   def clean_dir_recursive(path):
     """Recursively clean all files but keep all directory inodes intact"""
@@ -444,34 +498,46 @@ def compare_outputs(cpu_output, imcflow_output):
     pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
 
 
-def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None):
+def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False):
   """Generate IMCFLOW evaluation results with optional CPU validation
 
   Args:
     test_name: Name of the test
     eval_dir: evaluation directory name
-    mod: The TVM relay module
-    param_dict: Model parameters
+    mod: The TVM relay module (only used if skip_setup=False)
+    param_dict: Model parameters (only used if skip_setup=False)
     input_data_dict: Optional dict of input name -> numpy array for CPU validation
+    skip_setup: If True, skip transformation, codegen, and graph generation.
+                Loads previously transformed model from file.
   """
   print(f"\n{'='*60}")
   print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
   print(f"{'='*60}")
 
-  # Transform the model for IMCFLOW
-  mod, param_dict = transform_model_for_imcflow(mod, param_dict, eval_dir)
+  if not skip_setup:
+    # Transform the model for IMCFLOW
+    print("\n--- Transforming Model ---")
+    mod, param_dict = transform_model_for_imcflow(mod, param_dict, eval_dir)
+
+    # Save transformed model for future reuse
+    save_transformed_model(mod, param_dict, eval_dir)
+
+    # Run IMCFLOW codegen to generate hardware deployment code
+    run_imcflow_codegen(mod, eval_dir)
+
+    # Generate graph executor for hardware deployment
+    generate_graph_executor(mod, param_dict, eval_dir)
+  else:
+    # Skip setup: load previously transformed model
+    print("\n⏭️  Skipping model transformation, codegen, and graph generation (skip_setup=True)")
+    print("   Loading previously transformed model from file...")
+    mod, param_dict = load_transformed_model(eval_dir)
 
   # Run CPU validation if input data is provided
   if input_data_dict is not None:
     cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir)
     if cpu_output is not None:
       print("✅ CPU validation completed successfully")
-
-  # Run IMCFLOW codegen to generate hardware deployment code
-  run_imcflow_codegen(mod, eval_dir)
-
-  # Generate graph executor for hardware deployment
-  generate_graph_executor(mod, param_dict, eval_dir)
 
   # Run simulation (build + gem5 execution)
   imcflow_output = run_simulation(eval_dir)
@@ -487,29 +553,58 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None):
 # ============================================================================
 # Test Pipeline
 # ============================================================================
-def run_test_pipeline(test_name):
+def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   """
   Test pipeline that:
   1. Gets the model from registry
-  2. Generates and saves test inputs
+  2. Generates and saves test inputs with specified pattern
   3. Loads test inputs for CPU validation
   4. Runs the full evaluation pipeline
 
   Args:
     test_name: Name of the test (must exist in MODEL_REGISTRY)
+    input_pattern: Input pattern to use ("random", "ones", "zeros", "linear").
+                   If "default", uses the default pattern from MODEL_REGISTRY.
+    skip_setup: If True, skip codegen, and graph generation steps.
+                Useful for testing different inputs on an already-compiled model.
+                NOTE: When True, assumes directory already exists from previous run.
   """
   if test_name not in MODEL_REGISTRY:
     raise ValueError(f"Unknown test: {test_name}. Available tests: {list(MODEL_REGISTRY.keys())}")
 
-  dir_name = setup_dir(test_name, "_evl")
+  # Get model and default input pattern from registry
+  model_getter, default_input_pattern = MODEL_REGISTRY[test_name]
 
-  # Get model and input pattern from registry
-  model_getter, input_pattern = MODEL_REGISTRY[test_name]
+  # Use provided pattern or fall back to default
+  if input_pattern == "default":
+    input_pattern = default_input_pattern
+
+  # Determine directory name
+  dir_name = f"{test_name}_evl"
+
+  # Setup directory: only clean/create if NOT skipping setup
+  if not skip_setup:
+    # Full setup: clean and recreate directory
+    setup_dir(test_name if input_pattern == default_input_pattern else f"{test_name}_{input_pattern}", "_evl")
+  else:
+    # Skip setup: directory must already exist, just ensure subdirs exist
+    if not os.path.exists(dir_name):
+      raise FileNotFoundError(
+        f"Directory '{dir_name}' does not exist. "
+        f"Cannot use skip_setup=True without a previous run. "
+        f"Run without --skip-setup first to compile the model."
+      )
+    # Ensure test_inputs directory exists for new input files
+    os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
+    print(f"⏭️  Reusing existing directory: {dir_name}")
+
+  # Get original model (needed for input generation)
+  # This is lightweight compared to transformation/codegen
   mod, param_dict = model_getter()
 
   # Generate and save test inputs
   input_dir = f"./{dir_name}/test_inputs"
-  print(f"Generating test inputs for {test_name}...")
+  print(f"Generating test inputs for {test_name} with pattern '{input_pattern}'...")
   gen = InputGenerator(mod=mod, seed=42)
   inputs = gen.generate_input(pattern=input_pattern)
   gen.save_to_files(inputs, input_dir)
@@ -521,16 +616,45 @@ def run_test_pipeline(test_name):
   input_dict = {input_name: input_data}
 
   # Run with CPU validation enabled
-  run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict)
+  # Note: When skip_setup=True, run_test will load the transformed model from file
+  run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup)
+
+
+# ============================================================================
+# Pytest Fixtures for Setup Caching
+# ============================================================================
+# Cache to track which models have been set up (for pytest session reuse)
+_setup_cache = {}
+
+@pytest.fixture(scope="session")
+def setup_cache():
+  """Session-scoped fixture to cache model setups across tests"""
+  return _setup_cache
 
 
 # ============================================================================
 # Parametrized Tests
 # ============================================================================
-@pytest.mark.parametrize("test_name", list(MODEL_REGISTRY.keys()))
-def test_imcflow_model(test_name):
-  """Parametrized test for IMCFLOW models"""
-  run_test_pipeline(test_name)
+@pytest.mark.parametrize("test_name,input_pattern", [
+  (model_name, pattern)
+  for model_name in MODEL_REGISTRY.keys()
+  for pattern in INPUT_PATTERNS
+])
+def test_imcflow_model_with_pattern(test_name, input_pattern, setup_cache):
+  """Parametrized test for IMCFLOW models with all input patterns
+
+  Uses setup caching: first pattern does full setup, subsequent patterns skip setup.
+  """
+  # Check if this model has already been set up in this test session
+  skip_setup = test_name in setup_cache
+
+  if not skip_setup:
+    print(f"\n🔧 First run for {test_name}: Running full setup")
+    setup_cache[test_name] = True
+  else:
+    print(f"\n⚡ Reusing compiled model for {test_name}")
+
+  run_test_pipeline(test_name, input_pattern, skip_setup=skip_setup)
 
 
 if __name__ == "__main__":
