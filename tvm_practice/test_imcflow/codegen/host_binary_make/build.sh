@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build script for ${ISA} target
-MAIN_SCRIPT=${1:-"relu.c"}
+MAIN_SCRIPT=${1:-"execute_graph.c"}
 MAIN_TEST_FOLDER=${2:-"one_relu_evl"}
 ISA=${3:-"x86"}
 

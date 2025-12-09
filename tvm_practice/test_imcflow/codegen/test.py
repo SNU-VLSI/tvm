@@ -18,7 +18,8 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
 from tvm.contrib.imcflow import DataBlock
 import os
-import shutil
+import subprocess
+import copy
 from tvm.relay.op.transform import imcflow_4d_to_qconv_input, imcflow_mmquant_out_to_4d
 import tvm.relay as relay
 import pprint
@@ -81,11 +82,12 @@ def run_cpu_validation(mod, param_dict, input_data_dict, output_dir):
   target = "llvm"
   ctx = tvm.cpu(0)
 
-  mod = cpu_run.make_cpu_runnable(mod)
-  printModel(output_dir, mod, param_dict, "cpu_runnable_model")
+  cpu_mod = copy.deepcopy(mod)
+  cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
+  printModel(output_dir, cpu_mod, param_dict, "cpu_runnable_model")
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-    graph, lib, params = tvm.relay.build(mod, target=target, params=param_dict)
-  
+    graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict)
+
   executor = graph_executor.create(graph, lib, device=ctx)
     
   # Load constant parameters
@@ -322,6 +324,15 @@ def run_test_evl(test_name, mod, param_dict, input_data_dict=None):
 
   # Generate graph executor for hardware deployment
   generate_graph_executor(mod, param_dict, eval_dir)
+
+  # Run simulation using unified execute_graph.c
+  host_build_dir = "./host_binary_make/build"
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86"]
+  subprocess.run(build_command, cwd=host_build_dir, capture_output=True, text=True, check=True)
+
+  imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow"
+  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no"]
+  subprocess.run(sim_command, cwd=imcflow_gem5_dir, capture_output=True, text=True, check=True)
 
 
 def test_big_evl():
