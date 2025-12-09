@@ -115,7 +115,7 @@ def load_transformed_model(eval_dir):
   return save_data["mod"], save_data["param_dict"]
 
 
-def setup_dir(test_name, suffix="_evl"):
+def setup_dir(test_name, suffix=""):
   def clean_dir_recursive(path):
     """Recursively clean all files but keep all directory inodes intact"""
     for item in os.listdir(path):
