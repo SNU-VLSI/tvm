@@ -692,7 +692,7 @@ def getResnetCifar10SmallPretrained(small_debug=False):
 
   return out, params_dict
   
-def getMiniImcflowModel():
+def getOneConvBnModel():
   """
   
   """
@@ -702,15 +702,6 @@ def getMiniImcflowModel():
   stride, padding = 1, 1
 
   input = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
-
-  # y = imcflow_min_max_quantize(
-  #   input,
-  #   relay.var("quant_min", shape=(), dtype="int16"),
-  #   relay.var("quant_max", shape=(), dtype="int16"),
-  #   axis=1,
-  #   out_dtype="uint8",
-  #   channel=IC
-  # )
 
   y = imcflow_qconv2d(
     input,
@@ -732,11 +723,11 @@ def getMiniImcflowModel():
   )
 
   param_dict = {
-    "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
-    "quant_min" : np.array(1, dtype="int16"),
-    "quant_max" : np.array(2, dtype="int16"),
-    "fused_scale": np.ones((OC,), dtype="int16"),
-    "fused_bias" : np.ones((OC,), dtype="int16"),
+    "conv_weight": rand_tensor("int8", (OC,IC,KH,KW)),
+    "quant_min" : np.array(-128, dtype="int16"),
+    "quant_max" : np.array(127, dtype="int16"),
+    "fused_scale": one_tensor("int16", (OC,)),
+    "fused_bias" : rand_tensor("int16", (OC,))
   }
 
   out = tvm.IRModule.from_expr(y)
