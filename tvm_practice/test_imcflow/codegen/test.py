@@ -48,6 +48,7 @@ MODEL_REGISTRY = {
     "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
     "one_conv_bn": (models_for_test.getOneConvBnModel, "ones"),
     "big_conv": (models_for_test.getBigConvModel, "random"),
+    "conv_bn_quant": (models_for_test.getConvBNQuantModel, "ones"),
     "residual_model": (lambda: models_for_test.getResidualModel(False), "ones"),
     "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
@@ -462,24 +463,27 @@ def run_simulation(eval_dir):
   sim_log_path = os.path.join(log_dir, "gem5.log")
 
   with open(sim_log_path, "w") as log_file:
-    process = subprocess.Popen(
-      sim_command,
-      cwd=imcflow_gem5_dir,
-      stdout=subprocess.PIPE,
-      stderr=subprocess.STDOUT,
-      text=True
-    )
+    try:
+      process = subprocess.Popen(
+        sim_command,
+        cwd=imcflow_gem5_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+      )
 
-    # Stream output line by line to both terminal and log file
-    for line in process.stdout:
-      print(line, end='')
-      log_file.write(line)
+      # Stream output line by line to both terminal and log file
+      for line in process.stdout:
+        print(line, end='')
+        log_file.write(line)
 
-    process.wait()
-    if process.returncode != 0:
-      raise subprocess.CalledProcessError(process.returncode, sim_command)
+      process.wait()
+      if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, sim_command)
+      print(f"✅ Simulation completed, log saved to: {sim_log_path}")
+    except Exception as e:
+      print(f"❌ Simulation failed with error: {e}")
 
-  print(f"✅ Simulation completed, log saved to: {sim_log_path}")
   print(f"✅ move imcflow simulator log to {log_dir}")
   imcflow_sim_log_paths = glob.glob(f"{imcflow_gem5_dir}/logs/now*.log")
   for sim_log in imcflow_sim_log_paths:

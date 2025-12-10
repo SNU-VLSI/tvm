@@ -92,11 +92,12 @@ class ImceCallCodeBlock(ImceCodeBlock):
 
   @property
   def num_blocks(self) -> int:
-    return 4 if self.prev_op else 1
+    # return 4 if self.prev_op else 1
+    return self.prev_op.num_out_blocks if self.prev_op else 1
 
   @property
   def num_out_blocks(self) -> int:
-    return 4 if self.prev_op else 1
+    return self.prev_op.num_out_blocks if self.prev_op else 1
 
   def __repr__(self):
     return f"{self.__class__.__name__}(gid: {self.call.get_gid()})"
@@ -271,6 +272,7 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
     self._num_blocks = 4
+    self.channels = None
     self.o_split_idx = o_split_idx
 
   @property
@@ -293,10 +295,13 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     # arg_shape = get_type(call.module, arg).shape
     # arg_layout = DevConfig().LayoutMap[arg]
 
+    #TODO: maybe we need to clear qreg before
     for i in range(self.num_blocks):
       var_i = self._make_unique_input_var_for_post_op(data_edge, i)
       qreg_start_idx = i + 4 * self.o_split_idx
       # min max quantization does not require 
+      if i*16 >= self.channels:
+        src_mask = 0
       code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
     # NOTE: currently, it is not possible to have consequtive 4*(MM_QUANT -> QREG)s.
@@ -393,6 +398,11 @@ class ConvBlock(ImceCallCodeBlock):
     self.total_in_read_counts = self.conv.get_total_input_read_counts()
     self.origin_hw = shapes["data"][2] * shapes["data"][3]  # H * W
     self.remain = self.origin_hw - self.total_in_read_counts
+
+    self.out_channels = conv_attrs.channels.value
+    assert self.out_channels <= 64, "convolution output channel is greater than 64"
+    assert self.out_channels%16 == 0, "Until now, conv output channel should be multiple of 16"
+    self.in_channels  = conv_attrs.in_channels.value
     
     # Link post-ops
     prev = self
@@ -404,11 +414,13 @@ class ConvBlock(ImceCallCodeBlock):
 
   @property
   def num_blocks(self) -> int:
+    # conv have to recieve 4 bit planes.
     return 4  # FIXED in ConvBlock
 
   @property
   def num_out_blocks(self) -> int:
-    return 4  # FIXED in ConvBlock
+    # return self.out_channels//16
+    return 4
 
   def _build_loop_body(self, recv_count: int) -> CodeBlock:
 
@@ -436,7 +448,7 @@ class ConvBlock(ImceCallCodeBlock):
     comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
 
     creg_code = TextBlock("")
-    for i in range(self.num_blocks):
+    for i in range(self.num_out_blocks):
       var_o = UniqueVar((self, i))
       creg_code += f"{var_o} = __builtin_IMCE_GET_CREG((short){i});"
     comp.add(creg_code)
@@ -680,6 +692,9 @@ class RecvSendWrapper(ImceCodeBlock):
 
     datablock = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(data_edge)
 
+    arg_types = []
+    ret_type  = None
+
     # get input edge size
     args = []
     for idx, arg in enumerate(call.args):
@@ -693,6 +708,7 @@ class RecvSendWrapper(ImceCodeBlock):
     for arg in args:
       layout = DevConfig().LayoutMap[arg]
       vir_ttype = get_type(call_ctx.module, arg)
+      arg_types.append(vir_ttype)
       ch_size = vir_ttype.shape[1]  # assuming NCHW
       real_ttype_ = apply_layout_to_type(vir_ttype, layout)
       if real_ttype and real_ttype != real_ttype_:
@@ -715,7 +731,8 @@ class RecvSendWrapper(ImceCodeBlock):
 
     # get output edge size
     layout = DevConfig().LayoutMap[call_ctx.call]
-    real_ttype = apply_layout_to_type(get_type(call_ctx.module, call_ctx.call), layout)
+    ret_type = get_type(call_ctx.module, call_ctx.call)
+    real_ttype = apply_layout_to_type(ret_type, layout)
     
     elem_count = math.prod(list(real_ttype.shape))
     if isinstance(elem_count, tvm.tir.expr.IntImm):
@@ -763,6 +780,18 @@ class RecvSendWrapper(ImceCodeBlock):
         count = count * ratio
         num_blocks = num_blocks // ratio
       self.send_block._num_blocks = num_blocks
+      arg_vtype = arg_types[0]
+      N, IC, H, W = arg_vtype.shape
+      N, IC, H, W = N.value, IC.value, H.value, W.value
+      self.send_block.channels = IC
+
+      # N, IC, H, W = arg_vtype.shape
+      # N, IC, H, W = N.value, IC.value, H.value, W.value
+      # num_blocks = math.ceil(IC/4.0)*4
+      # num_out_blocks = 4
+      # self.send_block._num_blocks = num_blocks
+      # self.send_block.channels = IC
+      # count = N*H*W
 
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks, 
