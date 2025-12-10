@@ -118,7 +118,7 @@ def imcflow_min_max_quantize(
     num_thresholds = (1 << bits) - 1  # 2^bits - 1
     thresholds = []
     
-    range_val = max - min
+    range_val = topi.cast(max, dtype="int32") - topi.cast(min, dtype="int32")
     divisor = tir.const(1 << bits, dtype=param_dtype)  # 2^bits
     
     for i in range(num_thresholds):

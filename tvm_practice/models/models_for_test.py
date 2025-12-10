@@ -165,9 +165,13 @@ def getOneMMQuantModel():
     relay.var("quant_max", shape=(), dtype="int16"), 
     axis=1, out_dtype="uint8", channel=16)
   
+  # param_dict = {
+  #   "quant_min": np.array(-128, dtype="int16"),
+  #   "quant_max": np.array(127, dtype="int16"),
+  # }
   param_dict = {
-    "quant_min": np.array(-128, dtype="int16"),
-    "quant_max": np.array(127, dtype="int16"),
+    "quant_min": np.array(-2**15, dtype="int16"),
+    "quant_max": np.array(2**15-1, dtype="int16"),
   }
 
   out = tvm.IRModule.from_expr(y)
