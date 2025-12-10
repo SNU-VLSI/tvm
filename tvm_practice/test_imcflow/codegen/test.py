@@ -44,6 +44,7 @@ MODEL_REGISTRY = {
     "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
     "one_conv_bn": (models_for_test.getOneConvBnModel, "ones"),
     "big_conv": (models_for_test.getBigConvModel, "random"),
+    "conv_bn_quant": (models_for_test.getConvBNQuantModel, "ones"),
     "residual_model": (lambda: models_for_test.getResidualModel(False), "ones"),
     "residual_random_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
