@@ -37,6 +37,7 @@ MODEL_REGISTRY = {
     "one_relu": (models_for_test.getOneReluModel, "linear"),
     "one_conv": (models_for_test.getOneConvModel, "random"),
     "one_mmquant": (models_for_test.getOneMMQuantModel, "linear"),
+    "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
     "residual_model": (models_for_test.getResidualModel, "ones"),
     "mini_imcflow": (models_for_test.getMiniImcflowModel, "ones"),
 

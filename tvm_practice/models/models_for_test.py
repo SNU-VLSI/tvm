@@ -169,6 +169,23 @@ def getOneMMQuantModel():
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
+def getOneFusedBNModel():
+  N, C, H, W = 1, 16, 4, 4
+  input = relay.var("input", shape=(N,C,H,W), dtype="int16")
+  y = imcflow_batch_norm(
+    input,
+    relay.var("fused_scale", shape=(C,), dtype="int16"),
+    relay.var("fused_bias", shape=(C,), dtype="int16"),
+  )
+
+  param_dict = {
+    "fused_scale": np.ones((C,), dtype="int16"),
+    "fused_bias" : np.zeros((C,), dtype="int16"),
+  }
+
+  out = tvm.IRModule.from_expr(y)
+  return out, param_dict
+
 def getResidualModel():
   N, IC, H, W = 1, 16, 1, 1
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
