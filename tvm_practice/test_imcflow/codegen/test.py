@@ -43,7 +43,8 @@ MODEL_REGISTRY = {
     "one_conv_quant": (models_for_test.getOneConvQuantModel, "ones"),
     "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
     "one_conv_bn": (models_for_test.getOneConvBnModel, "ones"),
-    "residual_model": (models_for_test.getResidualModel, "ones"),
+    "residual_model": (lambda: models_for_test.getResidualModel(False), "ones"),
+    "residual_random_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
     # ResNet8 variants - all use small_debug=True
     "resnet8_small": (lambda: resnet8_cifar.getModel(True), "ones"),
