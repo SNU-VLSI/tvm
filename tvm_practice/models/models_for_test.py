@@ -223,7 +223,7 @@ def getOneFusedBNModel():
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
-def getResidualModel():
+def getResidualModel(random=False):
   N, IC, H, W = 1, 16, 1, 1
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
   y = imcflow_qconv2d(
@@ -254,13 +254,20 @@ def getResidualModel():
 
   y = y + residual
 
-  param_dict = {
-    "weight2_1"  : np.ones((16,16,3,3), dtype="int8"),
-    "weight2_2"  : np.ones((16,16,3,3), dtype="int8"),
-    "quant_min_2": np.array(-128, dtype="int16"),
-    "quant_max_2": np.array(127, dtype="int16"),
-  }
-
+  if random == False:
+    param_dict = {
+      "weight2_1"  : np.ones((16,16,3,3), dtype="int8"),
+      "weight2_2"  : np.ones((16,16,3,3), dtype="int8"),
+      "quant_min_2": np.array(-128, dtype="int16"),
+      "quant_max_2": np.array(127, dtype="int16"),
+    }
+  else:
+    param_dict = {
+      "weight2_1"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
+      "weight2_2"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
+      "quant_min_2": np.array(-128, dtype="int16"),
+      "quant_max_2": np.array(127, dtype="int16"),
+    }
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
