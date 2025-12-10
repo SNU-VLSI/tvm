@@ -69,12 +69,12 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
     ),
   ],
   "qnn.imcflow_min_max_quantize": [
-    (
-      [
-        [LayoutType.NCHW16C, LayoutType.SCALAR, LayoutType.SCALAR],
-      ],
-      LayoutType.QCONV_INPUT,
-    ),
+    # (
+    #   [
+    #     [LayoutType.NCHW16C, LayoutType.SCALAR, LayoutType.SCALAR],
+    #   ],
+    #   LayoutType.QCONV_INPUT,
+    # ),
     (
       [
         [LayoutType.NCHW64C, LayoutType.SCALAR, LayoutType.SCALAR],
