@@ -89,7 +89,7 @@ class WriteIMCUBlock(InodeCodeBlock):
         self.body.add(TextBlock(f"{var} = {db.offset};"))
         self.body.add(TextBlock(f"__builtin_INODE_SET_ADDR_CNT(0);"))
         self.body.add(SimpleFor(math.ceil(db.size / 32),
-                          lambda iter: f"__builtin_INODE_WR_IMCU({var} + {iter}*32, 0, {info.policy_info[0].address});"))
+                          lambda iter, addr=info.policy_info[0].address: f"__builtin_INODE_WR_IMCU({var} + {iter}*32, 0, {addr});"))
 
 
 class RecvBlock(InodeCodeBlock):
