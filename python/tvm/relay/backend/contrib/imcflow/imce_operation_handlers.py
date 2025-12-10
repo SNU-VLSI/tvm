@@ -384,8 +384,6 @@ class BatchNormHandler(OperationHandler):
 
   def handle(self, call: 'BuilderContext') -> None:
     print(f"[IMCE CODE BUILDER] handle BatchNorm: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
-    assert call.curr_composite_id, \
-        f"BatchNorm must be inside a composite function, got gid: {call.get_gid()}"
     hid = call.get_hid()
     scale_edge = call.get_tensor_edge_from_tag("fused_scale")
     bias_edge = call.get_tensor_edge_from_tag("fused_bias")
@@ -400,10 +398,13 @@ class BatchNormHandler(OperationHandler):
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)
 
-    # TODO: how to scale?
     block = BatchNormBlock(call, "batch_norm")
-    call.post_op_stack.append(block)
-
+    if call.curr_composite_id:
+      # TODO: how to scale?
+      call.post_op_stack.append(block)
+    else:
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "bn_standalone").create_loop_from_call(call)
+      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 @register_operation_handler
 class NuQuantizeHandler(OperationHandler):

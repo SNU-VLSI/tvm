@@ -270,11 +270,12 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', o_split_idx: int, annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
+    self._num_blocks = 4
     self.o_split_idx = o_split_idx
 
   @property
   def num_blocks(self) -> int:
-    return 4
+    return self._num_blocks
 
   @property
   def num_out_blocks(self) -> int:
@@ -688,9 +689,12 @@ class RecvSendWrapper(ImceCodeBlock):
         args.append(arg)
 
     real_ttype = None
+    ch_size = None
     for arg in args:
       layout = DevConfig().LayoutMap[arg]
-      real_ttype_ = apply_layout_to_type(get_type(call_ctx.module, arg), layout)
+      vir_ttype = get_type(call_ctx.module, arg)
+      ch_size = vir_ttype.shape[1]  # assuming NCHW
+      real_ttype_ = apply_layout_to_type(vir_ttype, layout)
       if real_ttype and real_ttype != real_ttype_:
         raise RuntimeError("Mismatched real tensor types among input args")
       real_ttype = real_ttype_
@@ -744,6 +748,21 @@ class RecvSendWrapper(ImceCodeBlock):
       num_blocks=int(ratio)
       num_out_blocks=1
       count=out_total_bytes//32
+    
+    # for min_max_quant, it has minimum granularity more then one.
+    # It have to recv all input channels first.
+    if isinstance(self.send_block, MinmaxQuantBlock):
+      if num_out_blocks <= 4:
+        ratio = 4 // num_out_blocks
+        num_blocks = num_blocks * ratio
+        count = count // ratio
+        num_out_blocks = 4
+      else:
+        ratio = num_out_blocks // 4
+        num_out_blocks = 4
+        count = count * ratio
+        num_blocks = num_blocks // ratio
+      self.send_block._num_blocks = num_blocks
 
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks, 
