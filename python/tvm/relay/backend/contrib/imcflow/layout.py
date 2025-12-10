@@ -18,10 +18,16 @@ from copy import deepcopy
 import math
 import numpy as np
 
+#TODO: mm_quant and concat need NHWC, NHW16C, NHW64C support
+#      consider NHW16C and NCHW16C can be same if channel is less than 16.
+
 # Layout requirements for each IMCFLOW-friendly op.
 # These drive packing/unpacking instead of ad-hoc shape checks.
 class LayoutType(Enum):
   NCHW = "NCHW"
+  NHWC = "NHWC"
+  NHW16C = "NHW16c"
+  NHW64C = "NHW64c"
   NCHW16C = "NCHW16c"
   NCHW64C = "NCHW64c"
   QCONV_INPUT = "QCONV_INPUT"   # Packed activation layout used by qconv input path
