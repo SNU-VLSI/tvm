@@ -456,6 +456,7 @@ def getResnetCifar10Small_(input_shape):
 
   return out, var_info
 
+
 def getResnetCifar10Small(small_debug=False, init_only_one=False):
   if small_debug:
     out, var_dict = getResnetCifar10Small_([1, 3, 8, 8])
@@ -470,6 +471,28 @@ def getResnetCifar10Small(small_debug=False, init_only_one=False):
       params_dict[name] = one_tensor(info["dtype"], info["shape"])
     else:
       params_dict[name] = rand_tensor(info["dtype"], info["shape"])
+  
+  # swap min, max pair if min is greater than max
+  min_max_pairs = {}
+  for name, value in params_dict.items():
+    if "quant_min" in name:
+      base_name = name.replace("quant_min", "")
+      if base_name not in min_max_pairs:
+        min_max_pairs[base_name] = [value, None]
+      else:
+        min_max_pairs[base_name][0] = value
+    elif "quant_max" in name:
+      base_name = name.replace("quant_max", "")
+      if base_name not in min_max_pairs:
+        min_max_pairs[base_name] = [None, value]
+      else:
+        min_max_pairs[base_name][1] = value
+    
+  for base_name, (min_val, max_val) in min_max_pairs.items():
+    if min_val is not None and max_val is not None:
+      if np.any(min_val > max_val):
+        # swap
+        params_dict[f"quant_min{base_name}"], params_dict[f"quant_max{base_name}"] = max_val, min_val
 
   return out, params_dict
 
@@ -731,5 +754,201 @@ def getOneConvBnModel():
   }
 
   out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
+
+def getResnetCifar10SmallManualParam_(input_shape):
+  input = relay.var("model_input", shape=input_shape, dtype="float32")
+  N, IC, H, W = input_shape
+
+  y = relay.nn.conv2d(
+      input,
+      relay.var("weight1", shape=(16, 3, 3, 3), dtype="float32"),
+      in_channels=3,
+      channels=16,
+      kernel_size=(3, 3),
+      padding=(1, 1),
+  )
+
+  N, IC, H, W = (N, 16, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
+
+  y = relay.nn.batch_norm(y, 
+                          relay.var("bn_gamma", shape=(16,), dtype="float32"), relay.var("bn_beta", shape=(16,), dtype="float32"), 
+                          relay.var("bn_moving_mean", shape=(16,), dtype="float32"), relay.var("bn_moving_var", shape=(16,), dtype="float32"))[0]
+  
+  y = y * relay.var("x_f_1", shape=(1,), dtype="float32")
+  y = relay.cast(y, dtype="int16")
+
+  # basic block 1
+  residual = y
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_1", shape=(), dtype="int16"), relay.var("quant_max_1", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=16)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2_1", shape=(16,16,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (16,16,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=16,
+    channels=16,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  IC, H, W = (16, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
+
+  """
+  y = imcflow_batch_norm(y, relay.var("fused_scale1", shape=(16,), dtype="int16"), relay.var("fused_bias1", shape=(16,), dtype="int16"))
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_2", shape=(), dtype="int16"), relay.var("quant_max_2", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=16)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2_2", shape=(16,16,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (16,16,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=16,
+    channels=16,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  IC, H, W = (16, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
+
+  y = imcflow_batch_norm(y, relay.var("fused_scale2", shape=(16,), dtype="int16"), relay.var("fused_bias2", shape=(16,), dtype="int16"))
+  y = y + residual * relay.var("y_f_1", shape=(1,), dtype="int16")
+
+  # basic block 2
+  residual = y
+  IC_res, H_res, W_res = IC, H, W
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_3", shape=(), dtype="int16"), relay.var("quant_max_3", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=16)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight3_1", shape=(32,16,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (32,16,3,3), padding=1, stride=2).get_as_const_tensor(),
+    in_channels=16,
+    channels=32,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    strides=(2,2),
+    out_dtype="int16"
+  )
+  IC, H, W = (32, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
+
+  y = imcflow_batch_norm(y, relay.var("fused_scale3", shape=(32,), dtype="int16"), relay.var("fused_bias3", shape=(32,), dtype="int16"))
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_4", shape=(), dtype="int16"), relay.var("quant_max_4", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=32)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight3_2", shape=(32,32,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (32,32,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=32,
+    channels=32,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  IC, H, W = (32, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
+
+  y = imcflow_batch_norm(y, relay.var("fused_scale4", shape=(32,), dtype="int16"), relay.var("fused_bias4", shape=(32,), dtype="int16"))
+
+  y_residual = imcflow_min_max_quantize(residual, relay.var("quant_min_4_2", shape=(), dtype="int16"), relay.var("quant_max_4_2", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=32)
+  y_residual = imcflow_qconv2d(
+    y_residual,
+    relay.var("weight3_0", shape=(32,16,1,1), dtype="int8"),
+    ConfigData((N, IC_res, H_res, W_res), (32,16,1,1), padding=0, stride=2).get_as_const_tensor(),
+    in_channels=16,
+    channels=32,
+    kernel_size=(1, 1),
+    strides=(2,2),
+    out_dtype="int16"
+  )
+  y_residual = imcflow_batch_norm(y_residual, relay.var("fused_scale4_2", shape=(32,), dtype="int16"), relay.var("fused_bias4_2", shape=(32,), dtype="int16"))
+
+  y_residual = relay.var("bn_out_f_1", shape=(32,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_0", shape=(32,1,1), dtype="int16")
+  y = y + y_residual
+
+  # basic block 3
+  residual = y
+  IC_res, H_res, W_res = IC, H, W
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_5", shape=(), dtype="int16"), relay.var("quant_max_5", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=32)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight4_1", shape=(64,32,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (64,32,3,3), padding=1, stride=2).get_as_const_tensor(),
+    in_channels=32,
+    channels=64,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    strides=(2,2),
+    out_dtype="int16"
+  )
+  IC, H, W = (64, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
+
+  y = imcflow_batch_norm(y, relay.var("fused_scale5", shape=(64,), dtype="int16"), relay.var("fused_bias5", shape=(64,), dtype="int16"))
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_6", shape=(), dtype="int16"), relay.var("quant_max_6", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=64)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight4_2", shape=(64,64,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (64,64,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=64,
+    channels=64,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  IC, H, W = (64, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
+
+  y = imcflow_batch_norm(y, relay.var("fused_scale6", shape=(64,), dtype="int16"), relay.var("fused_bias6", shape=(64,), dtype="int16"))
+
+  y_residual = imcflow_min_max_quantize(residual, relay.var("quant_min_6_2", shape=(), dtype="int16"), relay.var("quant_max_6_2", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=64)
+  y_residual = imcflow_qconv2d(
+    y_residual,
+    relay.var("weight4_0", shape=(64,32,1,1), dtype="int8"),
+    ConfigData((N, IC_res, H_res, W_res), (64,32,1,1), padding=0, stride=2).get_as_const_tensor(),
+    in_channels=32,
+    channels=64,
+    kernel_size=(1, 1),
+    strides=(2,2),
+    out_dtype="int16"
+  )
+  y_residual = imcflow_batch_norm(y_residual, relay.var("fused_scale6_2", shape=(64,), dtype="int16"), relay.var("fused_bias6_2", shape=(64,), dtype="int16"))
+
+  y_residual = relay.var("bn_out_f_3", shape=(64,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_2", shape=(64,1,1), dtype="int16")
+
+  y = y + y_residual
+
+  # post process
+  y = relay.cast(y,dtype="float32") * relay.var("post_f_inv", shape=(1,), dtype="float32")
+  y = relay.nn.relu(y)
+  y = relay.nn.adaptive_avg_pool2d(y, output_size=(1,1))
+  y = relay.nn.batch_flatten(y) 
+  y = relay.nn.dense(y, relay.var("dense_weight", shape=(10, 64), dtype="float32"))
+  y = relay.nn.bias_add(y, relay.var("dense_bias", shape=(10,), dtype="float32"))
+  """
+  out = tvm.IRModule.from_expr(y)
+
+  params_dict = {
+    "weight1": np.ones((16, 3, 3, 3), dtype="float32"),
+    "bn_gamma": np.ones((16,), dtype="float32"),
+    "bn_beta": np.ones((16,), dtype="float32"),
+    "bn_moving_mean": np.zeros((16,), dtype="float32"),
+    "bn_moving_var": np.ones((16,), dtype="float32"),
+    "quant_min_1": np.array(-64, dtype="int16"),
+    "quant_max_1": np.array(64, dtype="int16"),
+    "x_f_1": np.array([2.0], dtype="float32"),
+    "weight2_1" : np.ones((16,16,3,3), dtype="int8"),
+  }
+
+  params_dict['weight1'][0,0,0,1] = 2
+  params_dict['weight1'][0,0,1,0] = 2
+  params_dict['weight1'][0,1,0,0] = 2
+  params_dict['weight1'][1,0,0,0] = 2
+
+  params_dict['weight2_1'][0,0,0,1] = 2
+  params_dict['weight2_1'][0,0,1,0] = 2
+  params_dict['weight2_1'][0,1,0,0] = 2
+  params_dict['weight2_1'][1,0,0,0] = 2
+
+  return out, params_dict
+
+def getResnetCifar10SmallManualParam(small_debug=False):
+  if small_debug:
+    out, param_dict = getResnetCifar10SmallManualParam_([1, 3, 8, 8])
+  else:
+    out, param_dict = getResnetCifar10SmallManualParam_([1, 3, 32, 32])
 
   return out, param_dict
