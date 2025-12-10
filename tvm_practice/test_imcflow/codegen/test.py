@@ -66,16 +66,17 @@ INPUT_PATTERNS = ["random", "ones", "zeros", "linear", "default"]
 # ============================================================================
 # Utility Functions
 # ============================================================================
-def save_transformed_model(mod, param_dict, eval_dir):
+def save_transformed_model(mod, param_dict, eval_dir, pkl_name="transformed_model.pkl"):
   """Save transformed model and parameters to file for reuse
 
   Args:
     mod: Transformed TVM relay module
     param_dict: Transformed model parameters
     eval_dir: Directory to save the model
+    pkl_name: Name of the pickle file to save
   """
   import pickle
-  model_save_path = os.path.join(eval_dir, "transformed_model.pkl")
+  model_save_path = os.path.join(eval_dir, pkl_name)
 
   save_data = {
     "mod": mod,
@@ -88,11 +89,12 @@ def save_transformed_model(mod, param_dict, eval_dir):
   print(f"💾 Saved transformed model to: {model_save_path}")
 
 
-def load_transformed_model(eval_dir):
+def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
   """Load previously transformed model and parameters from file
 
   Args:
     eval_dir: Directory containing the saved model
+    pkl_name: Name of the pickle file to load
 
   Returns:
     tuple: (mod, param_dict)
@@ -101,7 +103,7 @@ def load_transformed_model(eval_dir):
     FileNotFoundError: If transformed model file doesn't exist
   """
   import pickle
-  model_save_path = os.path.join(eval_dir, "transformed_model.pkl")
+  model_save_path = os.path.join(eval_dir, pkl_name)
 
   if not os.path.exists(model_save_path):
     raise FileNotFoundError(
@@ -155,7 +157,7 @@ def printModel(result_dir, mod, param_dict, mod_name):
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
 
-def run_cpu_validation(mod, param_dict, input_data_dict, model_dir):
+def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=False):
   """Run transformed model on CPU for validation
 
   Args:
@@ -163,6 +165,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir):
     param_dict: Model parameters
     input_data_dict: Dictionary of input name -> numpy array
     model_dir: Directory to save CPU outputs
+    skip_setup: If True, load from previously transformed CPU model
 
   Returns:
     output: The CPU execution output as numpy array
@@ -174,9 +177,19 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir):
   target = "llvm"
   ctx = tvm.cpu(0)
 
-  cpu_mod = copy.deepcopy(mod)
-  cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
-  printModel(model_dir, cpu_mod, param_dict, "cpu_runnable_model")
+  if not skip_setup:
+    # Transform model to be CPU runnable
+    cpu_mod = copy.deepcopy(mod)
+    cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
+    printModel(model_dir, cpu_mod, param_dict, "cpu_runnable_model")
+
+    # Save the CPU runnable model
+    save_transformed_model(cpu_mod, param_dict, model_dir, pkl_name="transformed_cpu_model.pkl")
+  else:
+    # Load previously transformed CPU model
+    print("⏭️  Skipping CPU model transformation, loading from file...")
+    cpu_mod, param_dict = load_transformed_model(model_dir, pkl_name="transformed_cpu_model.pkl")
+
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
     graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict)
 
@@ -492,10 +505,12 @@ def compare_outputs(cpu_output, imcflow_output):
   if cpu_output.dtype in [np.float32, np.float64]:
     if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
       print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
+      print(f"IMCFLOW == CPU reference output: {cpu_output}")
     else:
       pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
   elif np.array_equal(cpu_output, imcflow_output):
     print("✅ IMCFLOW output matches CPU reference output (exact match)")
+    print(f"IMCFLOW == CPU reference output: {cpu_output}")
   else:
     pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
 
@@ -509,7 +524,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     mod: The TVM relay module (only used if skip_setup=False)
     param_dict: Model parameters (only used if skip_setup=False)
     input_data_dict: Optional dict of input name -> numpy array for CPU validation
-    skip_setup: If True, skip transformation, codegen, and graph generation.
+    skip_setup: If True, skip transformations, codegen, and graph generation.
                 Loads previously transformed model from file.
   """
   print(f"\n{'='*60}")
@@ -537,7 +552,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 
   # Run CPU validation if input data is provided
   if input_data_dict is not None:
-    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir)
+    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup)
     if cpu_output is not None:
       print("✅ CPU validation completed successfully")
 
