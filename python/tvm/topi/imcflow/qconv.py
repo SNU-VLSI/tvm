@@ -125,7 +125,8 @@ def imcflow_qconv2d(
 
   def get_scale(bi, bw):
       # Weight bit 3 is sign bit (-8)
-      w_scale = tvm.tir.if_then_else(bw == 3, -8, 1 << bw)
+      # w_scale = tvm.tir.if_then_else(bw == 3, -8, 1 << bw)
+      w_scale = (1 << bw) - 16 * (bw // 3)
       in_scale = 1 << bi
       return w_scale * in_scale
 
