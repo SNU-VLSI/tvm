@@ -146,7 +146,11 @@ def getOneConvModel():
     out_dtype="int16"
   )
 
-  param_dict = {"conv_weight": np.ones((OC,IC,KH,KW), dtype="int8")}
+  # param_dict = {"conv_weight": np.ones((OC,IC,KH,KW), dtype="int8")}
+  param_dict = {
+    "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+    # "conv_weight": np.random.randint(-1, 0, size=(OC,IC,KH,KW), dtype=np.int8),
+  }
 
   out = tvm.IRModule.from_expr(y)
 
@@ -193,7 +197,7 @@ def getOneConvQuantModel():
     axis=1, out_dtype="uint8", channel=16)
 
   param_dict = {
-    "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+    "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
     "quant_min": np.array(-128, dtype="int16"),
     "quant_max": np.array(127, dtype="int16"),
     }
