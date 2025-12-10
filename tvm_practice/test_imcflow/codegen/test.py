@@ -27,6 +27,8 @@ from models import models_for_test
 # Import shared input generator
 from input_generator import InputGenerator
 
+np.random.seed(1234)
+
 # ============================================================================
 # Model Registry
 # ============================================================================
@@ -48,6 +50,7 @@ MODEL_REGISTRY = {
     "resnet8_small_pretrained": (lambda: resnet8_cifar.getModel_from_pretrained_weight(True), "ones"),
     "resnet_cifar10_small": (lambda: models_for_test.getResnetCifar10Small(small_debug=True), "ones"),
     "resnet_cifar10_small_pretrained": (lambda: models_for_test.getResnetCifar10SmallPretrained(small_debug=True), "ones"),
+    "resnet_cifar10_subset_small_manual_param": (lambda: models_for_test.getResnetCifar10SmallManualParam(small_debug=True), "ones"),
 
     # Other models
     "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
