@@ -5,6 +5,7 @@ from tvm.micro import export_model_library_format
 import tvm.testing
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 from tvm.contrib import graph_executor
+from tvm.contrib.debugger import debug_executor
 from tvm.relay.build_module import bind_params_by_name
 from tvm.relay import transform
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
@@ -29,12 +30,15 @@ from input_generator import InputGenerator
 
 np.random.seed(1234)
 
+DEBUG=1
+
 # ============================================================================
 # Model Registry
 # ============================================================================
 # Maps test_name -> (model_getter_function, default_input_pattern)
 # default_input_pattern: "random", "ones", "zeros", "linear"
-# NOTE: models should have _evl suffix for its directory to be ignored by git.
+# NOTE: it is recommended to not include the input pattern strings in the test_name
+# NOTE: e.g. one_relu_random is discouraged, as it makes harder to collect pytest patterns
 MODEL_REGISTRY = {
     # Simple test models
     "one_relu": (models_for_test.getOneReluModel, "linear"),
@@ -45,7 +49,7 @@ MODEL_REGISTRY = {
     "one_conv_bn": (models_for_test.getOneConvBnModel, "ones"),
     "big_conv": (models_for_test.getBigConvModel, "random"),
     "residual_model": (lambda: models_for_test.getResidualModel(False), "ones"),
-    "residual_random_model": (lambda: models_for_test.getResidualModel(True), "ones"),
+    "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
     # ResNet8 variants - all use small_debug=True
     "resnet8_small": (lambda: resnet8_cifar.getModel(True), "ones"),
@@ -199,7 +203,10 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
     graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict)
 
-  executor = graph_executor.create(graph, lib, device=ctx)
+  if DEBUG:
+    executor = debug_executor.create(graph, lib, device=ctx)
+  else:
+    executor = graph_executor.create(graph, lib, device=ctx)
 
   # Load constant parameters
   if params:
@@ -212,6 +219,10 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
 
   # Run inference
   executor.run()
+
+  if DEBUG:
+    print("Debug executor output tensors:")
+    print(executor.debug_datum.get_output_tensors())
 
   # Get output
   output = executor.get_output(0).asnumpy()
