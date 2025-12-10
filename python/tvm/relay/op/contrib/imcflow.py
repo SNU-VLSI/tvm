@@ -484,9 +484,12 @@ def pattern_table():
       else:
         data = is_op(conv_type)(data1, weight)
 
-      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
+      # out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
+      # for i in range(1, 10):
+      #   out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
+      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
       for i in range(1, 10):
-        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
+        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
 
       return out
 
