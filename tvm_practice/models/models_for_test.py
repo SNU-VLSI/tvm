@@ -204,6 +204,8 @@ def getOneConvQuantModel():
 
   out = tvm.IRModule.from_expr(y)
 
+  return out, param_dict
+
 def getOneFusedBNModel():
   N, C, H, W = 1, 16, 4, 4
   input = relay.var("input", shape=(N,C,H,W), dtype="int16")
