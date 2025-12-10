@@ -269,9 +269,10 @@ def getResidualModel(random=False):
     param_dict = {
       "weight2_1"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
       "weight2_2"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
-      "quant_min_2": np.array(-128, dtype="int16"),
-      "quant_max_2": np.array(127, dtype="int16"),
+      "quant_min_2": np.array(-256, dtype="int16"),
+      "quant_max_2": np.array(256, dtype="int16"),
     }
+
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 

@@ -272,6 +272,7 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
     self._num_blocks = 4
+    self.channels = None
     self.o_split_idx = o_split_idx
 
   @property
@@ -299,6 +300,8 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
       var_i = self._make_unique_input_var_for_post_op(data_edge, i)
       qreg_start_idx = i + 4 * self.o_split_idx
       # min max quantization does not require 
+      if i*16 >= self.channels:
+        src_mask = 0
       code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
     # NOTE: currently, it is not possible to have consequtive 4*(MM_QUANT -> QREG)s.
@@ -416,7 +419,8 @@ class ConvBlock(ImceCallCodeBlock):
 
   @property
   def num_out_blocks(self) -> int:
-    return self.out_channels//16
+    # return self.out_channels//16
+    return 4
 
   def _build_loop_body(self, recv_count: int) -> CodeBlock:
 
@@ -765,26 +769,29 @@ class RecvSendWrapper(ImceCodeBlock):
     # for min_max_quant, it has minimum granularity more then one.
     # It have to recv all input channels first.
     if isinstance(self.send_block, MinmaxQuantBlock):
-      # if num_out_blocks <= 4:
-      #   ratio = 4 // num_out_blocks
-      #   num_blocks = num_blocks * ratio
-      #   count = count // ratio
-      #   num_out_blocks = 4
-      # else:
-      #   ratio = num_out_blocks // 4
-      #   num_out_blocks = 4
-      #   count = count * ratio
-      #   num_blocks = num_blocks // ratio
-      # self.send_block._num_blocks = num_blocks
-
+      if num_out_blocks <= 4:
+        ratio = 4 // num_out_blocks
+        num_blocks = num_blocks * ratio
+        count = count // ratio
+        num_out_blocks = 4
+      else:
+        ratio = num_out_blocks // 4
+        num_out_blocks = 4
+        count = count * ratio
+        num_blocks = num_blocks // ratio
+      self.send_block._num_blocks = num_blocks
       arg_vtype = arg_types[0]
       N, IC, H, W = arg_vtype.shape
       N, IC, H, W = N.value, IC.value, H.value, W.value
-      assert IC%16==0
-      num_blocks = IC//16
-      num_out_blocks = 4
-      self.send_block._num_blocks = num_blocks
-      count = N*H*W
+      self.send_block.channels = IC
+
+      # N, IC, H, W = arg_vtype.shape
+      # N, IC, H, W = N.value, IC.value, H.value, W.value
+      # num_blocks = math.ceil(IC/4.0)*4
+      # num_out_blocks = 4
+      # self.send_block._num_blocks = num_blocks
+      # self.send_block.channels = IC
+      # count = N*H*W
 
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks, 
