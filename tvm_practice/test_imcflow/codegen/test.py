@@ -634,6 +634,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   gen = InputGenerator(mod=mod, known_keys=known_keys, seed=42)
   inputs = gen.generate_input(pattern=input_pattern)
   gen.save_to_files(inputs, input_dir)
+  gen.save_to_files(param_dict, input_dir) # also save params
 
   # Load test inputs for CPU validation
   input_name = list(gen.input_info.keys())[0]
