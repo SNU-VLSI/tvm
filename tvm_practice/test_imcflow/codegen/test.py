@@ -37,6 +37,7 @@ MODEL_REGISTRY = {
     "one_relu": (models_for_test.getOneReluModel, "linear"),
     "one_conv": (models_for_test.getOneConvModel, "random"),
     "one_mmquant": (models_for_test.getOneMMQuantModel, "linear"),
+    "one_conv_quant": (models_for_test.getOneConvQuantModel, "ones"),
     "residual_model": (models_for_test.getResidualModel, "ones"),
     "mini_imcflow": (models_for_test.getMiniImcflowModel, "ones"),
 
@@ -54,7 +55,7 @@ MODEL_REGISTRY = {
     # Legacy models (for backward compatibility)
     "big": (real_model.getModel, "random"),
     "small": (real_model2.getModel, "random"),
-    "one_conv_quant": (real_model2.getOneConvQuantModel, "ones"),
+    # "one_conv_quant": (real_model2.getOneConvQuantModel, "ones"),
     "model_v2": (real_model2.getModelV2, "random"),
     "model_1": (test_models.get_model1, "random"),
 }

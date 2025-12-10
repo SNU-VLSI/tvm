@@ -169,6 +169,39 @@ def getOneMMQuantModel():
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
+def getOneConvQuantModel():
+  N, IC, H, W = 1, 28, 4, 4
+  OC = 64
+  KH, KW = 3, 3
+  stride, padding = 1, 1
+  input = relay.var("conv_input", shape=(N,IC,H,W), dtype="uint8")
+
+  y = imcflow_qconv2d(
+    input,
+    relay.var("conv_weight", shape=(OC,IC,KH,KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+  y = imcflow_min_max_quantize(
+    y, 
+    relay.var("quant_min", shape=(), dtype="int16"), 
+    relay.var("quant_max", shape=(), dtype="int16"), 
+    axis=1, out_dtype="uint8", channel=16)
+
+  param_dict = {
+    "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+    "quant_min": np.array(-128, dtype="int16"),
+    "quant_max": np.array(127, dtype="int16"),
+    }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
+
 def getResidualModel():
   N, IC, H, W = 1, 16, 1, 1
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
