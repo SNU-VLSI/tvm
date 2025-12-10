@@ -52,8 +52,8 @@ def imcflow_qconv2d_no_psum_quant(
 def imcflow_qconv2d(
     input : te.Tensor,
     filter : te.Tensor,
-    strides, padding, dilation, 
-    adcmode=0, vmode=0,
+    strides, padding, dilation,
+    adcmode=0, vmode=0, acc_mask=0,
     data_layout="NCHW", kernel_layout="", out_dtype=None
 ):
   """
@@ -61,6 +61,12 @@ def imcflow_qconv2d(
   Input is bit serial.
   weight bit planes are mapped into a column of IMCU.
   In each column, accumulate bit product and quantize at the end of the column.
+
+  Args:
+    acc_mask: Accumulation mask. For each bit position b, if (acc_mask & (1 << b)) == 0,
+              accumulation mode is enabled. When accumulation mode is enabled and the
+              input bitplane has fewer than 8 ones, quantization is bypassed.
+
   Refer to imcflow simulator for more details.
   """
   batch, in_channel, IH, IW = input.shape
@@ -103,6 +109,20 @@ def imcflow_qconv2d(
       name="BitConv"
   )
 
+  # Count ones in each input bitplane for conditional quantization
+  # Shape: [batch, OH, OW, input_bit]
+  rc2 = te.reduce_axis((0, in_channel), name="rc2")
+  ry2 = te.reduce_axis((0, KH), name="ry2")
+  rx2 = te.reduce_axis((0, KW), name="rx2")
+  InputBitCount = te.compute(
+      (batch, OH, OW, 4),
+      lambda nn, hh, ww, bi: te.sum(
+          get_bit(Apad[nn, rc2, hh * strides[0] + ry2, ww * strides[1] + rx2], bi),
+          axis=[rc2, ry2, rx2]
+      ),
+      name="InputBitCount"
+  )
+
   def psum_quantize_expr(data, adcmode, vmode):
       adc_divider = 2**(2 + adcmode - vmode)
       val = data.astype("float32")
@@ -112,10 +132,19 @@ def imcflow_qconv2d(
       val = val * adc_divider
       return val.astype("int16")
 
-  # Quantize each bitplane result
+  # Quantize each bitplane result with conditional quantization
+  # If acc_mode is enabled (acc_mask & (1 << bi) == 0) AND input bitplane is sparse (< 8 ones),
+  # skip quantization
   QuantizedBitConv = te.compute(
       (batch, out_channel, OH, OW, 4, 4),
-      lambda nn, ff, hh, ww, bi, bw: psum_quantize_expr(BitConv[nn, ff, hh, ww, bi, bw], adcmode, vmode),
+      lambda nn, ff, hh, ww, bi, bw: tvm.tir.if_then_else(
+          tvm.tir.all(
+              InputBitCount[nn, hh, ww, bi] < 8,
+              (acc_mask & (1 << bi)) == 0
+          ),
+          BitConv[nn, ff, hh, ww, bi, bw].astype("int16"),  # No quantization
+          psum_quantize_expr(BitConv[nn, ff, hh, ww, bi, bw], adcmode, vmode)  # Quantize
+      ),
       name="QuantizedBitConv"
   )
 

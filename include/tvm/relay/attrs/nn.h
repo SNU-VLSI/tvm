@@ -1621,6 +1621,7 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
   bool const_packed_node;
   int adcmode;
   int vmode;
+  int acc_mask;
 
   TVM_DECLARE_ATTRS(ImcflowQConv2DAttrs, "relay.attrs.ImcflowQConv2DAttrs") {
     TVM_ATTR_FIELD(strides)
@@ -1679,6 +1680,11 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
     TVM_ATTR_FIELD(vmode)
         .set_default(0)
         .describe("Voltage mode for quantization.");
+    TVM_ATTR_FIELD(acc_mask)
+        .set_default(0)
+        .describe("Accumulation mask. For each bit position b, if (acc_mask & (1 << b)) == 0, "
+                  "accumulation mode is enabled. When enabled and input bitplane has < 8 ones, "
+                  "quantization is bypassed.");
   }
 };
 
