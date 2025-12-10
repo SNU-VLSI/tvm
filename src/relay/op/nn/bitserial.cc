@@ -61,7 +61,7 @@ bool BitPackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
 
   int pack_bits = pack_type.bits();
   if(pack_bits == 255) pack_bits = 256; // Handle special case for 256 bits
-  std::cout<<"BitPackRel pack_bits : " << pack_bits << std::endl;
+  // std::cout<<"BitPackRel pack_bits : " << pack_bits << std::endl;
   
   // Determine if we need chunking for 32-bit targets
   // uint64/uint128/uint256 are split into multiple uint32 chunks
@@ -98,11 +98,11 @@ bool BitPackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   }
 
   reporter->Assign(types[1], TensorType(out_shape, chunk_type));
-  printf("BitPackRel output shape: ");
-  for(const auto& dim : out_shape) {
-    std::cout << dim << ",";
-  }
-  std::cout << std::endl;
+  // printf("BitPackRel output shape: ");
+  // for(const auto& dim : out_shape) {
+  //   std::cout << dim << ",";
+  // }
+  // std::cout << std::endl;
   return true;
 }
 
@@ -113,7 +113,7 @@ Expr MakeBitPack(Expr data, int bits, int pack_axis, int bit_axis, DataType pack
   attrs->pack_axis = pack_axis;
   attrs->bit_axis = bit_axis;
   attrs->pack_type = pack_type;
-  std::cout<<"MakeBitPack pack_type : " << pack_type << std::endl;
+  // std::cout<<"MakeBitPack pack_type : " << pack_type << std::endl;
   attrs->name = name;
   attrs->msb_first = msb_first;
   static const Op& op = Op::Get("nn.bitpack");
@@ -177,14 +177,14 @@ bool BitUnpackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
     adjusted_pack_axis = pack_axis + 1;
   }
   
-  std::cout << "BitUnpackRel pack_axis: " << pack_axis << ", bit_axis: " << bit_axis 
-            << ", adjusted_pack_axis: " << adjusted_pack_axis << std::endl;
+  // std::cout << "BitUnpackRel pack_axis: " << pack_axis << ", bit_axis: " << bit_axis 
+  //           << ", adjusted_pack_axis: " << adjusted_pack_axis << std::endl;
 
   // Parse pack_type bits
   int pack_bits = pack_type.bits();
   if (pack_bits == 255) pack_bits = 256;  // Handle uint256 special case
   
-  std::cout << "BitUnpackRel pack_bits : " << pack_bits << std::endl;
+  // std::cout << "BitUnpackRel pack_bits : " << pack_bits << std::endl;
   
   // Determine if we have chunking
   int num_chunks = 1;
@@ -192,26 +192,26 @@ bool BitUnpackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   if (pack_bits > 32) {
     num_chunks = pack_bits / 32;
     has_chunks = true;
-    std::cout << "BitUnpackRel num_chunks : " << num_chunks << std::endl;
+    // std::cout << "BitUnpackRel num_chunks : " << num_chunks << std::endl;
   }
 
   // Calculate data width (number of elements per packed unit)
   int data_width = pack_bits / bits;
-  std::cout << "BitUnpackRel data_width : " << data_width << std::endl;
+  // std::cout << "BitUnpackRel data_width : " << data_width << std::endl;
   
   // Calculate full unpacked size using adjusted_pack_axis
   IndexExpr packed_size = ishape[adjusted_pack_axis];
   IndexExpr full_size = packed_size * data_width;
-  std::cout << "BitUnpackRel packed_size : " << packed_size << ", full_size: " << full_size << std::endl;
+  // std::cout << "BitUnpackRel packed_size : " << packed_size << ", full_size: " << full_size << std::endl;
   
   // Use out_size if specified, otherwise full_size
   IndexExpr output_size;
   if (param->out_size.defined()) {
     output_size = param->out_size.value();
-    std::cout << "BitUnpackRel output_size (specified) : " << output_size << std::endl;
+    // std::cout << "BitUnpackRel output_size (specified) : " << output_size << std::endl;
   } else {
     output_size = full_size;
-    std::cout << "BitUnpackRel output_size (full) : " << output_size << std::endl;
+    // std::cout << "BitUnpackRel output_size (full) : " << output_size << std::endl;
   }
 
   // Build output shape
@@ -235,11 +235,11 @@ bool BitUnpackRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
 
   reporter->Assign(types[1], TensorType(out_shape, out_dtype));
   
-  printf("BitUnpackRel output shape: ");
+  // printf("BitUnpackRel output shape: ");
   for(const auto& dim : out_shape) {
-    std::cout << dim << ",";
+    // std::cout << dim << ",";
   }
-  std::cout << std::endl;
+  // std::cout << std::endl;
   
   return true;
 }
@@ -255,8 +255,8 @@ Expr MakeBitUnpack(Expr data, int bits, int pack_axis, int bit_axis, DataType pa
   attrs->out_dtype = out_dtype;
   attrs->name = name;
   attrs->msb_first = msb_first;
-  std::cout << "MakeBitUnpack pack_type : " << pack_type << std::endl;
-  std::cout << "MakeBitUnpack out_dtype : " << out_dtype << std::endl;
+  // std::cout << "MakeBitUnpack pack_type : " << pack_type << std::endl;
+  // std::cout << "MakeBitUnpack out_dtype : " << out_dtype << std::endl;
   static const Op& op = Op::Get("nn.bitunpack");
   return Call(op, {data}, Attrs(attrs), {});
 }

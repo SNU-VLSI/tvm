@@ -3335,8 +3335,8 @@ bool LayoutTransformRel(const Array<Type>& types, int num_inputs, const Attrs& a
       << "cannot convert from " << params->src_layout << " to " << params->dst_layout;
 
   const auto& out_shape = layout_converter.ForwardShape(data->shape);
-  std::cout << "layout transform REL in shape: " << data->shape << std::endl;
-  std::cout << "layout transform REL out shape: " << out_shape << std::endl;
+  // std::cout << "layout transform REL in shape: " << data->shape << std::endl;
+  // std::cout << "layout transform REL out shape: " << out_shape << std::endl;
   reporter->Assign(types[1], TensorType(out_shape, data->dtype));
   return true;
 }

@@ -17,6 +17,7 @@ import os
 import subprocess
 import copy
 import pprint
+import glob
 
 from tvm.relay.op.contrib.imcflow import HashToCustomID
 from models import real_model, real_model2, test_models
@@ -450,6 +451,12 @@ def run_simulation(eval_dir):
       raise subprocess.CalledProcessError(process.returncode, sim_command)
 
   print(f"✅ Simulation completed, log saved to: {sim_log_path}")
+  print(f"✅ move imcflow simulator log to {log_dir}")
+  imcflow_sim_log_paths = glob.glob(f"{imcflow_gem5_dir}/logs/now*.log")
+  for sim_log in imcflow_sim_log_paths:
+    base_name = os.path.basename(sim_log)
+    new_log_path = os.path.join(log_dir, base_name)
+    os.rename(sim_log, new_log_path)
 
   # Load and return the simulation output
   imcflow_output_path = os.path.abspath(os.path.join(eval_dir, "test_outputs", "output.npy"))
