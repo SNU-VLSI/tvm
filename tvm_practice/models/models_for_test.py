@@ -305,7 +305,8 @@ def getResidualModel(random=False):
   else:
     param_dict = {
       "weight2_1"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
-      "weight2_2"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
+      # "weight2_2"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
+      "weight2_2"  : np.ones((16,16,3,3), dtype="int8"),
       "quant_min_2": np.array(-256, dtype="int16"),
       "quant_max_2": np.array(256, dtype="int16"),
     }
