@@ -399,7 +399,7 @@ class ConvBlock(ImceCallCodeBlock):
 
     self.out_channels = conv_attrs.channels.value
     assert self.out_channels <= 64, "convolution output channel is greater than 64"
-    assert self.out_channels%16 == 0, "Until now, conv output channel should be multiple of 16"
+    # assert self.out_channels%16 == 0, "Until now, conv output channel should be multiple of 16"
     self.in_channels  = conv_attrs.in_channels.value
     
     # Link post-ops
