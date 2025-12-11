@@ -883,7 +883,7 @@ def getOneConvBnModel():
 
   return out, param_dict
 
-def getBigConvModel():
+def getBigConvModel(random_param=False):
   N, IC, H, W = 1, 64, 4, 4
   OC = 64
   KH, KW = 3, 3
@@ -902,15 +902,19 @@ def getBigConvModel():
     out_dtype="int16"
   )
 
-  param_dict = {
-    # "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
-    "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
-  }
+  if random_param:
+    param_dict = {
+      "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+    }
+  else:
+    param_dict = {
+      # "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+      "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+    }
 
   out = tvm.IRModule.from_expr(y)
 
   return out, param_dict
-
 
 def getResnetCifar10SmallManualParam_(input_shape):
   input = relay.var("model_input", shape=input_shape, dtype="float32")
