@@ -3979,10 +3979,23 @@ def imcflow_qconv2d(
     kernel_layout="OIHW",
     out_layout="",
     out_dtype="",
-    adcmode=0,
-    vmode=0,
-    acc_mask=0,
 ):
+    # Extract adcmode, vmode, acc_mask from config if it's a Constant and these values are default
+    # This allows passing config tensor without needing separate parameters
+    if isinstance(config, Constant):
+      config_data = config.data.numpy()
+      slice0 = int(config_data[0])
+      slice1 = int(config_data[1])
+      # Reconstruct the 39-bit register value
+      reg_val = slice0 | (slice1 << 32)
+      # Extract fields: adcmode[22:23], vmode[24:25], acc_mask[34:37]
+      adcmode = (reg_val >> 22) & 0x3
+      vmode = (reg_val >> 24) & 0x3
+      acc_mask = (reg_val >> 34) & 0xF
+    else:
+      # config is not a Constant, raise error
+      assert False, "imcflow_qconv2d requires config to be a Constant tensor"
+
     if isinstance(kernel_size, int):
         kernel_size = (kernel_size, kernel_size)
     if isinstance(strides, int):
@@ -4107,4 +4120,3 @@ def imcflow_qdwconv2d(
         out_layout,
         out_dtype,
     )
-

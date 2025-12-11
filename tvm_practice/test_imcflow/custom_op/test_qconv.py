@@ -223,6 +223,7 @@ def test_imcflow_qconv2d(acc_mask):
   input_data = np.zeros((1, 16, 1, 1)).astype("uint8")
   # non_zero_indices = [0,1,2,4,5,6, 7,10,11,13,14,15,16]
   non_zero_indices = [0,1,2,4,5,6, 7,10,11,13,14,15]
+  # non_zero_values = [5,7,13,3,6,7,10, 3, 4, 7, 4, 4, 7]
   non_zero_values = [5,7,13,3,6,7,10, 3, 4, 7, 4, 4]
   for idx, val in zip(non_zero_indices, non_zero_values):
     input_data[0, idx, 0, 0] = val

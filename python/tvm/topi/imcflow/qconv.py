@@ -53,7 +53,7 @@ def imcflow_qconv2d(
     input : te.Tensor,
     filter : te.Tensor,
     strides, padding, dilation,
-    adcmode=0, vmode=0, acc_mask=0,
+    adcmode, vmode, acc_mask,
     data_layout="NCHW", kernel_layout="", out_dtype=None
 ):
   """
@@ -63,9 +63,16 @@ def imcflow_qconv2d(
   In each column, accumulate bit product and quantize at the end of the column.
 
   Args:
-    acc_mask: Accumulation mask. For each bit position b, if (acc_mask & (1 << b)) == 0,
-              accumulation mode is enabled. When accumulation mode is enabled and the
-              input bitplane has fewer than 8 ones, quantization is bypassed.
+    acc_mask: Accumulation mask. Can be either:
+              - An integer (compile-time constant): For each bit position b, if (acc_mask & (1 << b)) == 0,
+                accumulation mode is enabled.
+              - A te.Tensor scalar (runtime value): Same semantics but evaluated at runtime.
+              When accumulation mode is enabled and the input bitplane has fewer than 8 ones,
+              quantization is bypassed.
+
+  Note: The current implementation uses arithmetic instead of if_then_else, which allows
+        acc_mask to be a runtime parameter in the future. However, currently acc_mask is
+        still expected to be a compile-time constant.
 
   Refer to imcflow simulator for more details.
   """
@@ -133,18 +140,30 @@ def imcflow_qconv2d(
       return val.astype("int16")
 
   # Quantize each bitplane result with conditional quantization
-  # If acc_mode is enabled (acc_mask & (1 << bi) == 0) AND input bitplane is sparse (< 8 ones),
+  # If acc_mode is enabled (acc_mask & (1 << bi)) == 0) AND input bitplane is sparse (< 8 ones),
   # skip quantization
+  #
+  # Instead of if_then_else, use arithmetic to support runtime acc_mask:
+  # skip_quant = (InputBitCount < 8) AND ((acc_mask & (1 << bi)) == 0)
+  # result = skip_quant * no_quant + (1 - skip_quant) * quant
+  def compute_quantized_bitconv(nn, ff, hh, ww, bi, bw):
+      data_val = BitConv[nn, ff, hh, ww, bi, bw]
+
+      # Compute skip_quant condition as integer (0 or 1)
+      popcount_low = (InputBitCount[nn, hh, ww, bi] < 8).astype("int32")
+      acc_mode_enabled = ((acc_mask & (1 << bi)) == 0).astype("int32")
+      skip_quant = popcount_low * acc_mode_enabled
+
+      # Compute both paths
+      no_quant_val = data_val.astype("int16")
+      quant_val = psum_quantize_expr(data_val, adcmode, vmode)
+
+      # Select based on condition: skip_quant * no_quant + (1 - skip_quant) * quant
+      return skip_quant * no_quant_val + (1 - skip_quant) * quant_val
+
   QuantizedBitConv = te.compute(
       (batch, out_channel, OH, OW, 4, 4),
-      lambda nn, ff, hh, ww, bi, bw: tvm.tir.if_then_else(
-          tvm.tir.all(
-              InputBitCount[nn, hh, ww, bi] < 8,
-              (acc_mask & (1 << bi)) == 0
-          ),
-          BitConv[nn, ff, hh, ww, bi, bw].astype("int16"),  # No quantization
-          psum_quantize_expr(BitConv[nn, ff, hh, ww, bi, bw], adcmode, vmode)  # Quantize
-      ),
+      lambda nn, ff, hh, ww, bi, bw: compute_quantized_bitconv(nn, ff, hh, ww, bi, bw),
       name="QuantizedBitConv"
   )
 
@@ -154,7 +173,6 @@ def imcflow_qconv2d(
 
   def get_scale(bi, bw):
       # Weight bit 3 is sign bit (-8)
-      # w_scale = tvm.tir.if_then_else(bw == 3, -8, 1 << bw)
       w_scale = (1 << bw) - 16 * (bw // 3)
       in_scale = 1 << bi
       return w_scale * in_scale
