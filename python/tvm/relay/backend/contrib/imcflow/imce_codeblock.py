@@ -285,7 +285,6 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
 
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
-    src_mask = 15
     data_edge = next(
         edge for edge in self.in_edges if edge.dst_id.tensor_type == "data")
 
@@ -296,12 +295,11 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     # arg_layout = DevConfig().LayoutMap[arg]
 
     #TODO: maybe we need to clear qreg before
-    for i in range(self.num_blocks):
+    src_masks = [min(15, self.channels - i - 1) for i in range(0, self.channels, 16)]
+
+    for i, src_mask in enumerate(src_masks):
       var_i = self._make_unique_input_var_for_post_op(data_edge, i)
       qreg_start_idx = i + 4 * self.o_split_idx
-      # min max quantization does not require 
-      if i*16 >= self.channels:
-        src_mask = 0
       code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
     # NOTE: currently, it is not possible to have consequtive 4*(MM_QUANT -> QREG)s.
