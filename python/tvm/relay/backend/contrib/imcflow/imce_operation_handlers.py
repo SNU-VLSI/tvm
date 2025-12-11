@@ -153,6 +153,21 @@ class AddHandler(OperationHandler):
 
   def handle(self, call: 'BuilderContext') -> None:
     assert call.curr_composite_id, "Add must be inside a composite function"
+    hid = call.get_hid()
+
+    to_process_in_edges = []
+    for in_edge in call.get_input_edges():
+      arg_gid = in_edge.src_id.graph_node_id
+      try:
+        if ConstPat.match(CustomIDToNode()[arg_gid]):
+          block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"add const")
+          call.codeblocks.append(hid, block, CodePhase.INIT)
+          # add constedge info to codeblock info
+          IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
+      except KeyError:
+        # If the node is not found in CustomIDToNode, treat it as non-constant
+        to_process_in_edges.append(in_edge)
+        pass
 
     block = AddBlock(call, "add")
     call.post_op_stack.append(block)

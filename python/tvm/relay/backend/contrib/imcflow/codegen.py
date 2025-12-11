@@ -578,16 +578,35 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           assert False, f"const edge {edge} in IMCECodeBlockInfo not found in function const edges"
 
     # send param edge interleaved
-    #TODO: if edge count is more than one, interleave them
-    if len(param_edges) == 1:
-      self.add_send_block(param_edges[0], CodePhase.EXEC)
-    else:
-      self.add_send_block_interleaved(param_edges, CodePhase.EXEC)
+    # Group param edges by source HID (inode)
+    param_edges_by_hid = {}
+    for edge in param_edges:
+      hid = self.get_hid(edge.src_id)
+      if hid not in param_edges_by_hid:
+        param_edges_by_hid[hid] = []
+      param_edges_by_hid[hid].append(edge)
+
+    # Generate send blocks for each HID group
+    for hid, edges in param_edges_by_hid.items():
+      if len(edges) == 1:
+        self.add_send_block(edges[0], CodePhase.EXEC)
+      else:
+        self.add_send_block_interleaved(edges, CodePhase.EXEC)
 
     # recv output edge interleaved
-    #TODO: if edge count is more than one, interleave them
+    # Group output edges by destination HID (inode)
+    output_edges_by_hid = {}
     for edge in output_edges:
-      self.add_recv_block(edge, CodePhase.EXEC)
+      hid = self.get_hid(edge.dst_id)
+      if hid not in output_edges_by_hid:
+        output_edges_by_hid[hid] = []
+      output_edges_by_hid[hid].append(edge)
+
+    for hid, edges in output_edges_by_hid.items():
+      if len(edges) == 1:
+        self.add_recv_block(edges[0], CodePhase.EXEC)
+      else:
+        self.add_recv_block_interleaved(edges, CodePhase.EXEC)
 
   def construct_recv_send_map(self):
     """
@@ -635,6 +654,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         for db in block.blocks:
           edge = db.id
           _add_send_map(self.send_map, db, edge)
+      elif isinstance(block, RecvBlockInterleaved):
+        for db in block.blocks:
+          edge = db.id
+          recv_count = math.ceil(db.size / 32)
+          add_to_map(self.recv_map, edge, recv_count)
+
       elif isinstance(block, RecvBlock):
         edge = block.block.id
         # Calculate actual number of recv operations (loop count)
@@ -705,7 +730,25 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
     self.codeblocks.append(hid, block, phase)
   
-  def add_recv_block_interleaved(self, edge_list):
+  def add_recv_block_interleaved(self, edge_list, phase: CodePhase):
+    dbs = []
+    fifo_ids = []
+    # Group by HID
+    hids = [self.get_hid(edge.dst_id) for edge in edge_list]
+    assert all(hid == hids[0] for hid in hids), "all edges should have same destination inode for interleaved"
+    hid = hids[0]
+
+    annotation = ""
+    for edge in edge_list:
+      in_edge_info = DevConfig().get_tensor_edge_info(edge)
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
+      assert db is not None
+      dbs.append(db)
+      fifo_ids.append(in_edge_info.fifo_id)
+      annotation += f"recv - {edge}, {in_edge_info.fifo_id}, "
+
+    block = RecvBlockInterleaved(dbs, fifo_ids, annotation)
+    self.codeblocks.append(hid, block, phase)
     pass
 
   def get_graph_node_id(self, call):
