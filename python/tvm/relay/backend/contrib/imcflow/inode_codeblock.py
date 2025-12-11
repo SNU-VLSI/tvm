@@ -110,6 +110,50 @@ class RecvBlock(InodeCodeBlock):
                       lambda iter: f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {self.fifo_id});"))
 
 
+class RecvBlockInterleaved(InodeCodeBlock):
+  """ Code block for receiving data from given fifo id interleaved """
+
+  def __init__(self, blocks: List[DataBlock], fifo_ids: List[int], annotation: str = ""):
+    super().__init__(annotation)
+    assert len(blocks) == len(fifo_ids), "# of blocks and fifo_ids must be equal"
+    self.blocks = blocks
+    self.fifo_ids = fifo_ids
+    self._build()
+
+  def _build(self):
+    # Collect block info
+    info_list = []
+    for block, fifo_id in zip(self.blocks, self.fifo_ids):
+      recv_count = math.ceil(block.size / 32)
+      info_list.append({
+          'recv_count': recv_count,
+          'offset': block.offset,
+          'fid': fifo_id
+      })
+
+    # Sort unique recv_counts to define intervals
+    counts = sorted(list(set(x['recv_count'] for x in info_list)))
+    
+    current_base = 0
+    for limit in counts:
+      duration = limit - current_base
+      if duration <= 0:
+        continue
+        
+      # Identify blocks active in this interval
+      active_infos = [x for x in info_list if x['recv_count'] > current_base]
+      
+      # Generate loop for this interval
+      self.body.add(SimpleFor(duration,
+          lambda iter, base=current_base, infos=active_infos: "\n".join([
+              f"__builtin_INODE_RECV({x['offset']} + ({f'({base} + {iter})' if base > 0 else iter})*32, 0, 0, {x['fid']});"
+              for x in infos
+          ])
+      ))
+      
+      current_base = limit
+
+
 class SendBlock(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
 
