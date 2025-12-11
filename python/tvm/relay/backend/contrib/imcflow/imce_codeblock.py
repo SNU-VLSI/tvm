@@ -336,8 +336,12 @@ class ConcatBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
+    self.or_concat = False
     assert len(
         self.in_edges) >= self.min_in_edges, "At least two input edges are required"
+  
+  def set_type(self, or_concat):
+    self.or_concat = or_concat  # "OR" or "CONCAT"
 
   def _render(self) -> str:
     num_bitplanes = 4
