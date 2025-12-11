@@ -235,7 +235,7 @@ class PolicyTableCodegen:
       val = (val << 1) | (1 if conf["enable"] else 0)
       val = (val << 6) | get_bits(conf["addr"], 6)
       if direction == 'Local':
-        val = (val << 3) | 0b000
+        val = (val << 3) | get_bits(conf["ksel"], 3)
         val = (val << 6) | get_bits(conf["chunk_index"], 6)
 
     bin_data = bytearray()

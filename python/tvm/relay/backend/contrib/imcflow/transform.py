@@ -3059,6 +3059,13 @@ class PolicyTableGenerator:
                 source_node = mapping_info[0]
                 dest_node = mapping_info[1]
                 dest_index = mapping_info[2] or 0 # split index for destination node
+                if mapping_info[2] is not None:
+                  dst_graph_node = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
+                  kernel_size = dst_graph_node.attrs['kernel_size'][0].value
+                  ksel = kernel_size
+                  if ksel not in [1, 2, 3, 5, 7]: raise ValueError("Unsupported kernel size for split index calculation.")
+                else:
+                  ksel = 0
 
                 if isinstance(edge, NodeID):
                   src_node_data = f"instruction_{edge.name}"
@@ -3095,7 +3102,7 @@ class PolicyTableGenerator:
                     next_node = NodeID.from_coord(next_coord[0], next_coord[1])
 
                     #append entry to router's policy table
-                    entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0}, \
+                    entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0, "ksel":ksel}, \
                       "North": {"enable": False, "addr": 0}, \
                       "East": {"enable": False, "addr": 0},  \
                       "South": {"enable": False, "addr": 0}, \
@@ -3114,7 +3121,7 @@ class PolicyTableGenerator:
                     current_node = NodeID.from_coord(current_coord[0], current_coord[1])
 
                 # insert entry for destination node
-                entry = {"Local": {"enable": True, "chunk_index": dest_index, "addr": 0}, \
+                entry = {"Local": {"enable": True, "chunk_index": dest_index, "addr": 0, "ksel":ksel}, \
                   "North": {"enable": False, "addr": 0}, \
                   "East": {"enable": False, "addr": 0},  \
                   "South": {"enable": False, "addr": 0}, \
