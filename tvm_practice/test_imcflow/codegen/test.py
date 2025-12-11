@@ -51,6 +51,8 @@ MODEL_REGISTRY = {
     "big_conv_rparam": (lambda: models_for_test.getBigConvModel(True), "random"),
     "super_big_conv": (lambda: models_for_test.getSuperBigConvModel(False), "random"),
     "super_big_conv_rparam": (lambda: models_for_test.getSuperBigConvModel(True), "random"),
+    "super_big_conv_bn_quant": (lambda: models_for_test.getSuperBigConvBNQuantModel(False), "ones"),
+    "super_big_conv_bn_quant_rparam": (lambda: models_for_test.getSuperBigConvBNQuantModel(True), "ones"),
     "conv_bn_quant": (models_for_test.getConvBNQuantModel, "ones"),
     "conv_bn_mult_add": (models_for_test.getConvBNMultAddModel, "ones"),
     "conv_quant_conv": (models_for_test.getConvQuantConvModel, "ones"),
