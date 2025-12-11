@@ -142,19 +142,40 @@ class SendBlockInterleaved(InodeCodeBlock):
     self._build()
 
   def _build(self):
-    recv_count = math.ceil(self.blocks[0].size / 32)
-    inst_info = []
-    for idx, (block, edge_info) in enumerate(zip(self.blocks, self.edge_infos)):
-      assert recv_count == math.ceil(block.size / 32), "blocks should have the same recv_counts"
+    # Collect block info
+    info_list = []
+    for block, edge_info in zip(self.blocks, self.edge_infos):
+      recv_count = math.ceil(block.size / 32)
       next_policy_addr = edge_info.policy_info[0].address
       fifo_id = edge_info.fifo_id
-      inst_info.append((block.offset, next_policy_addr, fifo_id))
+      info_list.append({
+          'recv_count': recv_count,
+          'offset': block.offset,
+          'policy': next_policy_addr,
+          'fid': fifo_id
+      })
 
-    self.body.add(SimpleFor(recv_count,
-                      lambda iter: "\n".join([
-                        f"__builtin_INODE_SEND({iter}*32, {offset}, {policy_addr}, {fid});"
-                        for offset, policy_addr, fid in inst_info
-                      ])))
+    # Sort unique recv_counts to define intervals
+    counts = sorted(list(set(x['recv_count'] for x in info_list)))
+    
+    current_base = 0
+    for limit in counts:
+      duration = limit - current_base
+      if duration <= 0:
+        continue
+        
+      # Identify blocks active in this interval
+      active_infos = [x for x in info_list if x['recv_count'] > current_base]
+      
+      # Generate loop for this interval
+      self.body.add(SimpleFor(duration,
+          lambda iter, base=current_base, infos=active_infos: "\n".join([
+              f"__builtin_INODE_SEND({f'({base} + {iter})' if base > 0 else iter}*32, {x['offset']}, {x['policy']}, {x['fid']});"
+              for x in infos
+          ])
+      ))
+      
+      current_base = limit
 
 
 class IMCEComputeBlock(InodeCodeBlock):
