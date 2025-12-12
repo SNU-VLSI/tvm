@@ -20,7 +20,7 @@ from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 from tvm.relay.backend.contrib.imcflow import imce_codeblock
 from tvm.relay.backend.contrib.imcflow.operation_handlers import get_handler_registry
-from tvm.relay.backend.contrib.imcflow.transform_utils import UseDefChainBuilder
+from tvm.relay.backend.contrib.imcflow.transform_utils import UseDefChainBuilder, UseDefChainParser
 import pdb
 
 # Ensure external codegen registration side-effects are loaded.
@@ -153,13 +153,19 @@ class CodegenSuite:
       print(f"  {edge}")
     
     # get use def chain
-    use_def_builder = UseDefChainBuilder(self.module)
+    use_def_chains = {}
+    for gv, func_ in self.module.functions.items():
+      if util.is_imcflow_func(func_):
+        target_func = DevConfig().ImcflowFuncMap[gv.name_hint]
+        parser = UseDefChainParser()
+        parser.visit(target_func.func_node)
+        use_def_chains[gv.name_hint] = parser
 
     # clear IMCECodeBlockInfo before codegen
     IMCECodeBlockInfo().clear()
 
     # generate code blocks for each node
-    imce_builder = ImceCodeBlockBuilder(self.module, func_name, sorted_edges, use_def_builder)
+    imce_builder = ImceCodeBlockBuilder(self.module, func_name, sorted_edges, use_def_chains)
     imce_builder.visit(func)
 
     # add stop block for active imces
@@ -281,10 +287,17 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
     return self.stack[-1] if self.stack else None
 
   def add_edge(self, dst_tid, arg, split_idx=None):
+    # skip relay Var. arg can be var from tuple path
+    if isinstance(arg, tvm.relay.Var):
+      return
+
     # handle tuple using recursion
     if TuplePat.match(arg):
-      for a in arg.fields:
-        self.add_edge(dst_tid, a)
+      if split_idx is not None:
+        self.add_edge(dst_tid, arg.fields[split_idx])
+      else:
+        for a in arg.fields:
+          self.add_edge(dst_tid, a)
       return
     elif TupleGetItemPat.match(arg):
       self.add_edge(dst_tid, arg.tuple_value, split_idx=arg.index)
@@ -338,11 +351,12 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   Handlers receive a BuilderContext that wraps each call with helper methods.
   """
 
-  def __init__(self, module, func_name, edges, use_def_builder):
+  def __init__(self, module, func_name, edges, use_def_chains):
     super().__init__()
     # Shared state accessed by handlers through BuilderContext
     self.module = module
-    self.use_def_builder = use_def_builder
+    self.func_name = func_name
+    self.use_def_chains = use_def_chains
     self.edges = edges
     self.codeblocks = ImceCodeBlockManager(func_name)
     self.curr_composite_id = None
