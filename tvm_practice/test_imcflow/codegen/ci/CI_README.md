@@ -39,10 +39,12 @@ cd /root/project/tvm/tvm_practice/test_imcflow/codegen/ci
 ## How It Works
 
 1. **Monitors** the `imcflow` branch for new commits (every 60 seconds)
-2. **Runs** pytest on `test.py` when changes detected
-3. **Uses direnv** to load the correct Python environment from `.envrc` files (tvm_env virtual environment)
-4. **Reports** results to GitHub as commit statuses (if configured)
-5. **Saves** detailed logs to `logs/` directory
+2. **Checks out** the specific commit to test (ensuring correct code is tested)
+3. **Runs** pytest on `test.py` when changes detected
+4. **Uses direnv** to load the correct Python environment from `.envrc` files (tvm_env virtual environment)
+5. **Restores** the original branch/state after testing
+6. **Reports** results to GitHub as commit statuses (if configured)
+7. **Saves** detailed logs to `logs/` directory
 
 ## Requirements
 
