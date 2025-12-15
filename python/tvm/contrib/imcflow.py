@@ -720,7 +720,8 @@ class ImcflowDeviceConfig:
             enable = int(local.get('enable', False))
             addr = local.get('addr', 0)
             chunk_index = local.get('chunk_index', 0)
-            local_str = f"L:({enable}, {addr}, {chunk_index})"
+            ksel = local.get('ksel', 0)
+            local_str = f"L:({enable}, {addr}, {ksel}, {chunk_index})"
 
           # Format other directions: (enable, addr)
           def format_dir(dir_dict, name):

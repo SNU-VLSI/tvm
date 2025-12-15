@@ -483,6 +483,22 @@ def pattern_table():
       for i in range(1, 10):
         out = out | makeConcatPattern(out)
       return out
+    
+    def imcflow_conv_split_concat(conv_type, preop=None):
+      if preop is None:
+        data1, weight = wildcard(), is_constant()
+      else:
+        data1, weight = preop, is_constant()
+
+      if conv_type == "nn.imcflow_qconv" or conv_type == "nn.imcflow_qdwconv":
+        cfg = is_constant()
+        data = is_op(conv_type)(data1, weight, cfg)
+      else:
+        data = is_op(conv_type)(data1, weight)
+      
+      out = makeSplitPatern(data) | imcflow_concat(data)
+
+      return out
 
     def make_postop_pattern_start_with(conv_type, preop=None):
       if preop is None:
@@ -518,6 +534,8 @@ def pattern_table():
     
     imcflow_patterns.extend(
       [ 
+        ("imcflow.qconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qconv")),
+        ("imcflow.qdwconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qdwconv")),
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
         ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),

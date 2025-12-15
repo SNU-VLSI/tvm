@@ -144,13 +144,13 @@ class RecvBlockInterleaved(InodeCodeBlock):
       active_infos = [x for x in info_list if x['recv_count'] > current_base]
       
       # Generate loop for this interval
-      self.body.add(SimpleFor(duration,
-          lambda iter, base=current_base, infos=active_infos: "\n".join([
-              f"__builtin_INODE_RECV({x['offset']} + ({f'({base} + {iter})' if base > 0 else iter})*32, 0, 0, {x['fid']});"
-              for x in infos
-          ])
-      ))
-      
+      for x in active_infos:
+        var = UniqueVar("recv_offset_address", dtype="int")
+        self.body.add(TextBlock(f"{var} = {x['offset']};"))
+        self.body.add(SimpleFor(duration,
+            lambda iter, base=current_base, offset_var=var, fid=x['fid']: 
+              f"__builtin_INODE_RECV({offset_var} + ({f'({base} + {iter})' if base > 0 else iter})*32, 0, 0, {fid});"))
+
       current_base = limit
 
 
@@ -212,13 +212,13 @@ class SendBlockInterleaved(InodeCodeBlock):
       active_infos = [x for x in info_list if x['recv_count'] > current_base]
       
       # Generate loop for this interval
-      self.body.add(SimpleFor(duration,
-          lambda iter, base=current_base, infos=active_infos: "\n".join([
-              f"__builtin_INODE_SEND({f'({base} + {iter})' if base > 0 else iter}*32, {x['offset']}, {x['policy']}, {x['fid']});"
-              for x in infos
-          ])
-      ))
-      
+      for x in active_infos:
+        var = UniqueVar("send_offset_address", dtype="int")
+        self.body.add(TextBlock(f"{var} = {x['offset']};"))
+        self.body.add(SimpleFor(duration,
+            lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid']: 
+              f"__builtin_INODE_SEND({offset_var} + ({f'{base} + {iter}' if base > 0 else iter})*32, 0, {policy}, {fid});"))
+
       current_base = limit
 
 
