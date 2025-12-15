@@ -436,6 +436,56 @@ def test_layout_transform_NCHW_to_NCHW16c():
     print("\n✓ All dtype tests passed!")
     return True
 
+def test_layout_transform_NCHW_to_NHWC16c():
+    print("\n" + "="*60)
+    print("Test: layout_transform_NCHW_to_NHWC16c")
+    print("="*60)
+    
+    shape_nchw = (1, 15, 1, 1)
+    # dtype = ["float32", "float16", "int16", "int8"]:
+    dtypes = ["int16"]
+    
+    for dtype in dtypes:
+        print(f"\nTesting dtype: {dtype}")
+        
+        x = relay.var("x", shape=shape_nchw, dtype=dtype)
+        y = relay.layout_transform(x, "NCHW", "NHWC16c")
+        func = relay.Function([x], y)
+        
+        # Create test data
+        if "float" in dtype:
+            x_data = np.random.uniform(size=shape_nchw).astype(dtype)
+        else:
+            x_data = np.random.randint(-10, 10, size=shape_nchw).astype(dtype)
+        
+        # Build and run
+        target = "llvm"
+        dev = tvm.cpu(0)
+        
+        mod = tvm.IRModule.from_expr(func)
+        mod = transform.InferType()(mod)
+        
+        graph, lib, params = relay.build(mod, target=target)
+        m = graph_executor.create(graph, lib, device=dev)
+        m.set_input("x", x_data)
+        m.run()
+        
+        output = m.get_output(0).asnumpy()
+        
+        pad_size = (16 - shape_nchw[1]) % 16
+        cg_size = (shape_nchw[1] + pad_size)//16
+        expected_output = np.pad(x_data, ((0,0),(0,pad_size),(0,0),(0,0)), mode='constant').reshape(1, cg_size, 16, shape_nchw[-2], shape_nchw[-1]).transpose(0,3,4,1,2)
+        print(f"------------- ours -------------")
+        print(output)
+        print(f"------------- expect -------------")
+        print(expected_output)
+        tvm.testing.assert_allclose(output, expected_output, rtol=1e-5, atol=1e-5)
+        
+        print(f"  ✓ {dtype} passed!")
+    
+    print("\n✓ All dtype tests passed!")
+    return True
+
 
 def run_all_tests():
     """Run all layout transform tests"""
@@ -476,5 +526,6 @@ def run_all_tests():
 
 if __name__ == "__main__":
     # success = run_all_tests()
-    success = test_layout_transform_NCHW_to_NCHW16c()
+    # success = test_layout_transform_NCHW_to_NCHW16c()
+    success = test_layout_transform_NCHW_to_NHWC16c()
     exit(0 if success else 1)

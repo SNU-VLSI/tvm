@@ -25,11 +25,8 @@ import numpy as np
 # These drive packing/unpacking instead of ad-hoc shape checks.
 class LayoutType(Enum):
   NCHW = "NCHW"
-  NHWC = "NHWC"
   NHWC16C = "NHWC16c"
   NHWC64C = "NHWC64c"
-  NHW16C = "NHW16c"
-  NHW64C = "NHW64c"
   NCHW16C = "NCHW16c"
   NCHW64C = "NCHW64c"
   QCONV_INPUT = "QCONV_INPUT"   # Packed activation layout used by qconv input path
@@ -91,7 +88,6 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
     # ),
     (
       [
-        [LayoutType.NHWC, LayoutType.SCALAR, LayoutType.SCALAR],
         [LayoutType.NHWC16C, LayoutType.SCALAR, LayoutType.SCALAR],
         [LayoutType.NHWC64C, LayoutType.SCALAR, LayoutType.SCALAR]
       ],
@@ -1214,6 +1210,20 @@ def apply_layout_to_type(original_type, layout_type):
     C_ceil = (C + 63) // 64
     new_shape = [N, C_ceil, H, W, 64]
     new_dtype = original_dtype
+  elif layout_type == LayoutType.NHWC16C:
+    if len(original_shape) != 4:
+      raise ValueError(f"Unsupported shape for NHWC16c layout: {original_shape}")
+    N, C, H, W = original_shape
+    C_ceil = (C + 15) // 16
+    new_shape = [N, H, W, C_ceil, 16]
+    new_dtype = original_dtype
+  elif layout_type == LayoutType.NHWC64C:
+    if len(original_shape) != 4:
+      raise ValueError(f"Unsupported shape for NHWC64c layout: {original_shape}")
+    N, C, H, W = original_shape
+    C_ceil = (C + 63) // 64
+    new_shape = [N, H, W, C_ceil, 64]
+    new_dtype = original_dtype
   elif layout_type == LayoutType.QCONV_INPUT:
     if len(original_shape) != 4:
       raise ValueError(f"Unsupported shape for qconv_input layout: {original_shape}")
@@ -1475,6 +1485,10 @@ class ImcflowLayoutLegalizer:
           return relay.op.layout_transform(expr, "NCHW", "NCHW16c")
         if layout_type == LayoutType.NCHW64C:
           return relay.op.layout_transform(expr, "NCHW", "NCHW64c")
+        if layout_type == LayoutType.NHWC16C:
+          return relay.op.layout_transform(expr, "NCHW", "NHWC16c")
+        if layout_type == LayoutType.NHWC64C:
+          return relay.op.layout_transform(expr, "NCHW", "NHWC64c")
         
         assert layout_type == LayoutType.NCHW, "Only NCHW layout is supported for packing"
         return expr
@@ -1766,6 +1780,8 @@ class ImcflowLayoutLegalizer:
           LayoutType.NCHW: "NCHW",
           LayoutType.NCHW16C: "NCHW16c",
           LayoutType.NCHW64C: "NCHW64c",
+          LayoutType.NHWC16C: "NHWC16c",
+          LayoutType.NHWC64C: "NHWC64c",
         }
         return mapping.get(layout, None)
 
@@ -1809,13 +1825,13 @@ class ImcflowLayoutLegalizer:
             return expr, target_layout
           raise ValueError("Tuple layout mismatch; cannot convert composite layout automatically.")
 
-        if curr_layout == LayoutType.NCHW and target_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C, LayoutType.NHWC):
+        if curr_layout == LayoutType.NCHW and target_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C):
           layout_str = self._layout_to_str(target_layout)
           expr = relay.op.layout_transform(expr, "NCHW", layout_str)
           self.layout_map[expr] = target_layout
           return expr, target_layout
 
-        if curr_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C, LayoutType.NHWC) and target_layout == LayoutType.NCHW:
+        if curr_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C) and target_layout == LayoutType.NCHW:
           layout_str = self._layout_to_str(curr_layout)
           expr = relay.op.layout_transform(expr, layout_str, "NCHW")
           self.layout_map[expr] = target_layout
@@ -1952,7 +1968,7 @@ class ImcflowLayoutLegalizer:
       def visit_function(self, fn):
         new_body = self.visit(fn.body)
         ret_layout = self.layout_map[new_body]
-        if not self._layout_equal(ret_layout, LayoutType.NCHW) and ret_layout in [LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT]:
+        if not self._layout_equal(ret_layout, LayoutType.NCHW) and ret_layout in [LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT, LayoutType.NHWC16C, LayoutType.NHWC64C]: 
           if isinstance(ret_layout, (tuple, list)):
             # best-effort: transform tuple fields individually
             new_fields = []
