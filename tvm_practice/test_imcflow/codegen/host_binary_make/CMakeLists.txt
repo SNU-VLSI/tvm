@@ -214,10 +214,20 @@ if(TVM_BUILD_HOST_RUNNER)
     ${TVM_MODEL_INCLUDE}
   )
   target_sources(tvm_host_runner PRIVATE "${TVM_ROOT}/src/runtime/crt/host/platform.cc")
-  target_compile_definitions(tvm_host_runner PRIVATE 
-    DMLC_LOG_STACK_TRACE=0 
-    TVM_WORKSPACE_SIZE_BYTES=8388608 
+  target_compile_definitions(tvm_host_runner PRIVATE
+    DMLC_LOG_STACK_TRACE=0
+    TVM_WORKSPACE_SIZE_BYTES=8388608
     TVM_CRT_LOG_LEVEL=3
+  )
+
+  # Optimize for gem5 simulation: static linking + no PIE for faster initialization
+  # This reduces dynamic linker overhead and mprotect syscalls in gem5
+  target_compile_options(tvm_host_runner PRIVATE -fno-pie)
+  target_link_options(tvm_host_runner PRIVATE
+    -no-pie
+    -static
+    -static-libgcc
+    -static-libstdc++
   )
   
   message(STATUS "Host runner executable will be built")
