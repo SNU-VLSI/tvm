@@ -717,14 +717,21 @@ class RecvSendWrapper(ImceCodeBlock):
       if not te_out_infos: raise RuntimeError(f"no tensor edge info found for src_id {src_id} even after checking split case")
 
       if split_case:
+        assert len(te_out_infos) > 1, "In split case, there should be multiple tensor edge infos"
         addresses = {info.policy_info[0].address for info in te_out_infos}
         assert len(addresses) == 1, "In split case, all output addresses must be identical"
         fifo_ids = {info.fifo_id for info in te_out_infos}
         assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
         te_out_info = te_out_infos[0] # we need just one edge info due to multicast
       else:
-        assert len(te_out_infos) == 1, "more than one te_out_info found!"
-        te_out_info = te_out_infos[0]
+        if len(te_out_infos) > 1:
+          addresses = {info.policy_info[0].address for info in te_out_infos}
+          assert len(addresses) == 1, "In split case, all output addresses must be identical"
+          fifo_ids = {info.fifo_id for info in te_out_infos}
+          assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
+          te_out_info = te_out_infos[0] # we need just one edge info due to multicast
+        else:
+          te_out_info = te_out_infos[0]
       
       for i in range(self.num_out_blocks):
         for te_out_info in [te_out_info]: #TODO: current version doesn't need it
