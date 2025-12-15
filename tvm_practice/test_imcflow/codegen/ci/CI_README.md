@@ -137,10 +137,32 @@ Once configured, you'll see:
 
 - ⏳ **Pending** - Tests are running
 - ✅ **Success** - All tests passed
-- ❌ **Failure** - Some tests failed
+- ❌ **Failure** - Some tests failed (click "Details" to see which tests failed)
 - 🔴 **Error** - CI system error
 
-Click on the status for details (test count, duration, etc.)
+### Failure Details
+
+When tests fail, the CI will:
+1. Post a comment on the commit listing all failed tests
+2. The "Details" link in the status will point to that comment
+3. You can see exactly which tests failed without checking local logs
+
+Example comment:
+```
+## ❌ IMCFlow Tests Failed
+
+Commit: 84dece8
+Duration: 45.2s
+
+### Summary
+- ✅ Passed: 68/120
+- ❌ Failed: 52/120
+
+### Failed Tests (52)
+1. test_imcflow_model_with_pattern[one_relu-random]
+2. test_imcflow_model_with_pattern[one_relu-ones]
+...
+```
 
 ## Logs Location
 

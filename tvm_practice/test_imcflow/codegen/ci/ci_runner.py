@@ -24,7 +24,7 @@ REPO_DIR = Path("/root/project/tvm")
 CI_DIR = Path(__file__).parent.resolve()  # codegen/ci directory
 TEST_FILE = CI_DIR.parent / "test.py"  # codegen/test.py
 BRANCH_NAME = "imcflow"
-POLL_INTERVAL = 60  # seconds between git checks
+POLL_INTERVAL = 10  # seconds between git checks
 LOG_DIR = CI_DIR / "logs"
 STATE_FILE = LOG_DIR / "ci_state.json"
 
@@ -118,7 +118,8 @@ class CIRunner:
         except subprocess.CalledProcessError:
             return {"message": "", "author": "", "email": ""}
 
-    def set_github_status(self, commit_sha: str, state: str, description: str, context: str = "ci/imcflow-tests"):
+    def set_github_status(self, commit_sha: str, state: str, description: str,
+                          context: str = "ci/imcflow-tests", target_url: str = None):
         """Set GitHub commit status using GitHub API
 
         Args:
@@ -126,6 +127,7 @@ class CIRunner:
             state: pending, success, error, or failure
             description: Short description of the status
             context: Status context (shown in GitHub UI)
+            target_url: Optional URL for "Details" link
         """
         if not GITHUB_TOKEN:
             print("Warning: GITHUB_TOKEN not set, skipping GitHub status update")
@@ -142,6 +144,10 @@ class CIRunner:
             "description": description,
             "context": context
         }
+
+        # Add target_url if provided
+        if target_url:
+            payload["target_url"] = target_url
 
         try:
             import requests
@@ -169,6 +175,41 @@ class CIRunner:
             print(f"✅ GitHub status updated via curl")
         except Exception as e:
             print(f"Error updating GitHub status via curl: {e}")
+
+    def post_github_comment(self, commit_sha: str, body: str) -> Optional[str]:
+        """Post a comment on the commit with test results
+
+        Args:
+            commit_sha: The commit to comment on
+            body: Comment text (markdown supported)
+
+        Returns:
+            URL of the comment, or None if failed
+        """
+        if not GITHUB_TOKEN:
+            return None
+
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/{commit_sha}/comments"
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        payload = {"body": body}
+
+        try:
+            import requests
+            response = requests.post(url, headers=headers, json=payload)
+            if response.status_code == 201:
+                comment_url = response.json().get("html_url")
+                print(f"✅ GitHub comment posted: {comment_url}")
+                return comment_url
+            else:
+                print(f"⚠️  Failed to post GitHub comment: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            print(f"Error posting GitHub comment: {e}")
+            return None
 
     def run_tests(self, commit_sha: str) -> Tuple[bool, str, Dict]:
         """Run pytest on the test file
@@ -246,13 +287,19 @@ python test.py --verbose --tb=short \
         test_stats = self._parse_test_results(json_report, duration)
         success = process.returncode == 0
 
-        # Update GitHub status
+        # Update GitHub status and post comment with details
         if success:
             description = f"All tests passed ({test_stats['total']} tests, {test_stats['duration']:.1f}s)"
             self.set_github_status(commit_sha, "success", description)
         else:
             description = f"Tests failed ({test_stats['failed']}/{test_stats['total']} failed)"
-            self.set_github_status(commit_sha, "failure", description)
+
+            # Create a comment with failed test details
+            comment_body = self._create_failure_comment(commit_sha, test_stats, str(log_file))
+            comment_url = self.post_github_comment(commit_sha, comment_body)
+
+            # Set status with link to comment
+            self.set_github_status(commit_sha, "failure", description, target_url=comment_url)
 
         # Write summary to log
         with open(log_file, 'a') as f:
@@ -267,6 +314,57 @@ python test.py --verbose --tb=short \
 
         return success, str(log_file), test_stats
 
+    def _create_failure_comment(self, commit_sha: str, test_stats: Dict, log_file: str) -> str:
+        """Create a markdown comment body for test failures
+
+        Args:
+            commit_sha: The commit being tested
+            test_stats: Test statistics dict
+            log_file: Path to the log file
+
+        Returns:
+            Markdown formatted comment body
+        """
+        failed_tests = test_stats.get("failed_tests", [])
+        total = test_stats.get("total", 0)
+        failed = test_stats.get("failed", 0)
+        passed = test_stats.get("passed", 0)
+        duration = test_stats.get("duration", 0)
+
+        # Build comment body
+        lines = [
+            f"## ❌ IMCFlow Tests Failed",
+            f"",
+            f"**Commit:** `{commit_sha[:7]}`",
+            f"**Duration:** {duration:.1f}s",
+            f"",
+            f"### Summary",
+            f"- ✅ **Passed:** {passed}/{total}",
+            f"- ❌ **Failed:** {failed}/{total}",
+            f"",
+        ]
+
+        if failed_tests:
+            lines.append(f"### Failed Tests ({len(failed_tests)})")
+            lines.append("")
+
+            # Limit to first 50 failed tests to avoid huge comments
+            display_tests = failed_tests[:50]
+            for i, test_name in enumerate(display_tests, 1):
+                lines.append(f"{i}. `{test_name}`")
+
+            if len(failed_tests) > 50:
+                lines.append("")
+                lines.append(f"... and {len(failed_tests) - 50} more failed tests")
+
+        lines.append("")
+        lines.append(f"---")
+        lines.append(f"*Local log file: `{log_file}`*")
+        lines.append(f"")
+        lines.append(f"<sub>Generated by IMCFlow CI</sub>")
+
+        return "\n".join(lines)
+
     def _parse_test_results(self, json_report: Path, duration: float) -> Dict:
         """Parse pytest JSON report for test statistics"""
         stats = {
@@ -274,7 +372,8 @@ python test.py --verbose --tb=short \
             "passed": 0,
             "failed": 0,
             "skipped": 0,
-            "duration": duration
+            "duration": duration,
+            "failed_tests": []  # List of failed test names
         }
 
         if not json_report.exists():
@@ -288,6 +387,17 @@ python test.py --verbose --tb=short \
                 stats["passed"] = summary.get("passed", 0)
                 stats["failed"] = summary.get("failed", 0)
                 stats["skipped"] = summary.get("skipped", 0)
+
+                # Extract failed test names
+                tests = data.get("tests", [])
+                for test in tests:
+                    if test.get("outcome") == "failed":
+                        test_name = test.get("nodeid", "unknown")
+                        # Clean up the nodeid (remove file path prefix)
+                        if "::" in test_name:
+                            test_name = test_name.split("::")[-1]
+                        stats["failed_tests"].append(test_name)
+
         except Exception as e:
             print(f"Warning: Could not parse test results: {e}")
 
