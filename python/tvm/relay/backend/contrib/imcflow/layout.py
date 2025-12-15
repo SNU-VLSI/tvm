@@ -26,6 +26,8 @@ import numpy as np
 class LayoutType(Enum):
   NCHW = "NCHW"
   NHWC = "NHWC"
+  NHWC16C = "NHWC16c"
+  NHWC64C = "NHWC64c"
   NHW16C = "NHW16c"
   NHW64C = "NHW64c"
   NCHW16C = "NCHW16c"
@@ -81,9 +83,17 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
     #   ],
     #   LayoutType.QCONV_INPUT,
     # ),
+    # (
+    #   [
+    #     [LayoutType.NCHW64C, LayoutType.SCALAR, LayoutType.SCALAR],
+    #   ],
+    #   LayoutType.QCONV_INPUT,
+    # ),
     (
       [
-        [LayoutType.NCHW64C, LayoutType.SCALAR, LayoutType.SCALAR],
+        [LayoutType.NHWC, LayoutType.SCALAR, LayoutType.SCALAR],
+        [LayoutType.NHWC16C, LayoutType.SCALAR, LayoutType.SCALAR],
+        [LayoutType.NHWC64C, LayoutType.SCALAR, LayoutType.SCALAR]
       ],
       LayoutType.QCONV_INPUT,
     ),
@@ -255,13 +265,13 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
       [
         [LayoutType.NCHW16C],
       ],
-      LayoutType.NCHW16C,
+      LayoutType.NHWC16C,
     ),
     (
       [
         [LayoutType.NCHW64C],
       ],
-      LayoutType.NCHW64C,
+      LayoutType.NHWC64C,
     ),
   ],
 }
@@ -1799,13 +1809,13 @@ class ImcflowLayoutLegalizer:
             return expr, target_layout
           raise ValueError("Tuple layout mismatch; cannot convert composite layout automatically.")
 
-        if curr_layout == LayoutType.NCHW and target_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C):
+        if curr_layout == LayoutType.NCHW and target_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C, LayoutType.NHWC):
           layout_str = self._layout_to_str(target_layout)
           expr = relay.op.layout_transform(expr, "NCHW", layout_str)
           self.layout_map[expr] = target_layout
           return expr, target_layout
 
-        if curr_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C) and target_layout == LayoutType.NCHW:
+        if curr_layout in (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C, LayoutType.NHWC) and target_layout == LayoutType.NCHW:
           layout_str = self._layout_to_str(curr_layout)
           expr = relay.op.layout_transform(expr, layout_str, "NCHW")
           self.layout_map[expr] = target_layout
