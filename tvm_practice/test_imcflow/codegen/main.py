@@ -91,19 +91,13 @@ Examples:
     return 1
 
   # Run the test
-  try:
-    run_test_pipeline(
-      test_name=args.model,
-      input_pattern=args.pattern,
-      skip_setup=args.skip_setup
-    )
-    print("\n✅ Test completed successfully")
-    return 0
-  except Exception as e:
-    print(f"\n❌ Test failed: {e}")
-    import traceback
-    traceback.print_exc()
-    return 1
+  run_test_pipeline(
+    test_name=args.model,
+    input_pattern=args.pattern,
+    skip_setup=args.skip_setup
+  )
+  print("\n✅ Test completed successfully")
+  return 0
 
 
 if __name__ == "__main__":

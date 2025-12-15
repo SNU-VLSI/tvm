@@ -521,7 +521,7 @@ def pattern_table():
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
         ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),
-        ("imcflow.vec_ops", imcflow_vec_op_combs(wildcard())),
+        # ("imcflow.vec_ops", imcflow_vec_op_combs(wildcard())),
       ]
     )
 
