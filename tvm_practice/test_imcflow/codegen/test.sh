@@ -1,10 +1,18 @@
 #!/bin/bash
 
+python_dbg="python -m debugpy --listen $TVM_DEBUG_PORT --wait-for-client"
+
 run_test() {
   local model=$1
   local pattern=${2:-random}  # 기본값 random
+  local dbg=${3:-0}      # 기본값 0
   echo "Running test: $model with pattern $pattern"
-  cmd="python main.py -p $pattern -m $model 2>&1 | tee ${model}_${pattern}.log"
+
+  if [ "$dbg" -eq 1 ]; then
+    cmd="$python_dbg main.py -p $pattern -m $model 2>&1 | tee ${model}_${pattern}.log"
+  else
+    cmd="python main.py -p $pattern -m $model 2>&1 | tee ${model}_${pattern}.log"
+  fi
   echo $cmd
   eval $cmd
 }
@@ -38,4 +46,18 @@ run_test() {
 
 # run_test "super_big_conv_rev5" "ones"
 # run_test "super_big_conv_rev5" "linear"
-run_test "super_big_conv_rev5" "random"
+# run_test "super_big_conv_rev5" "random"
+
+# run_test "super_big_conv_bn_quant_rev1" "ones"
+# run_test "super_big_conv_bn_quant_rev1" "linear"
+# run_test "super_big_conv_bn_quant_rev1" "random"
+
+# run_test "super_big_conv_bn_quant_rev2" "ones"
+# run_test "super_big_conv_bn_quant_rev2" "linear"
+# run_test "super_big_conv_bn_quant_rev2" "random"
+
+# run_test "super_big_conv_bn_quant_rev6" "ones"
+# run_test "super_big_conv_bn_quant_rev6" "linear"
+# run_test "super_big_conv_bn_quant_rev6" "random"
+
+run_test "resnet8_small_pretrained" "random" 1

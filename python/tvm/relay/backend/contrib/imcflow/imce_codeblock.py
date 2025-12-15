@@ -699,20 +699,22 @@ class RecvSendWrapper(ImceCodeBlock):
       te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(
           src_id, "out")
 
+      # handle split ops in middle of functions. For example, qconv2d -> split 
       output_edges=self.out_edges
-      split_case = False
-      if not te_out_infos: # normal op to split path. this path doesn't have tensor edge info
-        dst_node = CustomIDToNode()[getInnerNodeID(self.out_edges[0].dst_id.graph_node_id)]
-        if not dst_node.op.name == "split":
-          raise RuntimeError(f"Warning: no tensor edge info found for src_id {src_id}, dst_node op: {dst_node.op.name}")
-        else:
-          print(f"Info: no tensor edge info found for src_id {src_id}, dst_node is split, checking its output edges")
-          split_node_graph_id = self.out_edges[0].dst_id.graph_node_id
-          target_tensor_id = TensorID(split_node_graph_id, "odata")
-          te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(target_tensor_id, "out")
-          output_edges = [edge for edge in DevConfig().TensorEdgetoInfo.keys() if getInnerNodeID(edge.src_id.graph_node_id) == getInnerNodeID(target_tensor_id.graph_node_id)]
-          print(f"Info: got {len(te_out_infos)} tensor edge infos from split dst edge")
-          split_case = True
+      split_case = all(isinstance(dst_node, relay.Call) and dst_node.op == relay.op.get("split") for dst_node in [CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)] for edge in self.out_edges])
+      # if not te_out_infos: # local edge
+      if split_case:
+        assert len(self.out_edges) == 1, "In split case, there should be only one out_edge from this block"
+        assert te_out_infos[0].fifo_id == TensorEdgeInfo.LOCAL_FIFO, "producer of split should have same HW node ID"
+        # if not dst_node.op.name == "split":
+        #   raise RuntimeError(f"Warning: no tensor edge info found for src_id {src_id}, dst_node op: {dst_node.op.name}")
+        # else:
+        # print(f"Info: no tensor edge info found for src_id {src_id}, dst_node is split, checking its output edges")
+        split_node_graph_id = self.out_edges[0].dst_id.graph_node_id
+        target_tensor_id = TensorID(split_node_graph_id, "odata")
+        te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(target_tensor_id, "out")
+        output_edges = [edge for edge in DevConfig().TensorEdgetoInfo.keys() if getInnerNodeID(edge.src_id.graph_node_id) == getInnerNodeID(target_tensor_id.graph_node_id)]
+        print(f"Info: got {len(te_out_infos)} tensor edge infos from split dst edge")
 
       if not te_out_infos: raise RuntimeError(f"no tensor edge info found for src_id {src_id} even after checking split case")
 

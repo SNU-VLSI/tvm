@@ -986,9 +986,8 @@ def getSuperBigConvModel(input_shape, OC, random_param=False):
 
   return out, param_dict
 
-def getSuperBigConvBnQuantModel(random_param=False):
-  N, IC, H, W = 1, 64, 1, 1
-  OC = 129
+def getSuperBigConvBnQuantModel(input_shape, OC, random_param=False):
+  N, IC, H, W = input_shape
   KH, KW = 3, 3
   stride, padding = 1, 1
   # input = relay.var("conv_input", shape=(N,math.ceil(IC/256),H,W,4,8), dtype="int32")
