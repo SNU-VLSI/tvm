@@ -45,6 +45,7 @@ class CIRunner:
         self.last_tested_commit = self.load_state()
         self.test_process = None
         self.running = True
+        self.original_branch = None  # Track original branch to restore after testing
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.shutdown)
@@ -117,6 +118,80 @@ class CIRunner:
             }
         except subprocess.CalledProcessError:
             return {"message": "", "author": "", "email": ""}
+
+    def get_current_branch(self) -> Optional[str]:
+        """Get the current branch name or HEAD if detached"""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            print(f"Error getting current branch: {e}")
+            return None
+
+    def checkout_commit(self, commit_sha: str) -> bool:
+        """Checkout to a specific commit
+
+        Args:
+            commit_sha: The commit SHA to checkout
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Save the original branch if not already saved
+            if self.original_branch is None:
+                self.original_branch = self.get_current_branch()
+                print(f"📌 Saved original branch/state: {self.original_branch}")
+
+            # Checkout the commit
+            print(f"🔄 Checking out commit {commit_sha[:7]}...")
+            result = subprocess.run(
+                ["git", "checkout", commit_sha],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            print(f"✅ Successfully checked out {commit_sha[:7]}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Error checking out commit {commit_sha}: {e}")
+            print(f"   stdout: {e.stdout}")
+            print(f"   stderr: {e.stderr}")
+            return False
+
+    def restore_original_state(self) -> bool:
+        """Restore the repository to its original branch/state
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if self.original_branch is None:
+            print("⚠️  No original branch to restore")
+            return True
+
+        try:
+            print(f"🔄 Restoring to original branch: {self.original_branch}")
+            result = subprocess.run(
+                ["git", "checkout", self.original_branch],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            print(f"✅ Successfully restored to {self.original_branch}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Error restoring original branch: {e}")
+            print(f"   stdout: {e.stdout}")
+            print(f"   stderr: {e.stderr}")
+            return False
 
     def set_github_status(self, commit_sha: str, state: str, description: str,
                           context: str = "ci/imcflow-tests", target_url: str = None):
@@ -229,6 +304,16 @@ class CIRunner:
         # Set GitHub status to pending
         self.set_github_status(commit_sha, "pending", "Running IMCFlow tests...")
 
+        # Checkout the commit to test
+        if not self.checkout_commit(commit_sha):
+            error_msg = f"Failed to checkout commit {commit_sha[:7]}"
+            print(f"❌ {error_msg}")
+            self.set_github_status(commit_sha, "error", error_msg)
+            return False, str(log_file), {
+                "total": 0, "passed": 0, "failed": 0,
+                "skipped": 0, "duration": 0, "failed_tests": []
+            }
+
         # Prepare test command
         # We need to run the test file directly (not via pytest) because:
         # 1. test.py uses tvm.testing.main() which handles pytest internally
@@ -252,67 +337,75 @@ python test.py --verbose --tb=short \
         cmd = ["bash", "-c", test_cmd]
 
         # Run tests and capture output
-        start_time = time.time()
-        with open(log_file, 'w') as f:
-            f.write(f"IMCFlow CI Test Run\n")
-            f.write(f"Commit: {commit_sha}\n")
-            f.write(f"Branch: {self.branch}\n")
-            f.write(f"Started: {datetime.datetime.now().isoformat()}\n")
-            f.write(f"Test directory: {self.test_file.parent}\n")
-            f.write(f"Using direnv export to load .envrc environment\n")
-            f.write(f"{'='*60}\n\n")
-            f.flush()
-
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
-
-            self.test_process = process
-
-            # Stream output to both console and log file
-            for line in process.stdout:
-                print(line, end='')
-                f.write(line)
+        # Use try-finally to ensure we restore the original state
+        try:
+            start_time = time.time()
+            with open(log_file, 'w') as f:
+                f.write(f"IMCFlow CI Test Run\n")
+                f.write(f"Commit: {commit_sha}\n")
+                f.write(f"Branch: {self.branch}\n")
+                f.write(f"Started: {datetime.datetime.now().isoformat()}\n")
+                f.write(f"Test directory: {self.test_file.parent}\n")
+                f.write(f"Using direnv export to load .envrc environment\n")
+                f.write(f"{'='*60}\n\n")
                 f.flush()
 
-            process.wait()
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
 
-        end_time = time.time()
-        duration = end_time - start_time
+                self.test_process = process
 
-        # Parse test results
-        test_stats = self._parse_test_results(json_report, duration)
-        success = process.returncode == 0
+                # Stream output to both console and log file
+                for line in process.stdout:
+                    print(line, end='')
+                    f.write(line)
+                    f.flush()
 
-        # Update GitHub status and post comment with details
-        if success:
-            description = f"All tests passed ({test_stats['total']} tests, {test_stats['duration']:.1f}s)"
-            self.set_github_status(commit_sha, "success", description)
-        else:
-            description = f"Tests failed ({test_stats['failed']}/{test_stats['total']} failed)"
+                process.wait()
 
-            # Create a comment with failed test details
-            comment_body = self._create_failure_comment(commit_sha, test_stats, str(log_file))
-            comment_url = self.post_github_comment(commit_sha, comment_body)
+            end_time = time.time()
+            duration = end_time - start_time
 
-            # Set status with link to comment
-            self.set_github_status(commit_sha, "failure", description, target_url=comment_url)
+            # Parse test results
+            test_stats = self._parse_test_results(json_report, duration)
+            success = process.returncode == 0
 
-        # Write summary to log
-        with open(log_file, 'a') as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"Test Summary:\n")
-            f.write(f"  Total: {test_stats['total']}\n")
-            f.write(f"  Passed: {test_stats['passed']}\n")
-            f.write(f"  Failed: {test_stats['failed']}\n")
-            f.write(f"  Duration: {test_stats['duration']:.1f}s\n")
-            f.write(f"  Status: {'PASSED' if success else 'FAILED'}\n")
-            f.write(f"{'='*60}\n")
+            # Update GitHub status and post comment with details
+            if success:
+                description = f"All tests passed ({test_stats['total']} tests, {test_stats['duration']:.1f}s)"
+                self.set_github_status(commit_sha, "success", description)
+            else:
+                description = f"Tests failed ({test_stats['failed']}/{test_stats['total']} failed)"
 
-        return success, str(log_file), test_stats
+                # Create a comment with failed test details
+                comment_body = self._create_failure_comment(commit_sha, test_stats, str(log_file))
+                comment_url = self.post_github_comment(commit_sha, comment_body)
+
+                # Set status with link to comment
+                self.set_github_status(commit_sha, "failure", description, target_url=comment_url)
+
+            # Write summary to log
+            with open(log_file, 'a') as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"Test Summary:\n")
+                f.write(f"  Total: {test_stats['total']}\n")
+                f.write(f"  Passed: {test_stats['passed']}\n")
+                f.write(f"  Failed: {test_stats['failed']}\n")
+                f.write(f"  Duration: {test_stats['duration']:.1f}s\n")
+                f.write(f"  Status: {'PASSED' if success else 'FAILED'}\n")
+                f.write(f"{'='*60}\n")
+
+            return success, str(log_file), test_stats
+
+        finally:
+            # Always restore the original branch/state after testing
+            print(f"\n{'='*60}")
+            self.restore_original_state()
+            print(f"{'='*60}\n")
 
     def _create_failure_comment(self, commit_sha: str, test_stats: Dict, log_file: str) -> str:
         """Create a markdown comment body for test failures
