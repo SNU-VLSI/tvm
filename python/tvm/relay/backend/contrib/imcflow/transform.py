@@ -3148,7 +3148,15 @@ class PolicyTableGenerator:
                 """Handle multiple destinations with potential path sharing"""
                 source_node = mapping_info[0]
                 dest_node = mapping_info[1]
-                # dest_index = mapping_info[2]
+                dest_index = mapping_info[2] or 0 # split index for destination node
+                if mapping_info[2] is not None:
+                  dst_graph_node = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
+                  kernel_size = dst_graph_node.attrs['kernel_size'][0].value
+                  ksel = kernel_size
+                  if ksel not in [1, 2, 3, 5, 7]: raise ValueError("Unsupported kernel size for split index calculation.")
+                else:
+                  ksel = 0
+
                 if isinstance(edge, NodeID):
                   src_node_data = f"instruction_{edge.name}"
                 else:
@@ -3207,6 +3215,8 @@ class PolicyTableGenerator:
 
                         if current_node == dest_node: # if same node, return
                             policy_tables[dest_node][entry_addr]["Local"]["enable"] = True
+                            policy_tables[dest_node][entry_addr]["Local"]["chunk_index"] = dest_index
+                            policy_tables[dest_node][entry_addr]["Local"]["ksel"] = ksel
                             # create RouterEntry and append to router_entry_list
                             router_entry_list.append((current_node, entry_addr))
                             # temporary saving. Final saving is done after whole paths finish.

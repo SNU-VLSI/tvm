@@ -29,7 +29,8 @@ from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 from . import imce_operation_handlers  # noqa: F401
 from tvm.relay.backend.contrib.imcflow.imce_operation_handlers import IMCECodeBlockInfo
 
-CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})(None)
+CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})(None) | \
+               wildcard().has_attr({"Composite": "imcflow.qconv2d-split-concat"})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
