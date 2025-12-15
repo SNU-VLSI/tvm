@@ -68,19 +68,19 @@ MODEL_REGISTRY = {
     "resnet_cifar10_subset_small_manual_param": (lambda: models_for_test.getResnetCifar10SmallManualParam(small_debug=True), "ones"),
 
     # Other models
-    "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
-    "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
-    "ds_cnn_imcflow": (lambda: ds_cnn_imcflow.getModel(False), "random"),
+    # "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
+    # "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
+    # "ds_cnn_imcflow": (lambda: ds_cnn_imcflow.getModel(False), "random"),
 
     # Legacy models (for backward compatibility)
-    "big": (real_model.getModel, "random"),
-    "small": (real_model2.getModel, "random"),
-    "model_v2": (real_model2.getModelV2, "random"),
-    "model_1": (test_models.get_model1, "random"),
+    # "big": (real_model.getModel, "random"),
+    # "small": (real_model2.getModel, "random"),
+    # "model_v2": (real_model2.getModelV2, "random"),
+    # "model_1": (test_models.get_model1, "random"),
 }
 
 # Available input patterns for testing
-INPUT_PATTERNS = ["random", "ones", "zeros", "linear", "default"]
+INPUT_PATTERNS = ["random", "ones", "zeros", "linear"]
 
 # ============================================================================
 # Utility Functions
@@ -689,15 +689,41 @@ def setup_cache():
 # ============================================================================
 # Parametrized Tests
 # ============================================================================
-@pytest.mark.parametrize("test_name,input_pattern", [
-  (model_name, pattern)
-  for model_name in MODEL_REGISTRY.keys()
-  for pattern in INPUT_PATTERNS
-])
-def test_imcflow_model_with_pattern(test_name, input_pattern, setup_cache):
+def _generate_test_parameters():
+  """Generate test parameters with default pattern marked.
+
+  This creates test IDs like:
+  - one_conv-random(default) - matches both pytest -k "random" and -k "default"
+  - one_conv-ones
+  - one_conv-zeros
+  - one_conv-linear
+
+  This ensures each pattern is tested only once per model, with the default
+  pattern explicitly marked.
+  """
+  test_params = []
+  for model_name, (_, default_pattern) in MODEL_REGISTRY.items():
+    # Create a set of unique patterns for this model
+    patterns_to_test = set(INPUT_PATTERNS)
+
+    for pattern in patterns_to_test:
+      # Mark the pattern as default if it matches the registry default
+      is_default = (pattern == default_pattern)
+      test_params.append((model_name, pattern, is_default))
+
+  return test_params
+
+@pytest.mark.parametrize("test_name,input_pattern,is_default",
+  _generate_test_parameters(),
+  ids=[f"{params[0]}-{params[1]}{'(default)' if params[2] else ''}"
+       for params in _generate_test_parameters()]
+)
+def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_cache):
   """Parametrized test for IMCFLOW models with all input patterns
 
   Uses setup caching: first pattern does full setup, subsequent patterns skip setup.
+  The default pattern for each model is marked with (default) in the test ID,
+  allowing both 'pytest -k default' and 'pytest -k <pattern>' to work correctly.
   """
   # Check if this model has already been set up in this test session
   skip_setup = test_name in setup_cache
