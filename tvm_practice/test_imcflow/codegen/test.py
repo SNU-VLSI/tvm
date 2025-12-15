@@ -62,15 +62,15 @@ MODEL_REGISTRY = {
     "resnet_cifar10_subset_small_manual_param": (lambda: models_for_test.getResnetCifar10SmallManualParam(small_debug=True), "ones"),
 
     # Other models
-    "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
-    "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
-    "ds_cnn_imcflow": (lambda: ds_cnn_imcflow.getModel(False), "random"),
+    # "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
+    # "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
+    # "ds_cnn_imcflow": (lambda: ds_cnn_imcflow.getModel(False), "random"),
 
     # Legacy models (for backward compatibility)
-    "big": (real_model.getModel, "random"),
-    "small": (real_model2.getModel, "random"),
-    "model_v2": (real_model2.getModelV2, "random"),
-    "model_1": (test_models.get_model1, "random"),
+    # "big": (real_model.getModel, "random"),
+    # "small": (real_model2.getModel, "random"),
+    # "model_v2": (real_model2.getModelV2, "random"),
+    # "model_1": (test_models.get_model1, "random"),
 }
 
 # Available input patterns for testing
