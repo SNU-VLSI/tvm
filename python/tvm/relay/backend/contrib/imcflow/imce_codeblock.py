@@ -3,6 +3,7 @@ from typing import *
 from copy import copy
 import math
 from pprint import pprint
+from tvm import relay
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
@@ -337,11 +338,23 @@ class ConcatBlock(ImceCallCodeBlock):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
     self.or_concat = False
+    self.channel = 0
     assert len(
         self.in_edges) >= self.min_in_edges, "At least two input edges are required"
   
   def set_type(self, or_concat):
     self.or_concat = or_concat  # "OR" or "CONCAT"
+  
+  def set_channel(self, channel):
+    self.channel = channel
+  
+  @property
+  def num_blocks(self) -> int:
+    return self.channel//16
+  
+  @property
+  def num_out_blocks(self) -> int:
+    return len(self.in_edges) * (self.channel//16)
 
   def _render(self) -> str:
     num_bitplanes = 4
@@ -349,19 +362,34 @@ class ConcatBlock(ImceCallCodeBlock):
 
     code = TextBlock("")
 
-    external_in_edges = [
-        e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
-    internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
+    external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
+    internal_in_edge = (set(self.in_edges) - set(external_in_edges))
 
-    for i in range(num_bitplanes):
-      var_i = UniqueVar((internal_in_edge, i))
-      var_o = UniqueVar((self, i))
-      for ext_edge in external_in_edges:
-        var_e = UniqueVar((ext_edge, i))
-        fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
+    if self.call.curr_composite_id:
+      for in_edge in self.in_edges:
+        for b in range(self.num_blocks):
+          var_i = self._make_unique_input_var_for_post_op(in_edge, b)
+          var_o = UniqueVar((self, b + self.num_blocks * self.in_edges.index(in_edge)))
+          code += f"{var_o} = {var_i};"
+    else: 
+      raise NotImplementedError("concat is not implemented yet")
 
-        code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
-        code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
+    # if self.or_concat:
+    #   # external_in_edges = [
+    #   #     e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
+    #   # internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
+    #   # for i in range(num_bitplanes):
+    #   #   var_i = UniqueVar((internal_in_edge, i))
+    #   #   var_o = UniqueVar((self, i))
+    #   #   for ext_edge in external_in_edges:
+    #   #     var_e = UniqueVar((ext_edge, i))
+    #   #     fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
+
+    #   #     code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
+    #   #     code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
+    #   raise NotImplementedError("OR concat is not implemented yet")
+    # else:
+    #   code = TextBlock("// just forward")
 
     return code.render()
 
@@ -465,18 +493,33 @@ class ConvBlock(ImceCallCodeBlock):
         all_in_edges += op.in_edges
         all_out_edges += op.out_edges
       recv_edges = list(set(all_in_edges) - set(all_out_edges) - set(self.out_edges) - set([load_edge]))
+
       send_edges = list(set(all_out_edges) - set(all_in_edges))
       last_out_edges = self.post_ops[-1].out_edges
       assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
       send_block = self.post_ops[-1]
+
+      num_blocks = None
+
+      for edge in recv_edges:
+        for block in [self] + self.post_ops:
+          if edge in block.in_edges:
+            if num_blocks is None:
+              num_blocks = block.num_blocks
+            else:
+              assert num_blocks == block.num_blocks, "mismatched num_blocks in recv edges"
+      
+      num_out_blocks = send_block.num_out_blocks
 
       print(f"[ConvBlock] with post ops : recv_edges: {recv_edges}, send_edges: {send_edges}, send_block: {type(send_block).__name__}")
     else:
       recv_edges = self.in_edges
       send_edges = self.out_edges
       send_block = self
+      num_blocks = self.num_blocks
+      num_out_blocks = self.num_out_blocks
 
-    return RecvSendWrapper(comp, self.num_blocks, self.num_out_blocks, send_block, recv_edges, send_edges)
+    return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges)
 
   def _build_structure(self) -> CodeBlock:
     """
@@ -610,9 +653,20 @@ class RecvSendWrapper(ImceCodeBlock):
     if self.in_edges:
       for i in range(self.num_blocks):
         for edge in self.in_edges:
-          te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
-          assert len(te_infos) == 1, "more than one te_info found!"
-          te_info = te_infos[0]
+          # te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
+          # assert len(te_infos) == 1, "more than one te_info found!"
+          # te_info = te_infos[0]
+          if edge in DevConfig().TensorEdgetoInfo:
+            te_info = DevConfig().TensorEdgetoInfo[edge]
+          else:
+            src_graph_id = edge.src_id.graph_node_id
+            dst_graph_id = edge.dst_id.graph_node_id
+            assert len(src_graph_id) == 2 and len(dst_graph_id) == 2, "Graph node ID should be tuple of (outer_id, inner_id)"
+            assert src_graph_id[0] == dst_graph_id[0], "If src and dst outer node id are different, this edge should be in DevConfig().TensorEdgetoInfo"
+            te_info = None
+
+          if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+            continue # this edge's src and dst hw node is equal
 
           try:
             arg_id = edge.src_id.graph_node_id
@@ -637,6 +691,8 @@ class RecvSendWrapper(ImceCodeBlock):
     # --- 3. Generate SENDs ---
     if self.out_edges:
       out_edge_src_ids = {edge.src_id for edge in self.out_edges}
+
+      # if out edge is more than one -> split operation
       assert len(out_edge_src_ids) == 1, "out_edge_src_ids should have only one element"
 
       src_id = out_edge_src_ids.pop()
@@ -644,10 +700,11 @@ class RecvSendWrapper(ImceCodeBlock):
           src_id, "out")
 
       output_edges=self.out_edges
-      if not te_out_infos:
+      split_case = False
+      if not te_out_infos: # normal op to split path. this path doesn't have tensor edge info
         dst_node = CustomIDToNode()[getInnerNodeID(self.out_edges[0].dst_id.graph_node_id)]
         if not dst_node.op.name == "split":
-          print(f"Warning: no tensor edge info found for src_id {src_id}, dst_node op: {dst_node.op.name}")
+          raise RuntimeError(f"Warning: no tensor edge info found for src_id {src_id}, dst_node op: {dst_node.op.name}")
         else:
           print(f"Info: no tensor edge info found for src_id {src_id}, dst_node is split, checking its output edges")
           split_node_graph_id = self.out_edges[0].dst_id.graph_node_id
@@ -655,16 +712,25 @@ class RecvSendWrapper(ImceCodeBlock):
           te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(target_tensor_id, "out")
           output_edges = [edge for edge in DevConfig().TensorEdgetoInfo.keys() if getInnerNodeID(edge.src_id.graph_node_id) == getInnerNodeID(target_tensor_id.graph_node_id)]
           print(f"Info: got {len(te_out_infos)} tensor edge infos from split dst edge")
+          split_case = True
 
-      if te_out_infos:
+      if not te_out_infos: raise RuntimeError(f"no tensor edge info found for src_id {src_id} even after checking split case")
+
+      if split_case:
         addresses = {info.policy_info[0].address for info in te_out_infos}
-        if len(addresses) == 1:
-          fifo_ids = {info.fifo_id for info in te_out_infos}
-          assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
-          te_out_infos = [te_out_infos[0]]
+        assert len(addresses) == 1, "In split case, all output addresses must be identical"
+        fifo_ids = {info.fifo_id for info in te_out_infos}
+        assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
+        te_out_info = te_out_infos[0] # we need just one edge info due to multicast
+      else:
+        assert len(te_out_infos) == 1, "more than one te_out_info found!"
+        te_out_info = te_out_infos[0]
       
       for i in range(self.num_out_blocks):
-        for te_out_info in te_out_infos:
+        for te_out_info in [te_out_info]: #TODO: current version doesn't need it
+          if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+            continue # this edge's src and dst hw node is equal
+
           var_o = UniqueVar((self.send_block, i))
           if te_out_info:
             annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
@@ -699,14 +765,18 @@ class RecvSendWrapper(ImceCodeBlock):
 
     # get input edge size
     args = []
-    for idx, arg in enumerate(call.args):
-      if ConstPat.match(arg):
-        continue
-      else:
-        args.append(arg)
+    if isinstance(call, relay.Call) and call.op == relay.op.get("concatenate"):
+      args = call.args[0].fields  # for concat case 
+    else:
+      for idx, arg in enumerate(call.args):
+        if ConstPat.match(arg):
+          continue
+        else:
+          args.append(arg)
 
     real_ttype = None
     ch_size = None
+
     for arg in args:
       layout = DevConfig().LayoutMap[arg]
       vir_ttype = get_type(call_ctx.module, arg)
@@ -794,6 +864,12 @@ class RecvSendWrapper(ImceCodeBlock):
       # self.send_block._num_blocks = num_blocks
       # self.send_block.channels = IC
       # count = N*H*W
+    elif isinstance(self.send_block, ConcatBlock):
+      # For concat, num_out_blocks is determined by number of input edges
+      # Each input edge has num_blocks blocks
+      num_blocks = self.send_block.num_blocks
+      num_out_blocks = self.send_block.num_out_blocks
+      count = in_total_bytes // (32 * num_blocks)
 
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks, 

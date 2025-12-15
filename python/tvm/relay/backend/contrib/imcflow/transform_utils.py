@@ -137,6 +137,7 @@ class UseDefChainParser(relay.ExprVisitor):
     self._call_set = set()
     self.sub_parsers = {} # if function has local functions, store their use-def parsers here
                           # {local func_node : UseDefChainParser}
+    self.param_to_args = {} # {local func param : arg}
   
   def _record_use(self, user, operand, tag):
     if operand not in self.users:
@@ -160,6 +161,9 @@ class UseDefChainParser(relay.ExprVisitor):
         sub_parser = UseDefChainParser()
         sub_parser.visit(call.op.body)
         self.sub_parsers[call.op] = sub_parser
+      
+      for param, arg in zip(call.op.params, call.args):
+        self.param_to_args[param] = arg
 
     # Continue visiting child nodes
     for arg in call.args:
@@ -181,22 +185,28 @@ class UseDefChainParser(relay.ExprVisitor):
 
     super().visit_tuple_getitem(tgi)
 
-  def get_users(self, expr, recursive=False, depth=-1):
+  def get_users(self, expr, recursive=False, depth=-1, skip_tuple=False):
     """
     Get all users (consumers) of an expression
     Args:
         expr: The expression to query
         recursive: If True, recursively find users through sub-functions
         depth: Maximum recursion depth (-1 for unlimited)
+        skip_tuple: If True, skip through Tuple and TupleGetItem nodes to find Call users
     """
-    if not recursive:
+    if not recursive and not skip_tuple:
       return self.users.get(expr, [])
-    
+
     final_users = []
-    
+
     def _traverse(current_expr, current_parser, current_depth):
       direct_users = current_parser.users.get(current_expr, [])
       for user, tag in direct_users:
+        # Skip through Tuple and TupleGetItem nodes if skip_tuple is enabled
+        if skip_tuple and isinstance(user, (relay.Tuple, relay.TupleGetItem)):
+          _traverse(user, current_parser, current_depth)
+          continue
+
         if isinstance(user, relay.Call) and isinstance(user.op, relay.Function):
           if current_depth == 0:
             final_users.append((user, tag))
@@ -217,29 +227,46 @@ class UseDefChainParser(relay.ExprVisitor):
     _traverse(expr, self, depth)
     return final_users
 
-  def get_uses(self, expr, recursive=False, depth=-1):
-    """Get operands (dependencies) of an expression"""
-    if not recursive:
+  def get_uses(self, expr, recursive=False, depth=-1, skip_tuple=False):
+    """
+    Get operands (dependencies) of an expression
+    Args:
+        expr: The expression to query
+        recursive: If True, recursively find uses through sub-functions
+        depth: Maximum recursion depth (-1 for unlimited)
+        skip_tuple: If True, skip through Tuple and TupleGetItem nodes to find Call operands
+    """
+    if expr not in self.uses and expr not in self.users:
+      for sub_parser in self.sub_parsers.values():
+        if expr in sub_parser.uses or expr in sub_parser.users:
+          return sub_parser.get_uses(expr, recursive, depth, skip_tuple)
+
+    if not recursive and not skip_tuple:
       return self.uses.get(expr, [])
-    
+
     final_uses = []
-    
+
     def _traverse(current_expr, current_parser, current_depth):
-      direct_uses = current_parser.uses.get(current_expr, [])
+      if isinstance(current_expr, relay.Function):
+        direct_uses = [current_expr.body]
+      else:
+        direct_uses = current_parser.uses.get(current_expr, [])
       for operand in direct_uses:
+        # Skip through Tuple and TupleGetItem nodes if skip_tuple is enabled
+        if skip_tuple and isinstance(operand, (relay.Tuple, relay.TupleGetItem)):
+          _traverse(operand, current_parser, current_depth)
+          continue
+
         if isinstance(operand, relay.Call) and isinstance(operand.op, relay.Function):
           if current_depth == 0:
             final_uses.append(operand)
           else:
             sub_func = operand.op
-            if sub_func in current_parser.sub_parsers:
-              sub_parser = current_parser.sub_parsers[sub_func]
-              _traverse(sub_func.body, sub_parser, current_depth - 1 if current_depth > 0 else -1)
-            else:
-              final_uses.append(operand)
+            sub_parser = current_parser.sub_parsers[sub_func]
+            _traverse(sub_func, sub_parser, current_depth - 1 if current_depth > 0 else -1)
         else:
           final_uses.append(operand)
-    
+
     _traverse(expr, self, depth)
     return final_uses
 

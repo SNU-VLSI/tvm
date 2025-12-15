@@ -46,7 +46,7 @@ from tvm.relay.expr import Call, GlobalVar, TupleGetItem, const
 from tvm.relay.expr_functor import ExprMutator, ExprVisitor
 
 from ... import _ffi_api
-from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard, is_tuple_get_item
+from ...dataflow_pattern import DFPatternCallback, is_constant, is_expr, is_op, rewrite, wildcard, is_tuple_get_item, is_tuple
 from .register import register_pattern_table
 from tvm.relay.op.annotation import compiler_begin, compiler_end
 from tvm.relay.function import Function, FunctionWithFields
@@ -455,6 +455,12 @@ def makeNUQauntPattern(data):
 def makeDivPattern(data):
   return is_op("divide")(data, is_constant())
 
+def makeSplitPatern(data):
+  return is_op("split")(data)
+
+def makeConcatPattern(data):
+  return is_op("concatenate")(is_tuple([data, wildcard()]))
+
 def make_conv_with_postop_pattern(conv_type, postop):
     data1, weight = wildcard(), is_constant()
     out = is_op(conv_type)(data1, weight)
@@ -471,6 +477,12 @@ def pattern_table():
         Created patterns.
     """
     imcflow_patterns = []
+
+    def imcflow_concat(data):
+      out = makeConcatPattern(data)
+      for i in range(1, 10):
+        out = out | makeConcatPattern(out)
+      return out
 
     def make_postop_pattern_start_with(conv_type, preop=None):
       if preop is None:
@@ -490,16 +502,26 @@ def pattern_table():
       out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
       for i in range(1, 10):
         out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
+      
+      out = out | makeSplitPatern(out) | imcflow_concat(out)
 
       return out
+    
+    def imcflow_vec_op_combs(data):
+      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
+      for i in range(1, 10):
+        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
+      
+      out = out | makeSplitPatern(out) | imcflow_concat(out)
 
+      return out
+    
     imcflow_patterns.extend(
       [ 
-        # ("imcflow.quant-qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv", makeMinMaxQauntPattern(wildcard()))),
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
-        # ("imcflow.quant-qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv", makeMinMaxQauntPattern(wildcard()))),
         ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
-        ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d"))
+        ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),
+        # ("imcflow.vec_ops", imcflow_vec_op_combs(wildcard())),
       ]
     )
 

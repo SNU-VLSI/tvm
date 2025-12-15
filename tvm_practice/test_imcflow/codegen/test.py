@@ -198,7 +198,8 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
 
   if not skip_setup:
     # Transform model to be CPU runnable
-    cpu_mod = copy.deepcopy(mod)
+    # cpu_mod = copy.deepcopy(mod)
+    cpu_mod = copy.copy(mod)
     cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
     printModel(model_dir, cpu_mod, param_dict, "cpu_runnable_model")
 

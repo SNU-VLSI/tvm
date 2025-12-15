@@ -956,7 +956,7 @@ def getBigConvModel(random_param=False):
 
 def getSuperBigConvModel(random_param=False):
   N, IC, H, W = 1, 64, 1, 1
-  OC = 129
+  OC = 128
   KH, KW = 3, 3
   stride, padding = 1, 1
   # input = relay.var("conv_input", shape=(N,math.ceil(IC/256),H,W,4,8), dtype="int32")

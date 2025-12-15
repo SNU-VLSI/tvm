@@ -2402,6 +2402,15 @@ def constructTensorEdgeList(mod):
             self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
             return True
           else:
+              if isinstance(SrcGraphNode, Tuple):
+                for field in SrcGraphNode.fields:
+                  _processInputNode(field, SrcTag, DstGraphNodeID, DstTag, self.getInputGraphNodeSplitIndex(field))
+                return True
+
+              if isinstance(SrcGraphNode, TupleGetItem):
+                _processInputNode(SrcGraphNode.tuple_value, SrcTag, DstGraphNodeID, DstTag, SplitIdx)
+                return True
+
               if isinstance(SrcGraphNode, Var):
                 self.VarProperties[SrcGraphNode]["src_tag"] = SrcTag
                 # self.VarProperties[SrcGraphNode]["src_tag"] = "var"
@@ -2469,7 +2478,7 @@ def constructTensorEdgeList(mod):
           elif call.op == op.get("qnn.imcflow_nu_quantize"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "threshold", DstGraphNodeID, "threshold", None)
-          # elif call.op == op.get("imcflow_packing"):
+          # elif call.op == op.get("imcflow_packing"):python_dbg main.py -p random -m super_big_conv  2>&1 | tee main.log
           #   _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           # elif call.op == op.get("imcflow_unpacking"):
           #   _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
@@ -3280,6 +3289,9 @@ class PolicyTableGenerator:
                       # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
                       edgeinfo = InstEdgeInfo(router_entry_list, None)
                       ImcflowDeviceConfig().add_inst_edge_info(func_name, edge, edgeinfo)
+              else: # src hw node and dst hw node is equal. it is local edge
+                edgeinfo = TensorEdgeInfo([], None, TensorEdgeInfo.LOCAL_FIFO)
+                ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
 
         def allocate(self, func_name):
           # Allocate memory for policy tables

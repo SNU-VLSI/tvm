@@ -484,6 +484,7 @@ class InstEdgeInfo(EdgeInfo):
 
 
 class TensorEdgeInfo(EdgeInfo):
+  LOCAL_FIFO = -2
   def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
