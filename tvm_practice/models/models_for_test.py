@@ -341,6 +341,44 @@ def getConvQuantConvModel():
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
+def getBigConvQuantConvModel():
+  N, IC, H, W = 1, 64, 4, 4
+  y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2_1", shape=(64,64,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (64,64,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=64,
+    channels=64,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  IC, H, W = (64, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
+
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_2", shape=(), dtype="int16"), relay.var("quant_max_2", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=16)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2_2", shape=(64,64,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (64,64,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=64,
+    channels=64,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  IC, H, W = (64, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
+
+  param_dict = {
+    "weight2_1"  : np.random.randint(-8, 7, (64,64,3,3), dtype="int8"),
+    "weight2_2"  : np.random.randint(-8, 7, (64,64,3,3), dtype="int8"),
+    "quant_min_2": np.array(-256, dtype="int16"),
+    "quant_max_2": np.array(256, dtype="int16"),
+  }
+
+  out = tvm.IRModule.from_expr(y)
+  return out, param_dict
+
 def getResidualModel(random=False):
   N, IC, H, W = 1, 16, 1, 1
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
@@ -883,7 +921,7 @@ def getOneConvBnModel():
 
   return out, param_dict
 
-def getBigConvModel():
+def getBigConvModel(random_param=False):
   N, IC, H, W = 1, 64, 4, 4
   OC = 64
   KH, KW = 3, 3
@@ -902,15 +940,109 @@ def getBigConvModel():
     out_dtype="int16"
   )
 
-  param_dict = {
-    # "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
-    "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
-  }
+  if random_param:
+    param_dict = {
+      "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+    }
+  else:
+    param_dict = {
+      # "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+      "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+    }
 
   out = tvm.IRModule.from_expr(y)
 
   return out, param_dict
 
+def getSuperBigConvModel(random_param=False):
+  N, IC, H, W = 1, 64, 1, 1
+  OC = 129
+  KH, KW = 3, 3
+  stride, padding = 1, 1
+  # input = relay.var("conv_input", shape=(N,math.ceil(IC/256),H,W,4,8), dtype="int32")
+  input = relay.var("conv_input", shape=(N,IC,H,W), dtype="uint8")
+
+  y = imcflow_qconv2d(
+    input,
+    relay.var("conv_weight", shape=(OC,IC,KH,KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+
+  if random_param:
+    param_dict = {
+      "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+    }
+  else:
+    param_dict = {
+      # "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+      "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+    }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
+
+def getSuperBigConvBnQuantModel(random_param=False):
+  N, IC, H, W = 1, 64, 1, 1
+  OC = 129
+  KH, KW = 3, 3
+  stride, padding = 1, 1
+  # input = relay.var("conv_input", shape=(N,math.ceil(IC/256),H,W,4,8), dtype="int32")
+  input = relay.var("conv_input", shape=(N,IC,H,W), dtype="uint8")
+
+  y = imcflow_qconv2d(
+    input,
+    relay.var("conv_weight", shape=(OC,IC,KH,KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+
+  y = imcflow_batch_norm(
+    y,
+    relay.var("fused_scale", shape=(OC,), dtype="int16"),
+    relay.var("fused_bias", shape=(OC,), dtype="int16"),
+    axis=1,
+    in_channels=OC
+  )
+
+  y = imcflow_min_max_quantize(
+    y,
+    relay.var("quant_min", shape=(), dtype="int16"),
+    relay.var("quant_max", shape=(), dtype="int16"),
+    axis=1,
+    out_dtype="uint8",
+    channel=OC
+  )
+
+  if random_param:
+    param_dict = {
+      "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+      "fused_scale": np.random.randint(1, 4, size=(OC,), dtype=np.int16),
+      "fused_bias": np.random.randint(-8, 8, size=(OC,), dtype=np.int16),
+      "quant_min": np.array(-128, dtype=np.int16),
+      "quant_max": np.array(127, dtype=np.int16),
+    }
+  else:
+    param_dict = {
+      "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+      "fused_scale": np.ones((OC,), dtype="int16"),
+      "fused_bias": np.zeros((OC,), dtype="int16"),
+      "quant_min": np.array(-128, dtype=np.int16),
+      "quant_max": np.array(127, dtype=np.int16),
+    }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
 
 def getResnetCifar10SmallManualParam_(input_shape):
   input = relay.var("model_input", shape=input_shape, dtype="float32")

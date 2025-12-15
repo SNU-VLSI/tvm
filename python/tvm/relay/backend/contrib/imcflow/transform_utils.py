@@ -135,7 +135,9 @@ class UseDefChainParser(relay.ExprVisitor):
     self.uses = {}  # {expr : [list of operand exprs]}
     self.call_nodes = []
     self._call_set = set()
-
+    self.sub_parsers = {} # if function has local functions, store their use-def parsers here
+                          # {local func_node : UseDefChainParser}
+  
   def _record_use(self, user, operand, tag):
     if operand not in self.users:
       self.users[operand] = []
@@ -152,6 +154,12 @@ class UseDefChainParser(relay.ExprVisitor):
       self._call_set.add(call)
       self.call_nodes.append(call)
     self._register_uses(call, call.args)
+
+    if isinstance(call.op, relay.Function):
+      if call.op not in self.sub_parsers:
+        sub_parser = UseDefChainParser()
+        sub_parser.visit(call.op.body)
+        self.sub_parsers[call.op] = sub_parser
 
     # Continue visiting child nodes
     for arg in call.args:
@@ -173,13 +181,67 @@ class UseDefChainParser(relay.ExprVisitor):
 
     super().visit_tuple_getitem(tgi)
 
-  def get_users(self, expr):
-    """Get all users (consumers) of an expression"""
-    return self.users.get(expr, [])
+  def get_users(self, expr, recursive=False, depth=-1):
+    """
+    Get all users (consumers) of an expression
+    Args:
+        expr: The expression to query
+        recursive: If True, recursively find users through sub-functions
+        depth: Maximum recursion depth (-1 for unlimited)
+    """
+    if not recursive:
+      return self.users.get(expr, [])
+    
+    final_users = []
+    
+    def _traverse(current_expr, current_parser, current_depth):
+      direct_users = current_parser.users.get(current_expr, [])
+      for user, tag in direct_users:
+        if isinstance(user, relay.Call) and isinstance(user.op, relay.Function):
+          if current_depth == 0:
+            final_users.append((user, tag))
+          else:
+            sub_func = user.op
+            if sub_func in current_parser.sub_parsers:
+              sub_parser = current_parser.sub_parsers[sub_func]
+              if tag < len(sub_func.params):
+                param = sub_func.params[tag]
+                _traverse(param, sub_parser, current_depth - 1 if current_depth > 0 else -1)
+              else:
+                final_users.append((user, tag))
+            else:
+              final_users.append((user, tag))
+        else:
+          final_users.append((user, tag))
 
-  def get_uses(self, expr):
+    _traverse(expr, self, depth)
+    return final_users
+
+  def get_uses(self, expr, recursive=False, depth=-1):
     """Get operands (dependencies) of an expression"""
-    return self.uses.get(expr, [])
+    if not recursive:
+      return self.uses.get(expr, [])
+    
+    final_uses = []
+    
+    def _traverse(current_expr, current_parser, current_depth):
+      direct_uses = current_parser.uses.get(current_expr, [])
+      for operand in direct_uses:
+        if isinstance(operand, relay.Call) and isinstance(operand.op, relay.Function):
+          if current_depth == 0:
+            final_uses.append(operand)
+          else:
+            sub_func = operand.op
+            if sub_func in current_parser.sub_parsers:
+              sub_parser = current_parser.sub_parsers[sub_func]
+              _traverse(sub_func.body, sub_parser, current_depth - 1 if current_depth > 0 else -1)
+            else:
+              final_uses.append(operand)
+        else:
+          final_uses.append(operand)
+    
+    _traverse(expr, self, depth)
+    return final_uses
 
   def _find_call_inputs(self, call):
     deps = set()
@@ -239,6 +301,23 @@ class UseDefChainParser(relay.ExprVisitor):
     if len(ordered) != len(nodes):
       raise ValueError("Cycle detected in node graph")
     return ordered
+
+class UseDefChainBuilder:
+  """
+  use def chain builder for module.
+  """
+  def __init__(self, mod):
+    self.mod = mod
+    self.use_def_chain_parsers = {}  # {global_var_name: UseDefChainParser}
+
+    for global_var, func in mod.functions.items():
+      if isinstance(func, relay.Function):
+        parser = UseDefChainParser()
+        parser.visit(func.body)
+        self.use_def_chain_parsers[global_var.name_hint] = parser
+
+  def get_parser_for_func(self, global_var_name):
+    return self.use_def_chain_parsers[global_var_name]
 
 def get_type(parent_mod, node):
     """A method to infer the type of a relay expression."""

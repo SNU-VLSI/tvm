@@ -20,6 +20,7 @@ from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 from tvm.relay.backend.contrib.imcflow import imce_codeblock
 from tvm.relay.backend.contrib.imcflow.operation_handlers import get_handler_registry
+from tvm.relay.backend.contrib.imcflow.transform_utils import UseDefChainBuilder
 import pdb
 
 # Ensure external codegen registration side-effects are loaded.
@@ -150,12 +151,15 @@ class CodegenSuite:
     sorted_edges = sorted(list(annotator.edges), key=lambda x: str(x))
     for edge in sorted_edges:
       print(f"  {edge}")
+    
+    # get use def chain
+    use_def_builder = UseDefChainBuilder(self.module)
 
     # clear IMCECodeBlockInfo before codegen
     IMCECodeBlockInfo().clear()
 
     # generate code blocks for each node
-    imce_builder = ImceCodeBlockBuilder(self.module, func_name, sorted_edges)
+    imce_builder = ImceCodeBlockBuilder(self.module, func_name, sorted_edges, use_def_builder)
     imce_builder.visit(func)
 
     # add stop block for active imces
@@ -235,7 +239,7 @@ class PolicyTableCodegen:
       val = (val << 1) | (1 if conf["enable"] else 0)
       val = (val << 6) | get_bits(conf["addr"], 6)
       if direction == 'Local':
-        val = (val << 3) | 0b000
+        val = (val << 3) | get_bits(conf["ksel"], 3)
         val = (val << 6) | get_bits(conf["chunk_index"], 6)
 
     bin_data = bytearray()
@@ -334,10 +338,11 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   Handlers receive a BuilderContext that wraps each call with helper methods.
   """
 
-  def __init__(self, module, func_name, edges):
+  def __init__(self, module, func_name, edges, use_def_builder):
     super().__init__()
     # Shared state accessed by handlers through BuilderContext
     self.module = module
+    self.use_def_builder = use_def_builder
     self.edges = edges
     self.codeblocks = ImceCodeBlockManager(func_name)
     self.curr_composite_id = None

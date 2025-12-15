@@ -336,8 +336,12 @@ class ConcatBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
+    self.or_concat = False
     assert len(
         self.in_edges) >= self.min_in_edges, "At least two input edges are required"
+  
+  def set_type(self, or_concat):
+    self.or_concat = or_concat  # "OR" or "CONCAT"
 
   def _render(self) -> str:
     num_bitplanes = 4
@@ -399,7 +403,7 @@ class ConvBlock(ImceCallCodeBlock):
 
     self.out_channels = conv_attrs.channels.value
     assert self.out_channels <= 64, "convolution output channel is greater than 64"
-    assert self.out_channels%16 == 0, "Until now, conv output channel should be multiple of 16"
+    # assert self.out_channels%16 == 0, "Until now, conv output channel should be multiple of 16"
     self.in_channels  = conv_attrs.in_channels.value
     
     # Link post-ops

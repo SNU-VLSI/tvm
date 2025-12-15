@@ -249,8 +249,27 @@ class ConcatHandler(OperationHandler):
     return call.op == op.get("concatenate")
 
   def handle(self, call: 'BuilderContext') -> None:
+    builder = call.builder
+    use_def_parser = builder.use_def_builder.get_parser_for_func(call.func_name)
+    producers = use_def_parser.get_uses(call.call, recursive=True, depth=-1)
+    producer_types = [p.op.name for p in producers] 
+    if any(x != producer_types[0] for x in producer_types):
+      raise RuntimeError(f"ConcatHandler: all producers must be of the same type, got: {producer_types}")
+    
     block = ConcatBlock(call, "concat")
-    call.post_op_stack.append(block)
+    if producer_types[0] == "qnn.imcflow_min_max_quantize":
+      # we need OR
+      block.set_type(or_concat=True)
+    else:
+      # we need simple concat into regs
+      block.set_type(or_concat=False)
+
+    if call.curr_composite_id is not None:
+      call.post_op_stack.append(block)
+    else:
+      # Standalone concat needs RECV/SEND wrapper
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "concat_standalone").create_loop_from_call(call)
+      call.codeblocks.append(call.get_hid(), wrapped_block, CodePhase.EXEC)
 
 
 @register_operation_handler
