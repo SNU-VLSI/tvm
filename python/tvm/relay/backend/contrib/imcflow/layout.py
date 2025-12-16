@@ -1569,7 +1569,10 @@ class ImcflowLayoutLegalizer:
         elif layout_type in (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C):
           block = _block_from_layout(layout_type)
           arg = relay.op.layout_transform(param, layout_type.value, "NCHW")
-          N, CG, H, W, _ = new_type.shape
+          if layout_type in (LayoutType.NCHW16C, LayoutType.NCHW64C):
+            N, CG, H, W, _ = new_type.shape
+          else:
+            N, H, W, CG, _ = new_type.shape
           c_converted = CG * block
           if c_converted > old_type.shape[1]:
             arg = relay.op.strided_slice(arg, begin=[0,0,0,0], end=[N, old_type.shape[1], H, W])
