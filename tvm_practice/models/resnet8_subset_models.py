@@ -111,7 +111,8 @@ def getModel_(input_shape, until_relay: int = None):
     IC, H, W = (16, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
 
     y = c.check(imcflow_batch_norm(y, relay.var("fused_scale2", shape=(16,), dtype="int16"), relay.var("fused_bias2", shape=(16,), dtype="int16")))
-    y = c.check(y + residual * relay.var("y_f_1", shape=(1,), dtype="int16"))
+    # y = c.check(y + residual * relay.var("y_f_1", shape=(1,), dtype="int16"))
+    y = c.check(y + residual)
 
     # basic block 2
     residual = y
