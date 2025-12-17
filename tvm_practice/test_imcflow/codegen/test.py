@@ -23,6 +23,7 @@ import glob
 from tvm.relay.op.contrib.imcflow import HashToCustomID
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
+from models import resnet8_subset_models
 from models import models_for_test
 
 # Import shared input generator
@@ -81,11 +82,17 @@ MODEL_REGISTRY = {
     "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
     # ResNet8 variants - all use small_debug=True
-    "resnet8_small": (lambda: resnet8_cifar.getModel(True), "ones"),
+    "resnet8_subset6_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=6), "ones"),
+    "resnet8_subset7_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=7), "ones"),
+    "resnet8_subset8_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=8), "ones"),
+    "resnet8_subset9_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=9), "ones"),
+    "resnet8_subset10_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=10), "ones"),
+
+    # "resnet8_small": (lambda: resnet8_cifar.getModel(True), "ones"),
     "resnet8_small_pretrained": (lambda: resnet8_cifar.getModel_from_pretrained_weight(True), "ones"),
-    "resnet_cifar10_small": (lambda: models_for_test.getResnetCifar10Small(small_debug=True), "ones"),
-    "resnet_cifar10_small_pretrained": (lambda: models_for_test.getResnetCifar10SmallPretrained(small_debug=True), "ones"),
-    "resnet_cifar10_subset_small_manual_param": (lambda: models_for_test.getResnetCifar10SmallManualParam(small_debug=True), "ones"),
+    # "resnet_cifar10_small": (lambda: models_for_test.getResnetCifar10Small(small_debug=True), "ones"),
+    # "resnet_cifar10_small_pretrained": (lambda: models_for_test.getResnetCifar10SmallPretrained(small_debug=True), "ones"),
+    # "resnet_cifar10_subset_small_manual_param": (lambda: models_for_test.getResnetCifar10SmallManualParam(small_debug=True), "ones"),
 
     # Other models
     # "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
