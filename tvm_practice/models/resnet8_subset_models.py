@@ -435,7 +435,7 @@ def getModel_from_pretrained_weight(small_debug=False, until_relay=None):
         if shape == (1,):
           return np.array([value], dtype=dtype)
         else:
-          return np.array(value, dtype=dtype)
+          return np.full(shape, fill_value=value, dtype=dtype)
       else:
         raise ValueError(f"Missing adjust_factors for computing {name}")
 
