@@ -349,6 +349,28 @@ def getModel(small_debug=False):
     info = var_dict[name]
     params_dict[name] = _rand_tensor(info["dtype"], info["shape"])
 
+  # swap min, max pair if min is greater than max
+  min_max_pairs = {}
+  for name, value in params_dict.items():
+    if "quant_min" in name:
+      base_name = name.replace("quant_min", "")
+      if base_name not in min_max_pairs:
+        min_max_pairs[base_name] = [value, None]
+      else:
+        min_max_pairs[base_name][0] = value
+    elif "quant_max" in name:
+      base_name = name.replace("quant_max", "")
+      if base_name not in min_max_pairs:
+        min_max_pairs[base_name] = [None, value]
+      else:
+        min_max_pairs[base_name][1] = value
+    
+  for base_name, (min_val, max_val) in min_max_pairs.items():
+    if min_val is not None and max_val is not None:
+      if np.any(min_val > max_val):
+        # swap
+        params_dict[f"quant_min{base_name}"], params_dict[f"quant_max{base_name}"] = max_val, min_val
+
   return out, params_dict
 
 def getModel_from_pretrained_weight(small_debug=False):
