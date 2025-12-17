@@ -340,6 +340,11 @@ python test.py --verbose --tb=short \
         # Use try-finally to ensure we restore the original state
         try:
             start_time = time.time()
+
+            # Track test progress
+            current_test_num = 0
+            total_tests = 0
+
             with open(log_file, 'w') as f:
                 f.write(f"IMCFlow CI Test Run\n")
                 f.write(f"Commit: {commit_sha}\n")
@@ -364,6 +369,19 @@ python test.py --verbose --tb=short \
                     print(line, end='')
                     f.write(line)
                     f.flush()
+
+                    # Parse pytest output to track progress
+                    # Look for lines like "test_name.py::test_function PASSED [50%]"
+                    if ' PASSED ' in line or ' FAILED ' in line or ' SKIPPED ' in line:
+                        # Extract progress percentage
+                        import re
+                        match = re.search(r'\[(\d+)/(\d+)\]', line)
+                        if match:
+                            current_test_num = int(match.group(1))
+                            total_tests = int(match.group(2))
+                            # Update GitHub status with progress
+                            progress_msg = f"Running IMCFlow tests... [{current_test_num}/{total_tests}]"
+                            self.set_github_status(commit_sha, "pending", progress_msg)
 
                 process.wait()
 
