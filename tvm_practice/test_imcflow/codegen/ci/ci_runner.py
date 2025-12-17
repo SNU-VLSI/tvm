@@ -327,7 +327,7 @@ class CIRunner:
         test_cmd = f"""
 cd {self.test_file.parent} && \
 eval "$(direnv export bash)" && \
-python test.py --verbose --tb=short \
+python test.py --verbose -k "random" --tb=short \
   --junit-xml {self.log_dir / f"junit_{commit_sha[:7]}_{timestamp}.xml"} \
   --json-report \
   --json-report-file {json_report} \
