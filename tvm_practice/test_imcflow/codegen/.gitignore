@@ -5,3 +5,4 @@ big/
 *_ref/
 logs/
 test_inputs/*
+test.sh
