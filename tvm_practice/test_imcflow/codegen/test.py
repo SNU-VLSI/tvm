@@ -97,6 +97,11 @@ MODEL_REGISTRY = {
     "resnet8_subset18_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=18), "ones"),
     "resnet8_subset19_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=19), "ones"),
     "resnet8_subset20_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=20), "ones"),
+    "resnet8_subset21_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=21), "ones"),
+    "resnet8_subset22_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=22), "ones"),
+    "resnet8_subset23_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=23), "ones"),
+    "resnet8_subset24_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=24), "ones"),
+    "resnet8_subset25_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=25), "ones"),
 
     # "resnet8_small": (lambda: resnet8_cifar.getModel(True), "ones"),
     "resnet8_small_pretrained": (lambda: resnet8_cifar.getModel_from_pretrained_weight(True), "ones"),
