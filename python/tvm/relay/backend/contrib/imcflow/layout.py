@@ -177,33 +177,25 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
   "add": [
     (
       [
-        [LayoutType.NCHW16C, LayoutType.NCHW16C],
-        [LayoutType.NCHW16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW16C],
+        [LayoutType.NCHW16C, LayoutType.NCHW16C]
       ],
       LayoutType.NCHW16C,
     ),
     (
       [
-        [LayoutType.NCHW64C, LayoutType.NCHW64C],
-        [LayoutType.NCHW64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW64C],
+        [LayoutType.NCHW64C, LayoutType.NCHW64C]
       ],
       LayoutType.NCHW64C,
     ),
     (
       [
-        [LayoutType.NHWC16C, LayoutType.NHWC16C],
-        [LayoutType.NHWC16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC16C],
+        [LayoutType.NHWC16C, LayoutType.NHWC16C]
       ],
       LayoutType.NHWC16C,
     ),
     (
       [
-        [LayoutType.NHWC64C, LayoutType.NHWC64C],
-        [LayoutType.NHWC64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC64C],
+        [LayoutType.NHWC64C, LayoutType.NHWC64C]
       ],
       LayoutType.NHWC64C,
     ),
@@ -237,33 +229,25 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
   "divide": [
     (
       [
-        [LayoutType.NCHW16C, LayoutType.NCHW16C],
-        [LayoutType.NCHW16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW16C],
+        [LayoutType.NCHW16C, LayoutType.NCHW16C]
       ],
       LayoutType.NCHW16C,
     ),
     (
       [
-        [LayoutType.NCHW64C, LayoutType.NCHW64C],
-        [LayoutType.NCHW64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW64C],
+        [LayoutType.NCHW64C, LayoutType.NCHW64C]
       ],
       LayoutType.NCHW64C,
     ),
     (
       [
-        [LayoutType.NHWC16C, LayoutType.NHWC16C],
-        [LayoutType.NHWC16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC16C],
+        [LayoutType.NHWC16C, LayoutType.NHWC16C]
       ],
       LayoutType.NHWC16C,
     ),
     (
       [
-        [LayoutType.NHWC64C, LayoutType.NHWC64C],
-        [LayoutType.NHWC64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC64C],
+        [LayoutType.NHWC64C, LayoutType.NHWC64C]
       ],
       LayoutType.NHWC64C,
     ),
@@ -734,7 +718,7 @@ def _deduce_layout_from_op_const(call, index, not_const_layouts):
   elif op_name == "nn.bias_add":
     if index == 1:
       return LayoutType.C
-  elif op_name == "multiply":
+  elif op_name in ["add", "multiply", "divide"]:
     nchw16 = LayoutType.NCHW16C in not_const_layouts
     nchw64 = LayoutType.NCHW64C in not_const_layouts
     nhwc16 = LayoutType.NHWC16C in not_const_layouts
@@ -755,16 +739,6 @@ def _deduce_layout_from_op_const(call, index, not_const_layouts):
     raise ValueError(
       "Cannot deduce constant layout for binary op with ambiguous input layouts."
     )
-  elif op_name in ["add", "divide"]:
-    if len(ttype.shape) == 0 or (len(ttype.shape) == 1 and ttype.shape[0] == 1):
-      return LayoutType.SCALAR
-    else:
-      if LayoutType.NCHW16C in not_const_layouts and (LayoutType.NCHW64C not in not_const_layouts):
-        return LayoutType.NCHW16C
-      elif LayoutType.NCHW64C in not_const_layouts and (LayoutType.NCHW16C not in not_const_layouts):
-        return LayoutType.NCHW64C
-      else:
-        raise ValueError("Cannot deduce constant layout for binary op with ambiguous input layouts.")
   
   raise ValueError(f"Cannot deduce layout from op {op_name} at index {index}")
 
