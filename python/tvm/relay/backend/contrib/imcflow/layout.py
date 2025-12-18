@@ -212,32 +212,24 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
     (
       [
         [LayoutType.NCHW16C, LayoutType.NCHW16C],
-        [LayoutType.NCHW16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW16C],
       ],
       LayoutType.NCHW16C,
     ),
     (
       [
         [LayoutType.NCHW64C, LayoutType.NCHW64C],
-        [LayoutType.NCHW64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW64C],
       ],
       LayoutType.NCHW64C,
     ),
     (
       [
         [LayoutType.NHWC16C, LayoutType.NHWC16C],
-        [LayoutType.NHWC16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC16C],
       ],
       LayoutType.NHWC16C,
     ),
     (
       [
         [LayoutType.NHWC64C, LayoutType.NHWC64C],
-        [LayoutType.NHWC64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC64C],
       ],
       LayoutType.NHWC64C,
     ),
@@ -742,7 +734,28 @@ def _deduce_layout_from_op_const(call, index, not_const_layouts):
   elif op_name == "nn.bias_add":
     if index == 1:
       return LayoutType.C
-  elif op_name in ["add", "multiply", "divide"]:
+  elif op_name == "multiply":
+    nchw16 = LayoutType.NCHW16C in not_const_layouts
+    nchw64 = LayoutType.NCHW64C in not_const_layouts
+    nhwc16 = LayoutType.NHWC16C in not_const_layouts
+    nhwc64 = LayoutType.NHWC64C in not_const_layouts
+
+    # NCHW family
+    if nchw16 and not nchw64 and not nhwc16 and not nhwc64:
+      return LayoutType.NCHW16C
+    if nchw64 and not nchw16 and not nhwc16 and not nhwc64:
+      return LayoutType.NCHW64C
+
+    # NHWC family
+    if nhwc16 and not nhwc64 and not nchw16 and not nchw64:
+      return LayoutType.NHWC16C
+    if nhwc64 and not nhwc16 and not nchw16 and not nchw64:
+      return LayoutType.NHWC64C
+
+    raise ValueError(
+      "Cannot deduce constant layout for binary op with ambiguous input layouts."
+    )
+  elif op_name in ["add", "divide"]:
     if len(ttype.shape) == 0 or (len(ttype.shape) == 1 and ttype.shape[0] == 1):
       return LayoutType.SCALAR
     else:
