@@ -1239,10 +1239,14 @@ def getResnetCifar10SmallManualParam(small_debug=False):
   return out, param_dict
 
 
-def getResidualPathTest(small_debug=False):
+def getResidualPathTest(small_debug=False, random_param=False):
   """
   Test model for basic block 3 residual path (from resnet8_subset_models.py).
   Tests the problematic residual path computation with channel mismatch.
+  
+  Args:
+    small_debug: Use smaller input size (4x4) if True, otherwise 16x16
+    random_param: Use random tensors for adjust factors (bn_out_f_*) if True
   """
   if small_debug:
     N, IC, H, W = 1, 32, 4, 4
@@ -1312,19 +1316,19 @@ def getResidualPathTest(small_debug=False):
   params_dict = {
     "quant_min_5": np.array(-64, dtype="int16"),
     "quant_max_5": np.array(64, dtype="int16"),
-    "weight4_1": one_tensor("int8", (64, 32, 3, 3)),
-    "fused_scale5": one_tensor("int16", (64,)),
-    "fused_bias5": np.zeros((64,), dtype="int16"),
+    "weight4_1": rand_tensor("int8", (64, 32, 3, 3)) if random_param else one_tensor("int8", (64, 32, 3, 3)),
+    "fused_scale5": rand_tensor("int16", (64,)) if random_param else one_tensor("int16", (64,)),
+    "fused_bias5": rand_tensor("int16", (64,)) if random_param else np.zeros((64,), dtype="int16"),
     "quant_min_6": np.array(-64, dtype="int16"),
     "quant_max_6": np.array(64, dtype="int16"),
-    "weight4_2": one_tensor("int8", (64, 64, 3, 3)),
-    "fused_scale6": one_tensor("int16", (64,)),
-    "fused_bias6": np.zeros((64,), dtype="int16"),
+    "weight4_2": rand_tensor("int8", (64, 64, 3, 3)) if random_param else one_tensor("int8", (64, 64, 3, 3)),
+    "fused_scale6": rand_tensor("int16", (64,)) if random_param else one_tensor("int16", (64,)),
+    "fused_bias6": rand_tensor("int16", (64,)) if random_param else np.zeros((64,), dtype="int16"),
     "quant_min_6_2": np.array(-64, dtype="int16"),
     "quant_max_6_2": np.array(64, dtype="int16"),
-    "weight4_0": one_tensor("int8", (64, 32, 1, 1)),
-    "fused_scale6_2": one_tensor("int16", (64,)),
-    "fused_bias6_2": np.zeros((64,), dtype="int16"),
+    "weight4_0": rand_tensor("int8", (64, 32, 1, 1)) if random_param else one_tensor("int8", (64, 32, 1, 1)),
+    "fused_scale6_2": rand_tensor("int16", (64,)) if random_param else one_tensor("int16", (64,)),
+    "fused_bias6_2": rand_tensor("int16", (64,)) if random_param else np.zeros((64,), dtype="int16"),
     "bn_out_f_3": one_tensor("int16", (64, 1, 1)),
     "bn_out_f_2": np.zeros((64, 1, 1), dtype="int16"),
   }
