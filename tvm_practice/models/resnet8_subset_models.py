@@ -111,7 +111,7 @@ def getModel_(input_shape, until_relay: int = None):
     IC, H, W = (16, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
 
     y = c.check(imcflow_batch_norm(y, relay.var("fused_scale2", shape=(16,), dtype="int16"), relay.var("fused_bias2", shape=(16,), dtype="int16")))
-    y = c.check(y + residual * relay.var("y_f_1", shape=(1,), dtype="int16"))
+    y = c.check(y + residual * relay.var("y_f_1", shape=(16,1,1), dtype="int16"))
 
     # basic block 2
     residual = y
@@ -435,7 +435,7 @@ def getModel_from_pretrained_weight(small_debug=False, until_relay=None):
         if shape == (1,):
           return np.array([value], dtype=dtype)
         else:
-          return np.array(value, dtype=dtype)
+          return np.full(shape, fill_value=value, dtype=dtype)
       else:
         raise ValueError(f"Missing adjust_factors for computing {name}")
 

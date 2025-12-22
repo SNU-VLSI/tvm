@@ -243,6 +243,10 @@ class StandbyAndIntrtBlock(InodeCodeBlock):
   def _build(self):
     for node in self.node_ids:
       self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, 1);"))
+
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(self.node_ids))])
+    self.body.add(TextBlock(f"__asm__ volatile({nops});"))
+
     self.body.add(TextBlock(f"__builtin_INODE_DONE();"))
     self.body.add(TextBlock(f"__builtin_INODE_INTRT(0);"))
     self.body.add(TextBlock(f"__builtin_INODE_HALT();"))
@@ -257,6 +261,9 @@ class Standby(InodeCodeBlock):
   def _build(self):
     for node in self.node_ids:
       self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, 1);"))
+
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(self.node_ids))])
+    self.body.add(TextBlock(f"__asm__ volatile({nops});"))
 
 
 class SetFlagAndHaltBlock(InodeCodeBlock):
