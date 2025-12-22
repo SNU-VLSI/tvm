@@ -1237,3 +1237,96 @@ def getResnetCifar10SmallManualParam(small_debug=False):
     out, param_dict = getResnetCifar10SmallManualParam_([1, 3, 32, 32])
 
   return out, param_dict
+
+
+def getResidualPathTest(small_debug=False):
+  """
+  Test model for basic block 3 residual path (from resnet8_subset_models.py).
+  Tests the problematic residual path computation with channel mismatch.
+  """
+  if small_debug:
+    N, IC, H, W = 1, 32, 4, 4
+  else:
+    N, IC, H, W = 1, 32, 16, 16
+  
+  # Create input variable (simulating output of previous block)
+  input = relay.var("model_input", shape=(N, IC, H, W), dtype="int16")
+  y = input
+  
+  # Save residual (IC=32, before downsample)
+  residual = y
+  IC_res, H_res, W_res = IC, H, W
+  
+  # Main path: quantize -> qconv2d (stride=2, IC 32->64) -> batch_norm -> quantize -> qconv2d -> batch_norm
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_5", shape=(), dtype="int16"), relay.var("quant_max_5", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=32)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight4_1", shape=(64,32,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (64,32,3,3), padding=1, stride=2).get_as_const_tensor(),
+    in_channels=32,
+    channels=64,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    strides=(2,2),
+    out_dtype="int16"
+  )
+  IC, H, W = (64, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
+  
+  y = imcflow_batch_norm(y, relay.var("fused_scale5", shape=(64,), dtype="int16"), relay.var("fused_bias5", shape=(64,), dtype="int16"))
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_6", shape=(), dtype="int16"), relay.var("quant_max_6", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=64)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight4_2", shape=(64,64,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (64,64,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=64,
+    channels=64,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+  IC, H, W = (64, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
+  
+  y = imcflow_batch_norm(y, relay.var("fused_scale6", shape=(64,), dtype="int16"), relay.var("fused_bias6", shape=(64,), dtype="int16"))
+  
+  # Residual path: quantize -> qconv2d (1x1, stride=2, IC 32->64) -> batch_norm -> scale+bias
+  y_residual = imcflow_min_max_quantize(residual, relay.var("quant_min_6_2", shape=(), dtype="int16"), relay.var("quant_max_6_2", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=64)
+  y_residual = imcflow_qconv2d(
+    y_residual,
+    relay.var("weight4_0", shape=(64,32,1,1), dtype="int8"),
+    ConfigData((N, IC_res, H_res, W_res), (64,32,1,1), padding=0, stride=2).get_as_const_tensor(),
+    in_channels=32,
+    channels=64,
+    kernel_size=(1, 1),
+    strides=(2,2),
+    out_dtype="int16"
+  )
+  y_residual = imcflow_batch_norm(y_residual, relay.var("fused_scale6_2", shape=(64,), dtype="int16"), relay.var("fused_bias6_2", shape=(64,), dtype="int16"))
+  y_residual = relay.var("bn_out_f_3", shape=(64,1,1), dtype="int16") * y_residual + relay.var("bn_out_f_2", shape=(64,1,1), dtype="int16")
+  
+  # Merge paths
+  y = y + y_residual
+  
+  out = tvm.IRModule.from_expr(y)
+  
+  # Create parameter dictionary
+  params_dict = {
+    "quant_min_5": np.array(-64, dtype="int16"),
+    "quant_max_5": np.array(64, dtype="int16"),
+    "weight4_1": one_tensor("int8", (64, 32, 3, 3)),
+    "fused_scale5": one_tensor("int16", (64,)),
+    "fused_bias5": np.zeros((64,), dtype="int16"),
+    "quant_min_6": np.array(-64, dtype="int16"),
+    "quant_max_6": np.array(64, dtype="int16"),
+    "weight4_2": one_tensor("int8", (64, 64, 3, 3)),
+    "fused_scale6": one_tensor("int16", (64,)),
+    "fused_bias6": np.zeros((64,), dtype="int16"),
+    "quant_min_6_2": np.array(-64, dtype="int16"),
+    "quant_max_6_2": np.array(64, dtype="int16"),
+    "weight4_0": one_tensor("int8", (64, 32, 1, 1)),
+    "fused_scale6_2": one_tensor("int16", (64,)),
+    "fused_bias6_2": np.zeros((64,), dtype="int16"),
+    "bn_out_f_3": one_tensor("int16", (64, 1, 1)),
+    "bn_out_f_2": np.zeros((64, 1, 1), dtype="int16"),
+  }
+  
+  return out, params_dict
