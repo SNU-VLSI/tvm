@@ -193,6 +193,7 @@ class SendBlockInterleaved(InodeCodeBlock):
       next_policy_addr = edge_info.policy_info[0].address
       fifo_id = edge_info.fifo_id
       info_list.append({
+          'owner': block,
           'recv_count': recv_count,
           'offset': block.offset,
           'policy': next_policy_addr,
@@ -213,7 +214,8 @@ class SendBlockInterleaved(InodeCodeBlock):
       
       # Generate loop for this interval
       for x in active_infos:
-        var = UniqueVar("send_offset_address", dtype="int")
+        # var = UniqueVar("send_offset_address", dtype="int")
+        var = UniqueVar(x['owner'], dtype="int")
         self.body.add(TextBlock(f"{var} = {x['offset']};"))
         self.body.add(SimpleFor(duration,
             lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid']: 
