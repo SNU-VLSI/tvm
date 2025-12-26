@@ -1,3 +1,4 @@
+import pickle
 import tvm
 from tvm import relay
 from tvm.relay import transform, op
@@ -4776,5 +4777,380 @@ class NoCDeadlockDetector:
                             f.write(f"          {edge}\n")
                 
                 f.write("\n" + "-"*80 + "\n\n")
-        
+
         debug_print(f"NoC deadlock table exported to: {output_path}")
+
+
+def extract_outputs_by_custom_ids(mod, target_custom_ids):
+    """
+    Extract nodes with specific custom_ids and create a new module
+    with those nodes as outputs.
+
+    This function traverses the graph, finds nodes with target custom_ids,
+    and modifies function bodies to make those nodes the outputs.
+    Global functions and local (Composite) functions are preserved.
+    Consumer nodes after the target are removed via DCE.
+
+    Args:
+        mod: relay.Module - The input module (should have custom_id annotations)
+        target_custom_ids: list of int - The custom_ids of nodes to extract as outputs
+
+    Returns:
+        tuple: (new_mod, found_ids)
+            - new_mod: New relay.Module with extracted outputs
+            - found_ids: List of custom_ids that were actually found
+
+    Example:
+        >>> mod = annotateCustomId(mod)
+        >>> extracted_mod, found_ids = extract_outputs_by_custom_ids(mod, [63])
+    """
+    target_ids_set = set(target_custom_ids)
+
+    class CustomIdCollector(ExprVisitor):
+        """
+        Collect target nodes and their function context (path from main to target).
+        func_path is a list of (type, key, func, call_node) tuples.
+        """
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+            self.visited_funcs = set()
+            self.collected_nodes = {}  # custom_id -> (node, func_path)
+            self.current_func_path = []
+
+        def visit_call(self, call):
+            if isinstance(call.op, GlobalVar):
+                func_name = call.op.name_hint
+                if func_name not in self.visited_funcs:
+                    self.visited_funcs.add(func_name)
+                    func = self.module[func_name]
+                    self.current_func_path.append(("global", func_name, func, call))
+                    self.visit(func)
+                    self.current_func_path.pop()
+            elif isinstance(call.op, relay.Function):
+                self.current_func_path.append(("local", id(call.op), call.op, call))
+                self.visit(call.op)
+                self.current_func_path.pop()
+
+            super().visit_call(call)
+
+            if call.attrs and hasattr(call.attrs, 'custom_id'):
+                try:
+                    custom_id = int(call.attrs.custom_id)
+                    if custom_id in target_ids_set:
+                        self.collected_nodes[custom_id] = (call, list(self.current_func_path))
+                except (TypeError, ValueError):
+                    pass
+
+    # Step 1: Collect target nodes
+    collector = CustomIdCollector(mod)
+    collector.visit(mod["main"].body)
+
+    found_ids = []
+    for cid in sorted(target_custom_ids):
+        if cid in collector.collected_nodes:
+            found_ids.append(cid)
+        else:
+            print(f"Warning: custom_id {cid} not found in graph")
+
+    if not found_ids:
+        raise ValueError("No target nodes found! Check if custom_ids exist in the graph.")
+
+    if len(found_ids) > 1:
+        print(f"Warning: Multiple targets found. Only using first target: {found_ids[0]}")
+
+    target_cid = found_ids[0]
+    target_node, func_path = collector.collected_nodes[target_cid]
+
+    print("----- Extracted node with custom_id(s):", found_ids)
+
+    # Step 2: Find containing global function and local function chain
+    containing_global_name = None
+    containing_global_func = None
+    containing_global_call = None
+    local_func_chain = []  # List of (local_func, call_node) from outermost to innermost
+
+    for func_type, func_key, func, call_node in func_path:
+        if func_type == "global":
+            containing_global_name = func_key
+            containing_global_func = func
+            containing_global_call = call_node
+        elif func_type == "local":
+            local_func_chain.append((func, call_node))
+
+    # Step 3: Build new function body from innermost to outermost
+    # Start with target_node as the output
+    current_body = target_node
+
+    # Process local functions from innermost to outermost
+    for i in range(len(local_func_chain) - 1, -1, -1):
+        local_func, call_node = local_func_chain[i]
+        # Create new local function with current_body as its body
+        new_local_func = relay.Function(
+            local_func.params,
+            current_body,
+            None,
+            local_func.type_params,
+            local_func.attrs
+        )
+        # Create a call to this new local function with same args and attrs
+        current_body = relay.Call(
+            new_local_func,
+            call_node.args,
+            call_node.attrs,
+            call_node.type_args,
+            call_node.span
+        )
+
+    # Step 4: Find used parameters in current_body for the global function
+    # We need to keep only the parameters that are actually used
+    class UsedVarCollector(ExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.used_vars = set()
+
+        def visit_var(self, var):
+            self.used_vars.add(var)
+            super().visit_var(var)
+
+    used_params = []
+    used_args = []
+    param_to_arg_map = {}  # Map old param to new arg for updating body
+
+    if containing_global_func is not None:
+        # Collect used variables in current_body
+        var_collector = UsedVarCollector()
+        var_collector.visit(current_body)
+
+        # Find which parameters are used
+        for i, param in enumerate(containing_global_func.params):
+            if param in var_collector.used_vars:
+                used_params.append(param)
+                if containing_global_call is not None and i < len(containing_global_call.args):
+                    used_args.append(containing_global_call.args[i])
+
+    # Step 5: Create new module
+    new_mod = tvm.IRModule()
+
+    # Process each global function
+    for gv, func in mod.functions.items():
+        func_name = gv.name_hint
+        if func_name == "main":
+            continue  # Handle main separately
+
+        if func_name == containing_global_name:
+            # This global function contains the target
+            # Replace its body with current_body, keeping only used params
+            new_func = relay.Function(
+                used_params,
+                current_body,
+                None,
+                containing_global_func.type_params,
+                containing_global_func.attrs
+            )
+            new_mod[gv] = new_func
+        else:
+            # Keep original function
+            new_mod[gv] = func
+
+    # Step 6: Handle main function
+    # We need to modify main's body to call the modified global function
+    # and make its result the output of main
+    main_func = mod["main"]
+
+    if not func_path:
+        # Target is directly in main function (no global or local functions)
+        # Replace main body with just the target node
+        new_main_body = target_node
+        new_main_func = relay.Function(
+            main_func.params,
+            new_main_body,
+            None,
+            main_func.type_params,
+            main_func.attrs
+        )
+    elif func_path[0][0] == "local":
+        # Target is inside a local function directly in main (no global function wrapper)
+        # current_body already contains the local function call chain
+        new_main_body = current_body
+        new_main_func = relay.Function(
+            main_func.params,
+            new_main_body,
+            None,
+            main_func.type_params,
+            main_func.attrs
+        )
+    else:
+        # Target is inside a global function
+        # We need to replace the call to containing_global_func in main's body
+        # with a call that becomes the final output
+
+        class MainBodyCutter(ExprVisitor):
+            """Find the call to the containing global function and return it."""
+            def __init__(self, target_gv_name):
+                super().__init__()
+                self.target_gv_name = target_gv_name
+                self.found_call = None
+
+            def visit_call(self, call):
+                # Check if this is the call to the containing global function
+                if isinstance(call.op, GlobalVar) and call.op.name_hint == self.target_gv_name:
+                    self.found_call = call
+                # Continue visiting to find nested calls
+                super().visit_call(call)
+
+        # First, find the original call to the containing global function
+        cutter = MainBodyCutter(containing_global_name)
+        cutter.visit(main_func.body)
+
+        if cutter.found_call is None:
+            raise ValueError(f"Could not find call to {containing_global_name} in main function")
+
+        # Get the GlobalVar for the containing function (it might be new or same)
+        target_gv = None
+        for gv in new_mod.functions:
+            if gv.name_hint == containing_global_name:
+                target_gv = gv
+                break
+
+        if target_gv is None:
+            # Should not happen
+            target_gv = containing_global_call.op
+
+        # Create new main body: everything up to and including the modified global function call
+        # The new main body is simply the call to the modified global function
+        # We need to rebuild the computation graph up to this call
+
+        class MainBodyBuilder(ExprMutator):
+            """Rebuild main's body, stopping at the target global function call."""
+            def __init__(self, target_gv_name, new_gv, new_args, orig_call):
+                super().__init__()
+                self.target_gv_name = target_gv_name
+                self.new_gv = new_gv
+                self.new_args = new_args
+                self.orig_call = orig_call
+                self.result = None
+
+            def visit_call(self, call):
+                # Check if this is the call to the containing global function
+                if isinstance(call.op, GlobalVar) and call.op.name_hint == self.target_gv_name:
+                    # Return the modified call - this is the final output
+                    self.result = relay.Call(
+                        self.new_gv,
+                        self.new_args,
+                        call.attrs,
+                        call.type_args,
+                        call.span
+                    )
+                    return self.result
+                return super().visit_call(call)
+
+        builder = MainBodyBuilder(containing_global_name, target_gv, used_args, cutter.found_call)
+        builder.visit(main_func.body)
+
+        if builder.result is not None:
+            new_main_body = builder.result
+        else:
+            # Fallback: just use the found call with modified args
+            new_main_body = relay.Call(
+                target_gv,
+                used_args,
+                cutter.found_call.attrs,
+                cutter.found_call.type_args,
+                cutter.found_call.span
+            )
+
+        new_main_func = relay.Function(
+            main_func.params,
+            new_main_body,
+            None,
+            main_func.type_params,
+            main_func.attrs
+        )
+
+    new_mod["main"] = new_main_func
+
+    # Step 7: Clear all checked_type to allow InferType to work correctly
+    # The module has a mix of typed (from original) and untyped (newly created) nodes
+    @tvm.ir.transform.module_pass(opt_level=0)
+    def clear_checked_types(mod, ctx):
+        """Clear all checked_type annotations from the module."""
+        class TypeClearer(ExprMutator):
+            def __init__(self):
+                super().__init__()
+                # Don't use memo for this pass - we want to rebuild everything
+                self.memo_map = {}
+
+            def visit(self, expr):
+                # Clear checked_type by rebuilding the expression
+                result = super().visit(expr)
+                return result
+
+            def visit_function(self, fn):
+                # Create new params (to clear any type annotations on them)
+                new_params = []
+                for p in fn.params:
+                    # Create new Var with same name and type_annotation
+                    new_param = relay.Var(p.name_hint, p.type_annotation)
+                    self.memo_map[p] = new_param
+                    new_params.append(new_param)
+
+                new_body = self.visit(fn.body)
+                # Create new function without ret_type (will be inferred)
+                return relay.Function(
+                    new_params,
+                    new_body,
+                    None,  # Clear return type
+                    fn.type_params,
+                    fn.attrs
+                )
+
+            def visit_call(self, call):
+                new_args = [self.visit(arg) for arg in call.args]
+
+                if isinstance(call.op, relay.Function):
+                    new_op = self.visit(call.op)
+                elif isinstance(call.op, GlobalVar):
+                    new_op = call.op
+                else:
+                    new_op = self.visit(call.op)
+
+                # Create new call without type_args (will be inferred)
+                return relay.Call(new_op, new_args, call.attrs, [], call.span)
+
+            def visit_var(self, var):
+                # Return mapped var if exists (for function params)
+                if var in self.memo_map:
+                    return self.memo_map[var]
+                # Otherwise create new var with same type_annotation
+                return relay.Var(var.name_hint, var.type_annotation)
+
+            def visit_tuple(self, tup):
+                return relay.Tuple([self.visit(f) for f in tup.fields])
+
+            def visit_tuple_getitem(self, tgi):
+                return relay.TupleGetItem(self.visit(tgi.tuple_value), tgi.index)
+
+            def visit_constant(self, const):
+                # Create new constant without checked_type
+                return relay.Constant(const.data)
+
+        # Don't clear types - keep original types
+        # Just return the module as-is
+        return mod
+
+    new_mod = clear_checked_types(new_mod)
+
+    # DEBUG: Print module
+    print("=" * 60)
+    print("DEBUG: Extracted module")
+    print("=" * 60)
+    print(new_mod)
+    print("=" * 60)
+
+    # Skip InferType and DCE - return the module as-is
+    # The module already has partial type information from the original module
+    # DCE is not needed since we've already removed the consumer nodes by
+    # making the target global function return the target node directly
+
+    return new_mod, found_ids

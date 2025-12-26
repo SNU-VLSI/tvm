@@ -5,8 +5,8 @@ from tvm.micro import export_model_library_format
 import tvm.testing
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 from tvm.contrib import graph_executor
-from tvm.contrib.debugger import debug_executor
 from tvm.relay.build_module import bind_params_by_name
+from tvm.contrib.debugger import debug_executor
 from tvm.relay import transform
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.backend.contrib.imcflow import cpu_run as cpu_run
@@ -19,6 +19,7 @@ import subprocess
 import copy
 import pprint
 import glob
+import pickle
 
 from tvm.relay.op.contrib.imcflow import HashToCustomID
 from models import real_model, real_model2, test_models
@@ -32,6 +33,7 @@ from input_generator import InputGenerator
 np.random.seed(1234)
 
 DEBUG=1
+DEBUG_SUBSET=1
 
 # ============================================================================
 # Model Registry
@@ -277,7 +279,12 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
 
   if DEBUG:
     print("Debug executor output tensors:")
-    print(executor.debug_datum.get_output_tensors())
+    tvm_dict = executor.debug_datum.get_output_tensors()
+    print(tvm_dict)
+    np_dict = {}
+    for k, v in tvm_dict.items():
+      np_dict[k] = v.asnumpy()
+    pickle.dump(np_dict, open(f"{model_dir}/debug_executor_output_tensors.pkl", "wb"))
 
   # Get output
   output = executor.get_output(0).asnumpy()
@@ -362,6 +369,10 @@ def transform_model_for_imcflow(mod, param_dict, dir):
   with open(f"{dir}/node_to_custom_id.txt", "w") as f:
     pprint.pprint(HashToCustomID(), stream=f)
   printModel(dir, mod, param_dict, "7.6_with_custom_id")
+
+  # if DEBUG_SUBSET:
+  #   mod, _ = imcflow_transform.extract_outputs_by_custom_ids(mod, [63])
+  #   printModel(dir, mod, param_dict, "7.6.2_debug_subset")
 
   mod, ttype_map = imcflow_transform.legalizeImcflowLayout(mod)
   printModel(dir, mod, param_dict, "7.7_after_mark_in_out")

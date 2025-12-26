@@ -370,8 +370,10 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.recv_map = {}
 
   def visit_tuple(self, tup):
+    consumers = self.use_def_chains[self.func_name].get_users(tup)
     for idx, x in enumerate(tup.fields):
-      self.last_tuple_idx = idx
+      if len(consumers) == 1 and isinstance(consumers[0], tvm.relay.Call) and consumers[0].op.name == "concatenate":
+        self.last_tuple_idx = idx
       self.visit(x)
 
   def visit_call(self, call):
