@@ -162,6 +162,9 @@ class TensorEdge:
 
   def dst_inner_gid_match(self, graph_node_id: Union[int, Tuple]):
     return self.dst_id.inner_gid_match(graph_node_id)
+  
+  def simple_name(self):
+    return ""
 
   def __str__(self):
     if self.split_idx is None:
@@ -489,6 +492,9 @@ class TensorEdgeInfo(EdgeInfo):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
     self.owner = None
+    self.height_base_coords = [] # for tiling
+    self.height_sizes       = [] # for tiling
+    self.pkt_cnts           = [] # for tiling
 
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id
@@ -496,6 +502,15 @@ class TensorEdgeInfo(EdgeInfo):
   @property
   def node_info_str(self):
     return f"{self.policy_info[0].router_id.name} -> {self.policy_info[-1].router_id.name}"
+  
+  def get_height_base_coords(self):
+    return self.height_base_coords
+  
+  def get_height_sizes(self):
+    return self.height_sizes
+  
+  def get_pkt_cnts(self):
+    return self.pkt_cnts
 
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"
