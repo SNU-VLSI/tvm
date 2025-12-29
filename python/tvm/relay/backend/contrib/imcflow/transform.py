@@ -14,6 +14,7 @@ from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
 from tvm.relay.backend.contrib.imcflow.layout import ImcflowLayoutLegalizer
+from itertools import cycle
 
 # Debug logging utility controlled by IMCFLOW_DEBUG environment variable
 # Usage:
@@ -2001,7 +2002,8 @@ class NodeMapper:
             super().__init__()
             self.MappingDict ={}
             self.imce_index = ImcflowDeviceConfig.IMCE_NUM - 1
-            self.inode_index = ImcflowDeviceConfig.INODE_NUM - 1
+            self.input_inode_set = cycle([NodeID.inode_0_0, NodeID.inode_1_0])
+            self.output_inode_set = cycle([NodeID.inode_3_0, NodeID.inode_2_0])
             self.in_composite = False
             self.curr_composite_node_id = None
             self.vars = []
@@ -2018,7 +2020,6 @@ class NodeMapper:
             
             # assign var and constant nodes to consumer nodes
             self._assign_nodes_same_as_consumer(self.remaining_splits)
-            self._assign_nodes_same_as_consumer(self.vars)
             self._assign_nodes_same_as_consumer(self.consts)
             return self.MappingDict
         
@@ -2073,20 +2074,16 @@ class NodeMapper:
           if self.in_composite: 
             self.MappingDict[getNodeID(fn)] = self.curr_composite_node_id
           else:
-            self.MappingDict[getNodeID(fn)] = NodeID.from_inode_coord(self.inode_index)
-            self.inode_index -= 1
+            self.MappingDict[getNodeID(fn)] = next(self.output_inode_set)
           super().visit_function(fn)
-        
+
         def visit_var(self, var):
           if not self.in_composite:
             self.vars.append(var)
-            # self.MappingDict[getNodeID(var)] = NodeID.from_inode_coord(self.inode_index)
-            # self.inode_index -= 1
-        
+            self.MappingDict[getNodeID(var)] = next(self.input_inode_set)
+
         def visit_constant(self, const):
           self.consts.append(const)
-          # self.MappingDict[getNodeID(const)] = NodeID.from_inode_coord(self.inode_index)
-          # self.inode_index -= 1
 
         def visit_call(self, call):
           # post DFS search
