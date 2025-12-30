@@ -190,6 +190,15 @@ class FunctionInfo:
   def __repr__(self):
     return f"FunctionInfo(tiling_factor={self.tiling_factor})"
 
+class BlockTileInfo:
+  """Tiling information for a data block"""
+  def __init__(self):
+    self.height_base_coords  = [] # for tiling
+    self.height_sizes        = [] # for tiling
+    self.pkt_cnts            = [] # for tiling
+    self.c_input_var_offsets = [] # for tiling
+    self.c_input_var_sizes   = [] # for tiling
+
 
 class DataBlock:
   def __init__(self, id: Union[str, TensorEdge, List[TensorEdge]], size: int):
@@ -204,6 +213,7 @@ class DataBlock:
     self.size = size
     self.offset = -1  # offset in the region
     self.base_address = -1  # base address in the device memory
+    self.tiling_info = None
   
   @property
   def id(self):
@@ -496,9 +506,6 @@ class TensorEdgeInfo(EdgeInfo):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
     self.owner = None
-    self.height_base_coords = [] # for tiling
-    self.height_sizes       = [] # for tiling
-    self.pkt_cnts           = [] # for tiling
 
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id
