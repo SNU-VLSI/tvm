@@ -127,8 +127,8 @@ def getOneReluModel():
 
   return out, param_dict
 
-def getOneConvModel():
-  N, IC, H, W = 1, 28, 4, 4
+def getOneConvModel(H=4, W=4):
+  N, IC, H, W = 1, 28, H, W
   OC = 64
   KH, KW = 3, 3
   stride, padding = 1, 1
@@ -1332,5 +1332,284 @@ def getResidualPathTest(small_debug=False, random_param=False):
     "bn_out_f_3": one_tensor("int16", (64, 1, 1)),
     "bn_out_f_2": np.zeros((64, 1, 1), dtype="int16"),
   }
-  
+
+  return out, params_dict
+
+
+def getMultiInputOutputV1Model(height=8, width=8, random_param=False):
+  """
+  Model for testing multi-input memory allocation with multiple residual connections.
+
+  Structure (two residual blocks like resnet):
+    input ─→ qconv2d ─┬─→ quant ─→ qconv2d ─→ quant ─→ qconv2d ─┬─→ add1 ─┬─→ quant ─→ qconv2d ─→ quant ─→ qconv2d ─┬─→ add2 ─→ output
+                      │                                         │          │                                         │
+                      └─────────── residual1 ───────────────────┘          └─────────── residual2 ───────────────────┘
+
+  This creates multi-input pattern within imcflow region:
+    - region1 outputs (main_path, residual1) tuple
+    - region2 takes both and merges them with add1
+    - region3 outputs (main_path, residual2) tuple
+    - region4 takes both and merges them with add2
+
+  Properties:
+    - Multi-input/output connections between imcflow regions
+    - height, width configurable
+    - 6 qconv2d operations, 2 residual add operations
+
+  Args:
+    height: Input height (default 8)
+    width: Input width (default 8)
+    random_param: Use random parameters if True
+
+  Returns:
+    mod: TVM relay module
+    params_dict: Parameter dictionary
+  """
+  N = 1
+  IC = 16  # Input channels
+  H, W = height, width
+
+  # Single input
+  data = relay.var("input", shape=(N, IC, H, W), dtype="uint8")
+
+  # ====== First residual block ======
+  # First conv
+  y = imcflow_qconv2d(
+    data,
+    relay.var("weight1", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Save residual1
+  residual1 = y
+
+  # Quantize for second conv
+  y = imcflow_min_max_quantize(y, relay.var("qmin1", shape=(), dtype="int16"), relay.var("qmax1", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=IC)
+
+  # Second conv
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Quantize for third conv
+  y = imcflow_min_max_quantize(y, relay.var("qmin2", shape=(), dtype="int16"), relay.var("qmax2", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=IC)
+
+  # Third conv
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight3", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Add residual1
+  y = y + residual1
+
+  # ====== Second residual block ======
+  # Save residual2
+  residual2 = y
+
+  # Quantize for fourth conv
+  y = imcflow_min_max_quantize(y, relay.var("qmin3", shape=(), dtype="int16"), relay.var("qmax3", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=IC)
+
+  # Fourth conv
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight4", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Quantize for fifth conv
+  y = imcflow_min_max_quantize(y, relay.var("qmin4", shape=(), dtype="int16"), relay.var("qmax4", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=IC)
+
+  # Fifth conv
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight5", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Quantize for sixth conv
+  y = imcflow_min_max_quantize(y, relay.var("qmin5", shape=(), dtype="int16"), relay.var("qmax5", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=IC)
+
+  # Sixth conv
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight6", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Add residual2
+  y = y + residual2
+
+  out = tvm.IRModule.from_expr(y)
+
+  # Parameter dictionary
+  params_dict = {
+    "weight1": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "qmin1": np.array(-128, dtype="int16"),
+    "qmax1": np.array(127, dtype="int16"),
+    "weight2": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "qmin2": np.array(-128, dtype="int16"),
+    "qmax2": np.array(127, dtype="int16"),
+    "weight3": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "qmin3": np.array(-128, dtype="int16"),
+    "qmax3": np.array(127, dtype="int16"),
+    "weight4": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "qmin4": np.array(-128, dtype="int16"),
+    "qmax4": np.array(127, dtype="int16"),
+    "weight5": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "qmin5": np.array(-128, dtype="int16"),
+    "qmax5": np.array(127, dtype="int16"),
+    "weight6": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+  }
+
+  return out, params_dict
+
+def getMultiInputOutputModel(height=8, width=8, random_param=False):
+  """
+  Model for testing multi-input/multi-output memory allocation.
+
+  Structure:
+    input1 (H x W) ──→ qconv2d(stride=1) ──→ add ──┬──→ quant ──→ qconv2d(stride=1) ──→ output0
+                                             │     │
+    input2 (2H x 2W) ──→ qconv2d(stride=2) ──┘     └──→ quant ──→ qconv2d(stride=1) ──→ output1
+
+  Properties:
+    - 2 external inputs (different sizes: input1 is HxW, input2 is 2Hx2W)
+    - 2 outputs (tuple output)
+    - Multi-input add operation
+    - input2's qconv2d uses stride=2 to match spatial dimensions with input1's path
+
+  Args:
+    height: Output height (input1 height, input2 is 2*height)
+    width: Output width (input1 width, input2 is 2*width)
+    random_param: Use random parameters if True
+
+  Returns:
+    mod: TVM relay module
+    params_dict: Parameter dictionary
+  """
+  N = 1
+  IC = 16  # Input channels
+  H, W = height, width
+
+  # Two external inputs with different sizes
+  # input1: H x W (same as output size)
+  # input2: 2H x 2W (will be downsampled by stride=2 conv)
+  input1 = relay.var("input1", shape=(N, IC, H, W), dtype="uint8")
+  input2 = relay.var("input2", shape=(N, IC, H * 2, W * 2), dtype="uint8")
+
+  # Path 1: input1 -> qconv2d(stride=1) -> ...
+  path1 = imcflow_qconv2d(
+    input1,
+    relay.var("weight1", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Path 2: input2 -> qconv2d(stride=2) -> ... (downsamples 2Hx2W to HxW)
+  path2 = imcflow_qconv2d(
+    input2,
+    relay.var("weight2", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H * 2, W * 2), (IC, IC, 3, 3), padding=1, stride=2).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    strides=(2, 2),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Add the two paths (both are now H x W)
+  merged = path1 + path2
+
+  # Output path 0: quant -> qconv2d -> output0
+  out0 = imcflow_min_max_quantize(
+    merged,
+    relay.var("qmin0", shape=(), dtype="int16"),
+    relay.var("qmax0", shape=(), dtype="int16"),
+    axis=1, out_dtype="uint8", channel=IC
+  )
+  out0 = imcflow_qconv2d(
+    out0,
+    relay.var("weight3", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Output path 1: quant -> qconv2d -> output1
+  out1 = imcflow_min_max_quantize(
+    merged,
+    relay.var("qmin1", shape=(), dtype="int16"),
+    relay.var("qmax1", shape=(), dtype="int16"),
+    axis=1, out_dtype="uint8", channel=IC
+  )
+  out1 = imcflow_qconv2d(
+    out1,
+    relay.var("weight4", shape=(IC, IC, 3, 3), dtype="int8"),
+    ConfigData((N, IC, H, W), (IC, IC, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=IC,
+    channels=IC,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  # Create tuple output
+  output = relay.Tuple([out0, out1])
+
+  out = tvm.IRModule.from_expr(output)
+
+  # Parameter dictionary
+  params_dict = {
+    "weight1": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "weight2": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "qmin0": np.array(-128, dtype="int16"),
+    "qmax0": np.array(127, dtype="int16"),
+    "weight3": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+    "qmin1": np.array(-128, dtype="int16"),
+    "qmax1": np.array(127, dtype="int16"),
+    "weight4": rand_tensor("int8", (IC, IC, 3, 3)) if random_param else one_tensor("int8", (IC, IC, 3, 3)),
+  }
+
   return out, params_dict

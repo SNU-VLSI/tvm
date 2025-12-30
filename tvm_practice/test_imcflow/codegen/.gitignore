@@ -5,4 +5,5 @@ big/
 *_ref/
 logs/
 test_inputs/*
+test_mem_alloc_*/
 test.sh

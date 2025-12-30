@@ -45,7 +45,8 @@ DEBUG_SUBSET=1
 MODEL_REGISTRY = {
     # Simple test models
     "one_relu": (models_for_test.getOneReluModel, "linear"),
-    "one_conv": (models_for_test.getOneConvModel, "random"),
+    "one_conv_small": (lambda: models_for_test.getOneConvModel(H=4,W=4), "random"),
+    "one_conv_big": (lambda: models_for_test.getOneConvModel(H=32,W=32), "random"),
     "one_mmquant": (models_for_test.getOneMMQuantModel, "linear"),
     "one_conv_quant": (models_for_test.getOneConvQuantModel, "ones"),
     "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
@@ -105,6 +106,8 @@ MODEL_REGISTRY = {
     "resnet8_subset24_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=24), "ones"),
     "resnet8_subset25_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=25), "ones"),
     "resnet8_subset31_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=31), "ones"),
+
+    "resnet8_origin_subset31_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=31), "ones"),
 
     "resnet8_last_bb" : (lambda: models_for_test.getResidualPathTest(small_debug=True, random_param=True), "ones"),
 

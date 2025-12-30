@@ -2994,7 +2994,7 @@ class MemoryAllocator:
 
             if tensor_type == "weight":
               inode_tensors[inode_name]['weight'].append((edge, mem_block, inode_tensorid))
-            elif tensor_type == "data" or tensor_type == "odata" or tensor_type == "func_out" or tensor_type == "var":
+            elif tensor_type == "data" or tensor_type == "odata" or ("func_out" in tensor_type) or tensor_type == "var":
               # Check if this is function input or output
               src_node = self.data.get(getInnerNodeID(edge.src_id.graph_node_id))
               dst_node = self.data.get(getInnerNodeID(edge.dst_id.graph_node_id))
@@ -3018,7 +3018,7 @@ class MemoryAllocator:
           # 2. For each tiling factor, calculate tile specs for each output
           # 3. For each input, merge tile boundaries across all outputs
           # 4. Calculate memory using ceil formula
-          layout_map = ImcflowDeviceConfig().LayoutMap[self.func_name]
+          layout_map = ImcflowDeviceConfig().LayoutMap
           tiling_factor = 1
           max_tiling_factor = 128  # Safety limit
 
@@ -3026,12 +3026,12 @@ class MemoryAllocator:
           output_tensor_info = []
           for inode_name, tensors in inode_tensors.items():
             for edge, mem_block, inode_tensorid in tensors['output']:
-              src_node = edge.src_id
-              shape = src_node.type_annotation.shape
-              height = int(shape[1])
-              width = int(shape[2])
-              channels = int(shape[3]) if len(shape) > 3 else 1
-              dtype = src_node.type_annotation.dtype
+              src_node = transform_utils.getNodeFromTensorID(edge.src_id)
+              ttype = transform_utils.get_type(mod, src_node)
+              shape,dtype = ttype.shape, ttype.dtype
+              channels = int(shape[1])
+              height = int(shape[2])
+              width = int(shape[3])
               elem_size = np.dtype(dtype).itemsize
               output_tensor_info.append((edge, height, width, channels, elem_size, inode_name, mem_block))
 
@@ -3039,17 +3039,28 @@ class MemoryAllocator:
           input_tensor_info = []
           for inode_name, tensors in inode_tensors.items():
             for edge, mem_block, inode_tensorid in tensors['input']:
-              src_node = edge.src_id
+              src_node = transform_utils.getNodeFromTensorID(edge.src_id)
               shape = src_node.type_annotation.shape
-              height = int(shape[1])
-              width = int(shape[2])
-              channels = int(shape[3]) if len(shape) > 3 else 1
               dtype = src_node.type_annotation.dtype
+              channels = int(shape[1])
+              height = int(shape[2])
+              width = int(shape[3])
               elem_size = np.dtype(dtype).itemsize
               var_name = src_node.name_hint if isinstance(src_node, relay.Var) else "data"
               input_tensor_info.append((edge, height, width, channels, elem_size, inode_name, mem_block, var_name))
 
           # Find tiling factor by incrementing until memory fits
+          debug_print(f"\n  [{self.func_name}] ===== TILING FACTOR SEARCH =====")
+          debug_print(f"  [{self.func_name}] INODE_DATA_MEM_SIZE = {ImcflowDeviceConfig.INODE_DATA_MEM_SIZE} bytes")
+          debug_print(f"  [{self.func_name}] Output tensors:")
+          for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
+            actual_size = height * width * channels * elem_size
+            debug_print(f"    Output[{out_idx}]: H={height}, W={width}, C={channels}, elem_size={elem_size}, actual_size={actual_size}, mem_block.size={mem_block.size}, inode={inode_name}")
+          debug_print(f"  [{self.func_name}] Input tensors:")
+          for edge, height, width, channels, elem_size, inode_name, mem_block, var_name in input_tensor_info:
+            actual_size = height * width * channels * elem_size
+            debug_print(f"    Input[{var_name}]: H={height}, W={width}, C={channels}, elem_size={elem_size}, actual_size={actual_size}, mem_block.size={mem_block.size}, inode={inode_name}")
+
           while tiling_factor <= max_tiling_factor:
             # Step 1: Calculate output tile specs for each output tensor
             output_tile_specs = {}  # {output_idx: (bases, sizes)}
@@ -3066,7 +3077,7 @@ class MemoryAllocator:
             for out_idx, (out_bases, out_sizes) in output_tile_specs.items():
               # Calculate input tiles from this output
               all_input_tiles = self.calculate_all_input_tiles_from_output(
-                self.target_func, out_bases, out_sizes
+                func, out_bases, out_sizes
               )
 
               for var_name, (in_bases, in_sizes) in all_input_tiles.items():
@@ -3083,9 +3094,11 @@ class MemoryAllocator:
             # Step 4: Calculate memory for each tile using ceil formula
             # Memory = ceil(original_block_size / (total_height / tile_height))
             max_tile_memory = 0
+            debug_tile_memories = []
 
             for tile_idx in range(tiling_factor):
               tile_memory = 0
+              tile_detail = {"tile_idx": tile_idx, "outputs": [], "inputs": []}
 
               # Output tensor memory for this tile
               for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
@@ -3096,6 +3109,7 @@ class MemoryAllocator:
                   # ceil(original_size * tile_height / height)
                   tiled_size = math.ceil(original_size * tile_height / height)
                   tile_memory += tiled_size
+                  tile_detail["outputs"].append((out_idx, tile_height, tiled_size))
 
               # Input tensor memory for this tile (using merged boundaries)
               for edge, height, width, channels, elem_size, inode_name, mem_block, var_name in input_tensor_info:
@@ -3114,11 +3128,21 @@ class MemoryAllocator:
                     else:
                       tiled_size = original_size
                     tile_memory += tiled_size
+                    tile_detail["inputs"].append((var_name, tile_height, tiled_size))
                 else:
                   # Fallback: simple ceil division
-                  tile_memory += math.ceil(mem_block.size / tiling_factor)
+                  fallback_size = math.ceil(mem_block.size / tiling_factor)
+                  tile_memory += fallback_size
+                  tile_detail["inputs"].append((var_name, "fallback", fallback_size))
 
               max_tile_memory = max(max_tile_memory, tile_memory)
+              debug_tile_memories.append((tile_idx, tile_memory, tile_detail))
+
+            # Print detailed debug info for first few tiling factors
+            if tiling_factor <= 3 or tiling_factor == max_tiling_factor:
+              debug_print(f"  [{self.func_name}] --- Tiling factor {tiling_factor} detail ---")
+              for tile_idx, tile_mem, detail in debug_tile_memories[:3]:  # Show first 3 tiles
+                debug_print(f"    Tile[{tile_idx}]: total={tile_mem}, outputs={detail['outputs']}, inputs={detail['inputs']}")
 
             # Check if this tiling factor works
             if max_tile_memory <= ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
@@ -3156,7 +3180,7 @@ class MemoryAllocator:
           final_input_tile_candidates = {}
           for out_idx, (out_bases, out_sizes) in final_output_tile_specs.items():
             all_input_tiles = self.calculate_all_input_tiles_from_output(
-              self.target_func, out_bases, out_sizes
+              func, out_bases, out_sizes
             )
             for var_name, (in_bases, in_sizes) in all_input_tiles.items():
               if var_name not in final_input_tile_candidates:
@@ -3167,6 +3191,7 @@ class MemoryAllocator:
           for var_name, candidates in final_input_tile_candidates.items():
             merged_bases, merged_sizes = self.merge_input_tile_boundaries(candidates)
             final_merged_input_tiles[var_name] = (merged_bases, merged_sizes)
+            debug_print(f"  [{self.func_name}] Input '{var_name}' candiates : {candidates}")
             debug_print(f"  [{self.func_name}] Input '{var_name}' merged tiles: bases={merged_bases}, sizes={merged_sizes}")
 
           # Phase 3: Perform actual allocation with tiling
@@ -3178,7 +3203,7 @@ class MemoryAllocator:
 
             # Allocate input tensors (with tiling if needed)
             for edge, mem_block, inode_tensorid in tensors['input']:
-              src_node = edge.src_id
+              src_node = transform_utils.getNodeFromTensorID(edge.src_id)
               v_tensor_shape = src_node.type_annotation.shape
               channels = int(v_tensor_shape[1])
               height = int(v_tensor_shape[2])
@@ -3196,9 +3221,11 @@ class MemoryAllocator:
                 input_height_bases, input_height_sizes = self.remove_padding_and_halo(
                   merged_bases, merged_sizes, height
                 )
+                debug_print(f"    Input tensor {var_name} tiles after padding/halo removal: bases={input_height_bases}, sizes={input_height_sizes}")
               else:
                 input_height_bases = [0]
                 input_height_sizes = [height]
+                debug_print(f"    Input tensor {var_name} no tiling applied.")
 
               if tiling_factor > 1:
                 # Calculate tiled size using ceil formula
@@ -3217,7 +3244,7 @@ class MemoryAllocator:
               # c_input_var_offsets[i] = height_base[i] * height_offset (byte offset from tensor origin)
               # c_input_var_sizes[i] = height_size[i] * height_offset / sizeof(int) (int32 count)
               r_ttype = transform_utils.getRTTypeForEdge(mod, edge)
-              r_height_index = imcflow_layout.get_height_dim_index(layout_map[edge.src_id])
+              r_height_index = imcflow_layout.get_height_dim_index(layout_map[transform_utils.getNodeFromTensorID(edge.src_id)])
               assert math.prod(r_ttype.shape[0:r_height_index]) == 1, "Upper of height dimension should be 1 in imcflow."
               height_offset_elem_num = math.prod(r_ttype.shape[r_height_index + 1:]) if r_height_index + 1 < len(r_ttype.shape) else 1
               height_offset = height_offset_elem_num * np.dtype(r_ttype.dtype).itemsize
@@ -3247,12 +3274,12 @@ class MemoryAllocator:
 
             # Allocate output tensors (with tiling if needed)
             for out_local_idx, (edge, mem_block, inode_tensorid) in enumerate(tensors['output']):
-              src_node = edge.src_id
-              v_tensor_shape = src_node.type_annotation.shape
-              height = int(v_tensor_shape[1])
-              width = int(v_tensor_shape[2])
-              channels = int(v_tensor_shape[3]) if len(v_tensor_shape) > 3 else 1
-              dtype = src_node.type_annotation.dtype
+              src_node = transform_utils.getNodeFromTensorID(edge.src_id)
+              v_tensor_shape = src_node.checked_type.shape
+              channels = int(v_tensor_shape[1])
+              height = int(v_tensor_shape[2])
+              width = int(v_tensor_shape[3])
+              dtype = src_node.checked_type.dtype
               elem_size = np.dtype(dtype).itemsize
               original_size = mem_block.size
 
@@ -3278,7 +3305,7 @@ class MemoryAllocator:
               # Set tiling info
               # Calculate CPU tile base addresses and sizes based on height boundaries
               r_ttype = transform_utils.getRTTypeForEdge(mod, edge)
-              r_height_index = imcflow_layout.get_height_dim_index(layout_map[edge.src_id])
+              r_height_index = imcflow_layout.get_height_dim_index(layout_map[transform_utils.getNodeFromTensorID(edge.src_id)])
               assert math.prod(r_ttype.shape[0:r_height_index]) == 1, "Upper of height dimension should be 1 in imcflow."
               height_offset_elem_num = math.prod(r_ttype.shape[r_height_index + 1:]) if r_height_index + 1 < len(r_ttype.shape) else 1
               height_offset = height_offset_elem_num * np.dtype(r_ttype.dtype).itemsize
@@ -3397,7 +3424,7 @@ class MemoryAllocator:
               src_op = self.get_op_from_id(edge.src_id.graph_node_id)
 
               #find which argument index this edge correspond to find corresponding shape by type_args.shape
-              src_node = self.data[getInnerNodeID(edge.src_id.graph_node_id)]
+              src_node = transform_utils.getNodeFromTensorID(edge.src_id)
               if isinstance(src_node, relay.Var):
                 arg_ttype = self.ttype_map[src_node.name_hint]
                 arg_shape, arg_dtype = arg_ttype[0], arg_ttype[1]

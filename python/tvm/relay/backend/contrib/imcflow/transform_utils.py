@@ -1262,9 +1262,17 @@ def getInodePktCntForEdge(module, edge):
   in_total_bytes = elem_count * bytes_per_elem
   return math.ceil(in_total_bytes/32)
 
+def getNodeFromTensorID(tensor_id):
+  data = CustomIDToNode()
+  graph_node_id = getInnerNodeID(tensor_id.graph_node_id)
+  if graph_node_id in data:
+    return data[graph_node_id]
+  else:
+    raise RuntimeError(f"Cannot find node for graph node id {graph_node_id}")
+
 def getRTTypeForEdge(module, edge):
   from tvm.relay.backend.contrib.imcflow.layout import apply_layout_to_type
-  src_node = edge.src_node
+  src_node = getNodeFromTensorID(edge.src_id)
   layout = ImcflowDeviceConfig().LayoutMap[src_node]
   v_ttype = get_type(module, src_node)
   r_ttype = apply_layout_to_type(v_ttype, layout)
