@@ -191,7 +191,6 @@ def getObjectFileName(data_block, func_name=None):
     return f"_binary_{data_block.id}_bin"
 
 
-
 class KernelCodeGenerator:
   """Code generator for IMCFlow kernel functions."""
 
@@ -383,25 +382,34 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     else:
       return ""
 
-  def generateToNpuTransferCode(self, blocks):
+  def generateToNpuTransferCode(self, blocks, tile_idx=None):
     """Generate code to transfer data to NPU memory."""
     code = CodeWriter()
     code += "// Transfer data into NPU memory\n"
     for block in blocks:
-      base_address = block.base_address
-      base_address_name = makeBaseAddrName(block)
-      self.base_address_macros.update({base_address_name: base_address})
-      if isinstance(block.id, str):
-        var_prefix = getObjectFileName(block, self.func_name)
-        code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
-        code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){var_prefix}_start)[i];\n"
-        code += f"}}\n"
-      else:
-        size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
-        numel = math.ceil(size/4)
-        code += f"for(int i=0; i<{numel}; i++){{\n"
+      if block.tiling_info is not None:
+        tiling_info = block.tiling_info
+        tile_offset = tiling_info.c_input_var_offsets[tile_idx]
+        tile_size = tiling_info.c_input_var_sizes[tile_idx]
+        code += f"// Transfer data [TILE:{tile_idx}]\n"
+        code += f"for(int i={tile_offset}; i<{tile_offset + tile_size}; i++){{\n"
         code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){getCInputVarName(self.func, self.func_name, block)})[i];\n"
         code += f"}}\n"
+      else:
+        base_address = block.base_address
+        base_address_name = makeBaseAddrName(block)
+        self.base_address_macros.update({base_address_name: base_address})
+        if isinstance(block.id, str):
+          var_prefix = getObjectFileName(block, self.func_name)
+          code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
+          code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){var_prefix}_start)[i];\n"
+          code += f"}}\n"
+        else:
+          size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
+          numel = math.ceil(size/4)
+          code += f"for(int i=0; i<{numel}; i++){{\n"
+          code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){getCInputVarName(self.func, self.func_name, block)})[i];\n"
+          code += f"}}\n"
     return code
 
   def generateFromNpuTransferCode(self, data_blocks):
@@ -515,9 +523,9 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
     for t_idx in range(tile_factor):
-      code += self.generateToNpuTransferCode(self.input_blocks) # input
+      code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
       code += self.generateInvokeCode() # end of exec
-      code += self.generateFromNpuTransferCode(self.output_blocks)
+      code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
     code += self.generateDevicePointerCleanup()
     code.prevIndent()
     code += '}\n'
