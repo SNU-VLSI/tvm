@@ -619,7 +619,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # Group output edges by destination HID (inode)
     output_edges_by_hid = {}
     for edge in output_edges:
-      hid = self.get_hid(edge.dst_id)
+      # NOTE: updated to handle tuple hwnodeid
+      hid = self.get_hid(edge.dst_id, edge.split_idx)
       if hid not in output_edges_by_hid:
         output_edges_by_hid[hid] = []
       output_edges_by_hid[hid].append(edge)
@@ -746,7 +747,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def add_recv_block(self, edge, phase: CodePhase):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
     in_tid = edge.dst_id
-    hid = self.get_hid(in_tid)
+    hid = self.get_hid(in_tid, edge.split_idx)
     db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
 
     block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
@@ -756,7 +757,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     dbs = []
     fifo_ids = []
     # Group by HID
-    hids = [self.get_hid(edge.dst_id) for edge in edge_list]
+    hids = [self.get_hid(edge.dst_id, edge.split_idx) for edge in edge_list]
     assert all(hid == hids[0] for hid in hids), "all edges should have same destination inode for interleaved"
     hid = hids[0]
 
@@ -785,8 +786,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def get_output_edges_from_id(self, id):
     return [edge for edge in self.edges if edge.src_inner_gid_match(id)]
 
-  def get_hid(self, tensor_id):
+  def get_hid(self, tensor_id, tuple_idx=None):
     gid = tensor_id.graph_node_id
     if isinstance(gid, tuple):
       gid = gid[-1]
-    return DevConfig().get_hw_node(gid)
+    hid = DevConfig().get_hw_node(gid)
+    if isinstance(hid, tuple):
+      assert tuple_idx is not None, f"tuple index must be provided for tuple hw node id: {hid}"
+      hid = hid[tuple_idx]
+    return hid
