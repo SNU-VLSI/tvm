@@ -9,11 +9,13 @@ from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, 
 from tvm.relay import expr as _expr
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
-from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion
+from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion, BlockTileInfo
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
 from tvm.relay.backend.contrib.imcflow.layout import ImcflowLayoutLegalizer, apply_layout_to_type
+from tvm.relay.backend.contrib.imcflow import layout as imcflow_layout
+from tvm.relay.backend.contrib.imcflow import transform_utils
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInodePktCntForEdge, NodeCollector
 from itertools import cycle
 
@@ -3178,9 +3180,9 @@ class MemoryAllocator:
             for edge, mem_block, inode_tensorid in tensors['input']:
               src_node = edge.src_id
               v_tensor_shape = src_node.type_annotation.shape
-              height = int(v_tensor_shape[1])
-              width = int(v_tensor_shape[2])
-              channels = int(v_tensor_shape[3]) if len(v_tensor_shape) > 3 else 1
+              channels = int(v_tensor_shape[1])
+              height = int(v_tensor_shape[2])
+              width = int(v_tensor_shape[3])
               dtype = src_node.type_annotation.dtype
               elem_size = np.dtype(dtype).itemsize
               original_size = mem_block.size
@@ -3209,24 +3211,38 @@ class MemoryAllocator:
                 mem_block.set_size(tiled_size)
                 debug_print(f"    Input tensor {var_name}: {original_size} -> {tiled_size} bytes (max tile height={max_tile_height}/{height})")
 
-              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-
               # Set tiling info
-              total_pkt_cnt = getInodePktCntForEdge(mod, edge)
-              total_input_height = sum(input_height_sizes)
-              if total_input_height > 0:
-                pkt_cnts = [math.ceil(total_pkt_cnt * h / total_input_height) for h in input_height_sizes]
-                diff = total_pkt_cnt - sum(pkt_cnts)
-                if diff != 0 and pkt_cnts:
-                  pkt_cnts[-1] += diff
-              else:
-                pkt_cnts = [total_pkt_cnt]
+              # Calculate CPU tile base addresses and sizes based on height boundaries
+              # height_offset = prod(dims after height) * elem_size (bytes per height row)
+              # c_input_var_offsets[i] = height_base[i] * height_offset (byte offset from tensor origin)
+              # c_input_var_sizes[i] = height_size[i] * height_offset / sizeof(int) (int32 count)
+              r_ttype = transform_utils.getRTTypeForEdge(mod, edge)
+              r_height_index = imcflow_layout.get_height_dim_index(layout_map[edge.src_id])
+              assert math.prod(r_ttype.shape[0:r_height_index]) == 1, "Upper of height dimension should be 1 in imcflow."
+              height_offset_elem_num = math.prod(r_ttype.shape[r_height_index + 1:]) if r_height_index + 1 < len(r_ttype.shape) else 1
+              height_offset = height_offset_elem_num * np.dtype(r_ttype.dtype).itemsize
+              assert height_offset % 32 == 0, "Height offset should be multiple of 32 bytes."
+              pkt_cnt_per_height = height_offset//32
+              # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
+              pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
 
-              ImcflowDeviceConfig().TensorEdgetoInfo[edge].set_tiling_info(
+              # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
+              # base address = origin_base + height_base * height_offset
+              # cnt = height_size * height_offset / sizeof(int)
+              c_input_var_offsets = [base * height_offset for base in input_height_bases]
+              c_input_var_sizes = [h_size * height_offset // 4 for h_size in input_height_sizes]  # div by sizeof(int)=4
+
+              block_tiling_info = BlockTileInfo()
+              block_tiling_info.set_info(
                 height_base_coords=input_height_bases,
                 height_sizes=input_height_sizes,
-                pkt_cnts=pkt_cnts
+                pkt_cnts=pkt_cnts,
+                c_input_var_offsets=c_input_var_offsets,
+                c_input_var_sizes=c_input_var_sizes
               )
+
+              # add edge info and allocate
+              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block, block_tiling_info=block_tiling_info))
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="exec")
 
             # Allocate output tensors (with tiling if needed)
@@ -3259,24 +3275,33 @@ class MemoryAllocator:
                 mem_block.set_size(tiled_size)
                 debug_print(f"    Output tensor: {original_size} -> {tiled_size} bytes (max tile height={max_tile_height}/{height})")
 
-              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
-
               # Set tiling info
-              total_pkt_cnt = getInodePktCntForEdge(mod, edge) if hasattr(edge, 'src_id') else 0
-              total_output_height = sum(output_tile_sizes)
-              if total_output_height > 0:
-                pkt_cnts = [math.ceil(total_pkt_cnt * h / total_output_height) for h in output_tile_sizes]
-                diff = total_pkt_cnt - sum(pkt_cnts)
-                if diff != 0 and pkt_cnts:
-                  pkt_cnts[-1] += diff
-              else:
-                pkt_cnts = [total_pkt_cnt]
+              # Calculate CPU tile base addresses and sizes based on height boundaries
+              r_ttype = transform_utils.getRTTypeForEdge(mod, edge)
+              r_height_index = imcflow_layout.get_height_dim_index(layout_map[edge.src_id])
+              assert math.prod(r_ttype.shape[0:r_height_index]) == 1, "Upper of height dimension should be 1 in imcflow."
+              height_offset_elem_num = math.prod(r_ttype.shape[r_height_index + 1:]) if r_height_index + 1 < len(r_ttype.shape) else 1
+              height_offset = height_offset_elem_num * np.dtype(r_ttype.dtype).itemsize
+              assert height_offset % 32 == 0, "Height offset should be multiple of 32 bytes."
+              pkt_cnt_per_height = height_offset//32
+              # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
+              pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
 
-              ImcflowDeviceConfig().TensorEdgetoInfo[edge].set_tiling_info(
+              # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
+              c_output_var_offsets = [base * height_offset for base in output_tile_bases]
+              c_output_var_sizes = [h_size * height_offset // 4 for h_size in output_tile_sizes]  # div by sizeof(int)=4
+
+              block_tiling_info = BlockTileInfo()
+              block_tiling_info.set_info(
                 height_base_coords=output_tile_bases,
                 height_sizes=output_tile_sizes,
-                pkt_cnts=pkt_cnts
+                pkt_cnts=pkt_cnts,
+                c_input_var_offsets=c_output_var_offsets,
+                c_input_var_sizes=c_output_var_sizes
               )
+
+              # add edge info and allocate
+              ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block, block_tiling_info=block_tiling_info))
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="exec")
 
             # Allocate other tensors (no tiling)

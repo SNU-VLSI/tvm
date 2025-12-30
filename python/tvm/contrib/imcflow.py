@@ -198,6 +198,22 @@ class BlockTileInfo:
     self.pkt_cnts            = [] # for tiling
     self.c_input_var_offsets = [] # for tiling
     self.c_input_var_sizes   = [] # for tiling
+  
+  def set_info(self, height_base_coords: List[int]=None, 
+                     height_sizes: List[int]=None, 
+                     pkt_cnts: List[int]=None, 
+                     c_input_var_offsets: List[int]=None,
+                     c_input_var_sizes: List[int]=None):
+    if height_base_coords is not None:
+      self.height_base_coords = height_base_coords
+    if height_sizes is not None:
+      self.height_sizes = height_sizes
+    if pkt_cnts is not None:
+      self.pkt_cnts = pkt_cnts
+    if c_input_var_offsets is not None:
+      self.c_input_var_offsets = c_input_var_offsets
+    if c_input_var_sizes is not None:
+      self.c_input_var_sizes = c_input_var_sizes
 
 
 class DataBlock:
@@ -502,10 +518,11 @@ class InstEdgeInfo(EdgeInfo):
 
 class TensorEdgeInfo(EdgeInfo):
   LOCAL_FIFO = -2
-  def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1):
+  def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1, block_tiling_info: BlockTileInfo = None):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
     self.owner = None
+    self.block_tiling_info = block_tiling_info
 
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id
@@ -513,20 +530,39 @@ class TensorEdgeInfo(EdgeInfo):
   @property
   def node_info_str(self):
     return f"{self.policy_info[0].router_id.name} -> {self.policy_info[-1].router_id.name}"
-  
+
   def set_tiling_info(self, height_base_coords: List[int], height_sizes: List[int], pkt_cnts: List[int]):
     self.height_base_coords = height_base_coords
     self.height_sizes = height_sizes
     self.pkt_cnts = pkt_cnts
-  
+
+  def set_block_tiling_info(self, block_tiling_info: BlockTileInfo):
+    self.block_tiling_info = block_tiling_info
+
   def get_height_base_coords(self):
-    return self.height_base_coords
-  
+    if self.block_tiling_info:
+      return self.block_tiling_info.height_base_coords
+    return getattr(self, 'height_base_coords', [])
+
   def get_height_sizes(self):
-    return self.height_sizes
-  
+    if self.block_tiling_info:
+      return self.block_tiling_info.height_sizes
+    return getattr(self, 'height_sizes', [])
+
   def get_pkt_cnts(self):
-    return self.pkt_cnts
+    if self.block_tiling_info:
+      return self.block_tiling_info.pkt_cnts
+    return getattr(self, 'pkt_cnts', [])
+
+  def get_c_input_var_offsets(self):
+    if self.block_tiling_info:
+      return self.block_tiling_info.c_input_var_offsets
+    return []
+
+  def get_c_input_var_sizes(self):
+    if self.block_tiling_info:
+      return self.block_tiling_info.c_input_var_sizes
+    return []
 
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"

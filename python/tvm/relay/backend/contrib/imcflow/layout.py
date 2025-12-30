@@ -674,6 +674,18 @@ CPU_REQUIRED_OP_LAYOUTS = {
   ]
 }
 
+def get_height_dim_index(layout):
+  if layout in [LayoutType.NCHW, LayoutType.NCHW16C, LayoutType.NCHW64C]:
+    return 2
+  elif layout in [LayoutType.NHWC16C, LayoutType.NHWC64C]:
+    return 1
+  elif layout in [LayoutType.QCONV_INPUT]:
+    return 2
+  elif layout in [LayoutType.QCONV_WEIGHT, LayoutType.QDCONV_WEIGHT]:
+    raise ValueError(f"Layout {layout} does not have height dimension")
+  else:
+    raise ValueError(f"Layout {layout} does not have height dimension")
+
 
 def is_layout_compatible_with_type(layout, ttype):
   if layout == LayoutType.SCALAR:

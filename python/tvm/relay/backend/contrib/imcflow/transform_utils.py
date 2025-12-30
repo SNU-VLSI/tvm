@@ -12,7 +12,6 @@ from tvm.relay.op.contrib import imcflow
 from tvm.relay.function import Function, FunctionWithFields
 
 from tvm.contrib.imcflow import ImcflowDeviceConfig
-from tvm.relay.backend.contrib.imcflow.layout import apply_layout_to_type
 
 import os
 import collections
@@ -1242,6 +1241,7 @@ def constructActiveIMCEDict(mod):
       ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint] = list(ActiveIMCEs)
 
 def getInodePktCntForEdge(module, edge):
+  from tvm.relay.backend.contrib.imcflow.layout import apply_layout_to_type
   src_node = edge.src_node
   layout = ImcflowDeviceConfig().LayoutMap[src_node]
   v_ttype = get_type(module, src_node)
@@ -1261,3 +1261,11 @@ def getInodePktCntForEdge(module, edge):
     raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
   in_total_bytes = elem_count * bytes_per_elem
   return math.ceil(in_total_bytes/32)
+
+def getRTTypeForEdge(module, edge):
+  from tvm.relay.backend.contrib.imcflow.layout import apply_layout_to_type
+  src_node = edge.src_node
+  layout = ImcflowDeviceConfig().LayoutMap[src_node]
+  v_ttype = get_type(module, src_node)
+  r_ttype = apply_layout_to_type(v_ttype, layout)
+  return r_ttype
