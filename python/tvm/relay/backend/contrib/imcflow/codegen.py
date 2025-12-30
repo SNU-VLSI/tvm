@@ -202,6 +202,8 @@ class CodegenSuite:
 
     PolicyTableCodegen(func_name, self.build_dir, self.host_isa).generate(func_name)
 
+    CntBaseAddrCodegen(func_name, self.build_dir, self.host_isa).generate(func_name)
+
     # dump recv/send map and check consistency
     inode_builder.construct_recv_send_map()
     print("-"*40)
@@ -273,6 +275,71 @@ class PolicyTableCodegen:
         DevCodegen.func_dir = self.func_dir
         DevCodegen.create_host_object(
             f"{node_name.name}_policy.bin", policytable_host_obj_file)
+    return
+
+
+class CntBaseAddrCodegen:
+  """
+  Write out a binary file for counter base address blocks.
+  These are 32-byte blocks used for tiling send/recv operations.
+  The binary contains pkt_cnts from BlockTilingInfo, packed as 32-bit integers.
+  """
+
+  def __init__(self, func_name, build_dir="/tmp", host_isa="arm"):
+    super().__init__()
+    self.build_dir = build_dir
+    self.host_isa = host_isa
+    self.func_dir = os.path.join(build_dir, func_name)
+
+  def generate(self, func_name):
+    # Get all data blocks from the memory layout for this function
+    mem_layout = DevConfig().MemLayout[func_name]
+
+    # Find all cnt_base_addr blocks and their corresponding data blocks
+    for block_id, block in mem_layout.blocks.items():
+      if not isinstance(block_id, str) or not block_id.endswith("_cnt_base_addr"):
+        continue
+
+      # Extract edge simple name from block_id (remove "_cnt_base_addr" suffix)
+      edge_simple_name = block_id[:-len("_cnt_base_addr")]
+
+      # Find the corresponding data block with tiling_info
+      data_block = None
+      for db_id, db in mem_layout.blocks.items():
+        if hasattr(db, 'tiling_info') and db.tiling_info is not None:
+          # Check if this data block's edge matches our cnt_base_addr block
+          for edge in db.edges:
+            if edge.simple_name() == edge_simple_name:
+              data_block = db
+              break
+          if data_block:
+            break
+      if data_block is None:
+        raise RuntimeError(f"Could not find data block for cnt_base_addr block {block_id}")
+
+      # Create binary file
+      bin_file = f"{block_id}.bin"
+      bin_path = os.path.join(self.func_dir, bin_file)
+      host_obj_file = f"{block_id}.host.o"
+
+      # Pack pkt_cnts as 32-bit little-endian integers
+      with open(bin_path, "wb") as file:
+        if data_block and data_block.tiling_info and data_block.tiling_info.pkt_cnts:
+          pkt_cnts = data_block.tiling_info.pkt_cnts
+          for cnt in pkt_cnts:
+            file.write(int(cnt).to_bytes(4, byteorder='little', signed=False))
+          # Pad to 32 bytes if needed
+          written_bytes = len(pkt_cnts) * 4
+          if written_bytes < 32:
+            file.write(b'\x00' * (32 - written_bytes))
+        else:
+          raise RuntimeError(f"No tiling info found for data block corresponding to {block_id}")
+
+      # Create host object file using DeviceCodegen
+      DevCodegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
+      DevCodegen.func_dir = self.func_dir
+      DevCodegen.create_host_object(bin_file, host_obj_file)
+
     return
 
 

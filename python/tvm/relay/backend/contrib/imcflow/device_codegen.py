@@ -13,7 +13,9 @@ class DeviceCodegen:
     assert target in ["inode", "imce"], f"Unknown target: {target}"
     self.target = target
     self.build_dir = build_dir
-    self.compile_options = f"-O1 --target={target.upper()} -c -fPIC -mllvm=-force-hardware-loops -mllvm=-force-nested-hardware-loop"
+    # self.inode_compile_options = f"-O1 --target={target.upper()} -c -fPIC -mllvm=-force-nested-hardware-loop -mllvm=-debug -mllvm=--debug-pass=Details -mllvm=-print-after-all"
+    self.inode_compile_options = f"-O1 --target={target.upper()} -c -fPIC -mllvm=-force-nested-hardware-loop"
+    self.imce_compile_options = f"-O1 --target={target.upper()} -c -fPIC -mllvm=-force-hardware-loops -mllvm=-force-nested-hardware-loop"
     self.objcopy_options = "-O binary --only-section=.text"
     self.lld_options = "-e 0 -Ttext 0x0"
     self.ld_options = "-r -b binary"
@@ -83,7 +85,7 @@ class DeviceCodegen:
 
     command = [
         "clang",
-        *self.compile_options.split(),
+        *(self.imce_compile_options if self.target == "imce" else self.inode_compile_options).split(),
         f"-mllvm=-{hid_str}={node.to_coord(0)}",
         f"-mllvm=-{wid_str}={node.to_coord(1)}",
         "-o", obj_file,
