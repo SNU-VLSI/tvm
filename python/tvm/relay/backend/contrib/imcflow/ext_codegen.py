@@ -382,49 +382,74 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     else:
       return ""
 
+  def _get_transfer_loop_params(self, block, tile_idx):
+    """
+    Calculate loop parameters for data transfer.
+    Returns (loop_start, loop_end).
+    """
+    if block.tiling_info is not None:
+      # Tiled transfer
+      tiling_info = block.tiling_info
+      loop_start = tiling_info.c_input_var_offsets[tile_idx]
+      loop_end = loop_start + tiling_info.c_input_var_sizes[tile_idx]
+    else:
+      # Regular transfer
+      size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
+      loop_start = 0
+      loop_end = math.ceil(size/4)
+    return loop_start, loop_end
+
   def generateToNpuTransferCode(self, blocks, tile_idx=None):
     """Generate code to transfer data to NPU memory."""
     code = CodeWriter()
     code += "// Transfer data into NPU memory\n"
     for block in blocks:
-      if block.tiling_info is not None:
-        tiling_info = block.tiling_info
-        tile_offset = tiling_info.c_input_var_offsets[tile_idx]
-        tile_size = tiling_info.c_input_var_sizes[tile_idx]
-        code += f"// Transfer data [TILE:{tile_idx}]\n"
-        code += f"for(int i={tile_offset}; i<{tile_offset + tile_size}; i++){{\n"
-        code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){getCInputVarName(self.func, self.func_name, block)})[i];\n"
-        code += f"}}\n"
-      else:
-        base_address = block.base_address
-        base_address_name = makeBaseAddrName(block)
-        self.base_address_macros.update({base_address_name: base_address})
-        if isinstance(block.id, str):
-          var_prefix = getObjectFileName(block, self.func_name)
-          code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
-          code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){var_prefix}_start)[i];\n"
-          code += f"}}\n"
-        else:
-          size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
-          numel = math.ceil(size/4)
-          code += f"for(int i=0; i<{numel}; i++){{\n"
-          code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){getCInputVarName(self.func, self.func_name, block)})[i];\n"
-          code += f"}}\n"
-    return code
-
-  def generateFromNpuTransferCode(self, data_blocks):
-    """Generate code to transfer data from NPU memory."""
-    code = CodeWriter()
-    code += "// Transfer data from NPU memory\n"
-    for block in data_blocks:
-      assert "func_out" in block.id.dst_id.tensor_type, "output data block must have 'func_out' in tensor_type"
-      idx = block.id.dst_id.tensor_type.replace("func_out", "")
-      size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
       base_address = block.base_address
       base_address_name = makeBaseAddrName(block)
       self.base_address_macros.update({base_address_name: base_address})
-      numel = math.ceil(size/4)
-      code += f"for(int i=0; i<{numel}; i++){{\n"
+
+      # Add tiling comment if applicable
+      if block.tiling_info is not None:
+        code += f"// Transfer data [TILE:{tile_idx}]\n"
+
+      # Determine source variable and loop parameters based on block type
+      if isinstance(block.id, str):
+        # Binary object file transfer
+        var_prefix = getObjectFileName(block, self.func_name)
+        loop_start = 0
+        loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
+        src_var = f"{var_prefix}_start"
+      else:
+        # Regular or tiled data block transfer
+        loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
+        src_var = getCInputVarName(self.func, self.func_name, block)
+
+      # Generate unified loop code
+      code += f"for(int i={loop_start}; i<{loop_end}; i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){src_var})[i];\n"
+      code += f"}}\n"
+    return code
+
+  def generateFromNpuTransferCode(self, blocks, tile_idx=None):
+    """Generate code to transfer data from NPU memory."""
+    code = CodeWriter()
+    code += "// Transfer data from NPU memory\n"
+    for block in blocks:
+      assert "func_out" in block.id.dst_id.tensor_type, "output data block must have 'func_out' in tensor_type"
+      idx = block.id.dst_id.tensor_type.replace("func_out", "")
+      base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      self.base_address_macros.update({base_address_name: base_address})
+
+      # Add tiling comment if applicable
+      if block.tiling_info is not None:
+        code += f"// Transfer data [TILE:{tile_idx}]\n"
+
+      # Get loop parameters
+      loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
+
+      # Generate loop code
+      code += f"for(int i={loop_start}; i<{loop_end}; i++){{\n"
       code += f"  ((uint32_t*)out{idx})[i] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
       code += f"}}\n"
     return code
