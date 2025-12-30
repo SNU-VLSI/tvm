@@ -164,7 +164,11 @@ class TensorEdge:
     return self.dst_id.inner_gid_match(graph_node_id)
   
   def simple_name(self):
-    return ""
+    name=f"s{self.src_id.graph_node_id}{self.src_id.tensor_type}_d{self.dst_id.graph_node_id}{self.dst_id.tensor_type}"
+    if self.split_idx is not None:
+      name += f"_split{self.split_idx}"
+    name = name.replace("-", "m")
+    return name
 
   def __str__(self):
     if self.split_idx is None:
@@ -502,6 +506,11 @@ class TensorEdgeInfo(EdgeInfo):
   @property
   def node_info_str(self):
     return f"{self.policy_info[0].router_id.name} -> {self.policy_info[-1].router_id.name}"
+  
+  def set_tiling_info(self, height_base_coords: List[int], height_sizes: List[int], pkt_cnts: List[int]):
+    self.height_base_coords = height_base_coords
+    self.height_sizes = height_sizes
+    self.pkt_cnts = pkt_cnts
   
   def get_height_base_coords(self):
     return self.height_base_coords

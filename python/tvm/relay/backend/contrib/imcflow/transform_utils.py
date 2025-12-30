@@ -12,10 +12,12 @@ from tvm.relay.op.contrib import imcflow
 from tvm.relay.function import Function, FunctionWithFields
 
 from tvm.contrib.imcflow import ImcflowDeviceConfig
+from tvm.relay.backend.contrib.imcflow.layout import apply_layout_to_type
 
 import os
 import collections
 import re
+import math
 
 # Debug logging utility controlled by IMCFLOW_DEBUG environment variable
 # Usage:
@@ -1238,3 +1240,24 @@ def constructActiveIMCEDict(mod):
         if GraphNodeID in ImcflowDeviceConfig().HWNodeMap and ImcflowDeviceConfig().HWNodeMap[GraphNodeID].is_imce():
           ActiveIMCEs.add(ImcflowDeviceConfig().HWNodeMap[GraphNodeID])
       ImcflowDeviceConfig().ActiveIMCEPerFunc[func_name_var.name_hint] = list(ActiveIMCEs)
+
+def getInodePktCntForEdge(module, edge):
+  src_node = edge.src_node
+  layout = ImcflowDeviceConfig().LayoutMap[src_node]
+  v_ttype = get_type(module, src_node)
+  r_ttype = apply_layout_to_type(v_ttype, layout)
+  elem_count = math.prod(r_ttype.shape)
+  if isinstance(elem_count, tvm.tir.expr.IntImm):
+    elem_count = elem_count.value
+
+  dtype = r_ttype.dtype
+  if "int8" in dtype or "uint8" in dtype:
+    bytes_per_elem = 1
+  elif "int16" in dtype or "uint16" in dtype:
+    bytes_per_elem = 2
+  elif "int32" in dtype or "uint32" in dtype or "float32" in dtype:
+    bytes_per_elem = 4
+  else:
+    raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
+  in_total_bytes = elem_count * bytes_per_elem
+  return math.ceil(in_total_bytes/32)

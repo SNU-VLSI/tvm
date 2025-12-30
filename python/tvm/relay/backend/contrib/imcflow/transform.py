@@ -13,7 +13,8 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeI
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
-from tvm.relay.backend.contrib.imcflow.layout import ImcflowLayoutLegalizer
+from tvm.relay.backend.contrib.imcflow.layout import ImcflowLayoutLegalizer, apply_layout_to_type
+from tvm.relay.backend.contrib.imcflow.transform_utils import getInodePktCntForEdge, NodeCollector
 from itertools import cycle
 
 # Debug logging utility controlled by IMCFLOW_DEBUG environment variable
@@ -2604,7 +2605,7 @@ class MemoryAllocator:
     Assumption:
       no edge from inode to inode directly
     """
-    def run_(self, func, func_name, ttype_map):
+    def run_(self, mod, func, func_name, ttype_map):
       class _MemoryAllocator(tvm.relay.ExprVisitor):
         def __init__(self):
             super().__init__()
@@ -2725,6 +2726,249 @@ class MemoryAllocator:
 
           return edges
 
+        def _trace_all_paths_to_inputs(self, expr, param_map=None):
+          """
+          Trace all paths from output expr to input Vars, collecting conv operation parameters
+          for each path separately.
+
+          Args:
+              expr: relay expression to trace
+              param_map: dict mapping inner function params to outer args (for composite functions)
+
+          Returns:
+              dict: {var_name: conv_params_list} where conv_params_list is the list of
+                    (k, s, p_top, p_bottom) tuples for convs on the path from that input to output
+          """
+          paths = {}  # var_name -> list of conv_params on path to this var
+          if param_map is None:
+            param_map = {}
+
+          def is_qconv(node):
+            if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+              return node.op == op.get("nn.imcflow_qconv") or node.op == op.get("nn.imcflow_qdwconv")
+            return False
+
+          def extract_conv_params(node):
+            k = node.attrs['kernel_size'][0].value
+            s = node.attrs['strides'][0].value
+            p = node.attrs['padding']
+            p_top = p[0].value if hasattr(p[0], 'value') else int(p[0])
+            p_bottom = p[2].value if hasattr(p[2], 'value') else int(p[2])
+            return (k, s, p_top, p_bottom)
+
+          def trace_path(node, current_conv_params, local_param_map):
+            """Recursively trace paths, accumulating conv params"""
+            if isinstance(node, relay.Var):
+              # Check if this var is mapped to an outer argument
+              if node in local_param_map:
+                # Continue tracing through the outer argument
+                trace_path(local_param_map[node], current_conv_params, local_param_map)
+              else:
+                # Reached an input variable
+                var_name = node.name_hint
+                # current_conv_params is in output->input order, keep it that way
+                if var_name not in paths:
+                  paths[var_name] = list(current_conv_params)
+              return
+
+            elif isinstance(node, relay.Call):
+              if isinstance(node.op, relay.Function):
+                # Composite function - build mapping from inner params to outer args
+                inner_func = node.op
+                new_param_map = dict(local_param_map)
+                for param, arg in zip(inner_func.params, node.args):
+                  new_param_map[param] = arg
+                # Traverse into body with the new mapping
+                trace_path(inner_func.body, current_conv_params, new_param_map)
+              elif is_qconv(node):
+                # Conv operation - add to path and continue
+                conv_param = extract_conv_params(node)
+                new_params = current_conv_params + [conv_param]
+                # Continue tracing the data input (first arg)
+                trace_path(node.args[0], new_params, local_param_map)
+              elif isinstance(node.op, tvm.ir.Op):
+                # Other ops (add, cast, etc.) - traverse all args
+                for arg in node.args:
+                  trace_path(arg, current_conv_params, local_param_map)
+              else:
+                # Unknown call type
+                for arg in node.args:
+                  trace_path(arg, current_conv_params, local_param_map)
+
+            elif isinstance(node, relay.TupleGetItem):
+              trace_path(node.tuple_value, current_conv_params, local_param_map)
+
+            elif isinstance(node, relay.Tuple):
+              for field in node.fields:
+                trace_path(field, current_conv_params, local_param_map)
+
+            elif isinstance(node, relay.Constant):
+              # Constants don't lead to input vars
+              pass
+
+          trace_path(expr, [], param_map)
+          return paths
+
+        def _compute_input_tile_from_output(self, out_base, out_size, conv_params):
+          """
+          Compute required input tile range from output tile range.
+
+          Args:
+              out_base: output tile start position
+              out_size: output tile size
+              conv_params: List of (kernel_size, stride, padding_top, padding_bottom)
+                          in output→input order
+
+          Returns:
+              (input_base, input_size) tuple
+          """
+          curr_base = out_base
+          curr_size = out_size
+
+          for k, s, p_top, p_bottom in conv_params:
+            # Backward calculation: output → input
+            # input_base = output_base * stride - padding_top
+            # input_size = (output_size - 1) * stride + kernel_size
+            new_base = curr_base * s - p_top
+            new_size = (curr_size - 1) * s + k
+
+            curr_base = new_base
+            curr_size = new_size
+
+          return curr_base, curr_size
+        
+        def remove_padding_and_halo(self, input_bases, input_sizes, input_height):
+          """
+          Remove padding and halo regions from input tile specifications.
+
+          The raw input tile computed from backward calculation includes:
+          1. Padding regions (negative indices or indices beyond input height)
+          2. Halo regions (overlap with previous tiles that were already processed)
+
+          This function trims these regions to get the actual new input data needed.
+
+          Args:
+              input_bases: List of input tile start positions (may include padding/halo)
+              input_sizes: List of input tile sizes (may include padding/halo)
+              input_height: Original input tensor height
+
+          Returns:
+              (trimmed_bases, trimmed_sizes) - adjusted to valid input ranges without overlap
+          """
+          trimmed_bases = []
+          trimmed_sizes = []
+
+          prev_end = 0  # Track where previous tile ended (for halo removal)
+
+          for i, (in_base, in_size) in enumerate(zip(input_bases, input_sizes)):
+            in_end = in_base + in_size
+
+            # Clamp to valid input range [0, input_height)
+            valid_start = max(0, in_base)
+            valid_end = min(input_height, in_end)
+
+            # Remove halo: don't include data that was already processed by previous tile
+            if i > 0:
+              actual_start = max(valid_start, prev_end)
+            else:
+              actual_start = valid_start
+
+            actual_size = valid_end - actual_start
+
+            trimmed_bases.append(actual_start)
+            trimmed_sizes.append(max(0, actual_size))
+
+            # Update prev_end for next tile's halo calculation
+            prev_end = valid_end
+
+          return trimmed_bases, trimmed_sizes
+
+        def calculate_all_input_tiles_from_output(self, target_func, output_height_bases, output_height_sizes):
+          """
+          Calculate required input tile height coordinates and sizes for ALL input variables.
+
+          For graphs with multiple inputs (e.g., ResNet skip connections, multi-input addition),
+          this traces all paths from output to each input and computes the required tiles.
+
+          Args:
+              target_func: relay.Function to analyze
+              output_height_bases: List[int] - start positions of each output tile
+              output_height_sizes: List[int] - sizes of each output tile
+
+          Returns:
+              dict: {var_name: (input_bases, input_sizes)} for each input variable
+          """
+          body = target_func.body
+
+          # Handle Tuple output - for now, just use the first output
+          if isinstance(body, relay.Tuple):
+            output_expr = body.fields[0]
+          else:
+            output_expr = body
+
+          # Trace all paths to inputs
+          paths = self._trace_all_paths_to_inputs(output_expr)
+
+          # Calculate input tiles for each input variable
+          results = {}
+          for var_name, conv_params in paths.items():
+            input_bases = []
+            input_sizes = []
+            for out_base, out_size in zip(output_height_bases, output_height_sizes):
+              in_base, in_size = self._compute_input_tile_from_output(
+                out_base, out_size, conv_params
+              )
+              input_bases.append(in_base)
+              input_sizes.append(in_size)
+
+            results[var_name] = (input_bases, input_sizes)
+
+          return results
+
+        def merge_input_tile_boundaries(self, candidates):
+          """
+          Merge multiple input tile boundary candidates by taking the maximum range for each tile.
+
+          When multiple outputs require different input tile boundaries for the same input variable,
+          we need to select the tile boundaries that satisfy ALL outputs. This is done by taking
+          the minimum base (earliest start) and maximum end (latest end) for each tile.
+
+          Args:
+              candidates: List of (input_bases, input_sizes) tuples, where each tuple represents
+                         one candidate's tile specifications. Each input_bases is a list of
+                         start positions, and each input_sizes is a list of sizes.
+
+          Returns:
+              (merged_bases, merged_sizes): The merged tile specification that covers all candidates.
+          """
+          if not candidates:
+            return [], []
+
+          # All candidates should have the same number of tiles
+          num_tiles = len(candidates[0][0])
+          for bases, sizes in candidates:
+            if len(bases) != num_tiles or len(sizes) != num_tiles:
+              raise ValueError("All candidates must have the same number of tiles")
+
+          merged_bases = []
+          merged_sizes = []
+
+          for tile_idx in range(num_tiles):
+            # For each tile, find the minimum start and maximum end across all candidates
+            min_base = float('inf')
+            max_end = float('-inf')
+
+            for bases, sizes in candidates:
+              base = bases[tile_idx]
+              end = base + sizes[tile_idx]
+              min_base = min(min_base, base)
+              max_end = max(max_end, end)
+
+            merged_bases.append(min_base)
+            merged_sizes.append(max_end - min_base)
+
+          return merged_bases, merged_sizes
+
         def allocate(self):
           """
           Two-phase memory allocation:
@@ -2775,67 +3019,285 @@ class MemoryAllocator:
               inode_tensors[inode_name]['other'].append((edge, mem_block, inode_tensorid))
           
           # Phase 2: Calculate tiling factor for this function
+          # New approach:
+          # 1. Collect output/input tensor info
+          # 2. For each tiling factor, calculate tile specs for each output
+          # 3. For each input, merge tile boundaries across all outputs
+          # 4. Calculate memory using ceil formula
+          layout_map = ImcflowDeviceConfig().LayoutMap[self.func_name]
           tiling_factor = 1
-          
+          max_tiling_factor = 128  # Safety limit
+
+          # Collect output tensor info: [(edge, height, width, channels, elem_size, inode_name, mem_block)]
+          output_tensor_info = []
           for inode_name, tensors in inode_tensors.items():
-            # Calculate total size of input/output tensors for this inode
-            input_output_total = 0
-            
-            for edge, mem_block, _ in tensors['input']:
-              input_output_total += mem_block.size
-            
-            for edge, mem_block, _ in tensors['output']:
-              input_output_total += mem_block.size
-            
-            # Check if tiling is needed
-            if input_output_total > ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
-              required_factor = math.ceil(input_output_total / ImcflowDeviceConfig.INODE_DATA_MEM_SIZE)
-              tiling_factor = max(tiling_factor, required_factor)
-              debug_print(f"  [{self.func_name}] {inode_name}: input/output total = {input_output_total} bytes")
-              debug_print(f"    > Memory capacity = {ImcflowDeviceConfig.INODE_DATA_MEM_SIZE} bytes")
-              debug_print(f"    > Required tiling factor = {required_factor}")
-          
+            for edge, mem_block, inode_tensorid in tensors['output']:
+              src_node = edge.src_id
+              shape = src_node.type_annotation.shape
+              height = int(shape[1])
+              width = int(shape[2])
+              channels = int(shape[3]) if len(shape) > 3 else 1
+              dtype = src_node.type_annotation.dtype
+              elem_size = np.dtype(dtype).itemsize
+              output_tensor_info.append((edge, height, width, channels, elem_size, inode_name, mem_block))
+
+          # Collect input tensor info: [(edge, height, width, channels, elem_size, inode_name, mem_block, var_name)]
+          input_tensor_info = []
+          for inode_name, tensors in inode_tensors.items():
+            for edge, mem_block, inode_tensorid in tensors['input']:
+              src_node = edge.src_id
+              shape = src_node.type_annotation.shape
+              height = int(shape[1])
+              width = int(shape[2])
+              channels = int(shape[3]) if len(shape) > 3 else 1
+              dtype = src_node.type_annotation.dtype
+              elem_size = np.dtype(dtype).itemsize
+              var_name = src_node.name_hint if isinstance(src_node, relay.Var) else "data"
+              input_tensor_info.append((edge, height, width, channels, elem_size, inode_name, mem_block, var_name))
+
+          # Find tiling factor by incrementing until memory fits
+          while tiling_factor <= max_tiling_factor:
+            # Step 1: Calculate output tile specs for each output tensor
+            output_tile_specs = {}  # {output_idx: (bases, sizes)}
+            for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
+              base_tile_size = math.ceil(height / tiling_factor)
+              bases = [i * base_tile_size for i in range(tiling_factor)]
+              sizes = [min(base_tile_size, height - base) for base in bases]
+              output_tile_specs[out_idx] = (bases, sizes)
+
+            # Step 2: For each output, calculate input tile boundaries for all inputs
+            # Then merge boundaries per input variable across all outputs
+            input_tile_candidates = {}  # {var_name: [(bases, sizes), ...]}
+
+            for out_idx, (out_bases, out_sizes) in output_tile_specs.items():
+              # Calculate input tiles from this output
+              all_input_tiles = self.calculate_all_input_tiles_from_output(
+                self.target_func, out_bases, out_sizes
+              )
+
+              for var_name, (in_bases, in_sizes) in all_input_tiles.items():
+                if var_name not in input_tile_candidates:
+                  input_tile_candidates[var_name] = []
+                input_tile_candidates[var_name].append((in_bases, in_sizes))
+
+            # Step 3: Merge input tile boundaries for each input variable
+            merged_input_tiles = {}  # {var_name: (merged_bases, merged_sizes)}
+            for var_name, candidates in input_tile_candidates.items():
+              merged_bases, merged_sizes = self.merge_input_tile_boundaries(candidates)
+              merged_input_tiles[var_name] = (merged_bases, merged_sizes)
+
+            # Step 4: Calculate memory for each tile using ceil formula
+            # Memory = ceil(original_block_size / (total_height / tile_height))
+            max_tile_memory = 0
+
+            for tile_idx in range(tiling_factor):
+              tile_memory = 0
+
+              # Output tensor memory for this tile
+              for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
+                out_bases, out_sizes = output_tile_specs[out_idx]
+                if tile_idx < len(out_sizes):
+                  tile_height = out_sizes[tile_idx]
+                  original_size = mem_block.size
+                  # ceil(original_size * tile_height / height)
+                  tiled_size = math.ceil(original_size * tile_height / height)
+                  tile_memory += tiled_size
+
+              # Input tensor memory for this tile (using merged boundaries)
+              for edge, height, width, channels, elem_size, inode_name, mem_block, var_name in input_tensor_info:
+                if var_name in merged_input_tiles:
+                  merged_bases, merged_sizes = merged_input_tiles[var_name]
+                  # Apply remove_padding_and_halo
+                  trimmed_bases, trimmed_sizes = self.remove_padding_and_halo(
+                    merged_bases, merged_sizes, height
+                  )
+                  if tile_idx < len(trimmed_sizes):
+                    tile_height = trimmed_sizes[tile_idx]
+                    original_size = mem_block.size
+                    # ceil(original_size * tile_height / height)
+                    if height > 0:
+                      tiled_size = math.ceil(original_size * tile_height / height)
+                    else:
+                      tiled_size = original_size
+                    tile_memory += tiled_size
+                else:
+                  # Fallback: simple ceil division
+                  tile_memory += math.ceil(mem_block.size / tiling_factor)
+
+              max_tile_memory = max(max_tile_memory, tile_memory)
+
+            # Check if this tiling factor works
+            if max_tile_memory <= ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
+              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (fits)")
+              break
+            else:
+              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (too large)")
+              tiling_factor += 1
+
+          if tiling_factor > max_tiling_factor:
+            raise ValueError(f"Cannot fit tensors in inode memory even with tiling factor {max_tiling_factor}")
+
           # Store tiling factor in FunctionInfo
           func_info = ImcflowDeviceConfig().ImcflowFuncMap[self.func_name]
           func_info.tiling_factor = tiling_factor
-          
+
           if tiling_factor > 1:
             debug_print(f"  [{self.func_name}] Tiling factor = {tiling_factor}")
-          
+
+          # Pre-calculate final tile specs for Phase 3
+          # Recalculate output tile specs with final tiling factor
+          final_output_tile_specs = {}
+          for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
+            if tiling_factor > 1:
+              base_tile_size = math.ceil(height / tiling_factor)
+              bases = [i * base_tile_size for i in range(tiling_factor)]
+              sizes = [min(base_tile_size, height - base) for base in bases]
+            else:
+              bases = [0]
+              sizes = [height]
+            final_output_tile_specs[out_idx] = (bases, sizes)
+            debug_print(f"  [{self.func_name}] Output[{out_idx}] tiles: bases={bases}, sizes={sizes}")
+
+          # Recalculate and merge input tile specs
+          final_input_tile_candidates = {}
+          for out_idx, (out_bases, out_sizes) in final_output_tile_specs.items():
+            all_input_tiles = self.calculate_all_input_tiles_from_output(
+              self.target_func, out_bases, out_sizes
+            )
+            for var_name, (in_bases, in_sizes) in all_input_tiles.items():
+              if var_name not in final_input_tile_candidates:
+                final_input_tile_candidates[var_name] = []
+              final_input_tile_candidates[var_name].append((in_bases, in_sizes))
+
+          final_merged_input_tiles = {}
+          for var_name, candidates in final_input_tile_candidates.items():
+            merged_bases, merged_sizes = self.merge_input_tile_boundaries(candidates)
+            final_merged_input_tiles[var_name] = (merged_bases, merged_sizes)
+            debug_print(f"  [{self.func_name}] Input '{var_name}' merged tiles: bases={merged_bases}, sizes={merged_sizes}")
+
           # Phase 3: Perform actual allocation with tiling
           for inode_name, tensors in inode_tensors.items():
             # Allocate weight tensors (no tiling, allow overlap)
             for edge, mem_block, inode_tensorid in tensors['weight']:
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="init")
-            
+
             # Allocate input tensors (with tiling if needed)
             for edge, mem_block, inode_tensorid in tensors['input']:
+              src_node = edge.src_id
+              v_tensor_shape = src_node.type_annotation.shape
+              height = int(v_tensor_shape[1])
+              width = int(v_tensor_shape[2])
+              channels = int(v_tensor_shape[3]) if len(v_tensor_shape) > 3 else 1
+              dtype = src_node.type_annotation.dtype
+              elem_size = np.dtype(dtype).itemsize
+              original_size = mem_block.size
+
+              var_name = src_node.name_hint if isinstance(src_node, relay.Var) else "data"
+
+              # Get merged input tile specs for this variable
+              if var_name in final_merged_input_tiles and tiling_factor > 1:
+                merged_bases, merged_sizes = final_merged_input_tiles[var_name]
+                # Apply remove_padding_and_halo
+                input_height_bases, input_height_sizes = self.remove_padding_and_halo(
+                  merged_bases, merged_sizes, height
+                )
+              else:
+                input_height_bases = [0]
+                input_height_sizes = [height]
+
               if tiling_factor > 1:
-                # Apply tiling: divide size by tiling factor
-                # This represents height-wise tiling (axis=2)
-                tiled_size = math.ceil(mem_block.size / tiling_factor)
+                # Calculate tiled size using ceil formula
+                max_tile_height = max(input_height_sizes)
+                # tiled_size = ceil(original_size * max_tile_height / height)
+                if height > 0:
+                  tiled_size = math.ceil(original_size * max_tile_height / height)
+                else:
+                  tiled_size = original_size
                 mem_block.set_size(tiled_size)
-                debug_print(f"    Input tensor tiled: {mem_block.size} -> {tiled_size} bytes")
-              
+                debug_print(f"    Input tensor {var_name}: {original_size} -> {tiled_size} bytes (max tile height={max_tile_height}/{height})")
+
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+
+              # Set tiling info
+              total_pkt_cnt = getInodePktCntForEdge(mod, edge)
+              total_input_height = sum(input_height_sizes)
+              if total_input_height > 0:
+                pkt_cnts = [math.ceil(total_pkt_cnt * h / total_input_height) for h in input_height_sizes]
+                diff = total_pkt_cnt - sum(pkt_cnts)
+                if diff != 0 and pkt_cnts:
+                  pkt_cnts[-1] += diff
+              else:
+                pkt_cnts = [total_pkt_cnt]
+
+              ImcflowDeviceConfig().TensorEdgetoInfo[edge].set_tiling_info(
+                height_base_coords=input_height_bases,
+                height_sizes=input_height_sizes,
+                pkt_cnts=pkt_cnts
+              )
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="exec")
-            
+
             # Allocate output tensors (with tiling if needed)
-            for edge, mem_block, inode_tensorid in tensors['output']:
+            for out_local_idx, (edge, mem_block, inode_tensorid) in enumerate(tensors['output']):
+              src_node = edge.src_id
+              v_tensor_shape = src_node.type_annotation.shape
+              height = int(v_tensor_shape[1])
+              width = int(v_tensor_shape[2])
+              channels = int(v_tensor_shape[3]) if len(v_tensor_shape) > 3 else 1
+              dtype = src_node.type_annotation.dtype
+              elem_size = np.dtype(dtype).itemsize
+              original_size = mem_block.size
+
+              # Find this output's tile spec
+              # Match by finding the output in output_tensor_info
+              output_tile_bases = [0]
+              output_tile_sizes = [height]
+              for out_idx, (o_edge, o_h, o_w, o_c, o_e, o_inode, o_mem) in enumerate(output_tensor_info):
+                if o_edge == edge:
+                  output_tile_bases, output_tile_sizes = final_output_tile_specs[out_idx]
+                  break
+
               if tiling_factor > 1:
-                # Apply tiling: divide size by tiling factor
-                tiled_size = math.ceil(mem_block.size / tiling_factor)
+                # Calculate tiled size using ceil formula
+                max_tile_height = max(output_tile_sizes)
+                if height > 0:
+                  tiled_size = math.ceil(original_size * max_tile_height / height)
+                else:
+                  tiled_size = original_size
                 mem_block.set_size(tiled_size)
-                debug_print(f"    Output tensor tiled: {mem_block.size} -> {tiled_size} bytes")
-              
+                debug_print(f"    Output tensor: {original_size} -> {tiled_size} bytes (max tile height={max_tile_height}/{height})")
+
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
+
+              # Set tiling info
+              total_pkt_cnt = getInodePktCntForEdge(mod, edge) if hasattr(edge, 'src_id') else 0
+              total_output_height = sum(output_tile_sizes)
+              if total_output_height > 0:
+                pkt_cnts = [math.ceil(total_pkt_cnt * h / total_output_height) for h in output_tile_sizes]
+                diff = total_pkt_cnt - sum(pkt_cnts)
+                if diff != 0 and pkt_cnts:
+                  pkt_cnts[-1] += diff
+              else:
+                pkt_cnts = [total_pkt_cnt]
+
+              ImcflowDeviceConfig().TensorEdgetoInfo[edge].set_tiling_info(
+                height_base_coords=output_tile_bases,
+                height_sizes=output_tile_sizes,
+                pkt_cnts=pkt_cnts
+              )
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="exec")
-            
+
             # Allocate other tensors (no tiling)
             for edge, mem_block, inode_tensorid in tensors['other']:
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block))
               ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="init")
+
+            # Allocate counter base address block (32 bytes)
+            for edge, mem_block, inode_tensorid in (tensors['input'] + tensors['output']):
+              block_name = f"{edge.simple_name()}_cnt_base_addr"
+              block_size = 32
+              mem_block = DataBlock(block_name, block_size)
+              ImcflowDeviceConfig().MemLayout[self.func_name][f"{inode_name}_data"].allocate(mem_block, phase="exec")
 
           return
 
@@ -2963,7 +3425,7 @@ class MemoryAllocator:
       for gv, func in mod.functions.items():
         if isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow":
           func_info = imcflow_func_map[gv.name_hint]
-          self.run_(func_info.func_node, gv.name_hint, ttype_map[gv.name_hint])
+          self.run_(mod, func_info.func_node, gv.name_hint, ttype_map[gv.name_hint])
 
 class PolicyTableGenerator:
     def __init__(self, NoCPaths):
