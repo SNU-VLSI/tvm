@@ -220,7 +220,9 @@ def generateToNpuTransferCode(func, func_name, blocks, address_macros):
 def generateFromNpuTransferCode(data_blocks, address_macros):
   code = CodeWriter()
   code += "// Transfer data from NPU memory\n"
-  for idx, block in enumerate(data_blocks):
+  for block in data_blocks:
+    assert "func_out" in block.id.dst_id.tensor_type, "output data block must have 'func_out' in tensor_type"
+    idx = block.id.dst_id.tensor_type.replace("func_out", "")
     size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
     base_address = block.base_address
     base_address_name = makeBaseAddrName(block)
