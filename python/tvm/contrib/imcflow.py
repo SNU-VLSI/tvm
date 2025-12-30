@@ -189,11 +189,11 @@ class FunctionInfo:
 class BlockTileInfo:
   """Tiling information for a data block"""
   def __init__(self):
-    self.height_base_coords  = [] # for tiling
-    self.height_sizes        = [] # for tiling
-    self.pkt_cnts            = [] # for tiling
-    self.c_input_var_offsets = [] # for tiling
-    self.c_input_var_sizes   = [] # for tiling
+    self.height_base_coords = [] # for tiling
+    self.height_sizes       = [] # for tiling
+    self.pkt_cnts           = [] # for tiling
+    self.c_var_offsets      = [] # for tiling
+    self.c_var_sizes        = [] # for tiling
 
 
 class DataBlock:

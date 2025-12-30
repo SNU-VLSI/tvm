@@ -390,8 +390,8 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     if block.tiling_info is not None:
       # Tiled transfer
       tiling_info = block.tiling_info
-      loop_start = tiling_info.c_input_var_offsets[tile_idx]
-      loop_end = loop_start + tiling_info.c_input_var_sizes[tile_idx]
+      loop_start = tiling_info.c_var_offsets[tile_idx]
+      loop_end = loop_start + tiling_info.c_var_sizes[tile_idx]
     else:
       # Regular transfer
       size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
