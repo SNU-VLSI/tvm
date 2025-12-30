@@ -11,7 +11,7 @@ class UniqueVar:
   _instances = {}
   _counter = 0
 
-  def __new__(cls, obj, dtype="short16"):
+  def __new__(cls, obj, dtype="short16", pointer_type=False):
     """Ensure only one instance per unique obj and dtype combination."""
     key = cls._normalize_key(obj)
 
@@ -21,9 +21,10 @@ class UniqueVar:
       cls._counter += 1
       instance.name = f"var{cls._counter}"
       instance.dtype = dtype
+      instance.pointer_type = pointer_type
       instance.static = False
 
-    assert cls._instances[key].dtype == dtype, \
+    assert cls._instances[key].dtype == dtype and cls._instances[key].pointer_type == pointer_type, \
         f"UniqueVar {obj} already exists with dtype {cls._instances[key].dtype}"
 
     return cls._instances[key]
@@ -47,7 +48,10 @@ class UniqueVar:
   @classmethod
   def get_decls(cls):
     for obj, value in cls._instances.items():
-      yield f"{value.dtype} {value.name}; // {obj}"
+      if value.pointer_type:
+        yield f"{value.dtype}* {value.name}; // {obj}"
+      else:
+        yield f"{value.dtype} {value.name}; // {obj}"
 
   @classmethod
   def get_decls_str(cls):
@@ -160,7 +164,12 @@ class SimpleFor(CodeBlock):
 
   def __init__(self, count: int, body: Union[str, CodeBlock], annotation: str = ""):
     super().__init__(annotation)
-    self.count = int(count)
+    if not isinstance(count, UniqueVar):
+      self.count = int(count)
+      self.const_count = True
+    else:
+      self.count = count
+      self.const_count = False
     if isinstance(body, str):
       self.body = TextBlock(body)
     else:
@@ -181,10 +190,10 @@ class SimpleFor(CodeBlock):
     return f" : {self.annotation}" if self.annotation else ""
 
   def _render(self) -> str:
-    if self.count == 0:
+    if self.const_count and self.count == 0:
       return f"// loop ignored with loop count == 0{self.annotation_str}"
 
-    if self.count == 1:
+    if self.const_count and self.count == 1:
       # COMPATIBILITY FIX: If the user code passes a lambda, we execute it to get the string/block.
       if callable(self.body):
           formatted_body = self.body(0)

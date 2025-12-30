@@ -415,6 +415,15 @@ class FuncMemoryLayout(UserDict):
       if edge in block.edges:
         return block
     return None
+  
+  def get_data_block_by_id(self, block_id: Union[str, TensorEdge]):
+    """
+    Gets data_block by id from aggregated blocks
+    """
+    for block in self.blocks.values():
+      if block_id == block.id:
+        return block
+    return None
 
   def __str__(self):
     regions_str = ",\n  ".join(str(region) for region in self.data.values())

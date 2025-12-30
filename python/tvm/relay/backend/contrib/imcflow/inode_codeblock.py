@@ -95,8 +95,9 @@ class WriteIMCUBlock(InodeCodeBlock):
 class RecvBlock(InodeCodeBlock):
   """ Code block for receiving data from given fifo id """
 
-  def __init__(self, block: DataBlock, fifo_id: int, annotation: str = ""):
+  def __init__(self, builder, block: DataBlock, fifo_id: int, annotation: str = ""):
     super().__init__(annotation)
+    self.builder = builder
     self.block = block
     self.fifo_id = fifo_id
     self._build()
@@ -157,8 +158,9 @@ class RecvBlockInterleaved(InodeCodeBlock):
 class SendBlock(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
 
-  def __init__(self, block: DataBlock, edge_info: TensorEdgeInfo, annotation: str = ""):
+  def __init__(self, builder, block: DataBlock, edge_info: TensorEdgeInfo, annotation: str = ""):
     super().__init__(annotation)
+    self.builder = builder
     self.block = block
     self.edge_info = edge_info
     if self.block.tiling_info is not None:
@@ -175,19 +177,34 @@ class SendBlock(InodeCodeBlock):
     var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
     self.body.add(SimpleFor(recv_count,
-                      lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});"))
+                      lambda iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id: 
+                        f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});"))
 
   def _build_tiled(self):
-    tiling_info = self.block.tiling_info
+    # tiling_info = self.block.tiling_info
     fifo_id = self.edge_info.fifo_id
     assert fifo_id >= 0, "fifo id should be assigned to a positive id"
     next_policy_addr = self.edge_info.policy_info[0].address
+    if isinstance(self.block.id, list):
+      block_id = self.block.id[0]
+    else:
+      block_id = self.block.id
+    assert isinstance(block_id, TensorEdge), "Tiled send block must be a tensor edge"
+    target_edge = block_id
 
-    var = UniqueVar("send_data_base_address", dtype="int")
+    cnt_addr_var = UniqueVar(f"{target_edge.simple_name()}_send_data_base_address", dtype="int", pointer_type=True)
+    _send_cnt_address_block = DevConfig().MemLayout[self.builder.func_name].get_data_block_by_id(f"{target_edge.simple_name()}_cnt_base_addr")
+    _send_cnt_address = _send_cnt_address_block.offset
+    self.body.add(TextBlock(f"{cnt_addr_var} = (int*)({_send_cnt_address});"))
 
-    self.body.add(TextBlock(f"{var} = mem[{_send_cnt_address}];"))
-    self.body.add(TextBlock(f"{var} = mem[{_send_cnt_address}];"))
-
+    loop_cnt_var = UniqueVar(f"{target_edge.simple_name()}_tile_loop_count", dtype="int")
+    base_var = UniqueVar("send_data_base_address", dtype="int")
+    self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
+    
+    self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+    self.body.add(SimpleFor(loop_cnt_var,
+                      lambda iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id:
+                        f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});"))
 
 class SendBlockInterleaved(InodeCodeBlock):
   """ Code block for sending data from given fifo id """

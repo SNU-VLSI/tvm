@@ -191,7 +191,7 @@ class CodegenSuite:
       print(f"  {edge} : {send_info}")
     print("-"*40)
 
-    inode_builder = InodeCodeBlockBuilder(func_name, sorted_edges)
+    inode_builder = InodeCodeBlockBuilder(self.module, func, func_name, sorted_edges)
     inode_builder.visit(func)
 
     # add sync logic after INIT Phase
@@ -468,8 +468,11 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.send_map.update(imce_codeblock.send_num_map)
 
 class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
-  def __init__(self, func_name, edges):
+  def __init__(self, mod, func, func_name, edges):
     super().__init__()
+    self.mod = mod
+    self.func = func
+    self.func_name = func_name
     self.edges = edges
     self.codeblocks = InodeCodeBlockManager(func_name)
     # Track which hardware nodes already have an IMCE compute block added
@@ -722,7 +725,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         return
 
     annotation = f"send - {edge}, {out_edge_info.policy_info[0].router_id.name} -> {out_edge_info.policy_info[-1].router_id.name}"
-    block = SendBlock(db, out_edge_info, annotation)
+    block = SendBlock(self, db, out_edge_info, annotation)
     self.codeblocks.append(hid, block, phase)
   
   def add_send_block_interleaved(self, edge_list, phase: CodePhase):
@@ -764,7 +767,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     hid = self.get_hid(in_tid, edge.split_idx)
     db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
 
-    block = RecvBlock(db, in_edge_info.fifo_id, f"recv: {in_tid}")
+    block = RecvBlock(self, db, in_edge_info.fifo_id, f"recv: {in_tid}")
     self.codeblocks.append(hid, block, phase)
   
   def add_recv_block_interleaved(self, edge_list, phase: CodePhase):

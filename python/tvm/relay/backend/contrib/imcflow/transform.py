@@ -3130,10 +3130,7 @@ class MemoryAllocator:
                     tile_memory += tiled_size
                     tile_detail["inputs"].append((var_name, tile_height, tiled_size))
                 else:
-                  # Fallback: simple ceil division
-                  fallback_size = math.ceil(mem_block.size / tiling_factor)
-                  tile_memory += fallback_size
-                  tile_detail["inputs"].append((var_name, "fallback", fallback_size))
+                  raise ValueError(f"Input variable '{var_name}' not found in merged input tiles.")
 
               max_tile_memory = max(max_tile_memory, tile_memory)
               debug_tile_memories.append((tile_idx, tile_memory, tile_detail))
@@ -3145,6 +3142,8 @@ class MemoryAllocator:
                 debug_print(f"    Tile[{tile_idx}]: total={tile_mem}, outputs={detail['outputs']}, inputs={detail['inputs']}")
 
             # Check if this tiling factor works
+            size_for_inode_cnt = len(tensors['input'] + tensors['output']) * 32
+            max_tile_memory += size_for_inode_cnt
             if max_tile_memory <= ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
               debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (fits)")
               break
@@ -3256,16 +3255,16 @@ class MemoryAllocator:
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               # base address = origin_base + height_base * height_offset
               # cnt = height_size * height_offset / sizeof(int)
-              c_input_var_offsets = [base * height_offset for base in input_height_bases]
-              c_input_var_sizes = [h_size * height_offset // 4 for h_size in input_height_sizes]  # div by sizeof(int)=4
+              c_var_offsets = [base * height_offset for base in input_height_bases]
+              c_var_sizes = [h_size * height_offset // 4 for h_size in input_height_sizes]  # div by sizeof(int)=4
 
               block_tiling_info = BlockTileInfo()
               block_tiling_info.set_info(
                 height_base_coords=input_height_bases,
                 height_sizes=input_height_sizes,
                 pkt_cnts=pkt_cnts,
-                c_input_var_offsets=c_input_var_offsets,
-                c_input_var_sizes=c_input_var_sizes
+                c_var_offsets=c_var_offsets,
+                c_var_sizes=c_var_sizes
               )
               mem_block.tiling_info = block_tiling_info
 
@@ -3324,8 +3323,8 @@ class MemoryAllocator:
                 height_base_coords=output_tile_bases,
                 height_sizes=output_tile_sizes,
                 pkt_cnts=pkt_cnts,
-                c_input_var_offsets=c_output_var_offsets,
-                c_input_var_sizes=c_output_var_sizes
+                c_var_offsets=c_output_var_offsets,
+                c_var_sizes=c_output_var_sizes
               )
               mem_block.tiling_info = block_tiling_info
 
