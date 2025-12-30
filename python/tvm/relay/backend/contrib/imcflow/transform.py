@@ -3267,7 +3267,7 @@ class MemoryAllocator:
                 c_input_var_offsets=c_input_var_offsets,
                 c_input_var_sizes=c_input_var_sizes
               )
-              mem_block.block_tiling_info = block_tiling_info
+              mem_block.tiling_info = block_tiling_info
 
               # add edge info and allocate
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block, block_tiling_info=block_tiling_info))
@@ -3327,7 +3327,7 @@ class MemoryAllocator:
                 c_input_var_offsets=c_output_var_offsets,
                 c_input_var_sizes=c_output_var_sizes
               )
-              mem_block.block_tiling_info = block_tiling_info
+              mem_block.tiling_info = block_tiling_info
 
               # add edge info and allocate
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block, block_tiling_info=block_tiling_info))

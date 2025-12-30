@@ -660,10 +660,16 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           split_out_tensor_id = TensorID(dst_node_graph_id, "odata")
           output_edges = [edge for edge in DevConfig().TensorEdgetoInfo.keys() if getInnerNodeID(edge.src_id.graph_node_id) == getInnerNodeID(split_out_tensor_id.graph_node_id)]
           for output_edge in output_edges:
-            send_count = math.ceil(block.size / 32)
+            if block.tiling_info:
+              send_count = sum(block.tiling_info.pkt_cnts)
+            else:
+              send_count = math.ceil(block.size / 32)
             add_to_map(send_map, output_edge, send_count)
         else:
-          send_count = math.ceil(block.size / 32)
+          if block.tiling_info:
+            send_count = sum(block.tiling_info.pkt_cnts)
+          else:
+            send_count = math.ceil(block.size / 32)
           add_to_map(send_map, edge, send_count)
 
 
@@ -680,13 +686,21 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       elif isinstance(block, RecvBlockInterleaved):
         for db in block.blocks:
           edge = db.id
-          recv_count = math.ceil(db.size / 32)
+          # recv_count = math.ceil(db.size / 32)
+          if db.tiling_info:
+            recv_count = sum(db.tiling_info.pkt_cnts)
+          else:
+            recv_count = math.ceil(db.size / 32)
           add_to_map(self.recv_map, edge, recv_count)
 
       elif isinstance(block, RecvBlock):
         edge = block.block.id
         # Calculate actual number of recv operations (loop count)
-        recv_count = math.ceil(block.block.size / 32)
+        # recv_count = math.ceil(block.block.size / 32)
+        if block.block.tiling_info:
+          recv_count = sum(block.block.tiling_info.pkt_cnts)
+        else:
+          recv_count = math.ceil(block.block.size / 32)
         add_to_map(self.recv_map, edge, recv_count)
 
   def add_send_block(self, edge, phase: CodePhase, db=None):
