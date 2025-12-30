@@ -100,15 +100,41 @@ class RecvBlock(InodeCodeBlock):
     self.builder = builder
     self.block = block
     self.fifo_id = fifo_id
-    self._build()
+    if self.block.tiling_info is not None:
+      self._build_tiled()
+    else:
+      self._build()
 
   def _build(self):
     recv_count = math.ceil(self.block.size / 32)
     var = UniqueVar("recv_data_base_address", dtype="int")
-    
+
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
     self.body.add(SimpleFor(recv_count,
                       lambda iter: f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {self.fifo_id});"))
+
+  def _build_tiled(self):
+    fifo_id = self.fifo_id
+    if isinstance(self.block.id, list):
+      block_id = self.block.id[0]
+    else:
+      block_id = self.block.id
+    assert isinstance(block_id, TensorEdge), "Tiled recv block must be a tensor edge"
+    target_edge = block_id
+
+    cnt_addr_var = UniqueVar(f"{target_edge.simple_name()}_recv_data_base_address", dtype="int", pointer_type=True)
+    _recv_cnt_address_block = DevConfig().MemLayout[self.builder.func_name].get_data_block_by_id(f"{target_edge.simple_name()}_cnt_base_addr")
+    _recv_cnt_address = _recv_cnt_address_block.offset
+    self.body.add(TextBlock(f"{cnt_addr_var} = (int*)({_recv_cnt_address});"))
+
+    loop_cnt_var = UniqueVar(f"{target_edge.simple_name()}_tile_loop_count", dtype="int")
+    base_var = UniqueVar("recv_data_base_address", dtype="int")
+    self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
+
+    self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+    self.body.add(SimpleFor(loop_cnt_var,
+                      lambda iter, base_addr_var=base_var, fid=fifo_id:
+                        f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});"))
 
 
 class RecvBlockInterleaved(InodeCodeBlock):
