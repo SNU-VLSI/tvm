@@ -161,7 +161,10 @@ class SendBlock(InodeCodeBlock):
     super().__init__(annotation)
     self.block = block
     self.edge_info = edge_info
-    self._build()
+    if self.block.tiling_info is not None:
+      self._build_tiled()
+    else:
+      self._build()
 
   def _build(self):
     recv_count = math.ceil(self.block.size / 32)
@@ -173,6 +176,17 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
     self.body.add(SimpleFor(recv_count,
                       lambda iter: f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});"))
+
+  def _build_tiled(self):
+    tiling_info = self.block.tiling_info
+    fifo_id = self.edge_info.fifo_id
+    assert fifo_id >= 0, "fifo id should be assigned to a positive id"
+    next_policy_addr = self.edge_info.policy_info[0].address
+
+    var = UniqueVar("send_data_base_address", dtype="int")
+
+    self.body.add(TextBlock(f"{var} = mem[{_send_cnt_address}];"))
+    self.body.add(TextBlock(f"{var} = mem[{_send_cnt_address}];"))
 
 
 class SendBlockInterleaved(InodeCodeBlock):

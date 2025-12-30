@@ -193,27 +193,27 @@ class FunctionInfo:
 class BlockTileInfo:
   """Tiling information for a data block"""
   def __init__(self):
-    self.height_base_coords  = [] # for tiling
-    self.height_sizes        = [] # for tiling
-    self.pkt_cnts            = [] # for tiling
-    self.c_input_var_offsets = [] # for tiling
-    self.c_input_var_sizes   = [] # for tiling
+    self.height_base_coords = [] # for tiling
+    self.height_sizes       = [] # for tiling
+    self.pkt_cnts           = [] # for tiling
+    self.c_var_offsets      = [] # for tiling
+    self.c_var_sizes        = [] # for tiling
   
   def set_info(self, height_base_coords: List[int]=None, 
                      height_sizes: List[int]=None, 
                      pkt_cnts: List[int]=None, 
-                     c_input_var_offsets: List[int]=None,
-                     c_input_var_sizes: List[int]=None):
+                     c_var_offsets: List[int]=None,
+                     c_var_sizes: List[int]=None):
     if height_base_coords is not None:
       self.height_base_coords = height_base_coords
     if height_sizes is not None:
       self.height_sizes = height_sizes
     if pkt_cnts is not None:
       self.pkt_cnts = pkt_cnts
-    if c_input_var_offsets is not None:
-      self.c_input_var_offsets = c_input_var_offsets
-    if c_input_var_sizes is not None:
-      self.c_input_var_sizes = c_input_var_sizes
+    if c_var_offsets is not None:
+      self.c_var_offsets = c_var_offsets
+    if c_var_sizes is not None:
+      self.c_var_sizes = c_var_sizes
 
 
 class DataBlock:
