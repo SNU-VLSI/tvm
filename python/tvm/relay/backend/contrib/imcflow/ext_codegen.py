@@ -18,6 +18,13 @@ IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
 INT_ACK_GEN_ADDR = 0
 INT_ACK_GEN_LEN = 0
 
+# Device paths
+IMCFLOW_DEVICE = "/dev/uio5"
+INT_ACK_GEN_DEVICE = "/dev/uio4"
+# Code generation constants
+CONST_TAGS = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
+ALIGNMENT_BYTES = 32
+
 def getInnerNodeID(graph_node_id):
   if isinstance(graph_node_id, tuple):
     return graph_node_id[1]
@@ -48,23 +55,22 @@ def dtype_to_cpp(dtype: str) -> str:
 
 
 class CodeWriter:
-  indent_level = 0
-
   def __init__(self, indent_str="  "):
     self.lines = []
     self.indent_str = indent_str
+    self.indent_level = 0
 
   def nextIndent(self):
-    CodeWriter.indent_level += 1
+    self.indent_level += 1
 
   def prevIndent(self):
-    CodeWriter.indent_level -= 1
+    self.indent_level -= 1
 
   def write(self, line=""):
     for line_ in line.split("\n"):
       if len(line_) > 0:
         self.lines.append(
-            f"{self.indent_str * CodeWriter.indent_level}{line_}")
+            f"{self.indent_str * self.indent_level}{line_}")
 
   def get_code(self):
     return "\n".join(self.lines)
@@ -81,8 +87,6 @@ class CodeWriter:
       return self
 
 def makeBaseAddrName(block):
-  const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
-
   if isinstance(block.id, str):
     return f"{block.id.upper()}_BASE_ADDR"
 
@@ -91,21 +95,15 @@ def makeBaseAddrName(block):
     edge = block.edges[0]  # Use first edge for naming
     graph_node_id = imcflow_transform.getInnerNodeID(edge.src_id.graph_node_id)
     node_id_str = str(graph_node_id).replace("-", "m")
-    if edge.src_id.tensor_type in const_tags:
+    if edge.src_id.tensor_type in CONST_TAGS:
       return f"{edge.src_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
     else:
       return f"{edge.dst_id.tensor_type.upper()}_{node_id_str}_BASE_ADDR"
 
   raise ValueError("Wrong data block type!")
 
-def makeConstArrayDecl(func, func_name):
-
+def makeConstArrayDecl(func, func_name, target_func):
   params = {}
-
-  func_info = DevConfig().ImcflowFuncMap.get(func_name, None)
-  if func_info is None: raise ValueError(f"Function {func_name} not found in ImcflowFuncMap")
-  target_func = func_info.func_node
-
   class ConstantCollector(tvm.relay.ExprVisitor):
       def __init__(self):
           super().__init__()
@@ -167,16 +165,12 @@ def getConstantIdx(func, node_id):
 
 def getCInputVarName(func, func_name, data_block):
   node_map = CustomIDToNode()
-  const_tags = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
 
   # Get first edge from edges list (handles both single TensorEdge and List[TensorEdge])
   assert data_block.edges, "data_block must have at least one TensorEdge to get C input var name"
 
   edge = data_block.edges[0]
-  if edge.src_id.tensor_type in const_tags:
-    graph_node_inner_id = imcflow_transform.getInnerNodeID(edge.src_id.graph_node_id)
-  else:
-    graph_node_inner_id = imcflow_transform.getInnerNodeID(edge.src_id.graph_node_id)
+  graph_node_inner_id = imcflow_transform.getInnerNodeID(edge.src_id.graph_node_id)
 
   node_type = node_map[graph_node_inner_id]
   if isinstance(node_type, Var):
@@ -196,142 +190,62 @@ def getObjectFileName(data_block, func_name=None):
   else:
     return f"_binary_{data_block.id}_bin"
 
-def generateToNpuTransferCode(func, func_name, blocks, address_macros):
-  code = CodeWriter()
-  code += "// Transfer data into NPU memory\n"
-  for block in blocks:
-    base_address = block.base_address
-    base_address_name = makeBaseAddrName(block)
-    address_macros.update({base_address_name: base_address})
-    if isinstance(block.id, str):
-      var_prefix = getObjectFileName(block, func_name)
-      code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){var_prefix}_start)[i];\n"
-      code += f"}}\n"
-    else:
-      size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
-      numel = math.ceil(size/4)
-      code += f"for(int i=0; i<{numel}; i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){getCInputVarName(func, func_name, block)})[i];\n"
-      code += f"}}\n"
-  return code
 
 
-def generateFromNpuTransferCode(data_blocks, address_macros):
-  code = CodeWriter()
-  code += "// Transfer data from NPU memory\n"
-  for block in data_blocks:
-    assert "func_out" in block.id.dst_id.tensor_type, "output data block must have 'func_out' in tensor_type"
-    idx = block.id.dst_id.tensor_type.replace("func_out", "")
-    size = align_to_n_bytes(block.size, 32)  # 32bytes alignment
-    base_address = block.base_address
-    base_address_name = makeBaseAddrName(block)
-    address_macros.update({base_address_name: base_address})
-    numel = math.ceil(size/4)
-    code += f"for(int i=0; i<{numel}; i++){{\n"
-    code += f"  ((uint32_t*)out{idx})[i] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
-    code += f"}}\n"
-  return code
+class KernelCodeGenerator:
+  """Code generator for IMCFlow kernel functions."""
 
+  def __init__(self, func_name, func, os="linux"):
+    """
+    Initialize the kernel code generator.
 
-def generateBaseAddrMacros(base_address_macros):
-  code = CodeWriter()
-  for key, value in base_address_macros.items():
-    code += f"#define {key} {value}\n"
-  code += "\n"
-  return code
+    Parameters:
+      func_name: Name of the function to generate code for
+      func: Relay function (wrap function)
+      os: Target OS ("linux" or "baremetal")
+    """
+    self.func_name = func_name
+    self.func = func
+    self.os = os
 
-def generateExternLink(func_name, compiled_blocks):
-  code = CodeWriter()
-  code += 'extern "C" { \n'
-  for block in compiled_blocks:
-    if isinstance(block.id, str):
-      filename = f"_binary_{func_name}_{block.id}_bin"
-      code += f'  extern const int32_t {filename}_start[];\n'
-      code += f'  extern const int32_t {filename}_end[];\n'
-  code += '}\n'
-  return code
+    # Get target function info
+    self.target_func_info = DevConfig().ImcflowFuncMap.get(func_name, None)
+    if self.target_func_info is None:
+      raise ValueError(f"Function {func_name} not found in ImcflowFuncMap")
+    self.target_func = self.target_func_info.func_node
 
+    # Get data blocks
+    self.compiled_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["compiled"]
+    self.const_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["const"]
+    self.input_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["input"]
+    self.output_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["output"]
 
-def generatePackedFuncWrapper(func_name, input_node_types, output_node_types):
-  code = CodeWriter()
-  # PackedFunc wrapper for CRT
-  code += "#ifdef __cplusplus\n"
-  code += "extern \"C\"\n"
-  code += "#endif\n"
-  code += f"TVM_DLL int32_t {func_name}(void* args, int32_t* arg_type_ids, int32_t num_args, void* out_ret_value, int32_t* out_ret_tcode, void* resource_handle) {{\n"
-  code.nextIndent()
-  code += "(void)resource_handle;\n"
-  code += "if (num_args < 2) return -1;\n"
+    # Initialize base address macros
+    self.base_address_macros = {
+        "IMCFLOW_ADDR": IMCFLOW_ADDR,
+        "IMCFLOW_LEN": IMCFLOW_LEN,
+        "INT_ACK_GEN_ADDR": INT_ACK_GEN_ADDR,
+        "INT_ACK_GEN_LEN": INT_ACK_GEN_LEN,
+        "IMCFLOW_DEVICE": f'"{IMCFLOW_DEVICE}"',
+        "INT_ACK_GEN_DEVICE": f'"{INT_ACK_GEN_DEVICE}"',
+        "SET_IDLE_CODE": 0,
+        "SET_RUN_CODE": 1,
+        "SET_PROGRAM_CODE": 2,
+        "STATE_REG_IDX": 0,
+        "PC_REG_IDX": 2,
+        "INODE_PC_START_P1_ENUM_VAL": 0,
+        "INODE_PC_START_EXTERN_ENUM_VAL": 1,
+        "INODE_PC_START_P0_ENUM_VAL": 2,
+        "INODE_NUM": ImcflowDeviceConfig().INODE_NUM,
+    }
 
-  num_in_args = len(input_node_types)
-  num_out_args = len(output_node_types)
+    # Get input/output node types
+    self.input_nodes = [n for n in imcflow_transform.getInputNodesOfFunc(func)]
+    self.input_node_types = [n.checked_type.dtype for n in self.input_nodes]
+    self.output_node = imcflow_transform.getOutputNodeOfFunc(func)
+    self.output_node_types = self._node_types_to_list(self.output_node)
 
-  # get input and output data pointers
-  for idx in range(num_in_args):
-    code += f"void* _in{idx} = (((TVMValue*)args)[{idx}].v_handle);\n"
-    code += f"DLTensor* in{idx} = (DLTensor*)_in{idx};\n"
-  for idx in range(num_out_args):
-    code += f"void* _out{idx} = (((TVMValue*)args)[{idx + num_in_args}].v_handle);\n"
-    code += f"DLTensor* out{idx} = (DLTensor*)_out{idx};\n"
-
-  # call kernel function
-  args_list = []
-  for idx, i_type in enumerate(input_node_types):
-    args_list.append(f"({dtype_to_cpp(i_type)}*)in{idx}->data")
-  for idx, o_type in enumerate(output_node_types):
-    args_list.append(f"({dtype_to_cpp(o_type)}*)out{idx}->data")
-  code += f"{func_name}_kernel({', '.join(args_list)});\n"
-
-  code += "(void)out_ret_value;\n"
-  code += "if (out_ret_tcode) { *out_ret_tcode = kTVMArgInt; }\n"
-  code += "return 0;\n"
-  code.prevIndent()
-  code += "}\n"
-  return code
-
-
-def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
-  """
-  func : wrap function
-  """
-  imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
-  target_func_info = imcflow_func_map[func_name]
-  target_func = target_func_info.func_node
-  base_address_macros = {
-      "IMCFLOW_ADDR": IMCFLOW_ADDR,
-      "IMCFLOW_LEN": IMCFLOW_LEN,
-      "INT_ACK_GEN_ADDR": INT_ACK_GEN_ADDR,
-      "INT_ACK_GEN_LEN": INT_ACK_GEN_LEN,
-      "IMCFLOW_DEVICE": "\"/dev/uio5\"",
-      "INT_ACK_GEN_DEVICE": "\"/dev/uio4\"",
-      "SET_IDLE_CODE": 0,
-      "SET_RUN_CODE": 1,
-      "SET_PROGRAM_CODE": 2,
-      "STATE_REG_IDX": 0,
-      "PC_REG_IDX": 2,
-      "INODE_PC_START_P1_ENUM_VAL": 0,
-      "INODE_PC_START_EXTERN_ENUM_VAL": 1,
-      "INODE_PC_START_P0_ENUM_VAL": 2,
-      "INODE_NUM": ImcflowDeviceConfig().INODE_NUM,
-  }
-  proto_list = []
-  for i, param in enumerate(func.params):
-    # param_name = param.name_hint if param.name_hint else f"arg{i}"
-    impl_param = target_func.params[i]
-    param_name = impl_param.name_hint if impl_param.name_hint else f"arg{i}"
-    dtype = "float32"
-    if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
-      dtype = param.checked_type.dtype
-      cpp_type = dtype_to_cpp(dtype)
-      proto_list.append(f"{cpp_type}* {param_name}")
-
-  # we need real type, so use wrap function
-  input_nodes = [n for n in imcflow_transform.getInputNodesOfFunc(func)]
-  input_node_types = [n.checked_type.dtype for n in input_nodes]
-  output_node = imcflow_transform.getOutputNodeOfFunc(func)
-
-  def node_types_to_list(node):
+  def _node_types_to_list(self, node):
     """Extract dtype(s) from a node's checked_type into a list."""
     checked_type = node.checked_type
     if isinstance(checked_type, TupleType):
@@ -341,53 +255,9 @@ def makeKernelDef(func_name, func, compiled_blocks, data_blocks, os="linux"):
     else:
       raise TypeError(f"unsupported node type {checked_type.__class__}")
 
-  output_node_types = node_types_to_list(output_node)
-
-  for idx, node_type in enumerate(output_node_types):
-    proto_list.append(f"{dtype_to_cpp(node_type)}* out{idx}")
-
-  args_proto_type = ", ".join(proto_list)
-
-  code = CodeWriter()
-  code += generateHeader()
-  code += generateExternLink(func_name, compiled_blocks)
-  code += makeConstArrayDecl(func, func_name)
-  code += generateInterruptUtilities()
-
-  # Kernel function prototype and definition (C)
-  code += f"void {func_name}_kernel({args_proto_type}) {{\n"
-  code += f"printf(\"{func_name}_kernel called\\n\");\n"
-  code.nextIndent()
-  code += generateDevicePointerSetup(os)
-  code += generateToNpuTransferCode(func, func_name, compiled_blocks, base_address_macros) # inode instrunction + policy
-  code += generateToNpuTransferCode(func, func_name, data_blocks[0], base_address_macros) # constant
-  code += generatePolicyUpdateCode(os) # start from pc 0, up to halt
-  code += generateInvokeCode(os) # proceed up to halt
-  code += generateToNpuTransferCode(func, func_name, data_blocks[1], base_address_macros) # input
-  code += generateInvokeCode(os) # end of exec
-  code += generateFromNpuTransferCode(data_blocks[2], base_address_macros)
-  code += generateDevicePointerCleanup(os)
-  code.prevIndent()
-  code += '}\n'
-
-  code += generatePackedFuncWrapper(func_name,
-                                    input_node_types, output_node_types)
-  code = generateBaseAddrMacros(base_address_macros) + code
-
-  return code
-
-
-def makeKernelStartCode(func_name, func, os):
-  compiled_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["compiled"]
-  data_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["const"], ImcflowDeviceConfig().DataBlocks[func_name]["input"], ImcflowDeviceConfig().DataBlocks[func_name]["output"]
-  kernel_def = makeKernelDef(func_name, func, compiled_blocks, data_blocks, os)
-  code = kernel_def
-
-  return str(code)
-
-
-def generateHeader():
-  return ("""
+  def generateHeader(self):
+    """Generate C header includes."""
+    return ("""
 #include <stdlib.h>
 #include <string.h>
 #include <tvm/runtime/c_runtime_api.h>
@@ -401,9 +271,9 @@ def generateHeader():
 #include <unistd.h>
 """)
 
-
-def generateInterruptUtilities():
-  return ("""
+  def generateInterruptUtilities(self):
+    """Generate interrupt handling utility functions."""
+    return ("""
 static inline void enable_imcflow_interrupt(int fd)
 {
   uint32_t info = 1;
@@ -427,13 +297,10 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 }
 """)
 
-
-def generateDevicePointerSetup(os="linux"):
-  """
-  os: linux or baremetal
-  """
-  if os == "linux":
-    return ("""
+  def generateDevicePointerSetup(self):
+    """Generate device pointer setup code based on OS."""
+    if self.os == "linux":
+      return ("""
   int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
   if (npu_fd < 0) {
     perror("npu UIO cannot be opened");
@@ -466,59 +333,206 @@ def generateDevicePointerSetup(os="linux"):
     exit(1);
   }
   """)
-  elif os == "baremetal":
-    return (f"""
+    elif self.os == "baremetal":
+      return (f"""
     uint32_t* npu_pointer = (uint32_t*)IMCFLOW_ADDR;
     uint32_t* int_ack_gen_pointer = (uint32_t*)INT_ACK_GEN_ADDR;
 """)
+    else:
+      raise ValueError("Unsupported OS type for device pointer setup!")
 
-  else:
-    raise ValueError("Unsupported OS type for device pointer setup!")
+  def generatePolicyUpdateCode(self):
+    """Generate policy update code."""
+    out = [
+      "// Set the inode pc to 0 and run.",
+      "for(int i=0; i<INODE_NUM; i++) {",
+      "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
+      "}",
+      "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      " *(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;",
+      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
+      "npu_pointer[7] = 1;",
+    ]
+    return "\n".join(out) + "\n"
 
-def generatePolicyUpdateCode(os="linux"):
-  out = \
-  [
-    "// Set the inode pc to 0 and run.",
-    "for(int i=0; i<INODE_NUM; i++) {",
-    "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
-    "}",
-    "enable_imcflow_interrupt(npu_fd);" if os == "linux" else "",
-    " *(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;",
-    "wait_imcflow_interrupt(npu_fd);" if os == "linux" else "",
-    "generate_ack(int_ack_gen_pointer);" if os == "linux" else "",
-    "npu_pointer[7] = 1;",
-  ]
+  def generateInvokeCode(self):
+    """Generate NPU invoke code."""
+    out = [
+      "for(int i=0; i<INODE_NUM; i++) {",
+      "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
+      "}",
+      "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      "*(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;",
+      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
+      "npu_pointer[7] = 1;"
+    ]
+    return "\n".join(out) + "\n"
 
-  return "\n".join(out) + "\n"
-
-
-def generateInvokeCode(os="linux"):
-  out = \
-  [
-    "for(int i=0; i<INODE_NUM; i++) {",
-    "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
-    "}",
-    "enable_imcflow_interrupt(npu_fd);" if os == "linux" else "",
-    "*(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;",
-    "wait_imcflow_interrupt(npu_fd);" if os == "linux" else "",
-    "generate_ack(int_ack_gen_pointer);" if os == "linux" else "",
-    "npu_pointer[7] = 1;"
-  ]
-
-  return "\n".join(out) + "\n"
-
-
-def generateDevicePointerCleanup(os="linux"):
-  if os == "linux":
-    return ("""
+  def generateDevicePointerCleanup(self):
+    """Generate device pointer cleanup code."""
+    if self.os == "linux":
+      return ("""
   // Cleanup device pointer
   munmap(npu_pointer, npu_len);
   close(npu_fd);
   munmap(int_ack_gen_pointer, int_ack_gen_len);
   close(int_ack_gen_fd);
   """)
-  else:
-    return ""
+    else:
+      return ""
+
+  def generateToNpuTransferCode(self, blocks):
+    """Generate code to transfer data to NPU memory."""
+    code = CodeWriter()
+    code += "// Transfer data into NPU memory\n"
+    for block in blocks:
+      base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      self.base_address_macros.update({base_address_name: base_address})
+      if isinstance(block.id, str):
+        var_prefix = getObjectFileName(block, self.func_name)
+        code += f"for(int i=0; i<(size_t)({var_prefix}_end-{var_prefix}_start); i++){{\n"
+        code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){var_prefix}_start)[i];\n"
+        code += f"}}\n"
+      else:
+        size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
+        numel = math.ceil(size/4)
+        code += f"for(int i=0; i<{numel}; i++){{\n"
+        code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){getCInputVarName(self.func, self.func_name, block)})[i];\n"
+        code += f"}}\n"
+    return code
+
+  def generateFromNpuTransferCode(self, data_blocks):
+    """Generate code to transfer data from NPU memory."""
+    code = CodeWriter()
+    code += "// Transfer data from NPU memory\n"
+    for block in data_blocks:
+      assert "func_out" in block.id.dst_id.tensor_type, "output data block must have 'func_out' in tensor_type"
+      idx = block.id.dst_id.tensor_type.replace("func_out", "")
+      size = align_to_n_bytes(block.size, ALIGNMENT_BYTES)
+      base_address = block.base_address
+      base_address_name = makeBaseAddrName(block)
+      self.base_address_macros.update({base_address_name: base_address})
+      numel = math.ceil(size/4)
+      code += f"for(int i=0; i<{numel}; i++){{\n"
+      code += f"  ((uint32_t*)out{idx})[i] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
+      code += f"}}\n"
+    return code
+
+  def generateBaseAddrMacros(self):
+    """Generate base address macro definitions."""
+    code = CodeWriter()
+    for key, value in self.base_address_macros.items():
+      code += f"#define {key} {value}\n"
+    code += "\n"
+    return code
+
+  def generateExternLink(self):
+    """Generate extern C linkage declarations for compiled blocks."""
+    code = CodeWriter()
+    code += 'extern "C" { \n'
+    for block in self.compiled_blocks:
+      if isinstance(block.id, str):
+        filename = f"_binary_{self.func_name}_{block.id}_bin"
+        code += f'  extern const int32_t {filename}_start[];\n'
+        code += f'  extern const int32_t {filename}_end[];\n'
+    code += '}\n'
+    return code
+
+  def generatePackedFuncWrapper(self):
+    """Generate PackedFunc wrapper for CRT."""
+    code = CodeWriter()
+    code += "#ifdef __cplusplus\n"
+    code += "extern \"C\"\n"
+    code += "#endif\n"
+    code += f"TVM_DLL int32_t {self.func_name}(void* args, int32_t* arg_type_ids, int32_t num_args, void* out_ret_value, int32_t* out_ret_tcode, void* resource_handle) {{\n"
+    code.nextIndent()
+    code += "(void)resource_handle;\n"
+    code += "if (num_args < 2) return -1;\n"
+
+    num_in_args = len(self.input_node_types)
+    num_out_args = len(self.output_node_types)
+
+    # get input and output data pointers
+    for idx in range(num_in_args):
+      code += f"void* _in{idx} = (((TVMValue*)args)[{idx}].v_handle);\n"
+      code += f"DLTensor* in{idx} = (DLTensor*)_in{idx};\n"
+    for idx in range(num_out_args):
+      code += f"void* _out{idx} = (((TVMValue*)args)[{idx + num_in_args}].v_handle);\n"
+      code += f"DLTensor* out{idx} = (DLTensor*)_out{idx};\n"
+
+    # call kernel function
+    args_list = []
+    for idx, i_type in enumerate(self.input_node_types):
+      args_list.append(f"({dtype_to_cpp(i_type)}*)in{idx}->data")
+    for idx, o_type in enumerate(self.output_node_types):
+      args_list.append(f"({dtype_to_cpp(o_type)}*)out{idx}->data")
+    code += f"{self.func_name}_kernel({', '.join(args_list)});\n"
+
+    code += "(void)out_ret_value;\n"
+    code += "if (out_ret_tcode) { *out_ret_tcode = kTVMArgInt; }\n"
+    code += "return 0;\n"
+    code.prevIndent()
+    code += "}\n"
+    return code
+
+  def makeKernelDef(self):
+    """Generate the complete kernel definition."""
+    # Build function prototype
+    proto_list = []
+    for i, param in enumerate(self.func.params):
+      impl_param = self.target_func.params[i]
+      param_name = impl_param.name_hint if impl_param.name_hint else f"arg{i}"
+      dtype = "float32"
+      if hasattr(param, "checked_type") and isinstance(param.checked_type, TensorType):
+        dtype = param.checked_type.dtype
+        cpp_type = dtype_to_cpp(dtype)
+        proto_list.append(f"{cpp_type}* {param_name}")
+
+    for idx, node_type in enumerate(self.output_node_types):
+      proto_list.append(f"{dtype_to_cpp(node_type)}* out{idx}")
+
+    args_proto_type = ", ".join(proto_list)
+
+    code = CodeWriter()
+    code += self.generateHeader()
+    code += self.generateExternLink()
+    code += makeConstArrayDecl(self.func, self.func_name, self.target_func)
+    code += self.generateInterruptUtilities()
+
+    # Kernel function prototype and definition (C)
+    code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
+    code += f"printf(\"{self.func_name}_kernel called\\n\");\n"
+    code.nextIndent()
+    code += self.generateDevicePointerSetup()
+    code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
+    code += self.generateToNpuTransferCode(self.const_blocks) # constant
+    code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
+    code += self.generateInvokeCode() # proceed up to halt
+
+    # kernel tiling factor
+    tile_factor = self.target_func_info.tiling_factor
+    for t_idx in range(tile_factor):
+      code += self.generateToNpuTransferCode(self.input_blocks) # input
+      code += self.generateInvokeCode() # end of exec
+      code += self.generateFromNpuTransferCode(self.output_blocks)
+    code += self.generateDevicePointerCleanup()
+    code.prevIndent()
+    code += '}\n'
+
+    code += self.generatePackedFuncWrapper()
+    code = self.generateBaseAddrMacros() + code
+
+    return code
+
+
+def makeKernelStartCode(func_name, func, os="linux"):
+  """Generate kernel start code using KernelCodeGenerator class."""
+  generator = KernelCodeGenerator(func_name, func, os)
+  code = generator.makeKernelDef()
+  return str(code)
 
 def generate_invoke_code_for_subgraphs(mod):
   invoke_code_map = {}
