@@ -197,6 +197,9 @@ class CodegenSuite:
     # add sync logic after INIT Phase
     inode_builder.sync_inrt_clear(CodePhase.INIT)
 
+    # dump block structures
+    inode_builder.dump_block_structure(self.model_dir, func_name)
+
     DeviceCodegen("inode", self.build_dir, self.host_isa).handle_code_generation(
         func_name, inode_builder.codeblocks)
 
@@ -440,6 +443,46 @@ class InternalEdgeAnnotator(tvm.relay.ExprVisitor):
       return TensorID(getNodeID(call), tag)
 
 
+def _collect_block_lines(block, output_lines, indent=0):
+  """Helper function to recursively collect block information for dumping.
+
+  This is shared between ImceCodeBlockBuilder and InodeCodeBlockBuilder.
+  """
+  # Skip if block is a lambda function (used in SimpleFor body)
+  if callable(block) and not isinstance(block, CodeBlock):
+    prefix = " " * indent
+    output_lines.append(f"{prefix}- Lambda function")
+    return
+
+  prefix = " " * indent
+  block_type = type(block).__name__
+  try:
+    graph_node_id = block.get_graph_node_id()
+  except:
+    graph_node_id = "N/A"
+  annotation = getattr(block, "annotation", "")
+  annotation += f" (graph_node_id: {graph_node_id})"
+  annotation += f", {block.dump()}"
+  output_lines.append(f"{prefix}- {block_type} : {annotation}")
+
+  # Handle nested blocks
+  if isinstance(block, SequentialBlock):
+    for child in block.blocks:
+      _collect_block_lines(child, output_lines, indent + 2)
+  elif isinstance(block, SimpleFor):
+    _collect_block_lines(block.body, output_lines, indent + 2)
+  elif isinstance(block, LoadLBBlock):
+    _collect_block_lines(block.body, output_lines, indent + 2)
+  elif isinstance(block, RecvSendWrapper):
+    _collect_block_lines(block.body, output_lines, indent + 2)
+  elif isinstance(block, ConvBlock):
+    _collect_block_lines(block.body, output_lines, indent + 2)
+  elif isinstance(block, InodeCodeBlock):
+    # InodeCodeBlock has a body attribute that is a SequentialBlock
+    if hasattr(block, 'body') and isinstance(block.body, SequentialBlock):
+      _collect_block_lines(block.body, output_lines, indent + 2)
+
+
 class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
   """Visitor that generates IMCE code blocks from relay operations.
 
@@ -518,7 +561,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
         if not blocks: continue
         output_lines.append(f"  Phase: {phase}")
         for block in blocks:
-          self._collect_block_lines(block, output_lines, indent=4)
+          _collect_block_lines(block, output_lines, indent=4)
     output_lines.append("="*40)
 
     # Print to console
@@ -530,30 +573,6 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     with open(output_file, "a") as f:
       f.write("\n".join(output_lines) + "\n")
     print(f"Block structure appended to: {output_file}")
-
-  def _collect_block_lines(self, block, output_lines, indent=0):
-    prefix = " " * indent
-    block_type = type(block).__name__
-    try:
-      graph_node_id = block.get_graph_node_id()
-    except:
-      graph_node_id = "N/A"
-    annotation = getattr(block, "annotation", "")
-    annotation += f" (graph_node_id: {graph_node_id})"
-    annotation += f", {block.dump()}"
-    output_lines.append(f"{prefix}- {block_type} : {annotation}")
-
-    if isinstance(block, SequentialBlock):
-      for child in block.blocks:
-        self._collect_block_lines(child, output_lines, indent + 2)
-    elif isinstance(block, SimpleFor):
-      self._collect_block_lines(block.body, output_lines, indent + 2)
-    elif isinstance(block, LoadLBBlock):
-      self._collect_block_lines(block.body, output_lines, indent + 2)
-    elif isinstance(block, RecvSendWrapper):
-      self._collect_block_lines(block.body, output_lines, indent + 2)
-    elif isinstance(block, ConvBlock):
-      self._collect_block_lines(block.body, output_lines, indent + 2)
   
   def construct_recv_send_map(self):
     """
@@ -657,6 +676,35 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     block = SetFlagAndHaltBlock()
     for inode_slv in inode_slaves:
       self.codeblocks.append(inode_slv, block, CodePhase.END)
+
+  def dump_block_structure(self, dir_name, func_name):
+    output_lines = []
+    output_lines.append("="*40)
+    output_lines.append(f"[INODE CODE BUILDER] Dumping block structure for {func_name}")
+
+    # Sort hids for deterministic output
+    sorted_hids = sorted(self.codeblocks.blocks.keys(), key=lambda x: str(x))
+
+    for hid in sorted_hids:
+      phases = self.codeblocks.blocks[hid]
+      output_lines.append(f"Node: {hid}")
+      for phase in sorted(phases.keys(), key=lambda x: ["INIT", "EXEC", "END"].index(x.name)):
+        blocks = phases[phase]
+        if not blocks: continue
+        output_lines.append(f"  Phase: {phase}")
+        for block in blocks:
+          _collect_block_lines(block, output_lines, indent=4)
+    output_lines.append("="*40)
+
+    # Print to console
+    for line in output_lines:
+      print(line)
+
+    # Write to file (append mode to collect all functions)
+    output_file = os.path.join(dir_name, "block_structure.txt")
+    with open(output_file, "a") as f:
+      f.write("\n".join(output_lines) + "\n")
+    print(f"Block structure appended to: {output_file}")
 
   def visit_function(self, fn):
     # constant tensor tags except "weight" (IMCU weights are handled separately)
