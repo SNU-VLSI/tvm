@@ -2855,6 +2855,7 @@ class MemoryAllocator:
           Returns:
               (new_output_tile_specs, new_trimmed_input_tiles)
           """
+          debug_print("  Applying input sub-tiling due to memory limit")
           # Get memory per row for each input variable
           input_mem_per_row = {}
           for edge, height, width, channels, elem_size, inode_name, mem_block, var_name in input_tensor_info:
@@ -3162,7 +3163,6 @@ class MemoryAllocator:
           # 4. Calculate memory using ceil formula
           # 5. If full output tiling fails, apply hierarchical input sub-tiling
           layout_map = ImcflowDeviceConfig().LayoutMap
-          tiling_factor = 1
 
           # Collect output tensor info: [(edge, height, width, channels, elem_size, inode_name, mem_block)]
           output_tensor_info = []

@@ -44,6 +44,8 @@ SMALL_MODELS = {
     "big_conv_quant_conv": models_for_test.getBigConvQuantConvModel,
     "multi_io": lambda: models_for_test.getMultiInputOutputModel(height=8, width=8),
     "multi_io_large": lambda: models_for_test.getMultiInputOutputModel(height=32, width=32),
+    # Models designed to trigger sub-tiling
+    "wide_conv"   : lambda:models_for_test.getWideConvModel(height=64, width=128, in_channels=28, channels=64),
 }
 
 
@@ -212,8 +214,8 @@ def print_tensor_edge_info(verbose=True):
             print(f"  height_base_coords: {ti.height_base_coords}")
             print(f"  height_sizes: {ti.height_sizes}")
             print(f"  pkt_cnts: {ti.pkt_cnts}")
-            print(f"  c_input_var_offsets: {ti.c_input_var_offsets}")
-            print(f"  c_input_var_sizes: {ti.c_input_var_sizes}")
+            print(f"  c_var_offsets: {ti.c_var_offsets}")
+            print(f"  c_var_sizes: {ti.c_var_sizes}")
         elif hasattr(info, 'height_base_coords'):
             print(f"  height_base_coords: {info.get_height_base_coords()}")
             print(f"  height_sizes: {info.get_height_sizes()}")
@@ -287,8 +289,8 @@ def test_memory_allocator(model_name="one_conv_quant", output_dir=None):
                 print(f"    height_base_coords: {ti.height_base_coords}", file=f)
                 print(f"    height_sizes: {ti.height_sizes}", file=f)
                 print(f"    pkt_cnts: {ti.pkt_cnts}", file=f)
-                print(f"    c_input_var_offsets: {ti.c_input_var_offsets}", file=f)
-                print(f"    c_input_var_sizes: {ti.c_input_var_sizes}", file=f)
+                print(f"    c_var_offsets: {ti.c_var_offsets}", file=f)
+                print(f"    c_var_sizes: {ti.c_var_sizes}", file=f)
 
     print(f"\n✅ Test completed. Results saved to {output_dir}/")
 

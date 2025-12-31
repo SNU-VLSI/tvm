@@ -1613,3 +1613,212 @@ def getMultiInputOutputModel(height=8, width=8, random_param=False):
   }
 
   return out, params_dict
+
+
+def getLargeKernelConvModel(height=64, width=128, channels=128, kernel_size=7):
+  """
+  Model designed to trigger input sub-tiling in MemoryAllocator.
+
+  The memory required for a single output row is:
+    input_mem = channels * width * kernel_size * dtype_size
+
+  With default params (channels=128, width=128, kernel=7, uint8):
+    input_mem = 128 * 128 * 7 * 1 = 114,688 bytes > 64KB limit
+
+  This forces the allocator to sub-tile the input even when output
+  is already tiled to 1 row per tile.
+
+  Args:
+    height: Input/output height
+    width: Input/output width
+    channels: Number of channels
+    kernel_size: Kernel size (same for H and W)
+
+  Returns:
+    mod: TVM relay module
+    params_dict: Parameter dictionary
+  """
+  N = 1
+  IC = channels
+  OC = channels
+  H, W = height, width
+  KH, KW = kernel_size, kernel_size
+  padding = kernel_size // 2  # same padding
+  stride = 1
+
+  input_var = relay.var("input", shape=(N, IC, H, W), dtype="uint8")
+
+  # First conv with large kernel
+  y = imcflow_qconv2d(
+    input_var,
+    relay.var("weight1", shape=(OC, IC, KH, KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+
+  # Quantize
+  y = imcflow_min_max_quantize(
+    y,
+    relay.var("qmin", shape=(), dtype="int16"),
+    relay.var("qmax", shape=(), dtype="int16"),
+    axis=1, out_dtype="uint8", channel=OC
+  )
+
+  # Second conv with large kernel (cascaded to increase input requirements)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2", shape=(OC, OC, KH, KW), dtype="int8"),
+    ConfigData((N, OC, H, W), (OC, OC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=OC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+
+  out = tvm.IRModule.from_expr(y)
+
+  params_dict = {
+    "weight1": np.random.randint(-8, 8, size=(OC, IC, KH, KW), dtype=np.int8),
+    "qmin": np.array(-128, dtype="int16"),
+    "qmax": np.array(127, dtype="int16"),
+    "weight2": np.random.randint(-8, 8, size=(OC, OC, KH, KW), dtype=np.int8),
+  }
+
+  return out, params_dict
+
+
+def getStackedConvModel(height=64, width=64, channels=64, num_convs=4):
+  """
+  Model with stacked convolutions to trigger sub-tiling.
+
+  Multiple 3x3 convs stacked means the effective receptive field grows.
+  For num_convs=4 with 3x3 kernels:
+    - Conv1 needs 3 input rows per output row
+    - Conv2 needs 3 rows from Conv1 output = 5 input rows (with overlap)
+    - Conv3 needs 3 rows from Conv2 output = 7 input rows
+    - Conv4 needs 3 rows from Conv3 output = 9 input rows
+
+  With channels=64, width=64: 64 * 64 * 9 * 1 = 36,864 bytes
+  Increase width/channels to exceed 64KB.
+
+  Args:
+    height: Input height
+    width: Input width
+    channels: Number of channels
+    num_convs: Number of stacked convolutions
+
+  Returns:
+    mod: TVM relay module
+    params_dict: Parameter dictionary
+  """
+  N = 1
+  IC = channels
+  H, W = height, width
+  KH, KW = 3, 3
+  padding = 1
+  stride = 1
+
+  input_var = relay.var("input", shape=(N, IC, H, W), dtype="uint8")
+  y = input_var
+  params_dict = {}
+
+  for i in range(num_convs):
+    # Conv
+    weight_name = f"weight{i+1}"
+    y = imcflow_qconv2d(
+      y,
+      relay.var(weight_name, shape=(IC, IC, KH, KW), dtype="int8"),
+      ConfigData((N, IC, H, W), (IC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+      in_channels=IC,
+      channels=IC,
+      kernel_size=(KH, KW),
+      padding=(padding, padding),
+      out_dtype="int16"
+    )
+    params_dict[weight_name] = np.random.randint(-8, 8, size=(IC, IC, KH, KW), dtype=np.int8)
+
+    # Quantize (except for last conv)
+    if i < num_convs - 1:
+      qmin_name = f"qmin{i+1}"
+      qmax_name = f"qmax{i+1}"
+      y = imcflow_min_max_quantize(
+        y,
+        relay.var(qmin_name, shape=(), dtype="int16"),
+        relay.var(qmax_name, shape=(), dtype="int16"),
+        axis=1, out_dtype="uint8", channel=IC
+      )
+      params_dict[qmin_name] = np.array(-128, dtype="int16")
+      params_dict[qmax_name] = np.array(127, dtype="int16")
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, params_dict
+
+
+def getWideConvModel(height=64, width=128, in_channels=28, channels=64):
+  """
+  Model with wide spatial dimensions and many channels.
+
+  Memory per input row = channels * width * dtype_size
+  With channels=256, width=128, uint8: 256 * 128 * 1 = 32,768 bytes = 32KB
+
+  For 3x3 conv, we need 3 input rows per output row:
+    3 * 32,768 = 98,304 bytes > 64KB limit
+
+  This should trigger sub-tiling.
+
+  Note: Hardware constraint requires W <= 128 and H <= 128.
+
+  Args:
+    height: Input height (max 128)
+    width: Input width (max 128)
+    channels: Number of channels
+
+  Returns:
+    mod: TVM relay module
+    params_dict: Parameter dictionary
+  """
+  N = 1
+  IC = in_channels
+  OC = channels
+  H, W = height, width
+  KH, KW = 3, 3
+  padding = 1
+  stride = 1
+
+  input_var = relay.var("input", shape=(N, IC, H, W), dtype="uint8")
+
+  # Conv
+  y = imcflow_qconv2d(
+    input_var,
+    relay.var("weight", shape=(OC, IC, KH, KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+
+  # Quantize
+  y = imcflow_min_max_quantize(
+    y,
+    relay.var("qmin", shape=(), dtype="int16"),
+    relay.var("qmax", shape=(), dtype="int16"),
+    axis=1, out_dtype="uint8", channel=OC
+  )
+
+  out = tvm.IRModule.from_expr(y)
+
+  params_dict = {
+    "weight": np.random.randint(-8, 8, size=(OC, IC, KH, KW), dtype=np.int8),
+    "qmin": np.array(-128, dtype="int16"),
+    "qmax": np.array(127, dtype="int16"),
+  }
+
+  return out, params_dict
