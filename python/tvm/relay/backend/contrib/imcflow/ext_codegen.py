@@ -239,6 +239,7 @@ class KernelCodeGenerator:
         "SET_PROGRAM_CODE": 2,
         "STATE_REG_IDX": 0,
         "PC_REG_IDX": 2,
+        "INTR_DONE_REG_IDX": 7,
         "INODE_PC_START_P1_ENUM_VAL": 0,
         "INODE_PC_START_EXTERN_ENUM_VAL": 1,
         "INODE_PC_START_P0_ENUM_VAL": 2,
@@ -352,13 +353,13 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     out = [
       "// Set the inode pc to 0 and run.",
       "for(int i=0; i<INODE_NUM; i++) {",
-      "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
+      "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
-      " *(npu_pointer + STATE_REG_IDX) = SET_PROGRAM_CODE;",
+      " npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
       "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
-      "npu_pointer[7] = 1;",
+      "npu_pointer[INTR_DONE_REG_IDX] = 1;",
     ]
     return "\n".join(out) + "\n"
 
@@ -366,13 +367,13 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     """Generate NPU invoke code."""
     out = [
       "for(int i=0; i<INODE_NUM; i++) {",
-      "  *(npu_pointer + (PC_REG_IDX + i)) = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
+      "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
-      "*(npu_pointer + STATE_REG_IDX) = SET_RUN_CODE;",
+      "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
       "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
-      "npu_pointer[7] = 1;"
+        "npu_pointer[INTR_DONE_REG_IDX] = 1;"
     ]
     return "\n".join(out) + "\n"
 
@@ -417,11 +418,11 @@ static inline void generate_ack(uint32_t* int_ack_gen)
         loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
         src_var = f"{var_prefix}_start"
         code += f"for(int i={loop_start}; i<{loop_end}; i++){{\n"
-        code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){src_var})[i];\n"
+        code += f"  npu_pointer[({base_address_name} / 4) + i] = ((uint32_t*){src_var})[i];\n"
         code += f"}}\n"
       else:
         src_var = f"{var_prefix}_start"
-        code += f"*(npu_pointer + ({base_address_name} / 4)) = ((uint32_t*){src_var})[{tile_idx}];\n"
+        code += f"npu_pointer[({base_address_name} / 4)] = ((uint32_t*){src_var})[{tile_idx}];\n"
       return code
 
     def _appendLoopForCVarTransfer(code, block, base_address_name, func_name, tile_idx=None):
@@ -430,7 +431,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
       src_var = getCInputVarName(func_name, block)
 
       code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){src_var})[i + {loop_start}];\n"
+      code += f"  npu_pointer[({base_address_name} / 4) + i] = ((uint32_t*){src_var})[i + {loop_start}];\n"
       code += f"}}\n"
       return code
 
@@ -473,7 +474,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 
       # Generate loop code
       code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
-      code += f"  ((uint32_t*)out{idx})[i + {loop_start}] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
+      code += f"  ((uint32_t*)out{idx})[i + {loop_start}] = npu_pointer[({base_address_name} / 4) + i];\n"
       code += f"}}\n"
     return code
 
