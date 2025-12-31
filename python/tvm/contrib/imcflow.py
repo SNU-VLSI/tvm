@@ -163,7 +163,9 @@ class TensorEdge:
     return self.dst_id.inner_gid_match(graph_node_id)
   
   def simple_name(self):
-    name=f"s{self.src_id.graph_node_id}{self.src_id.tensor_type}_d{self.dst_id.graph_node_id}{self.dst_id.tensor_type}"
+    format_gid = lambda gid: f"{gid}" if not isinstance(gid, Tuple) else f"{gid[0]}_{gid[1]}"
+
+    name=f"s{format_gid(self.src_id.graph_node_id)}_d{format_gid(self.dst_id.graph_node_id)}{self.dst_id.tensor_type}"
     if self.split_idx is not None:
       name += f"_split{self.split_idx}"
     name = name.replace("-", "m")
