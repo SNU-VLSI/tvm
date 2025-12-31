@@ -413,16 +413,17 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     def _appendLoopForObjectFileTransfer(code, block, base_address_name, func_name, tile_idx=None):
       # Binary object file transfer
       var_prefix = getObjectFileName(block, func_name)
+      src_var = f"{var_prefix}_start"
       if tile_idx is None:
-        loop_start = 0
         loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
-        src_var = f"{var_prefix}_start"
-        code += f"for(int i={loop_start}; i<{loop_end}; i++){{\n"
+        code += f"for(int i=0; i<{loop_end}; i++){{\n"
         code += f"  npu_pointer[({base_address_name} / 4) + i] = ((uint32_t*){src_var})[i];\n"
         code += f"}}\n"
       else:
-        src_var = f"{var_prefix}_start"
-        code += f"npu_pointer[({base_address_name} / 4)] = ((uint32_t*){src_var})[{tile_idx}];\n"
+        code += f"  npu_pointer[({base_address_name} / 4)] = ((uint32_t*){src_var})[{tile_idx}];\n"
+        code += f"for(int i=1; i<8; i++){{\n"
+        code += f"  npu_pointer[({base_address_name} / 4) + i] = 0;\n"
+        code += f"}}\n"
       return code
 
     def _appendLoopForCVarTransfer(code, block, base_address_name, func_name, tile_idx=None):
