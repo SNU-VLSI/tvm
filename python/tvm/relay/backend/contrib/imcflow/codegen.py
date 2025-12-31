@@ -291,6 +291,33 @@ class CntBaseAddrCodegen:
     self.host_isa = host_isa
     self.func_dir = os.path.join(build_dir, func_name)
 
+  def write_readable_file(self, block_id, edge_simple_name, pkt_cnts, bin_file):
+    """Write a human-readable text file corresponding to the binary file."""
+    txt_file = f"{block_id}.txt"
+    txt_path = os.path.join(self.func_dir, txt_file)
+
+    with open(txt_path, "w") as file:
+      file.write(f"Counter Base Address Block: {block_id}\n")
+      file.write(f"Edge: {edge_simple_name}\n")
+      file.write(f"Binary file: {bin_file}\n")
+      file.write("=" * 60 + "\n\n")
+
+      file.write(f"Packet Counts ({len(pkt_cnts)} entries):\n")
+      file.write("-" * 60 + "\n")
+      for i, cnt in enumerate(pkt_cnts):
+        # Show decimal, hex, and binary offset
+        cnt_val = int(cnt)
+        file.write(f"  [{i:2d}] offset 0x{i*4:02x}: {cnt_val:10d} (0x{cnt_val:08x})\n")
+
+      # Show padding info
+      written_bytes = len(pkt_cnts) * 4
+      if written_bytes < 32:
+        padding_bytes = 32 - written_bytes
+        file.write(f"\nPadding: {padding_bytes} bytes (0x00) to reach 32-byte alignment\n")
+
+      file.write("\n" + "=" * 60 + "\n")
+      file.write(f"Total binary size: {max(written_bytes, 32)} bytes\n")
+
   def generate(self, func_name):
     # Get all data blocks from the memory layout for this function
     mem_layout = DevConfig().MemLayout[func_name]
@@ -323,6 +350,7 @@ class CntBaseAddrCodegen:
       host_obj_file = f"{block_id}.host.o"
 
       # Pack pkt_cnts as 32-bit little-endian integers
+      pkt_cnts = None
       with open(bin_path, "wb") as file:
         if data_block and data_block.tiling_info and data_block.tiling_info.pkt_cnts:
           pkt_cnts = data_block.tiling_info.pkt_cnts
@@ -334,6 +362,9 @@ class CntBaseAddrCodegen:
             file.write(b'\x00' * (32 - written_bytes))
         else:
           raise RuntimeError(f"No tiling info found for data block corresponding to {block_id}")
+
+      # Write human-readable text file
+      self.write_readable_file(block_id, edge_simple_name, pkt_cnts, bin_file)
 
       # Create host object file using DeviceCodegen
       DevCodegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
