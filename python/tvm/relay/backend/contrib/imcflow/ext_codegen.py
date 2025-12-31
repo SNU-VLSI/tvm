@@ -432,7 +432,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
       src_var = getCInputVarName(func_name, block)
 
       code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
-      code += f"  npu_pointer[({base_address_name} / 4) + i] = ((uint32_t*){src_var})[i + {loop_start}];\n"
+      code += f"  npu_pointer[({base_address_name} / 4) + i] = ((uint32_t*){src_var})[i + {loop_start//4}];\n"
       code += f"}}\n"
       return code
 
@@ -475,7 +475,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 
       # Generate loop code
       code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
-      code += f"  ((uint32_t*)out{idx})[i + {loop_start}] = npu_pointer[({base_address_name} / 4) + i];\n"
+      code += f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = npu_pointer[({base_address_name} / 4) + i];\n"
       code += f"}}\n"
     return code
 
