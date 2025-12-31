@@ -3267,6 +3267,7 @@ class MemoryAllocator:
                 c_var_sizes=c_var_sizes
               )
               mem_block.tiling_info = block_tiling_info
+              debug_print(f"    Input tensor tiles: bases={input_height_bases}, sizes={input_height_sizes}, pkt_cnts={pkt_cnts}")
 
               # add edge info and allocate
               ImcflowDeviceConfig().add_tensor_edge_info(edge, TensorEdgeInfo(data_block=mem_block, block_tiling_info=block_tiling_info))
@@ -3312,7 +3313,7 @@ class MemoryAllocator:
               assert height_offset % 32 == 0, "Height offset should be multiple of 32 bytes."
               pkt_cnt_per_height = height_offset//32
               # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
-              pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
+              pkt_cnts = [pkt_cnt_per_height * h for h in output_tile_sizes]
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               c_output_var_offsets = [base * height_offset for base in output_tile_bases]
@@ -3326,6 +3327,7 @@ class MemoryAllocator:
                 c_var_offsets=c_output_var_offsets,
                 c_var_sizes=c_output_var_sizes
               )
+              debug_print(f"    Output tensor tiles: bases={output_tile_bases}, sizes={output_tile_sizes}, pkt_cnts={pkt_cnts}")
               mem_block.tiling_info = block_tiling_info
 
               # add edge info and allocate
