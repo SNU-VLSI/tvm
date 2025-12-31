@@ -2828,7 +2828,149 @@ class MemoryAllocator:
             curr_size = new_size
 
           return curr_base, curr_size
-        
+
+        def apply_input_sub_tiling(self, output_tile_specs, trimmed_input_tiles,
+                                   input_tensor_info, output_tensor_info, memory_limit):
+          """
+          Apply hierarchical input sub-tiling when input tiles exceed memory limit.
+
+          When output is fully tiled (each tile = 1 output row) but required input still
+          exceeds memory, we sub-divide the input. For each input sub-tile iteration:
+          - Output has size=0 for intermediate sub-tiles
+          - Output has actual size only for the last sub-tile of each output tile
+
+          Example:
+            Original: output bases=[0,1,2], sizes=[1,1,1], input sizes=[8,0,0] (first needs 8 rows)
+            If 8 rows too big, split into 4 sub-tiles of 2 rows each:
+            Result: output bases=[0,0,0,0,1,2], sizes=[0,0,0,1,1,1]
+                    input bases=[0,2,4,6,8,8], sizes=[2,2,2,2,0,0]
+
+          Args:
+              output_tile_specs: {out_idx: (bases, sizes)}
+              trimmed_input_tiles: {var_name: (trimmed_bases, trimmed_sizes)} - already padding/halo removed
+              input_tensor_info: List of input tensor info tuples
+              output_tensor_info: List of output tensor info tuples
+              memory_limit: Maximum memory per tile in bytes
+
+          Returns:
+              (new_output_tile_specs, new_trimmed_input_tiles)
+          """
+          # Get memory per row for each input variable
+          input_mem_per_row = {}
+          for edge, height, width, channels, elem_size, inode_name, mem_block, var_name in input_tensor_info:
+            if height > 0:
+              input_mem_per_row[var_name] = mem_block.size / height
+            else:
+              input_mem_per_row[var_name] = mem_block.size
+
+          # Get memory per row for each output
+          output_mem_per_row = {}
+          for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
+            if height > 0:
+              output_mem_per_row[out_idx] = mem_block.size / height
+            else:
+              output_mem_per_row[out_idx] = mem_block.size
+
+          num_tiles = len(list(output_tile_specs.values())[0][0])
+
+          # For each tile, find the input with largest memory requirement
+          # and determine how many sub-tiles are needed
+          tile_sub_tile_info = []  # [(tile_idx, num_sub_tiles, max_var, sub_tile_size, total_input_size)]
+
+          for tile_idx in range(num_tiles):
+            max_input_mem = 0
+            max_var = None
+            max_input_size = 0
+
+            for var_name, (trimmed_bases, trimmed_sizes) in trimmed_input_tiles.items():
+              if tile_idx < len(trimmed_sizes):
+                tile_input_size = trimmed_sizes[tile_idx]
+                mem = tile_input_size * input_mem_per_row.get(var_name, 0)
+                if mem > max_input_mem:
+                  max_input_mem = mem
+                  max_var = var_name
+                  max_input_size = tile_input_size
+
+            # Calculate how many sub-tiles needed
+            if max_input_mem > memory_limit and max_input_size > 0:
+              # Estimate max rows that fit
+              max_rows_per_subtile = max(1, int(memory_limit / input_mem_per_row.get(max_var, 1)))
+              num_sub_tiles = math.ceil(max_input_size / max_rows_per_subtile)
+              sub_tile_size = math.ceil(max_input_size / num_sub_tiles)
+              tile_sub_tile_info.append((tile_idx, num_sub_tiles, max_var, sub_tile_size, max_input_size))
+              debug_print(f"    Tile {tile_idx}: input {max_var} needs {num_sub_tiles} sub-tiles of ~{sub_tile_size} rows (total {max_input_size})")
+            else:
+              tile_sub_tile_info.append((tile_idx, 1, None, 0, 0))
+
+          # Build new expanded tile specs
+          new_output_tile_specs = {out_idx: ([], []) for out_idx in output_tile_specs.keys()}
+          new_trimmed_input_tiles = {var_name: ([], []) for var_name in trimmed_input_tiles.keys()}
+
+          for tile_idx, num_sub_tiles, max_var, sub_tile_size, total_input_size in tile_sub_tile_info:
+            if num_sub_tiles == 1:
+              # No sub-tiling needed, copy as-is
+              for out_idx, (out_bases, out_sizes) in output_tile_specs.items():
+                new_output_tile_specs[out_idx][0].append(out_bases[tile_idx])
+                new_output_tile_specs[out_idx][1].append(out_sizes[tile_idx])
+
+              for var_name, (in_bases, in_sizes) in trimmed_input_tiles.items():
+                new_trimmed_input_tiles[var_name][0].append(in_bases[tile_idx])
+                new_trimmed_input_tiles[var_name][1].append(in_sizes[tile_idx])
+            else:
+              # Sub-tiling needed
+              # Get original output info for this tile
+              out_bases_orig = {out_idx: output_tile_specs[out_idx][0][tile_idx] for out_idx in output_tile_specs}
+              out_sizes_orig = {out_idx: output_tile_specs[out_idx][1][tile_idx] for out_idx in output_tile_specs}
+
+              # Get original trimmed input info for this tile
+              in_bases_orig = {var_name: trimmed_input_tiles[var_name][0][tile_idx] for var_name in trimmed_input_tiles}
+              in_sizes_orig = {var_name: trimmed_input_tiles[var_name][1][tile_idx] for var_name in trimmed_input_tiles}
+
+              # Get base for the max_var
+              max_var_base = in_bases_orig[max_var]
+
+              for sub_idx in range(num_sub_tiles):
+                is_last_subtile = (sub_idx == num_sub_tiles - 1)
+
+                # Output: size=0 for intermediate, actual size for last
+                for out_idx in output_tile_specs.keys():
+                  new_output_tile_specs[out_idx][0].append(out_bases_orig[out_idx])
+                  if is_last_subtile:
+                    new_output_tile_specs[out_idx][1].append(out_sizes_orig[out_idx])
+                  else:
+                    new_output_tile_specs[out_idx][1].append(0)
+
+                # Input: divide into sub-tiles
+                for var_name in trimmed_input_tiles.keys():
+                  if var_name == max_var:
+                    # This is the variable being sub-tiled
+                    sub_base = max_var_base + sub_idx * sub_tile_size
+                    sub_size = min(sub_tile_size, max_var_base + total_input_size - sub_base)
+                    new_trimmed_input_tiles[var_name][0].append(sub_base)
+                    new_trimmed_input_tiles[var_name][1].append(max(0, sub_size))
+                  else:
+                    # Other variables: proportional split
+                    orig_base = in_bases_orig[var_name]
+                    orig_size = in_sizes_orig[var_name]
+                    if total_input_size > 0 and orig_size > 0:
+                      ratio = sub_tile_size / total_input_size
+                      other_sub_size = int(orig_size * ratio)
+                      other_sub_base = orig_base + sub_idx * other_sub_size
+                      new_trimmed_input_tiles[var_name][0].append(other_sub_base)
+                      new_trimmed_input_tiles[var_name][1].append(other_sub_size)
+                    else:
+                      # Just repeat with size=0 for intermediate, orig for last
+                      new_trimmed_input_tiles[var_name][0].append(orig_base)
+                      if is_last_subtile:
+                        new_trimmed_input_tiles[var_name][1].append(orig_size)
+                      else:
+                        new_trimmed_input_tiles[var_name][1].append(0)
+
+          new_num_iterations = len(new_output_tile_specs[0][0]) if new_output_tile_specs else 0
+          debug_print(f"  [{self.func_name}] Input sub-tiling: {num_tiles} tiles -> {new_num_iterations} iterations")
+
+          return new_output_tile_specs, new_trimmed_input_tiles
+
         def remove_padding_and_halo(self, input_bases, input_sizes, input_height):
           """
           Remove padding and halo regions from input tile specifications.
@@ -3018,9 +3160,9 @@ class MemoryAllocator:
           # 2. For each tiling factor, calculate tile specs for each output
           # 3. For each input, merge tile boundaries across all outputs
           # 4. Calculate memory using ceil formula
+          # 5. If full output tiling fails, apply hierarchical input sub-tiling
           layout_map = ImcflowDeviceConfig().LayoutMap
           tiling_factor = 1
-          max_tiling_factor = 128  # Safety limit
 
           # Collect output tensor info: [(edge, height, width, channels, elem_size, inode_name, mem_block)]
           output_tensor_info = []
@@ -3049,9 +3191,17 @@ class MemoryAllocator:
               var_name = src_node.name_hint if isinstance(src_node, relay.Var) else "data"
               input_tensor_info.append((edge, height, width, channels, elem_size, inode_name, mem_block, var_name))
 
+          # max_tiling_factors: dict mapping out_idx -> max tiling factor (= output height)
+          # Each output can have different max tiling factor based on its height
+          max_tiling_factors = {out_idx: height for out_idx, (_, height, _, _, _, _, _) in enumerate(output_tensor_info)}
+
+          # tiling_factors: dict mapping out_idx -> current tiling factor (start with 1)
+          tiling_factors = {out_idx: 1 for out_idx in max_tiling_factors.keys()}
+
           # Find tiling factor by incrementing until memory fits
           debug_print(f"\n  [{self.func_name}] ===== TILING FACTOR SEARCH =====")
           debug_print(f"  [{self.func_name}] INODE_DATA_MEM_SIZE = {ImcflowDeviceConfig.INODE_DATA_MEM_SIZE} bytes")
+          debug_print(f"  [{self.func_name}] max_tiling_factors (per output height) = {max_tiling_factors}")
           debug_print(f"  [{self.func_name}] Output tensors:")
           for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
             actual_size = height * width * channels * elem_size
@@ -3061,13 +3211,29 @@ class MemoryAllocator:
             actual_size = height * width * channels * elem_size
             debug_print(f"    Input[{var_name}]: H={height}, W={width}, C={channels}, elem_size={elem_size}, actual_size={actual_size}, mem_block.size={mem_block.size}, inode={inode_name}")
 
-          while tiling_factor <= max_tiling_factor:
-            # Step 1: Calculate output tile specs for each output tensor
+          need_input_sub_tiling = False
+
+          # Helper to check if all outputs have reached their max tiling factor
+          def all_outputs_at_max():
+            return all(tiling_factors[out_idx] >= max_tiling_factors[out_idx] for out_idx in tiling_factors)
+
+          # Helper to get the unified number of tiles (max across all outputs' tiling factors)
+          def get_num_tiles():
+            return max(tiling_factors.values())
+
+          while True:
+            # Step 1: Calculate output tile specs for each output tensor (per-output tiling factor)
             output_tile_specs = {}  # {output_idx: (bases, sizes)}
+            num_tiles = get_num_tiles()  # unified iteration count
             for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
-              base_tile_size = math.ceil(height / tiling_factor)
-              bases = [i * base_tile_size for i in range(tiling_factor)]
+              tf = tiling_factors[out_idx]
+              base_tile_size = math.ceil(height / tf)
+              bases = [i * base_tile_size for i in range(tf)]
               sizes = [min(base_tile_size, height - base) for base in bases]
+              # Pad to unified num_tiles by repeating the last tile's base with size=0
+              while len(bases) < num_tiles:
+                bases.append(bases[-1] if bases else 0)
+                sizes.append(0)
               output_tile_specs[out_idx] = (bases, sizes)
 
             # Step 2: For each output, calculate input tile boundaries for all inputs
@@ -3075,6 +3241,7 @@ class MemoryAllocator:
             input_tile_candidates = {}  # {var_name: [(bases, sizes), ...]}
 
             for out_idx, (out_bases, out_sizes) in output_tile_specs.items():
+              debug_print(f"  [{self.func_name}] Output[{out_idx}] tiles for tiling_factors {tiling_factors}: bases={out_bases}, sizes={out_sizes}")
               # Calculate input tiles from this output
               all_input_tiles = self.calculate_all_input_tiles_from_output(
                 func, out_bases, out_sizes
@@ -3084,19 +3251,32 @@ class MemoryAllocator:
                 if var_name not in input_tile_candidates:
                   input_tile_candidates[var_name] = []
                 input_tile_candidates[var_name].append((in_bases, in_sizes))
+                debug_print(f"    Input[{var_name}] candidate tiles from Output[{out_idx}]: bases={in_bases}, sizes={in_sizes}")
 
-            # Step 3: Merge input tile boundaries for each input variable
-            merged_input_tiles = {}  # {var_name: (merged_bases, merged_sizes)}
+            # Step 3: Merge input tile boundaries and compute trimmed tiles for each input variable
+            # Build input_heights lookup for trimming
+            input_heights = {var_name: height for (_, height, _, _, _, _, _, var_name) in input_tensor_info}
+
+            merged_input_tiles = {}   # {var_name: (merged_bases, merged_sizes)}
+            trimmed_input_tiles = {}  # {var_name: (trimmed_bases, trimmed_sizes)}
             for var_name, candidates in input_tile_candidates.items():
               merged_bases, merged_sizes = self.merge_input_tile_boundaries(candidates)
               merged_input_tiles[var_name] = (merged_bases, merged_sizes)
+
+              # Compute trimmed (padding/halo removed) tiles
+              input_height = input_heights.get(var_name, 0)
+              trimmed_bases, trimmed_sizes = self.remove_padding_and_halo(merged_bases, merged_sizes, input_height)
+              trimmed_input_tiles[var_name] = (trimmed_bases, trimmed_sizes)
+
+              debug_print(f"  [{self.func_name}] Merged Input[{var_name}] tiles: bases={merged_bases}, sizes={merged_sizes}")
+              debug_print(f"  [{self.func_name}] Trimmed Input[{var_name}] tiles: bases={trimmed_bases}, sizes={trimmed_sizes}")
 
             # Step 4: Calculate memory for each tile using ceil formula
             # Memory = ceil(original_block_size / (total_height / tile_height))
             max_tile_memory = 0
             debug_tile_memories = []
 
-            for tile_idx in range(tiling_factor):
+            for tile_idx in range(num_tiles):
               tile_memory = 0
               tile_detail = {"tile_idx": tile_idx, "outputs": [], "inputs": []}
 
@@ -3107,18 +3287,17 @@ class MemoryAllocator:
                   tile_height = out_sizes[tile_idx]
                   original_size = mem_block.size
                   # ceil(original_size * tile_height / height)
-                  tiled_size = math.ceil(original_size * tile_height / height)
+                  if tile_height > 0 and height > 0:
+                    tiled_size = math.ceil(original_size * tile_height / height)
+                  else:
+                    tiled_size = 0
                   tile_memory += tiled_size
                   tile_detail["outputs"].append((out_idx, tile_height, tiled_size))
 
-              # Input tensor memory for this tile (using merged boundaries)
+              # Input tensor memory for this tile (using trimmed boundaries)
               for edge, height, width, channels, elem_size, inode_name, mem_block, var_name in input_tensor_info:
-                if var_name in merged_input_tiles:
-                  merged_bases, merged_sizes = merged_input_tiles[var_name]
-                  # Apply remove_padding_and_halo
-                  trimmed_bases, trimmed_sizes = self.remove_padding_and_halo(
-                    merged_bases, merged_sizes, height
-                  )
+                if var_name in trimmed_input_tiles:
+                  trimmed_bases, trimmed_sizes = trimmed_input_tiles[var_name]
                   if tile_idx < len(trimmed_sizes):
                     tile_height = trimmed_sizes[tile_idx]
                     original_size = mem_block.size
@@ -3130,68 +3309,64 @@ class MemoryAllocator:
                     tile_memory += tiled_size
                     tile_detail["inputs"].append((var_name, tile_height, tiled_size))
                 else:
-                  raise ValueError(f"Input variable '{var_name}' not found in merged input tiles.")
+                  raise ValueError(f"Input variable '{var_name}' not found in trimmed input tiles.")
 
               max_tile_memory = max(max_tile_memory, tile_memory)
               debug_tile_memories.append((tile_idx, tile_memory, tile_detail))
 
-            # Print detailed debug info for first few tiling factors
-            if tiling_factor <= 3 or tiling_factor == max_tiling_factor:
-              debug_print(f"  [{self.func_name}] --- Tiling factor {tiling_factor} detail ---")
-              for tile_idx, tile_mem, detail in debug_tile_memories[:3]:  # Show first 3 tiles
-                debug_print(f"    Tile[{tile_idx}]: total={tile_mem}, outputs={detail['outputs']}, inputs={detail['inputs']}")
+            # Print detailed debug info
+            debug_print(f"  [{self.func_name}] --- Tiling factors {tiling_factors} detail ---")
+            for tile_idx, tile_mem, detail in debug_tile_memories[:3]:  # Show first 3 tiles
+              debug_print(f"    Tile[{tile_idx}]: total={tile_mem}, outputs={detail['outputs']}, inputs={detail['inputs']}")
 
-            # Check if this tiling factor works
+            # Check if this tiling configuration works
             size_for_inode_cnt = len(tensors['input'] + tensors['output']) * 32
             max_tile_memory += size_for_inode_cnt
             if max_tile_memory <= ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
-              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (fits)")
+              debug_print(f"  [{self.func_name}] Tiling factors {tiling_factors}: max tile memory = {max_tile_memory} bytes (fits)")
               break
             else:
-              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (too large)")
-              tiling_factor += 1
+              debug_print(f"  [{self.func_name}] Tiling factors {tiling_factors}: max tile memory = {max_tile_memory} bytes (too large)")
+              # Increase tiling factor for output that can still grow
+              # Priority: increase the one with smallest tiling factor that hasn't reached max
+              increased = False
+              for out_idx in sorted(tiling_factors.keys(), key=lambda x: tiling_factors[x]):
+                if tiling_factors[out_idx] < max_tiling_factors[out_idx]:
+                  tiling_factors[out_idx] += 1
+                  debug_print(f"  [{self.func_name}] Increasing tiling factor for output[{out_idx}] to {tiling_factors[out_idx]}")
+                  increased = True
+                  break
+              if not increased:
+                # All outputs at max, need input sub-tiling
+                debug_print(f"  [{self.func_name}] All outputs at max tiling, need input sub-tiling")
+                break
 
-          if tiling_factor > max_tiling_factor:
-            raise ValueError(f"Cannot fit tensors in inode memory even with tiling factor {max_tiling_factor}")
+          if all_outputs_at_max() and max_tile_memory > ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
+            need_input_sub_tiling = True
+            debug_print(f"  [{self.func_name}] Full output tiling reached, applying input sub-tiling")
 
-          # Store tiling factor in FunctionInfo
-          func_info = ImcflowDeviceConfig().ImcflowFuncMap[self.func_name]
-          func_info.tiling_factor = tiling_factor
+          debug_print(f"  [{self.func_name}] Final tiling factors = {tiling_factors}")
 
-          if tiling_factor > 1:
-            debug_print(f"  [{self.func_name}] Tiling factor = {tiling_factor}")
+          # Use the output_tile_specs and trimmed_input_tiles from the while loop
+          # (already calculated with final tiling_factors)
+          final_output_tile_specs = output_tile_specs
+          final_trimmed_input_tiles = trimmed_input_tiles
 
-          # Pre-calculate final tile specs for Phase 3
-          # Recalculate output tile specs with final tiling factor
-          final_output_tile_specs = {}
-          for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
-            if tiling_factor > 1:
-              base_tile_size = math.ceil(height / tiling_factor)
-              bases = [i * base_tile_size for i in range(tiling_factor)]
-              sizes = [min(base_tile_size, height - base) for base in bases]
-            else:
-              bases = [0]
-              sizes = [height]
-            final_output_tile_specs[out_idx] = (bases, sizes)
-            debug_print(f"  [{self.func_name}] Output[{out_idx}] tiles: bases={bases}, sizes={sizes}")
-
-          # Recalculate and merge input tile specs
-          final_input_tile_candidates = {}
-          for out_idx, (out_bases, out_sizes) in final_output_tile_specs.items():
-            all_input_tiles = self.calculate_all_input_tiles_from_output(
-              func, out_bases, out_sizes
+          # Apply input sub-tiling if needed
+          if need_input_sub_tiling:
+            final_output_tile_specs, final_trimmed_input_tiles = self.apply_input_sub_tiling(
+              final_output_tile_specs,
+              final_trimmed_input_tiles,
+              input_tensor_info,
+              output_tensor_info,
+              ImcflowDeviceConfig.INODE_DATA_MEM_SIZE
             )
-            for var_name, (in_bases, in_sizes) in all_input_tiles.items():
-              if var_name not in final_input_tile_candidates:
-                final_input_tile_candidates[var_name] = []
-              final_input_tile_candidates[var_name].append((in_bases, in_sizes))
 
-          final_merged_input_tiles = {}
-          for var_name, candidates in final_input_tile_candidates.items():
-            merged_bases, merged_sizes = self.merge_input_tile_boundaries(candidates)
-            final_merged_input_tiles[var_name] = (merged_bases, merged_sizes)
-            debug_print(f"  [{self.func_name}] Input '{var_name}' candiates : {candidates}")
-            debug_print(f"  [{self.func_name}] Input '{var_name}' merged tiles: bases={merged_bases}, sizes={merged_sizes}")
+          # Debug print final tile specs
+          for out_idx, (bases, sizes) in final_output_tile_specs.items():
+            debug_print(f"  [{self.func_name}] Final Output[{out_idx}] tiles: bases={bases}, sizes={sizes}")
+          for var_name, (bases, sizes) in final_trimmed_input_tiles.items():
+            debug_print(f"  [{self.func_name}] Final Input[{var_name}] tiles: bases={bases}, sizes={sizes}")
 
           # Phase 3: Perform actual allocation with tiling
           for inode_name, tensors in inode_tensors.items():
@@ -3213,20 +3388,20 @@ class MemoryAllocator:
 
               var_name = src_node.name_hint if isinstance(src_node, relay.Var) else "data"
 
-              # Get merged input tile specs for this variable
-              if var_name in final_merged_input_tiles and tiling_factor > 1:
-                merged_bases, merged_sizes = final_merged_input_tiles[var_name]
-                # Apply remove_padding_and_halo
-                input_height_bases, input_height_sizes = self.remove_padding_and_halo(
-                  merged_bases, merged_sizes, height
-                )
-                debug_print(f"    Input tensor {var_name} tiles after padding/halo removal: bases={input_height_bases}, sizes={input_height_sizes}")
+              # Get number of iterations from final tile specs
+              num_iterations = len(list(final_output_tile_specs.values())[0][0]) if final_output_tile_specs else 1
+              has_tiling = num_iterations > 1
+
+              # Get trimmed input tile specs for this variable (already has padding/halo removed)
+              if var_name in final_trimmed_input_tiles and has_tiling:
+                input_height_bases, input_height_sizes = final_trimmed_input_tiles[var_name]
+                debug_print(f"    Input tensor {var_name} tiles: bases={input_height_bases}, sizes={input_height_sizes}")
               else:
                 input_height_bases = [0]
                 input_height_sizes = [height]
                 debug_print(f"    Input tensor {var_name} no tiling applied.")
 
-              if tiling_factor > 1:
+              if has_tiling:
                 # Calculate tiled size using ceil formula
                 max_tile_height = max(input_height_sizes)
                 # tiled_size = ceil(original_size * max_tile_height / height)
@@ -3293,7 +3468,11 @@ class MemoryAllocator:
                   output_tile_bases, output_tile_sizes = final_output_tile_specs[out_idx]
                   break
 
-              if tiling_factor > 1:
+              # Get number of iterations from final tile specs
+              num_iterations = len(list(final_output_tile_specs.values())[0][0]) if final_output_tile_specs else 1
+              has_tiling = num_iterations > 1
+
+              if has_tiling:
                 # Calculate tiled size using ceil formula
                 max_tile_height = max(output_tile_sizes)
                 if height > 0:
