@@ -115,10 +115,9 @@ class TensorID:
 
   def __new__(cls, graph_node_id: Union[int, Tuple], tensor_type: str):
     key = (graph_node_id, tensor_type)
-    if tensor_type not in {"data", "odata", "weight",
-                           "bias", "fused_scale", "fused_bias", "lhs", "rhs",
-                           "min", "max", "threshold", "zero","config", "var", "func_out"}:
-                           print("Invalid tensor type")
+    valid_pattern = r"^(data|odata|weight|bias|fused_scale|fused_bias|lhs|rhs|min|max|threshold|zero|config|var|func_out.*)$"
+    if not re.match(valid_pattern, tensor_type):
+      print(f"Invalid tensor type: {tensor_type}")
     if key not in cls._instances:
       instance = super(TensorID, cls).__new__(cls)
       cls._instances[(graph_node_id, tensor_type)] = instance
@@ -823,13 +822,17 @@ class ImcflowDeviceConfig:
 
   def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None, const_node_ids=None):
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
-    compiled_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], []
+    compiled_blocks, compiled_per_tile_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], [], []
 
     for memory_region in ImcflowDeviceConfig().MemLayout[func_name].values():
       for block_name, block in memory_region.blocks.items():
         # get compiled data blocks
         if isinstance(block_name, str):
-          compiled_blocks.append(block)
+          # Filter blocks ending with _cnt_base_addr into compiled_per_tile_blocks
+          if block_name.endswith("_cnt_base_addr"):
+            compiled_per_tile_blocks.append(block)
+          else:
+            compiled_blocks.append(block)
         # get input & output data blocks
         if isinstance(block_name, TensorEdge):
           if isinstance(block_name.src_id.graph_node_id, Tuple):
@@ -870,6 +873,7 @@ class ImcflowDeviceConfig:
 
     self.DataBlocks[func_name] = {
         "compiled": compiled_blocks,
+        "compiled_per_tile": compiled_per_tile_blocks,
         "input": input_data_blocks,
         "output": output_data_blocks,
         "const" : const_data_blocks

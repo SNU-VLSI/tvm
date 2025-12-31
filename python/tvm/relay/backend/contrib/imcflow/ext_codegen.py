@@ -80,7 +80,13 @@ class CodeWriter:
 
   def __add__(self, other):
     if isinstance(other, CodeWriter):
-      self.lines.extend(other.lines)
+      # Apply current indentation level to incoming lines
+      if self.indent_level > 0:
+        indent_prefix = self.indent_str * self.indent_level
+        indented_lines = [indent_prefix + line for line in other.lines]
+        self.lines.extend(indented_lines)
+      else:
+        self.lines.extend(other.lines)
       return self
     elif isinstance(other, str):
       self.write(other)
@@ -163,7 +169,7 @@ def getConstantIdx(func, node_id):
   return node_id_to_constant_id[node_id]
 
 
-def getCInputVarName(func, func_name, data_block):
+def getCInputVarName(func_name, data_block):
   node_map = CustomIDToNode()
 
   # Get first edge from edges list (handles both single TensorEdge and List[TensorEdge])
@@ -215,6 +221,7 @@ class KernelCodeGenerator:
 
     # Get data blocks
     self.compiled_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["compiled"]
+    self.compiled_per_tile_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["compiled_per_tile"]
     self.const_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["const"]
     self.input_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["input"]
     self.output_blocks = ImcflowDeviceConfig().DataBlocks[func_name]["output"]
@@ -401,6 +408,32 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 
   def generateToNpuTransferCode(self, blocks, tile_idx=None):
     """Generate code to transfer data to NPU memory."""
+
+    def _appendLoopForObjectFileTransfer(code, block, base_address_name, func_name, tile_idx=None):
+      # Binary object file transfer
+      var_prefix = getObjectFileName(block, func_name)
+      if tile_idx is None:
+        loop_start = 0
+        loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
+        src_var = f"{var_prefix}_start"
+        code += f"for(int i={loop_start}; i<{loop_end}; i++){{\n"
+        code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){src_var})[i];\n"
+        code += f"}}\n"
+      else:
+        src_var = f"{var_prefix}_start"
+        code += f"*(npu_pointer + ({base_address_name} / 4)) = ((uint32_t*){src_var})[{tile_idx}];\n"
+      return code
+
+    def _appendLoopForCVarTransfer(code, block, base_address_name, func_name, tile_idx=None):
+      # C Var transfer
+      loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
+      src_var = getCInputVarName(func_name, block)
+
+      code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
+      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){src_var})[i + {loop_start}];\n"
+      code += f"}}\n"
+      return code
+
     code = CodeWriter()
     code += "// Transfer data into NPU memory\n"
     for block in blocks:
@@ -414,20 +447,10 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 
       # Determine source variable and loop parameters based on block type
       if isinstance(block.id, str):
-        # Binary object file transfer
-        var_prefix = getObjectFileName(block, self.func_name)
-        loop_start = 0
-        loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
-        src_var = f"{var_prefix}_start"
+        code = _appendLoopForObjectFileTransfer(code, block, base_address_name, self.func_name, tile_idx)
       else:
-        # Regular or tiled data block transfer
-        loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
-        src_var = getCInputVarName(self.func, self.func_name, block)
+        code = _appendLoopForCVarTransfer(code, block, base_address_name, self.func_name, tile_idx)
 
-      # Generate unified loop code
-      code += f"for(int i={loop_start}; i<{loop_end}; i++){{\n"
-      code += f"  *(npu_pointer + ({base_address_name} / 4) + i) = ((uint32_t*){src_var})[i];\n"
-      code += f"}}\n"
     return code
 
   def generateFromNpuTransferCode(self, blocks, tile_idx=None):
@@ -449,8 +472,8 @@ static inline void generate_ack(uint32_t* int_ack_gen)
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
 
       # Generate loop code
-      code += f"for(int i={loop_start}; i<{loop_end}; i++){{\n"
-      code += f"  ((uint32_t*)out{idx})[i] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
+      code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
+      code += f"  ((uint32_t*)out{idx})[i + {loop_start}] = *(npu_pointer + ({base_address_name} / 4) + i);\n"
       code += f"}}\n"
     return code
 
@@ -466,7 +489,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     """Generate extern C linkage declarations for compiled blocks."""
     code = CodeWriter()
     code += 'extern "C" { \n'
-    for block in self.compiled_blocks:
+    for block in (self.compiled_blocks + self.compiled_per_tile_blocks):
       if isinstance(block.id, str):
         filename = f"_binary_{self.func_name}_{block.id}_bin"
         code += f'  extern const int32_t {filename}_start[];\n'
@@ -537,8 +560,8 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 
     # Kernel function prototype and definition (C)
     code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
-    code += f"printf(\"{self.func_name}_kernel called\\n\");\n"
     code.nextIndent()
+    code += f"printf(\"{self.func_name}_kernel called\\n\");\n"
     code += self.generateDevicePointerSetup()
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
@@ -548,6 +571,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
     for t_idx in range(tile_factor):
+      code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
       code += self.generateInvokeCode() # end of exec
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
