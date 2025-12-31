@@ -192,7 +192,9 @@ class CodegenSuite:
     print("-"*40)
 
     inode_builder = InodeCodeBlockBuilder(self.module, func, func_name, sorted_edges)
+    inode_builder.initialize()
     inode_builder.visit(func)
+    inode_builder.finalize()
 
     # add sync logic after INIT Phase
     inode_builder.sync_inrt_clear(CodePhase.INIT)
@@ -590,15 +592,14 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.mod = mod
     self.func = func
     self.func_name = func_name
+    self.is_tiled = (DevConfig().ImcflowFuncMap[func_name].tiling_factor > 1)
     self.edges = edges
     self.codeblocks = InodeCodeBlockManager(func_name)
     # Track which hardware nodes already have an IMCE compute block added
     self._imce_compute_added = set()
     self.send_map = {}
     self.recv_map = {}
-    self.initialize()
     self.curr_composite_id = None
-    self.finalize()
   
   def sync_inrt_clear(self, codephase: CodePhase):
     # standby and intrt
@@ -670,12 +671,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     inode_master = NodeID.inode_3_0
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
     block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
-    self.codeblocks.append(inode_master, block, CodePhase.END)
+    self.codeblocks.append(inode_master, block, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
 
     # set_flag
     block = SetFlagAndHaltBlock()
     for inode_slv in inode_slaves:
-      self.codeblocks.append(inode_slv, block, CodePhase.END)
+      self.codeblocks.append(inode_slv, block, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
 
   def dump_block_structure(self, dir_name, func_name):
     output_lines = []
@@ -688,7 +689,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for hid in sorted_hids:
       phases = self.codeblocks.blocks[hid]
       output_lines.append(f"Node: {hid}")
-      for phase in sorted(phases.keys(), key=lambda x: ["INIT", "EXEC", "END"].index(x.name)):
+      for phase in sorted(phases.keys(), key=lambda x: ["INIT", "EXEC", "EXEC_TILE", "END"].index(x.name)):
         blocks = phases[phase]
         if not blocks: continue
         output_lines.append(f"  Phase: {phase}")
@@ -733,7 +734,6 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     fn_edges = self.get_input_edges_from_id(fn_id)
     for last_edge in fn_edges:
       output_edges.append(last_edge)
-      # self.add_recv_block(last_edge)
     
     # send const edge interleaved
     #TODO: consider recv node order..
@@ -760,9 +760,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # Generate send blocks for each HID group
     for hid, edges in param_edges_by_hid.items():
       if len(edges) == 1:
-        self.add_send_block(edges[0], CodePhase.EXEC)
+        self.add_send_block(edges[0], CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
       else:
-        self.add_send_block_interleaved(edges, CodePhase.EXEC)
+        self.add_send_block_interleaved(edges, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
 
     # recv output edge interleaved
     # Group output edges by destination HID (inode)
@@ -776,9 +776,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     for hid, edges in output_edges_by_hid.items():
       if len(edges) == 1:
-        self.add_recv_block(edges[0], CodePhase.EXEC)
+        self.add_recv_block(edges[0], CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
       else:
-        self.add_recv_block_interleaved(edges, CodePhase.EXEC)
+        self.add_recv_block_interleaved(edges, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
 
   def construct_recv_send_map(self):
     """

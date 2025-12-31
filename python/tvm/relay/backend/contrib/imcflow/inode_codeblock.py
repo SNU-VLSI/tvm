@@ -357,7 +357,9 @@ class InodeCodeBlockManager(NodeCodeBlockManager):
   """A class that manages and generates code blocks for inodes."""
 
   def __init__(self, func_name: str):
-    super().__init__()
+    UniqueVar.reset()
+    self.blocks = {key: {CodePhase.INIT: [], CodePhase.EXEC: [], CodePhase.EXEC_TILE: [], CodePhase.END: []}
+                   for key in self.nodes}
     self.func_name = func_name
 
   @property
@@ -367,6 +369,39 @@ class InodeCodeBlockManager(NodeCodeBlockManager):
   @property
   def target(self) -> str:
     return "inode"
+
+  def render_phase(self, node: NodeID, phase: CodePhase) -> str:
+    blocks = self.blocks[node][phase]
+    if len(blocks) == 0:
+      return ""
+
+    if phase is CodePhase.EXEC_TILE:
+      # Tiling phase: wrap in for loop
+      seq_block = SequentialBlock()
+      for codeblock in blocks:
+        seq_block.add(codeblock)
+      code = f"{indent(SimpleFor(DevConfig().ImcflowFuncMap[self.func_name].tiling_factor, seq_block).render(), '  ')}\n"
+    else:
+      # None tiling phase: just render
+      code = ""
+      for codeblock in blocks:
+        code += f"{indent(codeblock.render(), '  ')}\n"
+
+    return code
+
+  def generate_body(self) -> str:
+    code = ""
+    first = True
+    for node in self.nodes:
+      condition = f"if" if first else f"else if"
+      code += f"{condition} (hid == {node.to_coord(0)} && wid == {node.to_coord(1)}) {{ // {node.name}\n"
+      code += self.render_phase(node, CodePhase.INIT)
+      code += self.render_phase(node, CodePhase.EXEC)
+      code += self.render_phase(node, CodePhase.EXEC_TILE)
+      code += self.render_phase(node, CodePhase.END)
+      code += "}\n"
+      first = False
+    return code
 
   def start_block(self) -> str:
     code = (

@@ -66,6 +66,7 @@ class UniqueVar:
 class CodePhase(Enum):
   INIT = "INIT"
   EXEC = "EXEC"
+  EXEC_TILE = "EXEC_TILE"
   END = "END"
 
 class CodeBlock(ABC):
