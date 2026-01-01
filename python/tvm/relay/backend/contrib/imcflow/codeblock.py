@@ -293,7 +293,7 @@ class NodeCodeBlockManager:
     if nodes is None:
       nodes = self.nodes
     if phase is None:
-      phase = [CodePhase.INIT, CodePhase.EXEC, CodePhase.END]
+      phase = [CodePhase.INIT, CodePhase.EXEC, CodePhase.EXEC_TILE, CodePhase.END]
 
     init_blocks = []
     for node in nodes:
