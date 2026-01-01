@@ -3191,17 +3191,15 @@ class MemoryAllocator:
               var_name = src_node.name_hint if isinstance(src_node, relay.Var) else "data"
               input_tensor_info.append((edge, height, width, channels, elem_size, inode_name, mem_block, var_name))
 
-          # max_tiling_factors: dict mapping out_idx -> max tiling factor (= output height)
-          # Each output can have different max tiling factor based on its height
-          max_tiling_factors = {out_idx: height for out_idx, (_, height, _, _, _, _, _) in enumerate(output_tensor_info)}
-
-          # tiling_factors: dict mapping out_idx -> current tiling factor (start with 1)
-          tiling_factors = {out_idx: 1 for out_idx in max_tiling_factors.keys()}
+          # max_tiling_factor: single unified max tiling factor = max of all output heights
+          # All outputs share the same tiling factor
+          max_tiling_factor = max(height for (_, height, _, _, _, _, _) in output_tensor_info)
+          tiling_factor = 1
 
           # Find tiling factor by incrementing until memory fits
           debug_print(f"\n  [{self.func_name}] ===== TILING FACTOR SEARCH =====")
           debug_print(f"  [{self.func_name}] INODE_DATA_MEM_SIZE = {ImcflowDeviceConfig.INODE_DATA_MEM_SIZE} bytes")
-          debug_print(f"  [{self.func_name}] max_tiling_factors (per output height) = {max_tiling_factors}")
+          debug_print(f"  [{self.func_name}] max_tiling_factor (unified, max output height) = {max_tiling_factor}")
           debug_print(f"  [{self.func_name}] Output tensors:")
           for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
             actual_size = height * width * channels * elem_size
@@ -3213,27 +3211,23 @@ class MemoryAllocator:
 
           need_input_sub_tiling = False
 
-          # Helper to check if all outputs have reached their max tiling factor
-          def all_outputs_at_max():
-            return all(tiling_factors[out_idx] >= max_tiling_factors[out_idx] for out_idx in tiling_factors)
+          # Helper to check if tiling factor has reached max
+          def at_max_tiling():
+            return tiling_factor >= max_tiling_factor
 
-          # Helper to get the unified number of tiles (max across all outputs' tiling factors)
+          # Helper to get the number of tiles
           def get_num_tiles():
-            return max(tiling_factors.values())
+            return tiling_factor
 
           while True:
-            # Step 1: Calculate output tile specs for each output tensor (per-output tiling factor)
+            # Step 1: Calculate output tile specs for each output tensor (unified tiling factor)
             output_tile_specs = {}  # {output_idx: (bases, sizes)}
-            num_tiles = get_num_tiles()  # unified iteration count
+            num_tiles = get_num_tiles()  # unified tile count
             for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
-              tf = tiling_factors[out_idx]
-              base_tile_size = math.ceil(height / tf)
-              bases = [i * base_tile_size for i in range(tf)]
+              # Use unified tiling_factor for all outputs
+              base_tile_size = math.ceil(height / tiling_factor)
+              bases = [i * base_tile_size for i in range(tiling_factor)]
               sizes = [min(base_tile_size, height - base) for base in bases]
-              # Pad to unified num_tiles by repeating the last tile's base with size=0
-              while len(bases) < num_tiles:
-                bases.append(bases[-1] if bases else 0)
-                sizes.append(0)
               output_tile_specs[out_idx] = (bases, sizes)
 
             # Step 2: For each output, calculate input tile boundaries for all inputs
@@ -3241,7 +3235,7 @@ class MemoryAllocator:
             input_tile_candidates = {}  # {var_name: [(bases, sizes), ...]}
 
             for out_idx, (out_bases, out_sizes) in output_tile_specs.items():
-              debug_print(f"  [{self.func_name}] Output[{out_idx}] tiles for tiling_factors {tiling_factors}: bases={out_bases}, sizes={out_sizes}")
+              debug_print(f"  [{self.func_name}] Output[{out_idx}] tiles for tiling_factor {tiling_factor}: bases={out_bases}, sizes={out_sizes}")
               # Calculate input tiles from this output
               all_input_tiles = self.calculate_all_input_tiles_from_output(
                 func, out_bases, out_sizes
@@ -3315,7 +3309,7 @@ class MemoryAllocator:
               debug_tile_memories.append((tile_idx, tile_memory, tile_detail))
 
             # Print detailed debug info
-            debug_print(f"  [{self.func_name}] --- Tiling factors {tiling_factors} detail ---")
+            debug_print(f"  [{self.func_name}] --- Tiling factor {tiling_factor} detail ---")
             for tile_idx, tile_mem, detail in debug_tile_memories[:3]:  # Show first 3 tiles
               debug_print(f"    Tile[{tile_idx}]: total={tile_mem}, outputs={detail['outputs']}, inputs={detail['inputs']}")
 
@@ -3323,32 +3317,27 @@ class MemoryAllocator:
             size_for_inode_cnt = len(tensors['input'] + tensors['output']) * 32
             max_tile_memory += size_for_inode_cnt
             if max_tile_memory <= ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
-              debug_print(f"  [{self.func_name}] Tiling factors {tiling_factors}: max tile memory = {max_tile_memory} bytes (fits)")
+              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (fits)")
               break
             else:
-              debug_print(f"  [{self.func_name}] Tiling factors {tiling_factors}: max tile memory = {max_tile_memory} bytes (too large)")
-              # Increase tiling factor for output that can still grow
-              # Priority: increase the one with smallest tiling factor that hasn't reached max
-              increased = False
-              for out_idx in sorted(tiling_factors.keys(), key=lambda x: tiling_factors[x]):
-                if tiling_factors[out_idx] < max_tiling_factors[out_idx]:
-                  tiling_factors[out_idx] += 1
-                  debug_print(f"  [{self.func_name}] Increasing tiling factor for output[{out_idx}] to {tiling_factors[out_idx]}")
-                  increased = True
-                  break
-              if not increased:
-                # All outputs at max, need input sub-tiling
-                debug_print(f"  [{self.func_name}] All outputs at max tiling, need input sub-tiling")
+              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (too large)")
+              # Increase unified tiling factor
+              if tiling_factor < max_tiling_factor:
+                tiling_factor += 1
+                debug_print(f"  [{self.func_name}] Increasing tiling factor to {tiling_factor}")
+              else:
+                # Reached max tiling factor, need input sub-tiling
+                debug_print(f"  [{self.func_name}] Reached max tiling factor, need input sub-tiling")
                 break
 
-          if all_outputs_at_max() and max_tile_memory > ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
+          if at_max_tiling() and max_tile_memory > ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
             need_input_sub_tiling = True
             debug_print(f"  [{self.func_name}] Full output tiling reached, applying input sub-tiling")
 
-          debug_print(f"  [{self.func_name}] Final tiling factors = {tiling_factors}")
+          debug_print(f"  [{self.func_name}] Final tiling factor = {tiling_factor}")
 
           # Use the output_tile_specs and trimmed_input_tiles from the while loop
-          # (already calculated with final tiling_factors)
+          # (already calculated with final tiling_factor)
           final_output_tile_specs = output_tile_specs
           final_trimmed_input_tiles = trimmed_input_tiles
 
@@ -3361,6 +3350,15 @@ class MemoryAllocator:
               output_tensor_info,
               ImcflowDeviceConfig.INODE_DATA_MEM_SIZE
             )
+          
+          # check all input and output tensor tiling factor is same (tile loop count)
+          num_iterations_set = set()
+          for out_idx, (bases, sizes) in final_output_tile_specs.items():
+            num_iterations_set.add(len(bases))
+          for var_name, (bases, sizes) in final_trimmed_input_tiles.items():
+            num_iterations_set.add(len(bases))
+          if len(num_iterations_set) != 1:
+            raise ValueError(f"Tiling factor mismatch among input/output tensors: {num_iterations_set}")
 
           # Debug print final tile specs
           for out_idx, (bases, sizes) in final_output_tile_specs.items():
@@ -3368,7 +3366,10 @@ class MemoryAllocator:
           for var_name, (bases, sizes) in final_trimmed_input_tiles.items():
             debug_print(f"  [{self.func_name}] Final Input[{var_name}] tiles: bases={bases}, sizes={sizes}")
 
+          # ================================================
           # Phase 3: Perform actual allocation with tiling
+          # ================================================
+          ImcflowDeviceConfig().ImcflowFuncMap[func_name].tiling_factor = num_iterations_set.pop()
           for inode_name, tensors in inode_tensors.items():
             # Allocate weight tensors (no tiling, allow overlap)
             for edge, mem_block, inode_tensorid in tensors['weight']:
@@ -3415,8 +3416,6 @@ class MemoryAllocator:
               # Set tiling info
               # Calculate CPU tile base addresses and sizes based on height boundaries
               # height_offset = prod(dims after height) * elem_size (bytes per height row)
-              # c_input_var_offsets[i] = height_base[i] * height_offset (byte offset from tensor origin)
-              # c_input_var_sizes[i] = height_size[i] * height_offset / sizeof(int) (int32 count)
               r_ttype = transform_utils.getRTTypeForEdge(mod, edge)
               r_height_index = imcflow_layout.get_height_dim_index(layout_map[transform_utils.getNodeFromTensorID(edge.src_id)])
               assert math.prod(r_ttype.shape[0:r_height_index]) == 1, "Upper of height dimension should be 1 in imcflow."
@@ -3424,7 +3423,6 @@ class MemoryAllocator:
               height_offset = height_offset_elem_num * np.dtype(r_ttype.dtype).itemsize
               assert height_offset % 32 == 0, "Height offset should be multiple of 32 bytes."
               pkt_cnt_per_height = height_offset//32
-              # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
               pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
