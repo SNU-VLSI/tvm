@@ -351,6 +351,7 @@ class MemoryRegion(UserDict):
     """Allocate block by finding first region of the phase with available space."""
     i = 0
     while not self[(phase, i)].allocate(block):
+      # raise RuntimeError(f"Failed to allocate block {block} in region {self._template_region.name} for phase {phase}")
       i += 1
 
 
@@ -631,8 +632,9 @@ class ImcflowDeviceConfig:
 
   IMCU_ROW_NUM = 256
   INODE_MMREG_SIZE = 128
-  INODE_DATA_MEM_SIZE = 8192
-  INODE_MAX_TILING_SIZE = 8192 # should be smaller than INODE_DATA_MEM_SIZE  
+  INODE_DATA_MEM_SIZE = 65536
+  INODE_MAX_TILING_SIZE = 65536 # should be smaller than INODE_DATA_MEM_SIZE  
+  # INODE_DATA_MEM_SIZE = 65536
   # INODE_DATA_MEM_SIZE = 131072
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024

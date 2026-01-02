@@ -371,11 +371,28 @@ def getS2ConvQuantConvModel(iH=1, iW=1):
   )
   IC, H, W = (16, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
 
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_3", shape=(), dtype="int16"), relay.var("quant_max_3", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=16)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("weight2_3", shape=(16,16,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (16,16,3,3), padding=1, stride=1, acc_mask=AccMask.BM_1111).get_as_const_tensor(),
+    in_channels=16,
+    channels=16,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    strides=(2, 2),
+    out_dtype="int16"
+  )
+  IC, H, W = (16, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
+
   param_dict = {
     "weight2_1"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
     "weight2_2"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
+    "weight2_3"  : np.random.randint(-8, 7, (16,16,3,3), dtype="int8"),
     "quant_min_2": np.array(-256, dtype="int16"),
     "quant_max_2": np.array(256, dtype="int16"),
+    "quant_min_3": np.array(-256, dtype="int16"),
+    "quant_max_3": np.array(256, dtype="int16"),
   }
 
   out = tvm.IRModule.from_expr(y)
