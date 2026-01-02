@@ -310,6 +310,30 @@ class StandbyAndIntrtBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"__builtin_INODE_INTRT(0);"))
     self.body.add(TextBlock(f"__builtin_INODE_HALT();"))
 
+class DoneAndIntrtBlock(InodeCodeBlock):
+  def __init__(self, annotation: str = ""):
+    super().__init__(annotation)
+    self._build()
+
+  def _build(self):
+    self.body.add(TextBlock(f"__builtin_INODE_DONE();"))
+    self.body.add(TextBlock(f"__builtin_INODE_INTRT(0);"))
+
+class SyncAllINodes(InodeCodeBlock):
+  def __init__(self, node_id : NodeID, annotation: str = ""):
+    super().__init__(annotation)
+    self.node_id = node_id
+    self._build()
+
+  def _build(self):
+    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(1);"))
+    for node in NodeID.inodes():
+      if node != self.node_id:
+        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, 1);"))
+
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
+    self.body.add(TextBlock(f"__asm__ volatile({nops});"))
+    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(0);"))
 
 class Standby(InodeCodeBlock):
   def __init__(self, node_ids: List[NodeID], annotation: str = ""):
@@ -332,6 +356,14 @@ class SetFlagAndHaltBlock(InodeCodeBlock):
 
   def _build(self):
     self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(1);"))
+    self.body.add(TextBlock(f"__builtin_INODE_HALT();"))
+
+class HaltBlock(InodeCodeBlock):
+  def __init__(self, annotation: str = ""):
+    super().__init__(annotation)
+    self._build()
+
+  def _build(self):
     self.body.add(TextBlock(f"__builtin_INODE_HALT();"))
 
 

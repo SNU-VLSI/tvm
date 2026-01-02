@@ -608,21 +608,24 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.curr_composite_id = None
   
   def sync_inrt_clear(self, codephase: CodePhase):
-    # standby and intrt
     inode_master = NodeID.inode_3_0
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
-    block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
-    self.codeblocks.append(inode_master, block, codephase)
 
-    # set_flag
-    block = SetFlagAndHaltBlock()
-    for inode_slv in inode_slaves:
-      self.codeblocks.append(inode_slv, block, codephase)
-
-    # clear flag
+    # sync all inodes
     for inode in NodeID.inodes():
-      block = ClearFlag("clear flag")
+      block = SyncAllINodes(inode, "sync all inodes")
       self.codeblocks.append(inode, block, codephase)
+    
+    # halt for slave inodes
+    for inode_slv in inode_slaves:
+      block = HaltBlock("halt for slave inodes")
+      self.codeblocks.append(inode_slv, block, codephase)
+    
+    # done and interrupt for master inode. and halt
+    block = DoneAndIntrtBlock("done and intrt for master inode")
+    self.codeblocks.append(inode_master, block, codephase)
+    block = HaltBlock("halt for master inode after done and intrt")
+    self.codeblocks.append(inode_master, block, codephase)
 
   def initialize(self):
     # clear flag
@@ -659,30 +662,33 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     
     # wait all enable of imce
     for inode in NodeID.inodes():
-      block = SetFlag()
+      block = SyncAllINodes(inode, "wait all imce compute enable")
       self.codeblocks.append(inode, block, CodePhase.INIT)
-      other_nodes = [n for n in NodeID.inodes() if n != inode]
-      block = Standby(node_ids=other_nodes, annotation=f"standby for {inode.name}")
-      self.codeblocks.append(inode, block, CodePhase.INIT)
+      # block = SetFlag()
+      # self.codeblocks.append(inode, block, CodePhase.INIT)
+      # other_nodes = [n for n in NodeID.inodes() if n != inode]
+      # block = Standby(node_ids=other_nodes, annotation=f"standby for {inode.name}")
+      # self.codeblocks.append(inode, block, CodePhase.INIT)
 
-      block = ClearFlag("clear flag after imce compute enable")
-      self.codeblocks.append(inode, block, CodePhase.INIT)
+      # block = ClearFlag("clear flag after imce compute enable")
+      # self.codeblocks.append(inode, block, CodePhase.INIT)
     
     # send constant goes is taken care of by graph traverse
 
 
   def finalize(self):
-    # standby and intrt
-    # FIXME: hardcoded inode_3_0
-    inode_master = NodeID.inode_3_0
-    inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
-    block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
-    self.codeblocks.append(inode_master, block, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
+    self.sync_inrt_clear(CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
+    # # standby and intrt
+    # # FIXME: hardcoded inode_3_0
+    # inode_master = NodeID.inode_3_0
+    # inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
+    # block = StandbyAndIntrtBlock(inode_slaves, "standby and intrt")
+    # self.codeblocks.append(inode_master, block, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
 
-    # set_flag
-    block = SetFlagAndHaltBlock()
-    for inode_slv in inode_slaves:
-      self.codeblocks.append(inode_slv, block, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
+    # # set_flag
+    # block = SetFlagAndHaltBlock()
+    # for inode_slv in inode_slaves:
+    #   self.codeblocks.append(inode_slv, block, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
 
   def dump_block_structure(self, dir_name, func_name):
     output_lines = []
