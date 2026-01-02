@@ -341,7 +341,7 @@ def getConvQuantConvModel(iH=1, iW=1):
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
-def getS2ConvQuantModel(iH=1, iW=1):
+def getS2ConvQuantConvModel(iH=1, iW=1):
   N, IC, H, W = 1, 16, iH, iW
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
   y = imcflow_qconv2d(
@@ -352,6 +352,7 @@ def getS2ConvQuantModel(iH=1, iW=1):
     channels=16,
     kernel_size=(3, 3),
     padding=(1, 1),
+    strides=(2, 2),
     out_dtype="int16"
   )
   IC, H, W = (16, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
@@ -365,6 +366,7 @@ def getS2ConvQuantModel(iH=1, iW=1):
     channels=16,
     kernel_size=(3, 3),
     padding=(1, 1),
+    strides=(2, 2),
     out_dtype="int16"
   )
   IC, H, W = (16, get_height(H, 3, 1, 2), get_width(W, 3, 1, 2))
