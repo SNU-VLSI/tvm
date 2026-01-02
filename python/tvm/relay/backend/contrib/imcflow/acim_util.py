@@ -155,8 +155,8 @@ class ConfigData(dict):
     ksel = to_int(weight_shape[2])
     pad = extract_single(padding)
     stride_val = extract_single(stride)
-    W = to_int(data_shape[3])
     H = to_int(data_shape[2])
+    W = to_int(data_shape[3])
 
     # assert for HW validity
     assert (ksel in [1, 3, 5, 7]), f"Invalid ksel value: {ksel}"
@@ -168,8 +168,8 @@ class ConfigData(dict):
         "ksel": ksel,
         "pad": pad,
         "stride": stride_val,
-        "W": W,
         "H": H,
+        "W": W,
         "adcmode": adcmode.value,
         "vmode": vmode.value,
         "multmode_set": multmode_set.as_int,
@@ -182,8 +182,8 @@ class ConfigData(dict):
     reg_val |= (self["ksel"] & 0x7) << 0
     reg_val |= (self["pad"] & 0x7) << 3
     reg_val |= (self["stride"] & 0x3) << 6
-    reg_val |= (self["W"] & 0x7F) << 8
-    reg_val |= (self["H"] & 0x7F) << 15
+    reg_val |= (self["H"] & 0x7F) << 8
+    reg_val |= (self["W"] & 0x7F) << 15
     reg_val |= (self["adcmode"] & 0x3) << 22
     reg_val |= (self["vmode"] & 0x3) << 24
     reg_val |= (self["multmode_set"] & 0xFF) << 26
