@@ -3267,16 +3267,22 @@ class MemoryAllocator:
               debug_print(f"  [{self.func_name}] Merged Input[{var_name}] tiles: bases={merged_bases}, sizes={merged_sizes}")
               debug_print(f"  [{self.func_name}] Trimmed Input[{var_name}] tiles: bases={trimmed_bases}, sizes={trimmed_sizes}")
 
-            # Step 4: Calculate memory for each tile using ceil formula
+            # Step 4: Calculate memory for each tile PER INODE using ceil formula
             # Memory = ceil(original_block_size / (total_height / tile_height))
-            max_tile_memory = 0
+            # Track max tile memory per inode separately
+            inode_max_tile_memory = {}  # {inode_name: max_tile_memory}
             debug_tile_memories = []
 
-            for tile_idx in range(num_tiles):
-              tile_memory = 0
-              tile_detail = {"tile_idx": tile_idx, "outputs": [], "inputs": []}
+            # Initialize inode memory tracking
+            for inode_name in inode_tensors.keys():
+              inode_max_tile_memory[inode_name] = 0
 
-              # Output tensor memory for this tile
+            for tile_idx in range(num_tiles):
+              # Track tile memory per inode for this tile
+              inode_tile_memory = {inode_name: 0 for inode_name in inode_tensors.keys()}
+              tile_detail = {"tile_idx": tile_idx, "outputs": [], "inputs": [], "per_inode": {}}
+
+              # Output tensor memory for this tile (per inode)
               for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
                 out_bases, out_sizes = output_tile_specs[out_idx]
                 if tile_idx < len(out_sizes):
@@ -3287,10 +3293,10 @@ class MemoryAllocator:
                     tiled_size = math.ceil(original_size * tile_height / height)
                   else:
                     tiled_size = 0
-                  tile_memory += tiled_size
-                  tile_detail["outputs"].append((out_idx, tile_height, tiled_size))
+                  inode_tile_memory[inode_name] += tiled_size
+                  tile_detail["outputs"].append((out_idx, inode_name, tile_height, tiled_size))
 
-              # Input tensor memory for this tile (using trimmed boundaries)
+              # Input tensor memory for this tile (using trimmed boundaries, per inode)
               for edge, height, width, channels, elem_size, inode_name, mem_block, var_name in input_tensor_info:
                 if var_name in trimmed_input_tiles:
                   trimmed_bases, trimmed_sizes = trimmed_input_tiles[var_name]
@@ -3302,27 +3308,44 @@ class MemoryAllocator:
                       tiled_size = math.ceil(original_size * tile_height / height)
                     else:
                       tiled_size = original_size
-                    tile_memory += tiled_size
-                    tile_detail["inputs"].append((var_name, tile_height, tiled_size))
+                    inode_tile_memory[inode_name] += tiled_size
+                    tile_detail["inputs"].append((var_name, inode_name, tile_height, tiled_size))
                 else:
                   raise ValueError(f"Input variable '{var_name}' not found in trimmed input tiles.")
 
-              max_tile_memory = max(max_tile_memory, tile_memory)
-              debug_tile_memories.append((tile_idx, tile_memory, tile_detail))
+              # Update max tile memory per inode
+              for inode_name, tile_mem in inode_tile_memory.items():
+                inode_max_tile_memory[inode_name] = max(inode_max_tile_memory[inode_name], tile_mem)
+
+              tile_detail["per_inode"] = dict(inode_tile_memory)
+              total_tile_memory = sum(inode_tile_memory.values())
+              debug_tile_memories.append((tile_idx, total_tile_memory, tile_detail))
 
             # Print detailed debug info
             debug_print(f"  [{self.func_name}] --- Tiling factor {tiling_factor} detail ---")
             for tile_idx, tile_mem, detail in debug_tile_memories[:3]:  # Show first 3 tiles
-              debug_print(f"    Tile[{tile_idx}]: total={tile_mem}, outputs={detail['outputs']}, inputs={detail['inputs']}")
+              debug_print(f"    Tile[{tile_idx}]: total={tile_mem}, per_inode={detail['per_inode']}")
 
-            # Check if this tiling configuration works
-            size_for_inode_cnt = len(tensors['input'] + tensors['output']) * 32
-            max_tile_memory += size_for_inode_cnt
-            if max_tile_memory <= ImcflowDeviceConfig.INODE_MAX_TILING_SIZE:
-              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (fits)")
+            # Add counter base address size per inode
+            inode_cnt_sizes = {}  # {inode_name: cnt_size}
+            for inode_name, tensors_for_inode in inode_tensors.items():
+              cnt_size = len(tensors_for_inode['input'] + tensors_for_inode['output']) * 32
+              inode_cnt_sizes[inode_name] = cnt_size
+              inode_max_tile_memory[inode_name] += cnt_size
+
+            # Check if this tiling configuration works FOR ALL INODES
+            all_inodes_fit = True
+            for inode_name, max_mem in inode_max_tile_memory.items():
+              if max_mem > ImcflowDeviceConfig.INODE_MAX_TILING_SIZE:
+                all_inodes_fit = False
+                debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: inode {inode_name} max tile memory = {max_mem} bytes (too large, limit={ImcflowDeviceConfig.INODE_MAX_TILING_SIZE})")
+              else:
+                debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: inode {inode_name} max tile memory = {max_mem} bytes (fits)")
+
+            if all_inodes_fit:
+              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: all inodes fit")
               break
             else:
-              debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (too large)")
               # Increase unified tiling factor
               if tiling_factor < max_tiling_factor:
                 tiling_factor += 1
@@ -3332,7 +3355,12 @@ class MemoryAllocator:
                 debug_print(f"  [{self.func_name}] Reached max tiling factor, need input sub-tiling")
                 break
 
-          if at_max_tiling() and max_tile_memory > ImcflowDeviceConfig.INODE_MAX_TILING_SIZE:
+          # Check if any inode exceeds the limit after reaching max tiling factor
+          any_inode_exceeds = any(
+            mem > ImcflowDeviceConfig.INODE_MAX_TILING_SIZE
+            for mem in inode_max_tile_memory.values()
+          )
+          if at_max_tiling() and any_inode_exceeds:
             need_input_sub_tiling = True
             debug_print(f"  [{self.func_name}] Full output tiling reached, applying input sub-tiling")
 
@@ -3344,13 +3372,18 @@ class MemoryAllocator:
           final_trimmed_input_tiles = trimmed_input_tiles
 
           # Apply input sub-tiling if needed
+          # Calculate the minimum available memory across all inodes (most constrained inode)
           if need_input_sub_tiling:
+            min_available_memory = min(
+              ImcflowDeviceConfig.INODE_MAX_TILING_SIZE - inode_cnt_sizes.get(inode_name, 0)
+              for inode_name in inode_tensors.keys()
+            )
             final_output_tile_specs, final_trimmed_input_tiles = self.apply_input_sub_tiling(
               final_output_tile_specs,
               final_trimmed_input_tiles,
               input_tensor_info,
               output_tensor_info,
-              ImcflowDeviceConfig.INODE_MAX_TILING_SIZE - size_for_inode_cnt
+              min_available_memory
             )
           
           # check all input and output tensor tiling factor is same (tile loop count)
