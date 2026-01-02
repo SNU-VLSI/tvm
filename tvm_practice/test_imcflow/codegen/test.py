@@ -49,6 +49,8 @@ MODEL_REGISTRY = {
     "one_relu": (models_for_test.getOneReluModel, "linear"),
     "one_conv_small": (lambda: models_for_test.getOneConvModel(H=4,W=4), "random"),
     "one_conv_big": (lambda: models_for_test.getOneConvModel(H=32,W=32), "random"),
+    "conv_quant_conv_big": (lambda: models_for_test.getConvQuantConvModel(H=32, W=32), "random"),
+    "s2_conv_quant_conv_big": (lambda: models_for_test.getS2ConvQuantModel(H=32, W=32), "random"),
     "one_mmquant": (models_for_test.getOneMMQuantModel, "linear"),
     "one_conv_quant": (models_for_test.getOneConvQuantModel, "ones"),
     "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
@@ -81,7 +83,8 @@ MODEL_REGISTRY = {
 
     "conv_bn_quant": (models_for_test.getConvBNQuantModel, "ones"),
     "conv_bn_mult_add": (models_for_test.getConvBNMultAddModel, "ones"),
-    "conv_quant_conv": (models_for_test.getConvQuantConvModel, "ones"),
+    "conv_quant_conv": (lambda: models_for_test.getConvQuantConvModel(H=1,W=1), "ones"),
+    "s2_conv_quant_conv": (lambda: models_for_test.getS2ConvQuantModel(H=1, W=1), "random"),
     "big_conv_quant_conv": (models_for_test.getBigConvQuantConvModel, "ones"),
     "residual_model": (lambda: models_for_test.getResidualModel(False), "ones"),
     "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
