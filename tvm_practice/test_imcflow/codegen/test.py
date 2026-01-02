@@ -20,6 +20,8 @@ import copy
 import pprint
 import glob
 import pickle
+import sys
+from contextlib import contextmanager
 
 from tvm.relay.op.contrib.imcflow import HashToCustomID
 from models import real_model, real_model2, test_models
@@ -157,6 +159,54 @@ INPUT_PATTERNS = ["random", "ones", "zeros", "linear"]
 # ============================================================================
 # Utility Functions
 # ============================================================================
+class TeeLogger:
+  """A class that writes to both stdout and a file simultaneously"""
+  def __init__(self, log_file):
+    self.terminal = sys.stdout
+    self.log = log_file
+
+  def write(self, message):
+    self.terminal.write(message)
+    self.log.write(message)
+    self.log.flush()  # Ensure immediate write to file
+
+  def flush(self):
+    self.terminal.flush()
+    self.log.flush()
+
+
+@contextmanager
+def tee_output_to_log(log_path):
+  """Context manager that tees stdout/stderr to both console and log file
+
+  Args:
+    log_path: Path to the log file
+  """
+  # Save original stdout/stderr
+  original_stdout = sys.stdout
+  original_stderr = sys.stderr
+
+  # Open log file
+  log_file = open(log_path, 'w')
+
+  try:
+    # Create tee logger
+    tee_logger = TeeLogger(log_file)
+
+    # Redirect both stdout and stderr to tee logger
+    sys.stdout = tee_logger
+    sys.stderr = tee_logger
+
+    yield
+  finally:
+    # Restore original stdout/stderr
+    sys.stdout = original_stdout
+    sys.stderr = original_stderr
+
+    # Close log file
+    log_file.close()
+
+
 def save_transformed_model(mod, param_dict, eval_dir, pkl_name="transformed_model.pkl"):
   """Save transformed model and parameters to file for reuse
 
@@ -732,27 +782,37 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
     os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
     print(f"⏭️  Reusing existing directory: {dir_name}")
 
-  # Get original model (needed for input generation)
-  # This is lightweight compared to transformation/codegen
-  mod, param_dict = model_getter()
+  # Setup log file path in the test directory's logs folder
+  log_dir = os.path.join(dir_name, "logs")
+  os.makedirs(log_dir, exist_ok=True)
+  log_file_path = os.path.join(log_dir, f"test_{input_pattern}.log")
 
-  # Generate and save test inputs
-  input_dir = f"./{dir_name}/test_inputs"
-  print(f"Generating test inputs for {test_name} with pattern '{input_pattern}'...")
-  known_keys = param_dict.keys() if param_dict is not None else []
-  gen = InputGenerator(mod=mod, known_keys=known_keys, seed=42)
-  inputs = gen.generate_input(pattern=input_pattern)
-  gen.save_to_files(inputs, input_dir)
-  gen.save_to_files(param_dict, input_dir) # also save params
+  # Wrap the entire test execution in the tee logger
+  with tee_output_to_log(log_file_path):
+    print(f"Logging test output to: {log_file_path}")
+    print(f"Test: {test_name}, Input pattern: {input_pattern}, Skip setup: {skip_setup}")
 
-  # Load test inputs for CPU validation
-  input_name = list(gen.input_info.keys())[0]
-  input_data = gen.load_from_files(input_dir, input_name)
-  input_dict = {input_name: input_data}
+    # Get original model (needed for input generation)
+    # This is lightweight compared to transformation/codegen
+    mod, param_dict = model_getter()
 
-  # Run with CPU validation enabled
-  # Note: When skip_setup=True, run_test will load the transformed model from file
-  run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup)
+    # Generate and save test inputs
+    input_dir = f"./{dir_name}/test_inputs"
+    print(f"Generating test inputs for {test_name} with pattern '{input_pattern}'...")
+    known_keys = param_dict.keys() if param_dict is not None else []
+    gen = InputGenerator(mod=mod, known_keys=known_keys, seed=42)
+    inputs = gen.generate_input(pattern=input_pattern)
+    gen.save_to_files(inputs, input_dir)
+    gen.save_to_files(param_dict, input_dir) # also save params
+
+    # Load test inputs for CPU validation
+    input_name = list(gen.input_info.keys())[0]
+    input_data = gen.load_from_files(input_dir, input_name)
+    input_dict = {input_name: input_data}
+
+    # Run with CPU validation enabled
+    # Note: When skip_setup=True, run_test will load the transformed model from file
+    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup)
 
 
 # ============================================================================
