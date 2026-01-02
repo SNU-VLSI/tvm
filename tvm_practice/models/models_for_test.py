@@ -127,8 +127,8 @@ def getOneReluModel():
 
   return out, param_dict
 
-def getOneConvModel(H=4, W=4):
-  N, IC, H, W = 1, 28, H, W
+def getOneConvModel(iH=4, iW=4):
+  N, IC, H, W = 1, 28, iH, iW
   OC = 64
   KH, KW = 3, 3
   stride, padding = 1, 1
@@ -303,8 +303,8 @@ def getConvBNMultAddModel():
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
-def getConvQuantConvModel(H=1, W=1):
-  N, IC = 1, 16
+def getConvQuantConvModel(iH=1, iW=1):
+  N, IC, H, W = 1, 16, iH, iW
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
   y = imcflow_qconv2d(
     y,
@@ -341,8 +341,8 @@ def getConvQuantConvModel(H=1, W=1):
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
-def getS2ConvQuantModel(H=1, W=1):
-  N, IC = 1, 16
+def getS2ConvQuantModel(iH=1, iW=1):
+  N, IC, H, W = 1, 16, iH, iW
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
   y = imcflow_qconv2d(
     y,
