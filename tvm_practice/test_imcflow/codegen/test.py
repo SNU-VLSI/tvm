@@ -627,6 +627,8 @@ def run_simulation(eval_dir):
       print(f"✅ Simulation completed, log saved to: {sim_log_path}")
     except Exception as e:
       print(f"❌ Simulation failed with error: {e}")
+    except KeyboardInterrupt:
+      print("❌ Simulation interrupted by user")
 
   print(f"✅ move imcflow simulator log to {log_dir}")
   imcflow_sim_log_paths = glob.glob(f"{imcflow_gem5_dir}/logs/now*.log")
