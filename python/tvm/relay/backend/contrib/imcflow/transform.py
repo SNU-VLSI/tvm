@@ -3198,7 +3198,7 @@ class MemoryAllocator:
 
           # Find tiling factor by incrementing until memory fits
           debug_print(f"\n  [{self.func_name}] ===== TILING FACTOR SEARCH =====")
-          debug_print(f"  [{self.func_name}] INODE_DATA_MEM_SIZE = {ImcflowDeviceConfig.INODE_DATA_MEM_SIZE} bytes")
+          debug_print(f"  [{self.func_name}] INODE_MAX_TILING_SIZE = {ImcflowDeviceConfig.INODE_MAX_TILING_SIZE} bytes")
           debug_print(f"  [{self.func_name}] max_tiling_factor (unified, max output height) = {max_tiling_factor}")
           debug_print(f"  [{self.func_name}] Output tensors:")
           for out_idx, (edge, height, width, channels, elem_size, inode_name, mem_block) in enumerate(output_tensor_info):
@@ -3316,7 +3316,7 @@ class MemoryAllocator:
             # Check if this tiling configuration works
             size_for_inode_cnt = len(tensors['input'] + tensors['output']) * 32
             max_tile_memory += size_for_inode_cnt
-            if max_tile_memory <= ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
+            if max_tile_memory <= ImcflowDeviceConfig.INODE_MAX_TILING_SIZE:
               debug_print(f"  [{self.func_name}] Tiling factor {tiling_factor}: max tile memory = {max_tile_memory} bytes (fits)")
               break
             else:
@@ -3330,7 +3330,7 @@ class MemoryAllocator:
                 debug_print(f"  [{self.func_name}] Reached max tiling factor, need input sub-tiling")
                 break
 
-          if at_max_tiling() and max_tile_memory > ImcflowDeviceConfig.INODE_DATA_MEM_SIZE:
+          if at_max_tiling() and max_tile_memory > ImcflowDeviceConfig.INODE_MAX_TILING_SIZE:
             need_input_sub_tiling = True
             debug_print(f"  [{self.func_name}] Full output tiling reached, applying input sub-tiling")
 
@@ -3348,7 +3348,7 @@ class MemoryAllocator:
               final_trimmed_input_tiles,
               input_tensor_info,
               output_tensor_info,
-              ImcflowDeviceConfig.INODE_DATA_MEM_SIZE
+              ImcflowDeviceConfig.INODE_MAX_TILING_SIZE - size_for_inode_cnt
             )
           
           # check all input and output tensor tiling factor is same (tile loop count)
