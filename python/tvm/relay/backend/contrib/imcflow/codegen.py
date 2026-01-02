@@ -22,6 +22,7 @@ from tvm.relay.backend.contrib.imcflow import imce_codeblock
 from tvm.relay.backend.contrib.imcflow.operation_handlers import get_handler_registry
 from tvm.relay.backend.contrib.imcflow.transform_utils import UseDefChainBuilder, UseDefChainParser
 import pdb
+import pprint
 
 # Ensure external codegen registration side-effects are loaded.
 from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
@@ -225,6 +226,11 @@ class CodegenSuite:
 
     # Clear the codegen context when done
     CodegenContext().clear()
+
+    with open(f"{self.model_dir}/final_imcflow_config_memory_map_with_inst.txt", "w") as f:
+      print(f"----------------------- memory_map_with_inst ------------------------", file=f)
+      for key, value in DevConfig().MemLayout.items():
+        pprint.pprint(f"{key} : {value}", stream=f)
 
     return func
 

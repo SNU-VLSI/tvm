@@ -25,6 +25,8 @@ from itertools import cycle
 #   export IMCFLOW_DEBUG=0  # Disable all debug messages
 _DEBUG_ENABLED = None
 
+INODE_DMEM_FOR_TILE = ImcflowDeviceConfig.INODE_DATA_MEM_SIZE
+
 def _is_debug_enabled():
     """Check if debug logging is enabled via IMCFLOW_DEBUG environment variable"""
     global _DEBUG_ENABLED

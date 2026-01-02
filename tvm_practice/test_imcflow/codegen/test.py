@@ -543,6 +543,7 @@ def transform_model_for_imcflow(mod, param_dict, dir):
   _dump("TensorEdgetoInfo", config.TensorEdgetoInfo)
   _dump("TensorIDtoEdge", config.TensorIDtoEdge)
   _dump("PolicyTableDict", config.PolicyTableDict)
+  _dump("memory_layout", config.MemLayout)
 
   return mod, param_dict
 
