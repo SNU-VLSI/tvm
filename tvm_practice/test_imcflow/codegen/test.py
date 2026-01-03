@@ -50,6 +50,7 @@ MODEL_REGISTRY = {
     "one_conv_small": (lambda: models_for_test.getOneConvModel(iH=4,iW=4), "random"),
     "one_conv_big": (lambda: models_for_test.getOneConvModel(iH=32,iW=32), "random"),
     "conv_quant_conv_big": (lambda: models_for_test.getConvQuantConvModel(iH=32, iW=32), "random"),
+    "s2_conv_quant_conv_med": (lambda: models_for_test.getS2ConvQuantConvModel(iH=16, iW=16), "random"),
     "s2_conv_quant_conv_big": (lambda: models_for_test.getS2ConvQuantConvModel(iH=32, iW=64), "random"),
     "one_mmquant": (models_for_test.getOneMMQuantModel, "linear"),
     "one_conv_quant": (models_for_test.getOneConvQuantModel, "ones"),

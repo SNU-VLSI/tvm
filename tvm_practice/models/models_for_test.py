@@ -375,7 +375,7 @@ def getS2ConvQuantConvModel(iH=1, iW=1):
   y = imcflow_qconv2d(
     y,
     relay.var("weight2_3", shape=(16,16,3,3), dtype="int8"),
-    ConfigData((N, IC, H, W), (16,16,3,3), padding=1, stride=1, acc_mask=AccMask.BM_1111).get_as_const_tensor(),
+    ConfigData((N, IC, H, W), (16,16,3,3), padding=1, stride=2, acc_mask=AccMask.BM_1111).get_as_const_tensor(),
     in_channels=16,
     channels=16,
     kernel_size=(3, 3),
