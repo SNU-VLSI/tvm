@@ -351,7 +351,7 @@ class MemoryRegion(UserDict):
     """Allocate block by finding first region of the phase with available space."""
     i = 0
     while not self[(phase, i)].allocate(block):
-      # raise RuntimeError(f"Failed to allocate block {block} in region {self._template_region.name} for phase {phase}")
+      raise RuntimeError(f"Failed to allocate block {block} in region {self._template_region.name} for phase {phase}")
       i += 1
 
 

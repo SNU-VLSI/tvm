@@ -113,6 +113,11 @@ MODEL_REGISTRY = {
     "resnet8_subset25_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=25), "ones"),
     "resnet8_subset31_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=31), "ones"),
 
+    "resnet8_subset01_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=1), "ones"),
+    "resnet8_subset02_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=2), "ones"),
+    "resnet8_subset03_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=3), "ones"),
+    "resnet8_subset04_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=4), "ones"),
+    "resnet8_subset05_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=5), "ones"),
     "resnet8_subset06_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=6), "ones"),
     "resnet8_subset07_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=7), "ones"),
     "resnet8_subset08_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=8), "ones"),
@@ -676,17 +681,29 @@ def compare_outputs(cpu_output, imcflow_output):
     pytest.fail(f"Output dtype mismatch: CPU {cpu_output.dtype} vs IMCFLOW {imcflow_output.dtype}")
 
   # Value comparison
+  fail = False
   if cpu_output.dtype in [np.float32, np.float64]:
     if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
       print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
       print(f"IMCFLOW == CPU reference output: {cpu_output}")
     else:
-      pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
+      fail_indices = np.where(~np.isclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8))
+      fail = True
   elif np.array_equal(cpu_output, imcflow_output):
     print("✅ IMCFLOW output matches CPU reference output (exact match)")
     print(f"IMCFLOW == CPU reference output: {cpu_output}")
   else:
+    fail_indices = np.where(cpu_output != imcflow_output)
+    fail = True
+  
+  if fail:
+    max_print_cnt = 10
     pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
+    print(f"❌ Output values do not match at {len(fail_indices[0])} locations. Showing up to {max_print_cnt} mismatches:")
+    for i in range(min(len(fail_indices[0]), max_print_cnt)):
+      idx = tuple(index[i] for index in fail_indices)
+      print(f"  Index {idx}: CPU={cpu_output[idx]}, IMCFLOW={imcflow_output[idx]}")
+    pytest.fail("Output comparison failed.")
 
 
 def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False):
