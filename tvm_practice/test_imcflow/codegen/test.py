@@ -341,8 +341,11 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
     print("⏭️  Skipping CPU model transformation, loading from file...")
     cpu_mod, param_dict = load_transformed_model(model_dir, pkl_name="transformed_cpu_model.pkl")
 
+  executor_ = Executor("graph")
+  runtime_  = Runtime("crt", {"system-lib": True})
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-    graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict)
+    graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict,
+                                         executor=executor_, runtime=runtime_)
 
   if DEBUG:
     executor = debug_executor.create(graph, lib, device=ctx)
@@ -698,13 +701,15 @@ def compare_outputs(cpu_output, imcflow_output):
   
   if fail:
     max_print_cnt = 10
-    pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
     print(f"❌ Output values do not match at {len(fail_indices[0])} locations. Showing up to {max_print_cnt} mismatches:")
     for i in range(min(len(fail_indices[0]), max_print_cnt)):
       idx = tuple(index[i] for index in fail_indices)
       print(f"  Index {idx}: CPU={cpu_output[idx]}, IMCFLOW={imcflow_output[idx]}")
-    pytest.fail("Output comparison failed.")
-
+    # Flush stdout to ensure tee logger captures everything before pytest.fail raises exception
+    sys.stdout.flush()
+    pytest.fail(f"Output comparison failed.\nReference output: {cpu_output}\nIMCFLOW output: {imcflow_output}")
+  else:
+    print("\n✅ Test completed successfully")
 
 def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False):
   """Generate IMCFLOW evaluation results with optional CPU validation

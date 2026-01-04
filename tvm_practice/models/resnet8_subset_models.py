@@ -79,6 +79,7 @@ def getModel_(input_shape, until_relay: int = None):
                             relay.var("bn_moving_mean", shape=(16,), dtype="float32"), relay.var("bn_moving_var", shape=(16,), dtype="float32"))[0])
 
     y = c.check(y * relay.var("x_f_1", shape=(1,), dtype="float32"))
+    y = relay.clip(y, a_min=-32768.0, a_max=32767.0)
     y = c.check(relay.cast(y, dtype="int16"))
 
     # basic block 1

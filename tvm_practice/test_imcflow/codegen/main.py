@@ -96,7 +96,6 @@ Examples:
     input_pattern=args.pattern,
     skip_setup=args.skip_setup
   )
-  print("\n✅ Test completed successfully")
   return 0
 
 
