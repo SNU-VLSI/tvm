@@ -3260,9 +3260,9 @@ class MemoryAllocator:
               var_name = src_node.name_hint if isinstance(src_node, relay.Var) else "data"
               input_tensor_info.append((edge, height, width, channels, elem_size, inode_name, mem_block, var_name))
 
-          # max_tiling_factor: single unified max tiling factor = max of all output heights
+          # max_tiling_factor: single unified max tiling factor = min of all output heights
           # All outputs share the same tiling factor
-          max_tiling_factor = max(height for (_, height, _, _, _, _, _) in output_tensor_info)
+          max_tiling_factor = min(height for (_, height, _, _, _, _, _) in output_tensor_info)
           tiling_factor = 1
 
           # Find tiling factor by incrementing until memory fits
