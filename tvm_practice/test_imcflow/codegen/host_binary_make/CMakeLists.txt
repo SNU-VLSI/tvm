@@ -54,9 +54,9 @@ if(ISA STREQUAL "ARM")
     message(STATUS "No host object files found (optional for ARM)")
   endif()
 else()
-  # X86: HOST_OBJ_FILES required
+  # X86: HOST_OBJ_FILES optional
   if(NOT HOST_OBJ_FILES)
-    message(FATAL_ERROR "No host object files (*.host.o) found in: ${H_OBJ_PATH}\nMake sure H_OBJ_PATH is set correctly and contains .host.o files")
+    message(STATUS "No host object files (*.host.o) found in: ${H_OBJ_PATH} (optional)")
   else()
     list(LENGTH HOST_OBJ_FILES HOST_OBJ_COUNT)
     message(STATUS "Found ${HOST_OBJ_COUNT} host object files:")

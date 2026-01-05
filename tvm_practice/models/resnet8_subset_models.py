@@ -79,6 +79,7 @@ def getModel_(input_shape, until_relay: int = None):
                             relay.var("bn_moving_mean", shape=(16,), dtype="float32"), relay.var("bn_moving_var", shape=(16,), dtype="float32"))[0])
 
     y = c.check(y * relay.var("x_f_1", shape=(1,), dtype="float32"))
+    y = relay.clip(y, a_min=-32768.0, a_max=32767.0)
     y = c.check(relay.cast(y, dtype="int16"))
 
     # basic block 1
@@ -260,12 +261,13 @@ def _finalize_model(y, input):
   return out, var_info
 
 
-def getModel_from_pretrained_weight(small_debug=False, until_relay=None):
+def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
   """
   Get ResNet8 subset model with pretrained weights loaded from checkpoint.
 
   Args:
-    small_debug: If True, use smaller input shape (8x8 instead of 32x32)
+    iH: Input height
+    iW: Input width
     until_relay: Optional relay operation index to stop at (0-based). If None, returns full model.
 
   Returns:
@@ -274,10 +276,7 @@ def getModel_from_pretrained_weight(small_debug=False, until_relay=None):
   import torch
   import re
 
-  if small_debug:
-    out, var_dict = getModel_([1, 3, 8, 8], until_relay=until_relay)
-  else:
-    out, var_dict = getModel_([1, 3, 32, 32], until_relay=until_relay)
+  out, var_dict = getModel_([1, 3, iH, iW], until_relay=until_relay)
 
   # Load checkpoint
   checkpoint_path = '/root/project/tvm/tvm_practice/models/checkpoint.pth.tar'

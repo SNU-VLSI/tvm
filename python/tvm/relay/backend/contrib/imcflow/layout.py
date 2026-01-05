@@ -608,6 +608,32 @@ CPU_REQUIRED_OP_LAYOUTS = {
       LayoutType.MK,
     )
   ],
+  "clip" : [
+    (
+      [
+        [LayoutType.NCHW16C],
+      ],
+      LayoutType.NCHW16C,
+    ),
+    (
+      [
+        [LayoutType.NCHW64C],
+      ],
+      LayoutType.NCHW64C,
+    ),
+    (
+      [
+        [LayoutType.NCHW],
+      ],
+      LayoutType.NCHW,
+    ),
+    (
+      [
+        [LayoutType.MK],
+      ],
+      LayoutType.MK,
+    )
+  ],
   "nn.bitpack" : [
     (
       [

@@ -90,53 +90,57 @@ MODEL_REGISTRY = {
     "residual_model": (lambda: models_for_test.getResidualModel(False), "ones"),
     "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
-    # ResNet8 variants - all use small_debug=True
-    "resnet8_subset06_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=6), "ones"),
-    "resnet8_subset07_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=7), "ones"),
-    "resnet8_subset08_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=8), "ones"),
-    "resnet8_subset09_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=9), "ones"),
-    "resnet8_subset10_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=10), "ones"),
-    "resnet8_subset11_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=11), "ones"),
-    "resnet8_subset12_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=12), "ones"),
-    "resnet8_subset13_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=13), "ones"),
-    "resnet8_subset14_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=14), "ones"),
-    "resnet8_subset15_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=15), "ones"),
-    "resnet8_subset16_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=16), "ones"),
-    "resnet8_subset17_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=17), "ones"),
-    "resnet8_subset18_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=18), "ones"),
-    "resnet8_subset19_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=19), "ones"),
-    "resnet8_subset20_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=20), "ones"),
-    "resnet8_subset21_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=21), "ones"),
-    "resnet8_subset22_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=22), "ones"),
-    "resnet8_subset23_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=23), "ones"),
-    "resnet8_subset24_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=24), "ones"),
-    "resnet8_subset25_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=25), "ones"),
-    "resnet8_subset31_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=True, until_relay=31), "ones"),
+    # ResNet8 variants
+    "resnet8_subset06_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=6), "ones"),
+    "resnet8_subset07_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=7), "ones"),
+    "resnet8_subset08_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=8), "ones"),
+    "resnet8_subset09_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=9), "ones"),
+    "resnet8_subset10_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=10), "ones"),
+    "resnet8_subset11_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=11), "ones"),
+    "resnet8_subset12_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=12), "ones"),
+    "resnet8_subset13_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=13), "ones"),
+    "resnet8_subset14_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=14), "ones"),
+    "resnet8_subset15_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=15), "ones"),
+    "resnet8_subset16_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=16), "ones"),
+    "resnet8_subset17_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=17), "ones"),
+    "resnet8_subset18_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=18), "ones"),
+    "resnet8_subset19_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=19), "ones"),
+    "resnet8_subset20_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=20), "ones"),
+    "resnet8_subset21_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=21), "ones"),
+    "resnet8_subset22_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=22), "ones"),
+    "resnet8_subset23_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=23), "ones"),
+    "resnet8_subset24_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=24), "ones"),
+    "resnet8_subset25_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=25), "ones"),
+    "resnet8_subset31_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=31), "ones"),
 
-    "resnet8_subset06_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=6), "ones"),
-    "resnet8_subset07_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=7), "ones"),
-    "resnet8_subset08_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=8), "ones"),
-    "resnet8_subset09_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=9), "ones"),
-    "resnet8_subset10_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=10), "ones"),
-    "resnet8_subset11_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=11), "ones"),
-    "resnet8_subset12_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=12), "ones"),
-    "resnet8_subset13_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=13), "ones"),
-    "resnet8_subset14_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=14), "ones"),
-    "resnet8_subset15_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=15), "ones"),
-    "resnet8_subset16_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=16), "ones"),
-    "resnet8_subset17_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=17), "ones"),
-    "resnet8_subset18_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=18), "ones"),
-    "resnet8_subset19_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=19), "ones"),
-    "resnet8_subset20_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=20), "ones"),
-    "resnet8_subset21_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=21), "ones"),
-    "resnet8_subset22_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=22), "ones"),
-    "resnet8_subset23_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=23), "ones"),
-    "resnet8_subset24_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=24), "ones"),
-    "resnet8_subset25_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=25), "ones"),
-    "resnet8_subset31_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=31), "ones"),
+    "resnet8_subset01_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=1), "ones"),
+    "resnet8_subset02_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=2), "ones"),
+    "resnet8_subset03_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=3), "ones"),
+    "resnet8_subset04_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=4), "ones"),
+    "resnet8_subset05_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=5), "ones"),
+    "resnet8_subset06_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=6), "ones"),
+    "resnet8_subset07_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=7), "ones"),
+    "resnet8_subset08_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=8), "ones"),
+    "resnet8_subset09_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=9), "ones"),
+    "resnet8_subset10_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=10), "ones"),
+    "resnet8_subset11_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=11), "ones"),
+    "resnet8_subset12_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=12), "ones"),
+    "resnet8_subset13_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=13), "ones"),
+    "resnet8_subset14_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=14), "ones"),
+    "resnet8_subset15_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=15), "ones"),
+    "resnet8_subset16_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=16), "ones"),
+    "resnet8_subset17_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=17), "ones"),
+    "resnet8_subset18_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=18), "ones"),
+    "resnet8_subset19_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=19), "ones"),
+    "resnet8_subset20_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=20), "ones"),
+    "resnet8_subset21_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=21), "ones"),
+    "resnet8_subset22_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=22), "ones"),
+    "resnet8_subset23_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=23), "ones"),
+    "resnet8_subset24_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=24), "ones"),
+    "resnet8_subset25_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=25), "ones"),
+    "resnet8_subset31_pretrained_orig": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=32, iW=32, until_relay=31), "ones"),
 
-    "resnet8_origin_subset31_pretrained": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(small_debug=False, until_relay=31), "ones"),
-
+    "resnet8_subset31_pretrained_big": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=16, iW=64, until_relay=31), "ones"),
     "resnet8_last_bb" : (lambda: models_for_test.getResidualPathTest(small_debug=True, random_param=True), "ones"),
 
     # "resnet8_small": (lambda: resnet8_cifar.getModel(True), "ones"),
@@ -336,8 +340,11 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
     print("⏭️  Skipping CPU model transformation, loading from file...")
     cpu_mod, param_dict = load_transformed_model(model_dir, pkl_name="transformed_cpu_model.pkl")
 
+  executor_ = Executor("graph")
+  runtime_  = Runtime("crt", {"system-lib": True})
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-    graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict)
+    graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict,
+                                         executor=executor_, runtime=runtime_)
 
   if DEBUG:
     executor = debug_executor.create(graph, lib, device=ctx)
@@ -676,18 +683,32 @@ def compare_outputs(cpu_output, imcflow_output):
     pytest.fail(f"Output dtype mismatch: CPU {cpu_output.dtype} vs IMCFLOW {imcflow_output.dtype}")
 
   # Value comparison
+  fail = False
   if cpu_output.dtype in [np.float32, np.float64]:
     if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
       print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
       print(f"IMCFLOW == CPU reference output: {cpu_output}")
     else:
-      pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
+      fail_indices = np.where(~np.isclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8))
+      fail = True
   elif np.array_equal(cpu_output, imcflow_output):
     print("✅ IMCFLOW output matches CPU reference output (exact match)")
     print(f"IMCFLOW == CPU reference output: {cpu_output}")
   else:
-    pytest.fail(f"Reference output: {cpu_output}\n IMCFLOW output: {imcflow_output}")
-
+    fail_indices = np.where(cpu_output != imcflow_output)
+    fail = True
+  
+  if fail:
+    max_print_cnt = 10
+    print(f"❌ Output values do not match at {len(fail_indices[0])} locations. Showing up to {max_print_cnt} mismatches:")
+    for i in range(min(len(fail_indices[0]), max_print_cnt)):
+      idx = tuple(index[i] for index in fail_indices)
+      print(f"  Index {idx}: CPU={cpu_output[idx]}, IMCFLOW={imcflow_output[idx]}")
+    # Flush stdout to ensure tee logger captures everything before pytest.fail raises exception
+    sys.stdout.flush()
+    pytest.fail(f"Output comparison failed.\nReference output: {cpu_output}\nIMCFLOW output: {imcflow_output}")
+  else:
+    print("\n✅ Test completed successfully")
 
 def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False):
   """Generate IMCFLOW evaluation results with optional CPU validation

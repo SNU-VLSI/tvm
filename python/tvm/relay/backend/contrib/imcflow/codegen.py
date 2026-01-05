@@ -366,6 +366,9 @@ class CntBaseAddrCodegen:
         if data_block and data_block.tiling_info and data_block.tiling_info.pkt_cnts:
           pkt_cnts = data_block.tiling_info.pkt_cnts
           for cnt in pkt_cnts:
+            if cnt < 0:
+              print(f"Warning: Negative packet count {cnt} in block {block_id}")
+              raise RuntimeError(f"Negative packet count {cnt} in block {block_id}")
             file.write(int(cnt).to_bytes(4, byteorder='little', signed=False))
           # Pad to 32 bytes if needed
           written_bytes = len(pkt_cnts) * 4
