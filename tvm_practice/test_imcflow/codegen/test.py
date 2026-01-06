@@ -585,6 +585,8 @@ def run_simulation(eval_dir):
   # Build the host binary
   print("\n--- Building Host Binary ---")
   host_build_dir = "./host_binary_make/build"
+  if not os.path.exists(host_build_dir):
+    os.makedirs(host_build_dir)
   build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86"]
   build_log_path = os.path.join(log_dir, "build.log")
 
