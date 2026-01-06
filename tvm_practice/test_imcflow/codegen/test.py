@@ -609,8 +609,8 @@ def run_simulation(eval_dir):
   print(f"✅ Build completed, log saved to: {build_log_path}")
 
   # Run gem5 simulation
-  print("\n--- Running gem5 Simulation ---")
-  imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow"
+  print("\n--- Running gem5+py_sim Simulation ---")
+  imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/py_runner"
   sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir]
   sim_log_path = os.path.join(log_dir, "gem5.log")
 
