@@ -25,6 +25,9 @@ INT_ACK_GEN_DEVICE = "/dev/uio4"
 CONST_TAGS = ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]
 ALIGNMENT_BYTES = 32
 
+# Polling configuration
+USE_POLLING = True
+
 def getInnerNodeID(graph_node_id):
   if isinstance(graph_node_id, tuple):
     return graph_node_id[1]
@@ -304,6 +307,36 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 }
 """)
 
+  def generatePollingUtilities(self):
+    """Generate polling utility functions for non-interrupt based synchronization."""
+    return ("""
+// Poll until ImcFlow returns to IDLE state
+#define POLL_LOG_INTERVAL 1000
+static void wait_for_idle(volatile uint32_t* npu_pointer) {
+  uint32_t poll_count = 0;
+  uint32_t state;
+
+  printf("[POLLING] Waiting for ImcFlow to return to IDLE state...\\n");
+
+  while (1) {
+    state = npu_pointer[STATE_REG_IDX];
+
+    if (state == SET_IDLE_CODE) {
+      printf("[POLLING] Operation complete! (polled %u times)\\n", poll_count);
+      return;
+    }
+
+    poll_count++;
+
+    // Log progress every 100k polls for debugging
+    if (poll_count % POLL_LOG_INTERVAL == 0) {
+      printf("[POLLING] Still waiting... (poll count: %u, current state: 0x%x)\\n",
+             poll_count, state);
+    }
+  }
+}
+""")
+
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
     if self.os == "linux":
@@ -357,7 +390,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       " npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
-      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("wait_for_idle(npu_pointer);" if USE_POLLING else ""),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
       "npu_pointer[INTR_DONE_REG_IDX] = 1;",
     ]
@@ -371,7 +404,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
-      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("wait_for_idle(npu_pointer);" if USE_POLLING else ""),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
         "npu_pointer[INTR_DONE_REG_IDX] = 1;"
     ]
@@ -559,6 +592,8 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     code += self.generateExternLink()
     code += makeConstArrayDecl(self.func, self.func_name, self.target_func)
     code += self.generateInterruptUtilities()
+    if USE_POLLING:
+      code += self.generatePollingUtilities()
 
     # Kernel function prototype and definition (C)
     code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
