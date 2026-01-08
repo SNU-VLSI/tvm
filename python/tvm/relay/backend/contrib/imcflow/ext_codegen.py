@@ -12,11 +12,20 @@ from tvm.runtime import String
 import math
 import os
 
-
-IMCFLOW_ADDR = 0x80000000
-IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
-INT_ACK_GEN_ADDR = 0
-INT_ACK_GEN_LEN = 0
+if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
+  print("IMCFLOW_HOST_OS: baremetal")
+  IMCFLOW_ADDR = 0x80000000
+  IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
+  INT_ACK_GEN_ADDR = 0
+  INT_ACK_GEN_LEN = 0
+elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
+  print("IMCFLOW_HOST_OS: linux")
+  IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
+  IMCFLOW_LEN = os.environ["IMCFLOW_LEN"]
+  INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
+  INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
+else:
+  raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
 
 # Device paths
 IMCFLOW_DEVICE = "/dev/uio5"

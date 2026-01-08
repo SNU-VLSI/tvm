@@ -22,6 +22,7 @@ import copy
 
 import re
 import math
+import os
 
 SMALL_DEBUG = 0
 
@@ -639,8 +640,8 @@ class ImcflowDeviceConfig:
   INODE_INST_MEM_SIZE = 1024
   IMCE_INST_MEM_SIZE = 1024
   IMCFLOW_ADDR_SIZE = 266368 # 128 + 4*(65536+1024) == 260.125KB
-  HOST_OS = "linux"
-  HOST_ISA = "arm"
+  HOST_OS = os.getenv("IMCFLOW_HOST_OS", "linux")
+  HOST_ISA = os.getenv("IMCFLOW_HOST_ISA", "arm")
 
   INODE0_IMEM_BASE_ADDR = 128
   INODE0_DMEM_BASE_ADDR = INODE0_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE

@@ -8,14 +8,18 @@
  * - Optional validation against CPU reference outputs
  *
  * Usage:
- *   execute_graph <test_name> [graph.json] [params.params]
+ *   execute_graph <test_name> [eval_dir] [graph.json] [params.params] [runner_name]
  *
  * Arguments:
  *   test_name     - Name of the test (used to construct input/output directories)
- *                   Input dir:  test_inputs/<test_name>/
- *                   Output dir: test_outputs/<test_name>/
+ *   eval_dir      - Evaluation directory base path (default: /root/project/tvm/tvm_practice/test_imcflow/codegen)
  *   graph.json    - Path to graph JSON (default: mlf/executor-config/graph/default.graph)
  *   params.params - Path to params file (default: mlf/parameters/default.params)
+ *   runner_name   - Name of runner (e.g., "py_runner", "rtl_runner"). If provided:
+ *                   Input dir:  {eval_dir}/{test_name}/test_inputs/
+ *                   Output dir: {eval_dir}/{test_name}/test_outputs/{runner_name}/
+ *                   If not provided (for backward compatibility):
+ *                   Output dir: {eval_dir}/{test_name}/test_outputs/
  */
 
 #include <stdio.h>
@@ -223,12 +227,20 @@ int main(int argc, char** argv) {
   const char* eval_dir = argc > 2 ? argv[2] : "/root/project/tvm/tvm_practice/test_imcflow/codegen";
   const char* graph_path = argc > 3 ? argv[3] : "mlf/executor-config/graph/default.graph";
   const char* params_path = argc > 4 ? argv[4] : "mlf/parameters/default.params";
+  const char* runner_name = argc > 5 ? argv[5] : "";
 
   // Construct input and output directories based on test name
   char input_dir[256];
   char output_dir[256];
   snprintf(input_dir, sizeof(input_dir), "%s/%s/test_inputs", eval_dir, test_name);
-  snprintf(output_dir, sizeof(output_dir), "%s/%s/test_outputs", eval_dir, test_name);
+
+  // If runner_name is provided, save outputs to test_outputs/<runner_name>/
+  // Otherwise, save to test_outputs/ for backward compatibility
+  if (runner_name && strlen(runner_name) > 0) {
+    snprintf(output_dir, sizeof(output_dir), "%s/%s/test_outputs/%s", eval_dir, test_name, runner_name);
+  } else {
+    snprintf(output_dir, sizeof(output_dir), "%s/%s/test_outputs", eval_dir, test_name);
+  }
 
   fprintf(stderr, "\n");
   fprintf(stderr, "========================================\n");
