@@ -661,17 +661,10 @@ def run_simulation(eval_dir):
 
     if os.path.exists(runner_output_path):
       output_data = np.load(runner_output_path)
-
-      # Save a copy to eval_dir/outputs/<runner_name>/
-      output_dest_dir = os.path.join(eval_dir, "outputs", runner.name)
-      os.makedirs(output_dest_dir, exist_ok=True)
-      output_dest_path = os.path.join(output_dest_dir, "output.npy")
-      np.save(output_dest_path, output_data)
-      print(f"✅ {runner.name} output saved to: {output_dest_path}")
-
+      print(f"✅ {runner.name} output found at: {runner_output_path}")
       outputs[runner.name] = output_data
     else:
-      print(f"⚠️  {runner.name} output not found")
+      print(f"⚠️  {runner.name} output not found at: {runner_output_path}")
       outputs[runner.name] = None
 
   # If running both runners, compare outputs

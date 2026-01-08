@@ -155,6 +155,10 @@ class PyRunner(ImcFlowRunner):
         """
         print(f"\n--- Running gem5+py_sim Simulation ---")
 
+        # Create runner-specific output directory
+        output_dir = self.get_output_path(test_name=eval_dir)
+        os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+
         sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name]
         log_dir = os.path.join(eval_dir, "logs")
         sim_log_path = os.path.join(log_dir, "gem5.log")
@@ -198,13 +202,11 @@ class PyRunner(ImcFlowRunner):
         Returns:
             Absolute path to output.npy in py_runner test_outputs
         """
-        # py_runner's execute_graph.c binary saves outputs to the eval_dir's test_outputs
-        # directory, not the py_runner's local test_outputs directory.
-        # The eval_dir is hardcoded in execute_graph.c:223 as:
-        # "/root/project/tvm/tvm_practice/test_imcflow/codegen"
+        # With runner_name support, outputs are saved to:
+        # {eval_dir}/{test_name}/test_outputs/{runner_name}/output.npy
         eval_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
         return os.path.abspath(
-            os.path.join(eval_dir, test_name, "test_outputs", "output.npy")
+            os.path.join(eval_dir, test_name, "test_outputs", self.name, "output.npy")
         )
 
 
@@ -268,6 +270,10 @@ class RTLRunner(ImcFlowRunner):
         """
         print(f"\n--- Running gem5+RTL Simulation (may take hours) ---")
 
+        # Create runner-specific output directory
+        output_dir = self.get_output_path(test_name=eval_dir)
+        os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+
         sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name]
         log_dir = os.path.join(eval_dir, "logs")
         sim_log_path = os.path.join(log_dir, "gem5_rtl.log")
@@ -324,13 +330,11 @@ class RTLRunner(ImcFlowRunner):
         Returns:
             Absolute path to output.npy in rtl_runner test_outputs
         """
-        # RTL runner's execute_graph.c binary saves outputs to the eval_dir's test_outputs
-        # directory, not the rtl_runner's local test_outputs directory.
-        # The eval_dir is hardcoded in execute_graph.c:223 as:
-        # "/root/project/tvm/tvm_practice/test_imcflow/codegen"
+        # With runner_name support, outputs are saved to:
+        # {eval_dir}/{test_name}/test_outputs/{runner_name}/output.npy
         eval_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
         return os.path.abspath(
-            os.path.join(eval_dir, test_name, "test_outputs", "output.npy")
+            os.path.join(eval_dir, test_name, "test_outputs", self.name, "output.npy")
         )
 
 
