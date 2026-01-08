@@ -3778,7 +3778,13 @@ class PolicyTableGenerator:
 
         def generate_policy_table(self, func_name):
             # Initialize policy tables for all nodes using NodeID as keys
-            policy_tables = {node_id: [] for node_id in NodeID}
+            # Each policy table starts with an all-zeros entry at address 0
+            zero_entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0, "ksel": 0}, \
+                          "North": {"enable": False, "addr": 0}, \
+                          "East": {"enable": False, "addr": 0},  \
+                          "South": {"enable": False, "addr": 0}, \
+                          "West": {"enable": False, "addr": 0}}
+            policy_tables = {node_id: [zero_entry.copy()] for node_id in NodeID}
 
             def get_direction(source_coord, dest_coord):
                 if source_coord[1] < dest_coord[1]:
