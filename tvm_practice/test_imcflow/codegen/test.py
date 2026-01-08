@@ -567,7 +567,7 @@ def run_imcflow_codegen(mod, dir):
   print(f"data_blocks: {config.DataBlocks}")
 
 
-def run_simulation(eval_dir):
+def run_simulation(eval_dir, HOST_ISA):
   """Run simulation by building and executing the graph with proper output streaming
 
   Args:
@@ -587,7 +587,7 @@ def run_simulation(eval_dir):
   host_build_dir = "./host_binary_make/build"
   if not os.path.exists(host_build_dir):
     os.makedirs(host_build_dir)
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86"]
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, HOST_ISA]
   build_log_path = os.path.join(log_dir, "build.log")
 
   with open(build_log_path, "w") as log_file:
@@ -611,6 +611,9 @@ def run_simulation(eval_dir):
   print(f"✅ Build completed, log saved to: {build_log_path}")
 
   # Run gem5 simulation
+  if (HOST_ISA == "arm"):
+    print("\n-- Skipping gem5 simulation for ARM architecture --")
+    return None
   print("\n--- Running gem5+py_sim Simulation ---")
   imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/py_runner"
   sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir]
@@ -753,8 +756,13 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     if cpu_output is not None:
       print("✅ CPU validation completed successfully")
 
+  config = DevConfig()
+
   # Run simulation (build + gem5 execution)
-  imcflow_output = run_simulation(eval_dir)
+  imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
+
+  if (config.HOST_ISA == "arm"):
+    return None
 
   # Compare the reference CPU output with IMCFLOW simulated output
   if input_data_dict is not None:
