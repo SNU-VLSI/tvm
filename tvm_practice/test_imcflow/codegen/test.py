@@ -32,10 +32,16 @@ from models import models_for_test
 # Import shared input generator
 from input_generator import InputGenerator
 
+# Import ImcFlow runner abstraction
+from imcflow_runner import get_runner
+
 np.random.seed(1234)
 
-DEBUG=1
+DEBUG_EXECUTOR=1
 DEBUG_SUBSET=1
+
+# Print environment configuration at startup
+print(f"Environment: IMCFLOW_RUNNER={os.getenv('IMCFLOW_RUNNER', 'py')}, IMCFLOW_DEBUG={os.getenv('IMCFLOW_DEBUG', '0')}")
 
 # ============================================================================
 # Model Registry
@@ -346,7 +352,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
     graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict,
                                          executor=executor_, runtime=runtime_)
 
-  if DEBUG:
+  if DEBUG_EXECUTOR:
     executor = debug_executor.create(graph, lib, device=ctx)
   else:
     executor = graph_executor.create(graph, lib, device=ctx)
@@ -363,7 +369,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
   # Run inference
   executor.run()
 
-  if DEBUG:
+  if DEBUG_EXECUTOR:
     print("Debug executor output tensors:")
     tvm_dict = executor.debug_datum.get_output_tensors()
     print(tvm_dict)
@@ -574,7 +580,8 @@ def run_simulation(eval_dir):
     eval_dir: Evaluation directory containing the model
 
   Returns:
-    imcflow_output: The IMCFLOW simulation output as numpy array, or None if output file doesn't exist
+    imcflow_output: The IMCFLOW simulation output as numpy array, or None if output file doesn't exist.
+                    When running both runners, returns the py_runner output for backward compatibility.
   """
   log_dir = f"{eval_dir}/logs"
 
@@ -610,52 +617,129 @@ def run_simulation(eval_dir):
 
   print(f"✅ Build completed, log saved to: {build_log_path}")
 
-  # Run gem5 simulation
-  print("\n--- Running gem5+py_sim Simulation ---")
-  imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/py_runner"
-  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir]
-  sim_log_path = os.path.join(log_dir, "gem5.log")
+  # Get the appropriate runner(s) based on IMCFLOW_RUNNER env var
+  runners = get_runner()  # Returns single runner or list of runners
 
-  with open(sim_log_path, "w") as log_file:
+  # Normalize to list for uniform handling
+  if not isinstance(runners, list):
+    runners = [runners]
+
+  # Dictionary to store outputs from each runner
+  outputs = {}
+
+  # Run each runner sequentially
+  for runner in runners:
+    if len(runners) > 1:
+      print(f"\n{'='*60}")
+      print(f"Running {runner.name}")
+      print(f"{'='*60}")
+
+    # Setup runner (VCS compilation for RTL if needed)
+    runner.setup()
+
+    # Create runner-specific log directory
+    runner_log_dir = os.path.join(log_dir, runner.name)
+    os.makedirs(runner_log_dir, exist_ok=True)
+
+    # Run gem5 simulation
     try:
-      process = subprocess.Popen(
-        sim_command,
-        cwd=imcflow_gem5_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
+      runner.run(
+        binary_name="tvm_host_runner",
+        gdb_mode="no",
+        test_name=eval_dir,
+        eval_dir=eval_dir
       )
-
-      # Stream output line by line to both terminal and log file
-      for line in process.stdout:
-        print(line, end='')
-        log_file.write(line)
-
-      process.wait()
-      if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, sim_command)
-      print(f"✅ Simulation completed, log saved to: {sim_log_path}")
-    except Exception as e:
-      print(f"❌ Simulation failed with error: {e}")
     except KeyboardInterrupt:
       print("❌ Simulation interrupted by user")
+      raise
 
-  print(f"✅ move imcflow simulator log to {log_dir}")
-  imcflow_sim_log_paths = glob.glob(f"{imcflow_gem5_dir}/logs/now*.log")
-  for sim_log in imcflow_sim_log_paths:
-    base_name = os.path.basename(sim_log)
-    new_log_path = os.path.join(log_dir, base_name)
-    os.rename(sim_log, new_log_path)
+    # Collect runner-specific logs to runner subdirectory
+    runner.collect_logs(log_dest_dir=runner_log_dir, test_name=eval_dir)
 
-  # Load and return the simulation output
-  imcflow_output_path = os.path.abspath(os.path.join(eval_dir, "test_outputs", "output.npy"))
-  if os.path.exists(imcflow_output_path):
-    imcflow_output = np.load(imcflow_output_path)
-    print(f"✅ Loaded IMCFLOW output from: {imcflow_output_path}")
-    return imcflow_output
+    # Load the output from this runner
+    runner_output_path = runner.get_output_path(test_name=eval_dir)
+
+    if os.path.exists(runner_output_path):
+      output_data = np.load(runner_output_path)
+
+      # Save a copy to eval_dir/outputs/<runner_name>/
+      output_dest_dir = os.path.join(eval_dir, "outputs", runner.name)
+      os.makedirs(output_dest_dir, exist_ok=True)
+      output_dest_path = os.path.join(output_dest_dir, "output.npy")
+      np.save(output_dest_path, output_data)
+      print(f"✅ {runner.name} output saved to: {output_dest_path}")
+
+      outputs[runner.name] = output_data
+    else:
+      print(f"⚠️  {runner.name} output not found")
+      outputs[runner.name] = None
+
+  # If running both runners, compare outputs
+  if len(runners) > 1:
+    print(f"\n--- Comparing Runner Outputs ---")
+    _compare_runner_outputs(outputs)
+
+  # Return py_runner output for backward compatibility (or first runner's output)
+  if "py_runner" in outputs:
+    return outputs["py_runner"]
+  elif outputs:
+    return list(outputs.values())[0]
   else:
-    print(f"⚠️  IMCFLOW output not found at: {imcflow_output_path}")
     return None
+
+
+def _compare_runner_outputs(outputs):
+  """Compare outputs from different runners
+
+  Args:
+    outputs: Dictionary mapping runner name to output array
+  """
+  runner_names = list(outputs.keys())
+  if len(runner_names) < 2:
+    return
+
+  # Get reference output (first runner)
+  ref_name = runner_names[0]
+  ref_output = outputs[ref_name]
+
+  if ref_output is None:
+    print(f"❌ Cannot compare: {ref_name} output is None")
+    return
+
+  # Compare against other runners
+  all_match = True
+  for runner_name in runner_names[1:]:
+    other_output = outputs[runner_name]
+
+    if other_output is None:
+      print(f"❌ {runner_name} output is None")
+      all_match = False
+      continue
+
+    # Shape and dtype check
+    if ref_output.shape != other_output.shape:
+      print(f"❌ Shape mismatch: {ref_name}{ref_output.shape} vs {runner_name}{other_output.shape}")
+      all_match = False
+      continue
+
+    # Value comparison
+    if ref_output.dtype in [np.float32, np.float64]:
+      if np.allclose(ref_output, other_output, rtol=1e-5, atol=1e-8):
+        print(f"✅ {ref_name} == {runner_name}")
+      else:
+        diff = np.sum(~np.isclose(ref_output, other_output, rtol=1e-5, atol=1e-8))
+        print(f"❌ {ref_name} != {runner_name} ({diff}/{ref_output.size} differ)")
+        all_match = False
+    else:
+      if np.array_equal(ref_output, other_output):
+        print(f"✅ {ref_name} == {runner_name}")
+      else:
+        diff = np.sum(ref_output != other_output)
+        print(f"❌ {ref_name} != {runner_name} ({diff}/{ref_output.size} differ)")
+        all_match = False
+
+  if not all_match:
+    print(f"⚠️  Runner outputs differ")
 
 
 def compare_outputs(cpu_output, imcflow_output):
