@@ -316,13 +316,13 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
   uint32_t poll_count = 0;
   uint32_t state;
 
-  printf("[POLLING] Waiting for ImcFlow to return to IDLE state...\\n");
+  fprintf(stderr,"[POLLING] Waiting for ImcFlow to return to IDLE state...\\n");
 
   while (1) {
     state = npu_pointer[STATE_REG_IDX];
 
     if (state == SET_IDLE_CODE) {
-      printf("[POLLING] Operation complete! (polled %u times)\\n", poll_count);
+      fprintf(stderr,"[POLLING] Operation complete! (polled %u times)\\n", poll_count);
       return;
     }
 
@@ -330,7 +330,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
     // Log progress every 100k polls for debugging
     if (poll_count % POLL_LOG_INTERVAL == 0) {
-      printf("[POLLING] Still waiting... (poll count: %u, current state: 0x%x)\\n",
+      fprintf(stderr,"[POLLING] Still waiting... (poll count: %u, current state: 0x%x)\\n",
              poll_count, state);
     }
   }
@@ -479,6 +479,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
+        code += f"fprintf(stderr,\"Transferring input block to NPU [TILE:{tile_idx}]\\n\");\n"
 
       # Determine source variable and loop parameters based on block type
       if isinstance(block.id, str):
@@ -502,6 +503,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
+        code += f"fprintf(stderr,\"Transferring output block to out{idx} [TILE:{tile_idx}]\\n\");\n"
 
       # Get loop parameters
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
@@ -598,7 +600,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     # Kernel function prototype and definition (C)
     code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
     code.nextIndent()
-    code += f"printf(\"{self.func_name}_kernel called\\n\");\n"
+    code += f"fprintf(stderr,\"{self.func_name}_kernel called\\n\");\n"
     code += self.generateDevicePointerSetup()
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
@@ -607,7 +609,10 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
+    code += f"// Tiled execution with factor {tile_factor}\n"
+    code += f"fprintf(stderr,\"Starting tiled execution with factor {tile_factor}\\n\");\n"
     for t_idx in range(tile_factor):
+      code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
       code += self.generateInvokeCode() # end of exec
