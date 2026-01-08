@@ -45,6 +45,7 @@ TEST_FOLDER="${TEST_NAME}_evl"
 REMOTE_HOST="147.46.117.99"
 REMOTE_PORT="1326"
 REMOTE_USER="root"
+REMOTE_PASSWORD="root"
 REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
 
 echo "=========================================="
@@ -67,7 +68,7 @@ echo ""
 # Step 2: Transfer test folder to remote
 echo "Step 2: Transferring $TEST_FOLDER to remote server..."
 echo ""
-./transfer_evl.sh "$TEST_FOLDER"
+echo "y" | ./transfer_evl.sh "$TEST_FOLDER"
 if [ $? -ne 0 ]; then
     echo "Error: Failed to transfer $TEST_FOLDER"
     exit 1
@@ -77,7 +78,7 @@ echo ""
 # Step 3: Transfer host_binary_make to remote
 echo "Step 3: Transferring host_binary_make to remote server..."
 echo ""
-./transfer_evl.sh --path host_binary_make
+echo "y" | ./transfer_evl.sh --path host_binary_make
 if [ $? -ne 0 ]; then
     echo "Error: Failed to transfer host_binary_make"
     exit 1
@@ -87,7 +88,7 @@ echo ""
 # Step 4: Execute on remote chip
 echo "Step 4: Executing on remote chip..."
 echo ""
-ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "cd $REMOTE_BASE_PATH/host_binary_make/build && ./tvm_host_runner $TEST_FOLDER $REMOTE_BASE_PATH"
+sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "cd $REMOTE_BASE_PATH/host_binary_make/build && ./tvm_host_runner $TEST_FOLDER $REMOTE_BASE_PATH"
 
 if [ $? -eq 0 ]; then
     echo ""

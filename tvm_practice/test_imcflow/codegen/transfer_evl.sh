@@ -8,6 +8,7 @@
 REMOTE_HOST="147.46.117.99"
 REMOTE_PORT="1326"
 REMOTE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen/."
+REMOTE_PASSWORD="root"
 TEST_OUTPUTS_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen/."
 
 # Function to display help message
@@ -142,7 +143,7 @@ for dir in "${MATCHING_DIRS[@]}"; do
     dir_name=$(basename "$dir")
     echo "Transferring $dir_name..."
 
-    if scp -P "$REMOTE_PORT" -r "$dir" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH"; then
+    if sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$dir" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH"; then
         echo "  ✓ Successfully transferred $dir_name"
         ((TRANSFER_COUNT++))
     else
