@@ -118,6 +118,10 @@ class ImcFlowRunner(ABC):
                 process.kill()
                 process.wait()
                 raise
+            except KeyboardInterrupt:
+                process.kill()
+                process.wait()
+                raise
 
             if process.returncode != 0:
                 raise subprocess.CalledProcessError(process.returncode, command)
@@ -240,7 +244,7 @@ class RTLRunner(ImcFlowRunner):
 
         # Need to compile VCS
         print(f"⚙️  VCS simulator not found, compiling RTL...")
-        compile_command = ["make", "compile"]
+        compile_command = ["direnv", "exec", ".", "make", "compile"]
         compile_log = os.path.join(self.directory_path, "vcs_compile.log")
 
         try:

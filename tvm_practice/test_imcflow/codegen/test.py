@@ -642,6 +642,8 @@ def run_simulation(eval_dir):
     os.makedirs(runner_log_dir, exist_ok=True)
 
     # Run gem5 simulation
+    interrupted = False
+    simul_err = False
     try:
       runner.run(
         binary_name="tvm_host_runner",
@@ -650,22 +652,32 @@ def run_simulation(eval_dir):
         eval_dir=eval_dir
       )
     except KeyboardInterrupt:
+      simul_err   = True
+      interrupted = True
       print("❌ Simulation interrupted by user")
-      raise
+    except Exception as e:
+      simul_err   = True
+      print(f"❌ Simulation failed for {runner.name}: {e}")
 
     # Collect runner-specific logs to runner subdirectory
-    runner.collect_logs(log_dest_dir=runner_log_dir, test_name=eval_dir)
+    if not simul_err or interrupted:
+      runner.collect_logs(log_dest_dir=runner_log_dir, test_name=eval_dir)
+
+    # Re-raise KeyboardInterrupt after collecting logs
+    if interrupted:
+      raise KeyboardInterrupt("Simulation interrupted by user")
 
     # Load the output from this runner
     runner_output_path = runner.get_output_path(test_name=eval_dir)
 
-    if os.path.exists(runner_output_path):
-      output_data = np.load(runner_output_path)
-      print(f"✅ {runner.name} output found at: {runner_output_path}")
-      outputs[runner.name] = output_data
-    else:
-      print(f"⚠️  {runner.name} output not found at: {runner_output_path}")
-      outputs[runner.name] = None
+    if not simul_err:
+      if os.path.exists(runner_output_path):
+        output_data = np.load(runner_output_path)
+        print(f"✅ {runner.name} output found at: {runner_output_path}")
+        outputs[runner.name] = output_data
+      else:
+        print(f"⚠️  {runner.name} output not found at: {runner_output_path}")
+        outputs[runner.name] = None
 
   # If running both runners, compare outputs
   if len(runners) > 1:
@@ -831,7 +843,11 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
       print("✅ CPU validation completed successfully")
 
   # Run simulation (build + gem5 execution)
-  imcflow_output = run_simulation(eval_dir)
+  try:
+    imcflow_output = run_simulation(eval_dir)
+  except KeyboardInterrupt:
+    print("\n⚠️  Simulation interrupted - skipping output comparison")
+    raise  # Re-raise to let pytest handle the interruption
 
   # Compare the reference CPU output with IMCFLOW simulated output
   if input_data_dict is not None:
