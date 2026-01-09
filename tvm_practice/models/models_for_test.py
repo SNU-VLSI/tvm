@@ -117,7 +117,7 @@ def one_tensor(dtype: str, shape):
   return np.ones(shape).astype("float32")
 
 def getOneReluModel():
-  N, C, H, W = 1, 28, 4, 4
+  N, C, H, W = 1, 16, 4, 4
   input_ = relay.var("input", shape=(N,C,H,W), dtype="int16")
   y = relay.nn.relu(input_)
 
