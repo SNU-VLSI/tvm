@@ -747,6 +747,10 @@ class RecvSendWrapper(ImceCodeBlock):
             for out_edge in output_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
+      # FIXME: the NOP count here is hardcoded
+      # nops = " ".join([f"\"nop\\n\"" for _ in range(5)])
+      # code += f"__asm__ volatile({nops});"
+      
     return code.render()
 
 

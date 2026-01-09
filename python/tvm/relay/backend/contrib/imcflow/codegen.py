@@ -302,7 +302,7 @@ class CntBaseAddrCodegen:
     self.host_isa = host_isa
     self.func_dir = os.path.join(build_dir, func_name)
 
-  def write_readable_file(self, block_id, edge_simple_name, pkt_cnts, bin_file):
+  def write_readable_file(self, block_id, edge_simple_name, pkt_cnts, pkt_cnts_divided, bin_file):
     """Write a human-readable text file corresponding to the binary file."""
     txt_file = f"{block_id}.txt"
     txt_path = os.path.join(self.func_dir, txt_file)
@@ -313,15 +313,22 @@ class CntBaseAddrCodegen:
       file.write(f"Binary file: {bin_file}\n")
       file.write("=" * 60 + "\n\n")
 
-      file.write(f"Packet Counts ({len(pkt_cnts)} entries):\n")
+      file.write(f"Original Packet Counts ({len(pkt_cnts)} entries):\n")
       file.write("-" * 60 + "\n")
       for i, cnt in enumerate(pkt_cnts):
+        cnt_val = int(cnt)
+        file.write(f"  [{i:2d}] original: {cnt_val:10d} (0x{cnt_val:08x})\n")
+
+      file.write("\n" + "=" * 60 + "\n")
+      file.write(f"Divided Packet Counts (for 4x unrolled INODE_RECV, {len(pkt_cnts_divided)} entries):\n")
+      file.write("-" * 60 + "\n")
+      for i, cnt in enumerate(pkt_cnts_divided):
         # Show decimal, hex, and binary offset
         cnt_val = int(cnt)
-        file.write(f"  [{i:2d}] offset 0x{i*4:02x}: {cnt_val:10d} (0x{cnt_val:08x})\n")
+        file.write(f"  [{i:2d}] offset 0x{i*4:02x}: {cnt_val:10d} (0x{cnt_val:08x}) [written to binary]\n")
 
       # Show padding info
-      written_bytes = len(pkt_cnts) * 4
+      written_bytes = len(pkt_cnts_divided) * 4
       if written_bytes < 32:
         padding_bytes = 32 - written_bytes
         file.write(f"\nPadding: {padding_bytes} bytes (0x00) to reach 32-byte alignment\n")
@@ -361,24 +368,28 @@ class CntBaseAddrCodegen:
       host_obj_file = f"{block_id}.host.o"
 
       # Pack pkt_cnts as 32-bit little-endian integers
+      # Divide by 4 to account for 4x unrolling in INODE_RECV
       pkt_cnts = None
+      pkt_cnts_divided = None
       with open(bin_path, "wb") as file:
         if data_block and data_block.tiling_info and data_block.tiling_info.pkt_cnts:
           pkt_cnts = data_block.tiling_info.pkt_cnts
-          for cnt in pkt_cnts:
+          # Divide each pkt_cnt by 4 for the unrolled loop
+          pkt_cnts_divided = [cnt // 4 for cnt in pkt_cnts]
+          for cnt in pkt_cnts_divided:
             if cnt < 0:
               print(f"Warning: Negative packet count {cnt} in block {block_id}")
               raise RuntimeError(f"Negative packet count {cnt} in block {block_id}")
             file.write(int(cnt).to_bytes(4, byteorder='little', signed=False))
           # Pad to 32 bytes if needed
-          written_bytes = len(pkt_cnts) * 4
+          written_bytes = len(pkt_cnts_divided) * 4
           if written_bytes < 32:
             file.write(b'\x00' * (32 - written_bytes))
         else:
           raise RuntimeError(f"No tiling info found for data block corresponding to {block_id}")
 
       # Write human-readable text file
-      self.write_readable_file(block_id, edge_simple_name, pkt_cnts, bin_file)
+      self.write_readable_file(block_id, edge_simple_name, pkt_cnts, pkt_cnts_divided, bin_file)
 
       # Create host object file using DeviceCodegen
       DevCodegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
