@@ -140,6 +140,34 @@ class RecvBlock(InodeCodeBlock):
               f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});")
     self.body.add(SimpleFor(loop_cnt_var, unrolled_recv_body))
 
+    # Consumer INODE waits for producer IMCE to signal completion
+    # Find producer IMCE ID from the tensor edge
+    SYNC_OUTPUT_FLAG = 2
+    producer_imce_ids = set()
+
+    # Get tensor edge info to find the producer
+    if target_edge in DevConfig().TensorEdgetoInfo:
+      te_info = DevConfig().TensorEdgetoInfo[target_edge]
+      if te_info.policy_info:
+        # The first router in policy_info is the source (producer)
+        producer_router_id = te_info.policy_info[0].router_id
+        if producer_router_id.is_imce():
+          producer_imce_ids.add(producer_router_id.value)
+
+    # Add STANDBY calls for each producer IMCE
+    for producer_imce_id in sorted(producer_imce_ids):
+      # Find producer name for annotation
+      producer_name = None
+      if target_edge in DevConfig().TensorEdgetoInfo:
+        te_info = DevConfig().TensorEdgetoInfo[target_edge]
+        if te_info.policy_info and te_info.policy_info[0].router_id.value == producer_imce_id:
+          producer_name = te_info.policy_info[0].router_id.name
+
+      if producer_name:
+        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({producer_imce_id}, {SYNC_OUTPUT_FLAG}); // {producer_name}"))
+      else:
+        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({producer_imce_id}, {SYNC_OUTPUT_FLAG});"))
+
 
 class RecvBlockInterleaved(InodeCodeBlock):
   """ Code block for receiving data from given fifo id interleaved """
