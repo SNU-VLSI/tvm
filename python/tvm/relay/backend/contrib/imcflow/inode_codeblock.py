@@ -132,6 +132,7 @@ class RecvBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
     # Unroll 4x with stride of 128 bytes (4 * 32)
     def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
       return (f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
@@ -260,6 +261,7 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
     # Unroll 4x with stride of 128 bytes (4 * 32)
     def unrolled_send_body(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id):
       return (f"__builtin_INODE_SEND({base_addr_var} + {iter}*128, 0, {policy_addr}, {fid});\n"
