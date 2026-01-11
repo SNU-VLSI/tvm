@@ -98,6 +98,17 @@ MODEL_REGISTRY = {
     "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
     # ResNet8 variants
+    "resnet8_subset04_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=4), "ones"),
+    "resnet8_subset05_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=5), "ones"),
+    "resnet8_subset06_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=6), "ones"),
+    "resnet8_subset07_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=7), "ones"),
+    "resnet8_subset08_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=8), "ones"),
+    "resnet8_subset09_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=9), "ones"),
+    "resnet8_subset25_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=25), "ones"),
+
+    # ResNet8 variants
+    "resnet8_subset04_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=4), "ones"),
+    "resnet8_subset05_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=5), "ones"),
     "resnet8_subset06_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=6), "ones"),
     "resnet8_subset07_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=7), "ones"),
     "resnet8_subset08_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=8), "ones"),
