@@ -15,6 +15,7 @@ from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
 import os
+import shutil
 import subprocess
 import copy
 import pprint
@@ -591,10 +592,17 @@ def run_simulation(eval_dir):
 
   # Build the host binary
   print("\n--- Building Host Binary ---")
-  host_build_dir = "./host_binary_make/build"
-  if not os.path.exists(host_build_dir):
-    os.makedirs(host_build_dir)
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, "x86"]
+
+  # Copy host_binary_make template to test directory if it doesn't exist
+  test_host_binary_dir = f"{eval_dir}/host_binary_make"
+  print(f"Copying host_binary_make template to {test_host_binary_dir}")
+  shutil.copytree("./host_binary_make.template", test_host_binary_dir, dirs_exist_ok=True)
+
+  host_build_dir = f"{test_host_binary_dir}/build"
+  os.makedirs(host_build_dir, exist_ok=True)
+
+  # Build in the test-specific directory (use current directory "." since eval_dir is now relative)
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", "x86"]
   build_log_path = os.path.join(log_dir, "build.log")
 
   with open(build_log_path, "w") as log_file:

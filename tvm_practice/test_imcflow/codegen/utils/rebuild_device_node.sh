@@ -300,7 +300,7 @@ if [ $FAILED_NODES -gt 0 ]; then
 fi
 echo ""
 echo -e "${BLUE}Next steps:${NC}"
-echo "  1. Rebuild host binary: cd ../host_binary_make/build && direnv exec . ../build.sh execute_graph.c ${TEST_NAME} x86"
+echo "  1. Rebuild host binary: cd ../${TEST_NAME}/host_binary_make/build && direnv exec . ../build.sh execute_graph.c . x86"
 echo "  2. Run RTL test: cd /root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner && ./run.sh tvm_host_runner no ${TEST_NAME}"
 echo ""
 echo "Or use: ${YELLOW}./rebuild_and_test.sh ${TEST_NAME}${NC}"

@@ -89,7 +89,8 @@ fi
 # Directory paths
 CODEGEN_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen"
 TEST_DIR="${CODEGEN_DIR}/${TEST_NAME}"
-HOST_BINARY_DIR="${CODEGEN_DIR}/host_binary_make"
+HOST_BINARY_DIR="${TEST_DIR}/host_binary_make"
+TEMPLATE_DIR="${CODEGEN_DIR}/host_binary_make.template"
 RTL_RUNNER_DIR="/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner"
 
 # Check if test directory exists
@@ -155,11 +156,20 @@ echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${GREEN}[Step ${CURRENT_STEP}/${TOTAL_STEPS}]${NC} Rebuilding host binary..."
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
+# Copy template if it doesn't exist
+if [ ! -d "${HOST_BINARY_DIR}" ]; then
+    echo -e "${BLUE}→${NC} Copying host_binary_make template to test directory..."
+    cp -r "${TEMPLATE_DIR}" "${HOST_BINARY_DIR}"
+    echo -e "${GREEN}✓${NC} Template copied"
+fi
+
+# Create build directory if it doesn't exist
+mkdir -p "${HOST_BINARY_DIR}/build"
 cd "${HOST_BINARY_DIR}/build"
 
-# Run build script
-echo -e "${BLUE}→${NC} Running: direnv exec . ../build.sh execute_graph.c ${TEST_NAME} x86"
-if direnv exec . ../build.sh execute_graph.c "${TEST_NAME}" x86 > "${TEST_DIR}/logs/rebuild.log" 2>&1; then
+# Run build script (use "." for test directory since we're building in-place)
+echo -e "${BLUE}→${NC} Running: direnv exec . ../build.sh execute_graph.c . x86"
+if direnv exec . ../build.sh execute_graph.c "." x86 > "${TEST_DIR}/logs/rebuild.log" 2>&1; then
     echo -e "${GREEN}✓${NC} Host binary rebuilt successfully"
 else
     echo -e "${RED}✗${NC} Host binary build failed"
