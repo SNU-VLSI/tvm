@@ -64,6 +64,10 @@ class SendRecvPairManager:
         Groups edges by source graph node ID to handle multicasts.
         Each group gets a unique UUID (0-255).
         """
+        print(f"[DEBUG _assign_uuids] Input edges ({len(edges)}):")
+        for e in edges:
+            print(f"  {e}")
+
         # Filter out constant edges if requested
         filtered_edges = []
         for edge in edges:
@@ -73,10 +77,15 @@ class SendRecvPairManager:
                     from tvm.relay.dataflow_pattern import is_constant
                     ConstPat = is_constant()
                     if ConstPat.match(CustomIDToNode()[src_graph_id]):
+                        print(f"[DEBUG _assign_uuids] Skipping constant edge: {edge}")
                         continue  # Skip constant edges
                 except (KeyError, Exception):
                     pass
             filtered_edges.append(edge)
+
+        print(f"[DEBUG _assign_uuids] Filtered edges ({len(filtered_edges)}):")
+        for e in filtered_edges:
+            print(f"  {e}")
 
         # Group edges by source graph node (handles multicast)
         # Key: (outer_src_gid, inner_src_gid)
@@ -93,6 +102,12 @@ class SendRecvPairManager:
             if key not in edge_groups:
                 edge_groups[key] = []
             edge_groups[key].append(edge)
+
+        print(f"[DEBUG _assign_uuids] Edge groups:")
+        for key, group in sorted(edge_groups.items(), key=lambda x: str(x[0])):
+            print(f"  key={key}:")
+            for e in group:
+                print(f"    {e}")
 
         # Assign UUIDs to each group
         uuid = 1  # Start from 1 (0 is reserved for flag clear)
@@ -115,13 +130,20 @@ class SendRecvPairManager:
                 else:
                     receiver_nodes.add(recv_node)
 
+            # Skip if sender == receiver (constant edge or same-node, no real communication)
+            if len(receiver_nodes) == 1 and sender_hw_node in receiver_nodes:
+                print(f"[DEBUG _assign_uuids] Skipping sender==receiver: {sender_hw_node} -> {receiver_nodes}")
+                continue
+
             # Create pair
             pair = SendRecvPair(uuid, sender_hw_node, receiver_nodes, group_edges)
             self.pairs[uuid] = pair
 
             # Map each edge to this pair
+            print(f"[DEBUG _assign_uuids] Created {pair}, mapping edges:")
             for edge in group_edges:
                 self.edge_to_pair[edge] = pair
+                print(f"    {edge}")
 
             uuid += 1
 
@@ -134,8 +156,36 @@ class SendRecvPairManager:
         return hw_node
 
     def get_pair(self, edge: TensorEdge) -> SendRecvPair:
-        """Get the send-recv pair for a given edge"""
-        return self.edge_to_pair.get(edge, None)
+        """Get the send-recv pair for a given edge
+
+        If edge's dst is a split node, recursively find edges starting from
+        that split node and return the pair from those edges.
+        """
+        # Direct lookup first
+        pair = self.edge_to_pair.get(edge, None)
+        if pair is not None:
+            return pair
+
+        # If not found, check if dst is a split node
+        dst_gid = edge.dst_id.graph_node_id
+        if isinstance(dst_gid, tuple):
+            dst_gid = dst_gid[-1]
+
+        try:
+            dst_node = CustomIDToNode()[dst_gid]
+            if hasattr(dst_node, 'op') and hasattr(dst_node.op, 'name') and dst_node.op.name == "split":
+                # dst is split node - find edges starting from this split node
+                for registered_edge, registered_pair in self.edge_to_pair.items():
+                    src_gid = registered_edge.src_id.graph_node_id
+                    if isinstance(src_gid, tuple):
+                        src_gid = src_gid[-1]
+                    if src_gid == dst_gid:
+                        print(f"[DEBUG get_pair] Split node detected: {edge} -> found pair via {registered_edge}")
+                        return registered_pair
+        except (KeyError, Exception):
+            pass
+
+        return None
 
     def get_uuid(self, edge: TensorEdge) -> int:
         """Get UUID for a given edge"""

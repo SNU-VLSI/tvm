@@ -411,24 +411,57 @@ class SendBlock(InodeCodeBlock):
   def _get_sync_code_str(self):
     """Get sync code as a string (for inline insertion in loops) - SENDER pattern"""
     if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      print(f"[DEBUG _get_sync_code_str] No pair_manager")
       return ""  # No pair manager, no sync
 
-    edge = self._get_edge()
+    edge_or_edges = self._get_edge()
+    if edge_or_edges is None:
+      print(f"[DEBUG _get_sync_code_str] Edge is None")
+      return ""
+
+    # Handle multicast (list of edges) vs single edge
+    if isinstance(edge_or_edges, list):
+      # Multicast case - find edge with split_idx to get correct pair
+      edge = None
+      for e in edge_or_edges:
+        if e.split_idx is not None:
+          edge = e
+          break
+      if edge is None:
+        edge = edge_or_edges[0] if edge_or_edges else None
+      print(f"[DEBUG _get_sync_code_str] Multicast: selected edge={edge} from {edge_or_edges}")
+    else:
+      edge = edge_or_edges
+
     if edge is None:
+      print(f"[DEBUG _get_sync_code_str] Edge is None after multicast handling")
       return ""
 
     pair = self.builder.pair_manager.get_pair(edge)
     if pair is None:
+      print(f"[DEBUG _get_sync_code_str] No pair for edge: {edge}")
       return ""  # No sync needed for this edge
+
+    # Skip sync if sender == all receivers (same node, no real communication)
+    if len(pair.receiver_nodes) == 1 and pair.sender_node in pair.receiver_nodes:
+      print(f"[DEBUG _get_sync_code_str] Skipping sync: sender==receiver for edge={edge}")
+      return ""  # No sync needed for same-node communication
 
     # Get current node from edge_info
     current_node = self.edge_info.policy_info[0].router_id
+
+    # DEBUG: Print pair info
+    print(f"[DEBUG _get_sync_code_str] edge={edge}")
+    print(f"[DEBUG _get_sync_code_str] pair.uuid={pair.uuid}, pair.sender_node={pair.sender_node}, pair.receiver_nodes={pair.receiver_nodes}")
+    print(f"[DEBUG _get_sync_code_str] pair.all_nodes={pair.all_nodes}")
+    print(f"[DEBUG _get_sync_code_str] current_node={current_node} (type={type(current_node)})")
 
     # Generate sync code inline - SENDER pattern
     # SENDER: STANDBY(receiver, uuid) → SETFLAG(uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_lines = []
     # First wait for receiver to be ready (receiver sets its flag first)
     for node in pair.all_nodes:
+      print(f"[DEBUG _get_sync_code_str] Checking node={node}, node != current_node = {node != current_node}")
       if node != current_node:
         sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
     # Then set sender flag to acknowledge
@@ -440,6 +473,7 @@ class SendBlock(InodeCodeBlock):
     # Clear sender flag
     sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
 
+    print(f"[DEBUG _get_sync_code_str] Generated sync_lines: {sync_lines}")
     return "\n".join(sync_lines) + "\n"
 
   def _add_sync_after_send(self):
@@ -465,10 +499,17 @@ class SendBlock(InodeCodeBlock):
     self.body.add(sync_block)
 
   def _get_edge(self):
-    """Get the tensor edge associated with this send block"""
+    """Get the tensor edge associated with this send block
+
+    Returns:
+      - List of TensorEdge if multicast (block.id is list)
+      - Single TensorEdge otherwise
+    """
     if isinstance(self.block.id, list):
-      return self.block.id[0] if len(self.block.id) > 0 else None
-    return self.block.id if isinstance(self.block.id, TensorEdge) else None
+      return self.block.id  # Return list for multicast handling
+    if isinstance(self.block.id, TensorEdge):
+      return self.block.id
+    return None
 
 class SendBlockInterleaved(InodeCodeBlock):
   """ Code block for sending data from given fifo id """

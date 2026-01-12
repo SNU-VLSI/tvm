@@ -22,9 +22,11 @@ import copy
 
 import re
 import math
+import os
 
 SMALL_DEBUG = 0
 
+BIG_IMEM = os.getenv("IMCFLOW_BIG_IMEM", "0") == "1"
 
 class NodeID(Enum):
   inode_0_0 = 0
@@ -636,8 +638,17 @@ class ImcflowDeviceConfig:
   INODE_MAX_TILING_SIZE = 65536 # should be smaller than INODE_DATA_MEM_SIZE  
   # INODE_DATA_MEM_SIZE = 65536
   # INODE_DATA_MEM_SIZE = 131072
-  INODE_INST_MEM_SIZE = 1024
-  IMCE_INST_MEM_SIZE = 1024
+
+  if not BIG_IMEM:
+    INODE_INST_MEM_SIZE = 1024
+  else:
+    INODE_INST_MEM_SIZE = 2048
+
+  if not BIG_IMEM:
+    IMCE_INST_MEM_SIZE = 1024
+  else:
+    IMCE_INST_MEM_SIZE = 2048
+
   IMCFLOW_ADDR_SIZE = 266368 # 128 + 4*(65536+1024) == 260.125KB
   HOST_OS = "baremetal"
   HOST_ISA = "x86"

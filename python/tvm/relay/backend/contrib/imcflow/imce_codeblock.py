@@ -881,12 +881,9 @@ class RecvSendWrapper(ImceCodeBlock):
     sync_block.add(f"// {sync_annotation}")
     sync_block.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
 
-    for node in pair.all_nodes:
-      if node != current_node:
-        sync_block.add(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
+    # Receiver only needs to wait for sender (not other receivers in multicast)
+    sync_block.add(f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {pair.uuid});")
 
-    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
-    sync_block.add(f"__asm__ volatile({nops});")
     sync_block.add(f"__builtin_IMCE_SETFLAG(0);")
 
     # Combine with existing code
