@@ -188,11 +188,10 @@ class LoadLBBlock(ImceCodeBlock):
       return ""
 
     # Generate sync code inline - RECEIVER pattern
+    # Receiver only waits for sender (not other receivers in multicast)
     sync_lines = []
     sync_lines.append(f"__builtin_IMCE_SETFLAG({pair.uuid});")
-    for node in pair.all_nodes:
-      if node != current_node:
-        sync_lines.append(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
+    sync_lines.append(f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {pair.uuid});")
     sync_lines.append(f"__builtin_IMCE_SETFLAG(0);")
 
     return "\n".join(sync_lines) + "\n"

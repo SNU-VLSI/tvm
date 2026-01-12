@@ -202,11 +202,10 @@ class RecvBlock(InodeCodeBlock):
       return ""
 
     # Generate sync code inline - RECEIVER pattern
+    # Receiver only waits for sender (not other receivers in multicast)
     sync_lines = []
     sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
-    for node in pair.all_nodes:
-      if node != dst_hw_node:
-        sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
+    sync_lines.append(f"__builtin_INODE_STANDBY({pair.sender_node.value}, {pair.uuid});")
     sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
 
     return "\n".join(sync_lines) + "\n"
