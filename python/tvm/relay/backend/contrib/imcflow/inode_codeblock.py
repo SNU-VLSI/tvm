@@ -425,16 +425,19 @@ class SendBlock(InodeCodeBlock):
     current_node = self.edge_info.policy_info[0].router_id
 
     # Generate sync code inline - SENDER pattern
-    # SENDER: SETFLAG(uuid) → STANDBY(receiver, uuid) → STANDBY(receiver, 0) → SETFLAG(0)
+    # SENDER: STANDBY(receiver, uuid) → SETFLAG(uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_lines = []
-    sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
+    # First wait for receiver to be ready (receiver sets its flag first)
     for node in pair.all_nodes:
       if node != current_node:
         sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
-    # Wait for receiver to clear flag before sender clears its own flag
+    # Then set sender flag to acknowledge
+    sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
+    # Wait for receiver to clear flag (receiver processed data)
     for node in pair.all_nodes:
       if node != current_node:
         sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, 0);")
+    # Clear sender flag
     sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
 
     return "\n".join(sync_lines) + "\n"

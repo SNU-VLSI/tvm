@@ -916,23 +916,27 @@ class RecvSendWrapper(ImceCodeBlock):
       return code
 
     # Create a SequentialBlock for sync instructions
-    # SENDER pattern: SETFLAG(uuid) → STANDBY(receiver, uuid) → STANDBY(receiver, 0) → SETFLAG(0)
+    # SENDER pattern: STANDBY(receiver, uuid) → SETFLAG(uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_annotation = f"sync after IMCE send: uuid={pair.uuid}, edge={edge}"
     print(f"[DEBUG _add_sync_after_send] Adding sync code")
 
     sync_block = SequentialBlock()
     sync_block.add(f"// {sync_annotation}")
-    sync_block.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
 
+    # First wait for receiver to be ready (receiver sets its flag first)
     for node in pair.all_nodes:
       if node != current_node:
         sync_block.add(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
 
-    # Wait for receiver to clear flag before sender clears its own flag
+    # Then set sender flag to acknowledge
+    sync_block.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
+
+    # Wait for receiver to clear flag (receiver processed data)
     for node in pair.all_nodes:
       if node != current_node:
         sync_block.add(f"__builtin_IMCE_STANDBY({node.value}, 0);")
 
+    # Clear sender flag
     sync_block.add(f"__builtin_IMCE_SETFLAG(0);")
 
     # Combine with existing code
