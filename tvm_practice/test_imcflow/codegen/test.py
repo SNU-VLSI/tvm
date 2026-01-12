@@ -277,12 +277,18 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
 
 def setup_dir(test_name, suffix=""):
   def clean_dir_recursive(path):
-    """Recursively clean all files but keep all directory inodes intact"""
+    """Recursively clean all files but keep all directory inodes intact
+
+    Skips the 'logs' directory to preserve logs from different runners.
+    """
     for item in os.listdir(path):
       item_path = os.path.join(path, item)
       if os.path.isfile(item_path) or os.path.islink(item_path):
         os.remove(item_path)
       elif os.path.isdir(item_path):
+        # Skip logs directory to preserve runner-specific logs
+        if item == "logs":
+          continue
         # Recursively clean subdirectory but keep the directory itself
         clean_dir_recursive(item_path)
 
@@ -667,11 +673,10 @@ def run_simulation(eval_dir):
       simul_err   = True
       print(f"❌ Simulation failed for {runner.name}: {e}")
 
-    # Collect runner-specific logs to runner subdirectory
-    if not simul_err or interrupted:
-      runner.collect_logs(log_dest_dir=runner_log_dir, test_name=eval_dir)
+    # Logs are automatically written to runner_log_dir during run()
+    # No collection needed
 
-    # Re-raise KeyboardInterrupt after collecting logs
+    # Re-raise KeyboardInterrupt
     if interrupted:
       raise KeyboardInterrupt("Simulation interrupted by user")
 

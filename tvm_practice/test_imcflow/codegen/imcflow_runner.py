@@ -7,12 +7,11 @@ Usage:
     runner = get_runner("py")  # or "rtl"
     runner.setup()
     runner.run(binary_name="tvm_host_runner", gdb_mode="no", test_name="my_test", eval_dir="/path/to/eval")
-    runner.collect_logs(log_dest_dir="/path/to/logs", test_name="my_test")
+    # Logs are automatically written to eval_dir/logs/runner_name/ during run()
 """
 
 import os
 import subprocess
-import glob
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -38,12 +37,23 @@ class ImcFlowRunner(ABC):
         """Return the timeout in seconds for this runner"""
         pass
 
+    @property
+    @abstractmethod
+    def display_name(self) -> str:
+        """Return the display name for this runner (e.g., 'gem5+py_sim Simulation')"""
+        pass
+
+    @property
+    @abstractmethod
+    def main_log_filename(self) -> str:
+        """Return the main log filename (e.g., 'gem5.log' or 'gem5_rtl.log')"""
+        pass
+
     @abstractmethod
     def setup(self) -> None:
         """Perform any necessary setup before running (e.g., VCS compilation)"""
         pass
 
-    @abstractmethod
     def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str) -> None:
         """Run the simulation
 
@@ -56,17 +66,37 @@ class ImcFlowRunner(ABC):
         Raises:
             subprocess.CalledProcessError: If simulation fails
         """
-        pass
+        print(f"\n--- Running {self.display_name} ---")
 
-    @abstractmethod
-    def collect_logs(self, log_dest_dir: str, test_name: str) -> None:
-        """Collect runner-specific logs to destination directory
+        # Create runner-specific output directory
+        output_dir = self.get_output_path(test_name=eval_dir)
+        os.makedirs(os.path.dirname(output_dir), exist_ok=True)
 
-        Args:
-            log_dest_dir: Destination directory for log files
-            test_name: Name of the test (for log naming)
-        """
-        pass
+        # Create runner-specific log directory in test's logs folder
+        runner_log_dir = os.path.join(eval_dir, "logs", self.name)
+        os.makedirs(runner_log_dir, exist_ok=True)
+
+        # Convert to absolute path since run.sh executes from runner directory
+        abs_runner_log_dir = os.path.abspath(runner_log_dir)
+
+        # Pass absolute log directory as 4th argument to run.sh
+        sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name, abs_runner_log_dir]
+
+        try:
+            self._stream_command_output(
+                command=sim_command,
+                cwd=self.directory_path,
+                log_path=os.path.join(runner_log_dir, self.main_log_filename),
+                timeout=self.timeout
+            )
+            print(f"✅ Simulation completed")
+            print(f"   Logs saved to: {runner_log_dir}/")
+        except subprocess.TimeoutExpired:
+            print(f"❌ Simulation timed out after {self.timeout} seconds")
+            raise
+        except Exception as e:
+            print(f"❌ Simulation failed with error: {e}")
+            raise
 
     @abstractmethod
     def get_output_path(self, test_name: str) -> str:
@@ -142,60 +172,19 @@ class PyRunner(ImcFlowRunner):
     def timeout(self) -> int:
         return 300  # 5 minutes
 
+    @property
+    def display_name(self) -> str:
+        return "gem5+py_sim Simulation"
+
+    @property
+    def main_log_filename(self) -> str:
+        return "gem5.log"
+
     def setup(self) -> None:
         """No setup required for py_runner"""
         print(f"🔧 Using {self.name} (Python functional simulation)")
         if not os.path.exists(self.directory_path):
             raise FileNotFoundError(f"py_runner directory not found at: {self.directory_path}")
-
-    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str) -> None:
-        """Run gem5 simulation with Python functional model
-
-        Args:
-            binary_name: Name of the binary to execute
-            gdb_mode: "yes" or "no" to enable/disable GDB
-            test_name: Name of the test for output directory
-            eval_dir: Evaluation directory containing the model
-        """
-        print(f"\n--- Running gem5+py_sim Simulation ---")
-
-        # Create runner-specific output directory
-        output_dir = self.get_output_path(test_name=eval_dir)
-        os.makedirs(os.path.dirname(output_dir), exist_ok=True)
-
-        sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name]
-        log_dir = os.path.join(eval_dir, "logs")
-        sim_log_path = os.path.join(log_dir, "gem5.log")
-
-        try:
-            self._stream_command_output(
-                command=sim_command,
-                cwd=self.directory_path,
-                log_path=sim_log_path,
-                timeout=self.timeout
-            )
-            print(f"✅ Simulation completed, log saved to: {sim_log_path}")
-        except subprocess.TimeoutExpired:
-            print(f"❌ Simulation timed out after {self.timeout} seconds")
-            raise
-        except Exception as e:
-            print(f"❌ Simulation failed with error: {e}")
-            raise
-
-    def collect_logs(self, log_dest_dir: str, test_name: str) -> None:
-        """Collect py_runner logs (logs/now*.log)
-
-        Args:
-            log_dest_dir: Destination directory for log files
-            test_name: Name of the test
-        """
-        log_pattern = os.path.join(self.directory_path, "logs", "now*.log")
-        sim_log_paths = glob.glob(log_pattern)
-
-        for sim_log in sim_log_paths:
-            base_name = os.path.basename(sim_log)
-            new_log_path = os.path.join(log_dest_dir, base_name)
-            os.rename(sim_log, new_log_path)
 
     def get_output_path(self, test_name: str) -> str:
         """Get the path to py_runner output file
@@ -228,6 +217,14 @@ class RTLRunner(ImcFlowRunner):
     @property
     def timeout(self) -> int:
         return 7200  # 2 hours
+
+    @property
+    def display_name(self) -> str:
+        return "gem5+RTL Simulation (may take hours)"
+
+    @property
+    def main_log_filename(self) -> str:
+        return "gem5_rtl.log"
 
     def setup(self) -> None:
         """Setup for rtl_runner: compile VCS if needed"""
@@ -262,68 +259,6 @@ class RTLRunner(ImcFlowRunner):
         except subprocess.TimeoutExpired:
             print(f"❌ VCS compilation timed out after 600 seconds")
             raise RuntimeError("VCS compilation timed out")
-
-    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str) -> None:
-        """Run gem5 simulation with RTL co-simulation
-
-        Args:
-            binary_name: Name of the binary to execute
-            gdb_mode: "yes" or "no" to enable/disable GDB
-            test_name: Name of the test for output directory
-            eval_dir: Evaluation directory containing the model
-        """
-        print(f"\n--- Running gem5+RTL Simulation (may take hours) ---")
-
-        # Create runner-specific output directory
-        output_dir = self.get_output_path(test_name=eval_dir)
-        os.makedirs(os.path.dirname(output_dir), exist_ok=True)
-
-        sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name]
-        log_dir = os.path.join(eval_dir, "logs")
-        sim_log_path = os.path.join(log_dir, "gem5_rtl.log")
-
-        try:
-            self._stream_command_output(
-                command=sim_command,
-                cwd=self.directory_path,
-                log_path=sim_log_path,
-                timeout=self.timeout
-            )
-            print(f"✅ RTL simulation completed, log saved to: {sim_log_path}")
-        except subprocess.TimeoutExpired:
-            print(f"❌ RTL simulation timed out after {self.timeout} seconds")
-            raise
-        except Exception as e:
-            print(f"❌ RTL simulation failed with error: {e}")
-            raise
-
-    def collect_logs(self, log_dest_dir: str, test_name: str) -> None:
-        """Collect rtl_runner logs (gem5_output.log, vcs_sim.log, fsim_logs/*)
-
-        Args:
-            log_dest_dir: Destination directory for log files
-            test_name: Name of the test
-        """
-        # Collect main gem5 log
-        gem5_log = os.path.join(self.directory_path, "logs", "gem5_output.log")
-        if os.path.exists(gem5_log):
-            dest_path = os.path.join(log_dest_dir, "gem5_output.log")
-            os.rename(gem5_log, dest_path)
-
-        # Collect VCS log
-        vcs_log = os.path.join(self.directory_path, "logs", "vcs_sim.log")
-        if os.path.exists(vcs_log):
-            dest_path = os.path.join(log_dest_dir, "vcs_sim.log")
-            os.rename(vcs_log, dest_path)
-
-        # Collect FSIM transaction logs (if they exist)
-        fsim_log_dir = os.path.join(self.directory_path, "logs", "fsim_logs")
-        if os.path.exists(fsim_log_dir):
-            fsim_logs = glob.glob(os.path.join(fsim_log_dir, "*"))
-            for fsim_log in fsim_logs:
-                base_name = os.path.basename(fsim_log)
-                dest_path = os.path.join(log_dest_dir, f"fsim_{base_name}")
-                os.rename(fsim_log, dest_path)
 
     def get_output_path(self, test_name: str) -> str:
         """Get the path to rtl_runner output file
