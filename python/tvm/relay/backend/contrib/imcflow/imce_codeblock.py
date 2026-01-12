@@ -558,43 +558,81 @@ class ConvBlock(ImceCallCodeBlock):
       creg_code += f"{var_o} = __builtin_IMCE_GET_CREG((short){i});"
     comp.add(creg_code)
 
-    for op in self.post_ops:
-      comp.add(op)
-
     if self.post_ops:
+      # Calculate internal edges (outputs from one op that are inputs to another)
       all_in_edges = copy(self.in_edges)
       all_out_edges = copy(self.out_edges)
       for op in self.post_ops:
         all_in_edges += op.in_edges
         all_out_edges += op.out_edges
-      recv_edges = list(set(all_in_edges) - set(all_out_edges) - set(self.out_edges) - set([load_edge]))
+      internal_edges = set(all_out_edges)  # edges produced by conv or post_ops
 
+      # For each post_op, generate its external RECVs right before the op
+      for op in self.post_ops:
+        # Find external edges for this op (edges not produced internally)
+        op_external_edges = [e for e in op.in_edges if e not in internal_edges and e != load_edge]
+
+        for edge in op_external_edges:
+          if edge in DevConfig().TensorEdgetoInfo:
+            te_info = DevConfig().TensorEdgetoInfo[edge]
+          else:
+            continue
+
+          if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+            continue  # local edge, no need to recv
+
+          try:
+            arg_id = edge.src_id.graph_node_id
+            if ConstPat.match(CustomIDToNode()[arg_id]):
+              continue  # constant edge
+          except KeyError:
+            pass
+
+          if te_info.fifo_id != 0:
+            # Generate RECV for each block
+            for i in range(op.num_blocks):
+              var_i = UniqueVar((edge, i))
+              if var_i.static:
+                continue
+              annotation = f"{edge}, {te_info.node_info_str}"
+              recv_code = TextBlock(f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}")
+              comp.add(recv_code)
+              owner_edge = te_info.owner
+              add_to_map(owner_edge, RecvSendNum("recv", 1), is_send=False)
+
+              # Add sync after recv
+              if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+                pair = self.builder.pair_manager.get_pair(edge)
+                if pair:
+                  sync_annotation = f"sync after IMCE recv: uuid={pair.uuid}, edge={edge}"
+                  sync_code = SequentialBlock()
+                  sync_code.add(f"// {sync_annotation}")
+                  sync_code.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
+                  sync_code.add(f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {pair.uuid});")
+                  sync_code.add(f"__builtin_IMCE_SETFLAG(0);")
+                  comp.add(sync_code)
+
+        # Add the post_op after its RECVs
+        comp.add(op)
+        print(f"[ConvBlock] post_op {type(op).__name__}: external_edges={op_external_edges}")
+
+    if self.post_ops:
       send_edges = list(set(all_out_edges) - set(all_in_edges))
       last_out_edges = self.post_ops[-1].out_edges
       assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
       send_block = self.post_ops[-1]
-
-      num_blocks = None
-
-      for edge in recv_edges:
-        for block in [self] + self.post_ops:
-          if edge in block.in_edges:
-            if num_blocks is None:
-              num_blocks = block.num_blocks
-            else:
-              assert num_blocks == block.num_blocks, "mismatched num_blocks in recv edges"
-      
       num_out_blocks = send_block.num_out_blocks
 
-      print(f"[ConvBlock] with post ops : recv_edges: {recv_edges}, send_edges: {send_edges}, send_block: {type(send_block).__name__}")
+      print(f"[ConvBlock] with post ops : send_edges: {send_edges}, send_block: {type(send_block).__name__}")
+      # Pass empty recv_edges to RecvSendWrapper since we already handled post_op_recv_edges above
+      return RecvSendWrapper(comp, self.num_blocks, num_out_blocks, send_block, [], send_edges, builder=self.builder)
     else:
       recv_edges = self.in_edges
       send_edges = self.out_edges
       send_block = self
       num_blocks = self.num_blocks
       num_out_blocks = self.num_out_blocks
-
-    return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges, builder=self.builder)
+      return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges, builder=self.builder)
 
   def _build_structure(self) -> CodeBlock:
     """
