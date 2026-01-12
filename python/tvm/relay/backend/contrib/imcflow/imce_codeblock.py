@@ -149,16 +149,23 @@ class LoadLBBlock(ImceCodeBlock):
     annotation = f"{self.edge}, {self.edge_info.node_info_str}"
 
     # Per-packet sync: Load one packet, then sync immediately
-    # Unroll repeat times and add sync after each LOAD_LB
-    body = SequentialBlock()
-    for _ in range(self.repeat):
-      body.add(TextBlock(f"__builtin_IMCE_LOAD_LB({load_fifo_id}); // {annotation}"))
+    # Use nested loops: outer loop (count) and inner loop (repeat)
+    def inner_body_with_sync(iter, fid=load_fifo_id, annot=annotation):
+      code = f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
       # Add sync after each load
       sync_code = self._get_sync_code_str()
       if sync_code:
-        body.add(TextBlock(sync_code))
+        code += sync_code
+      return code
 
-    self.body = SimpleFor(self.count, body, "load_block")
+    if self.repeat > 1:
+      # Inner loop: repeat times with sync after each LOAD_LB
+      inner_loop = SimpleFor(self.repeat, inner_body_with_sync)
+      # Outer loop: count times
+      self.body = SimpleFor(self.count, inner_loop, "load_block")
+    else:
+      # No need for inner loop if repeat == 1
+      self.body = SimpleFor(self.count, inner_body_with_sync, "load_block")
 
   def _get_sync_code_str(self):
     """Get sync code as a string (for inline insertion after LOAD_LB)"""
@@ -180,14 +187,12 @@ class LoadLBBlock(ImceCodeBlock):
     except Exception:
       return ""
 
-    # Generate sync code inline
+    # Generate sync code inline - RECEIVER pattern
     sync_lines = []
     sync_lines.append(f"__builtin_IMCE_SETFLAG({pair.uuid});")
     for node in pair.all_nodes:
       if node != current_node:
         sync_lines.append(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
-    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
-    sync_lines.append(f"__asm__ volatile({nops});")
     sync_lines.append(f"__builtin_IMCE_SETFLAG(0);")
 
     return "\n".join(sync_lines) + "\n"
@@ -911,6 +916,7 @@ class RecvSendWrapper(ImceCodeBlock):
       return code
 
     # Create a SequentialBlock for sync instructions
+    # SENDER pattern: SETFLAG(uuid) → STANDBY(receiver, uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_annotation = f"sync after IMCE send: uuid={pair.uuid}, edge={edge}"
     print(f"[DEBUG _add_sync_after_send] Adding sync code")
 
@@ -922,8 +928,11 @@ class RecvSendWrapper(ImceCodeBlock):
       if node != current_node:
         sync_block.add(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
 
-    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
-    sync_block.add(f"__asm__ volatile({nops});")
+    # Wait for receiver to clear flag before sender clears its own flag
+    for node in pair.all_nodes:
+      if node != current_node:
+        sync_block.add(f"__builtin_IMCE_STANDBY({node.value}, 0);")
+
     sync_block.add(f"__builtin_IMCE_SETFLAG(0);")
 
     # Combine with existing code

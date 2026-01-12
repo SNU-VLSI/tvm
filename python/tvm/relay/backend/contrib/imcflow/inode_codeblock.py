@@ -110,11 +110,16 @@ class RecvBlock(InodeCodeBlock):
     var = UniqueVar("recv_data_base_address", dtype="int")
 
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
-    self.body.add(SimpleFor(recv_count,
-                      lambda iter: f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {self.fifo_id});"))
 
-    # Add synchronization after recv
-    self._add_sync_after_recv()
+    # Per-packet sync: Receive one packet, then sync immediately
+    def recv_body_with_sync(iter, var=var, fid=self.fifo_id):
+      code = f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {fid});\n"
+      # Add sync after each recv
+      sync_code = self._get_recv_sync_code_str()
+      if sync_code:
+        code += sync_code
+      return code
+    self.body.add(SimpleFor(recv_count, recv_body_with_sync))
 
   def _build_tiled(self):
     fifo_id = self.fifo_id
@@ -176,8 +181,7 @@ class RecvBlock(InodeCodeBlock):
     #   else:
     #     self.body.add(TextBlock(f"__builtin_INODE_STANDBY({producer_imce_id}, {SYNC_OUTPUT_FLAG});"))
 
-    # Add synchronization after recv
-    self._add_sync_after_recv()
+    # Sync is already added inside the loop (per-packet sync), no need to add again here
 
   def _get_recv_sync_code_str(self):
     """Get sync code as a string (for inline insertion in loops) for recv"""
@@ -197,14 +201,12 @@ class RecvBlock(InodeCodeBlock):
     if dst_hw_node is None:
       return ""
 
-    # Generate sync code inline
+    # Generate sync code inline - RECEIVER pattern
     sync_lines = []
     sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
     for node in pair.all_nodes:
       if node != dst_hw_node:
         sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
-    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
-    sync_lines.append(f"__asm__ volatile({nops});")
     sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
 
     return "\n".join(sync_lines) + "\n"
@@ -361,12 +363,16 @@ class SendBlock(InodeCodeBlock):
 
     var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
-    self.body.add(SimpleFor(recv_count,
-                      lambda iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id:
-                        f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});"))
 
-    # Add synchronization after send
-    self._add_sync_after_send()
+    # Per-packet sync: Send one packet, then sync immediately
+    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id):
+      code = f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
+      # Add sync after each send
+      sync_code = self._get_sync_code_str()
+      if sync_code:
+        code += sync_code
+      return code
+    self.body.add(SimpleFor(recv_count, send_body_with_sync))
 
   def _build_tiled(self):
     # tiling_info = self.block.tiling_info
@@ -403,7 +409,7 @@ class SendBlock(InodeCodeBlock):
     self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
 
   def _get_sync_code_str(self):
-    """Get sync code as a string (for inline insertion in loops)"""
+    """Get sync code as a string (for inline insertion in loops) - SENDER pattern"""
     if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
       return ""  # No pair manager, no sync
 
@@ -418,14 +424,17 @@ class SendBlock(InodeCodeBlock):
     # Get current node from edge_info
     current_node = self.edge_info.policy_info[0].router_id
 
-    # Generate sync code inline
+    # Generate sync code inline - SENDER pattern
+    # SENDER: SETFLAG(uuid) → STANDBY(receiver, uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_lines = []
     sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
     for node in pair.all_nodes:
       if node != current_node:
         sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
-    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
-    sync_lines.append(f"__asm__ volatile({nops});")
+    # Wait for receiver to clear flag before sender clears its own flag
+    for node in pair.all_nodes:
+      if node != current_node:
+        sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, 0);")
     sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
 
     return "\n".join(sync_lines) + "\n"
