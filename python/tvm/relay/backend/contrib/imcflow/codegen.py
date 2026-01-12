@@ -29,6 +29,7 @@ from . import ext_codegen as _imcflow_ext_codegen  # noqa: F401
 # Load operation handlers (imports trigger registration via decorators)
 from . import imce_operation_handlers  # noqa: F401
 from tvm.relay.backend.contrib.imcflow.imce_operation_handlers import IMCECodeBlockInfo
+from tvm.relay.backend.contrib.imcflow.send_recv_sync import SendRecvPairManager
 
 CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})(None) | \
                wildcard().has_attr({"Composite": "imcflow.qconv2d-split-concat"})(None)
@@ -153,7 +154,11 @@ class CodegenSuite:
     sorted_edges = sorted(list(annotator.edges), key=lambda x: str(x))
     for edge in sorted_edges:
       print(f"  {edge}")
-    
+
+    # Create send-recv pair manager for synchronization
+    pair_manager = SendRecvPairManager(sorted_edges, exclude_const=True)
+    print(f"SendRecvPairManager created: {len(pair_manager.pairs)} send-recv pairs")
+
     # get use def chain
     use_def_chains = {}
     for gv, func_ in self.module.functions.items():
@@ -168,6 +173,7 @@ class CodegenSuite:
 
     # generate code blocks for each node
     imce_builder = ImceCodeBlockBuilder(self.module, func_name, sorted_edges, use_def_chains)
+    imce_builder.pair_manager = pair_manager  # Add pair manager for sync support
     imce_builder.visit(func)
 
     # add stop block for active imces
@@ -193,6 +199,7 @@ class CodegenSuite:
     print("-"*40)
 
     inode_builder = InodeCodeBlockBuilder(self.module, func, func_name, sorted_edges)
+    inode_builder.pair_manager = pair_manager  # Add pair manager for sync support
     inode_builder.initialize()
     inode_builder.visit(func)
     inode_builder.finalize()
@@ -302,7 +309,7 @@ class CntBaseAddrCodegen:
     self.host_isa = host_isa
     self.func_dir = os.path.join(build_dir, func_name)
 
-  def write_readable_file(self, block_id, edge_simple_name, pkt_cnts, pkt_cnts_divided, bin_file):
+  def write_readable_file(self, block_id, edge_simple_name, pkt_cnts, bin_file):
     """Write a human-readable text file corresponding to the binary file."""
     txt_file = f"{block_id}.txt"
     txt_path = os.path.join(self.func_dir, txt_file)
@@ -313,22 +320,15 @@ class CntBaseAddrCodegen:
       file.write(f"Binary file: {bin_file}\n")
       file.write("=" * 60 + "\n\n")
 
-      file.write(f"Original Packet Counts ({len(pkt_cnts)} entries):\n")
+      file.write(f"Packet Counts ({len(pkt_cnts)} entries):\n")
       file.write("-" * 60 + "\n")
       for i, cnt in enumerate(pkt_cnts):
-        cnt_val = int(cnt)
-        file.write(f"  [{i:2d}] original: {cnt_val:10d} (0x{cnt_val:08x})\n")
-
-      file.write("\n" + "=" * 60 + "\n")
-      file.write(f"Divided Packet Counts (for 4x unrolled INODE_RECV, {len(pkt_cnts_divided)} entries):\n")
-      file.write("-" * 60 + "\n")
-      for i, cnt in enumerate(pkt_cnts_divided):
         # Show decimal, hex, and binary offset
         cnt_val = int(cnt)
-        file.write(f"  [{i:2d}] offset 0x{i*4:02x}: {cnt_val:10d} (0x{cnt_val:08x}) [written to binary]\n")
+        file.write(f"  [{i:2d}] offset 0x{i*4:02x}: {cnt_val:10d} (0x{cnt_val:08x})\n")
 
       # Show padding info
-      written_bytes = len(pkt_cnts_divided) * 4
+      written_bytes = len(pkt_cnts) * 4
       if written_bytes < 32:
         padding_bytes = 32 - written_bytes
         file.write(f"\nPadding: {padding_bytes} bytes (0x00) to reach 32-byte alignment\n")
@@ -368,28 +368,24 @@ class CntBaseAddrCodegen:
       host_obj_file = f"{block_id}.host.o"
 
       # Pack pkt_cnts as 32-bit little-endian integers
-      # Divide by 4 to account for 4x unrolling in INODE_RECV
       pkt_cnts = None
-      pkt_cnts_divided = None
       with open(bin_path, "wb") as file:
         if data_block and data_block.tiling_info and data_block.tiling_info.pkt_cnts:
           pkt_cnts = data_block.tiling_info.pkt_cnts
-          # Divide each pkt_cnt by 4 for the unrolled loop
-          pkt_cnts_divided = [cnt // 4 for cnt in pkt_cnts]
-          for cnt in pkt_cnts_divided:
+          for cnt in pkt_cnts:
             if cnt < 0:
               print(f"Warning: Negative packet count {cnt} in block {block_id}")
               raise RuntimeError(f"Negative packet count {cnt} in block {block_id}")
             file.write(int(cnt).to_bytes(4, byteorder='little', signed=False))
           # Pad to 32 bytes if needed
-          written_bytes = len(pkt_cnts_divided) * 4
+          written_bytes = len(pkt_cnts) * 4
           if written_bytes < 32:
             file.write(b'\x00' * (32 - written_bytes))
         else:
           raise RuntimeError(f"No tiling info found for data block corresponding to {block_id}")
 
       # Write human-readable text file
-      self.write_readable_file(block_id, edge_simple_name, pkt_cnts, pkt_cnts_divided, bin_file)
+      self.write_readable_file(block_id, edge_simple_name, pkt_cnts, bin_file)
 
       # Create host object file using DeviceCodegen
       DevCodegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
@@ -930,7 +926,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       else:
         annotation += append_edgeinfo_and_db(edge, edge_infos, dbs)
 
-    block = SendBlockInterleaved(dbs, edge_infos, annotation)
+    block = SendBlockInterleaved(self, dbs, edge_infos, annotation)
     self.codeblocks.append(hid, block, phase)
 
   def add_recv_block(self, edge, phase: CodePhase):
@@ -959,9 +955,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       fifo_ids.append(in_edge_info.fifo_id)
       annotation += f"recv - {edge}, {in_edge_info.fifo_id}, "
 
-    block = RecvBlockInterleaved(dbs, fifo_ids, annotation)
+    block = RecvBlockInterleaved(self, dbs, fifo_ids, annotation)
     self.codeblocks.append(hid, block, phase)
-    pass
 
   def get_graph_node_id(self, call):
     if self.curr_composite_id:

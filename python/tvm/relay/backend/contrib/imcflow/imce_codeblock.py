@@ -68,6 +68,36 @@ class ImceCodeBlock(CodeBlock):
     pass
 
 
+class SyncPairIMCE(ImceCodeBlock):
+  """Synchronize IMCE nodes after send/recv using UUID-based barrier"""
+
+  def __init__(self, current_node: NodeID, participating_nodes: List[NodeID], uuid: int, annotation: str = ""):
+    super().__init__(annotation)
+    self.current_node = current_node
+    self.participating_nodes = participating_nodes
+    self.uuid = uuid
+
+  def _render(self) -> str:
+    code = TextBlock("")
+
+    # Set flag with UUID
+    code += f"__builtin_IMCE_SETFLAG({self.uuid});"
+
+    # Wait for all other participating nodes
+    for node in self.participating_nodes:
+      if node != self.current_node:
+        code += f"__builtin_IMCE_STANDBY({node.value}, {self.uuid});"
+
+    # Add nops for timing (one per participating node)
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(self.participating_nodes))])
+    code += f"__asm__ volatile({nops});"
+
+    # Clear flag
+    code += f"__builtin_IMCE_SETFLAG(0);"
+
+    return code.render()
+
+
 class ImceCallCodeBlock(ImceCodeBlock):
   num_in_edges = None
 
@@ -107,20 +137,60 @@ class ImceCallCodeBlock(ImceCodeBlock):
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
 
-  def __init__(self, count: int, repeat: int, edge: TensorEdge, edge_info: TensorEdgeInfo, annotation: str = ""):
+  def __init__(self, count: int, repeat: int, edge: TensorEdge, edge_info: TensorEdgeInfo, builder=None, annotation: str = ""):
     super().__init__(annotation)
     self.count = count
     self.repeat = repeat
     self.edge = edge
     self.edge_info = edge_info
+    self.builder = builder
 
-    body = SequentialBlock()
     load_fifo_id = self.edge_info.fifo_id
     annotation = f"{self.edge}, {self.edge_info.node_info_str}"
+
+    # Per-packet sync: Load one packet, then sync immediately
+    # Unroll repeat times and add sync after each LOAD_LB
+    body = SequentialBlock()
     for _ in range(self.repeat):
       body.add(TextBlock(f"__builtin_IMCE_LOAD_LB({load_fifo_id}); // {annotation}"))
-    
+      # Add sync after each load
+      sync_code = self._get_sync_code_str()
+      if sync_code:
+        body.add(TextBlock(sync_code))
+
     self.body = SimpleFor(self.count, body, "load_block")
+
+  def _get_sync_code_str(self):
+    """Get sync code as a string (for inline insertion after LOAD_LB)"""
+    if self.builder is None or not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return ""  # No pair manager, no sync
+
+    pair = self.builder.pair_manager.get_pair(self.edge)
+    if pair is None:
+      return ""  # No sync needed for this edge
+
+    # Get current node
+    try:
+      dst_gid = self.edge.dst_id.graph_node_id
+      if isinstance(dst_gid, tuple):
+        dst_gid = dst_gid[-1]
+      current_node = DevConfig().get_hw_node(dst_gid)
+      if isinstance(current_node, tuple):
+        current_node = current_node[0]
+    except Exception:
+      return ""
+
+    # Generate sync code inline
+    sync_lines = []
+    sync_lines.append(f"__builtin_IMCE_SETFLAG({pair.uuid});")
+    for node in pair.all_nodes:
+      if node != current_node:
+        sync_lines.append(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
+    sync_lines.append(f"__asm__ volatile({nops});")
+    sync_lines.append(f"__builtin_IMCE_SETFLAG(0);")
+
+    return "\n".join(sync_lines) + "\n"
 
   def _render(self) -> str:
     add_to_map(self.edge, RecvSendNum("recv", self.count * self.repeat), is_send=False)
@@ -421,6 +491,7 @@ class ConvBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', shapes: dict, conv_attrs: Conv2DAttrs,
                post_ops: List[ImceCallCodeBlock] = None, annotation: str = ""):
     super().__init__(call, annotation)
+    self.builder = call.builder  # Store builder reference for sync support
     self.conv = ConvUtil(shapes["data"][2], shapes["data"][3],
                          conv_attrs.padding[0], conv_attrs.strides[0],
                          conv_attrs.kernel_size[0], conv_attrs.kernel_size[1])
@@ -433,13 +504,13 @@ class ConvBlock(ImceCallCodeBlock):
     assert self.out_channels <= 64, "convolution output channel is greater than 64"
     # assert self.out_channels%16 == 0, "Until now, conv output channel should be multiple of 16"
     self.in_channels  = conv_attrs.in_channels.value
-    
+
     # Link post-ops
     prev = self
     for op in self.post_ops:
       op.prev_op = prev
       prev = op
-      
+
     self.body = self._build_structure()
 
   @property
@@ -474,7 +545,7 @@ class ConvBlock(ImceCallCodeBlock):
     self.load_edge_info = load_edge_info
 
     comp = SequentialBlock()
-    comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info))
+    comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info, builder=self.builder))
     comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
 
     creg_code = TextBlock("")
@@ -519,7 +590,7 @@ class ConvBlock(ImceCallCodeBlock):
       num_blocks = self.num_blocks
       num_out_blocks = self.num_out_blocks
 
-    return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges)
+    return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges, builder=self.builder)
 
   def _build_structure(self) -> CodeBlock:
     """
@@ -614,7 +685,7 @@ class RecvSendWrapper(ImceCodeBlock):
   """
 
   def __init__(self, body: CodeBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
-               in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = ""):
+               in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = "", builder=None):
     """Wrap a computation block with RECV/SEND operations.
 
     Args:
@@ -622,6 +693,7 @@ class RecvSendWrapper(ImceCodeBlock):
         in_edges:
         out_edges:
         annotation: Optional annotation string
+        builder: Optional builder reference for pair_manager access
     """
     super().__init__(annotation)
     self.body = body
@@ -632,18 +704,22 @@ class RecvSendWrapper(ImceCodeBlock):
     self.send_block = send_block
     self.send_map = {}
     self.recv_map = {}
+    self.builder = builder
   
   @classmethod
-  def from_codeblock(cls, codeblock: ImceCallCodeBlock, annotation: str=""):
+  def from_codeblock(cls, codeblock: ImceCallCodeBlock, annotation: str="", builder=None):
     # Instead of calling content(), we wrap the codeblock itself
-    body = codeblock 
+    body = codeblock
     send_block = codeblock
     in_edges = codeblock.in_edges
     out_edges = codeblock.out_edges
     num_blocks = codeblock.num_blocks
     num_out_blocks = codeblock.num_out_blocks
+    # Try to get builder from codeblock if not provided
+    if builder is None and hasattr(codeblock, 'call') and hasattr(codeblock.call, 'builder'):
+      builder = codeblock.call.builder
 
-    return cls(body, num_blocks, num_out_blocks, send_block, in_edges, out_edges, annotation)
+    return cls(body, num_blocks, num_out_blocks, send_block, in_edges, out_edges, annotation, builder=builder)
 
   def _render(self) -> str:
     """Generate RECV -> body -> SEND."""
@@ -683,6 +759,10 @@ class RecvSendWrapper(ImceCodeBlock):
           code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
           owner_edge = te_info.owner
           add_to_map(owner_edge, RecvSendNum("recv", 1), is_send=False)
+
+          # Add sync immediately after this recv
+          if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+            code = self._add_sync_after_recv(code, edge)
 
     # --- 2. Generate Body ---
     # Here we call content() on the child block(s)
@@ -736,8 +816,10 @@ class RecvSendWrapper(ImceCodeBlock):
           te_out_info = te_out_infos[0]
 
       # Producer IMCE signals start of output (flag 0)
-      code += f"__builtin_IMCE_SETFLAG(0);"
+      # TEMPORARILY DISABLED: Testing UUID-based sync instead
+      # code += f"__builtin_IMCE_SETFLAG(0);"
 
+      # Per-packet sync: Send one packet, then sync immediately
       for i in range(self.num_out_blocks):
         for te_out_info in [te_out_info]: #TODO: current version doesn't need it
           if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
@@ -750,14 +832,102 @@ class RecvSendWrapper(ImceCodeBlock):
             for out_edge in output_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
+            # Add sync AFTER each send (per-packet sync)
+            if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+              if output_edges:
+                # Use first edge for UUID lookup (all edges in output_edges should have same UUID)
+                # IMPORTANT: += creates new object, so we must capture the return value
+                code = self._add_sync_after_send(code, output_edges[0])
+
       # Producer IMCE signals end of output (flag 2)
-      code += f"__builtin_IMCE_SETFLAG(2);"
+      # TEMPORARILY DISABLED: Testing UUID-based sync instead
+      # code += f"__builtin_IMCE_SETFLAG(2);"
 
       # FIXME: the NOP count here is hardcoded
       # nops = " ".join([f"\"nop\\n\"" for _ in range(5)])
       # code += f"__asm__ volatile({nops});"
 
     return code.render()
+
+  def _add_sync_after_recv(self, code: TextBlock, edge: TensorEdge) -> CodeBlock:
+    """Add synchronization after recv for a specific edge
+
+    Returns the updated code block with sync instructions appended
+    """
+    pair = self.builder.pair_manager.get_pair(edge)
+    if pair is None:
+      return code
+
+    # Get current node (receiver)
+    try:
+      dst_gid = edge.dst_id.graph_node_id
+      if isinstance(dst_gid, tuple):
+        dst_gid = dst_gid[-1]
+      current_node = DevConfig().get_hw_node(dst_gid)
+      if isinstance(current_node, tuple):
+        current_node = current_node[0]
+    except Exception:
+      return code
+
+    # Create a SequentialBlock for sync instructions
+    sync_annotation = f"sync after IMCE recv: uuid={pair.uuid}, edge={edge}"
+
+    sync_block = SequentialBlock()
+    sync_block.add(f"// {sync_annotation}")
+    sync_block.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
+
+    for node in pair.all_nodes:
+      if node != current_node:
+        sync_block.add(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
+
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
+    sync_block.add(f"__asm__ volatile({nops});")
+    sync_block.add(f"__builtin_IMCE_SETFLAG(0);")
+
+    # Combine with existing code
+    return code + sync_block
+
+  def _add_sync_after_send(self, code: TextBlock, edge: TensorEdge) -> CodeBlock:
+    """Add synchronization after send for a specific edge
+
+    Returns the updated code block with sync instructions appended
+    """
+    print(f"[DEBUG _add_sync_after_send] Called with edge: {edge}")
+    pair = self.builder.pair_manager.get_pair(edge)
+    print(f"[DEBUG _add_sync_after_send] pair={pair}")
+    if pair is None:
+      print(f"[DEBUG _add_sync_after_send] pair is None, returning")
+      return code
+
+    # Get current node (sender)
+    try:
+      src_gid = edge.src_id.graph_node_id
+      if isinstance(src_gid, tuple):
+        src_gid = src_gid[-1]
+      current_node = DevConfig().get_hw_node(src_gid)
+      print(f"[DEBUG _add_sync_after_send] current_node={current_node}, uuid={pair.uuid}")
+    except Exception as e:
+      print(f"[DEBUG _add_sync_after_send] Exception getting current_node: {e}")
+      return code
+
+    # Create a SequentialBlock for sync instructions
+    sync_annotation = f"sync after IMCE send: uuid={pair.uuid}, edge={edge}"
+    print(f"[DEBUG _add_sync_after_send] Adding sync code")
+
+    sync_block = SequentialBlock()
+    sync_block.add(f"// {sync_annotation}")
+    sync_block.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
+
+    for node in pair.all_nodes:
+      if node != current_node:
+        sync_block.add(f"__builtin_IMCE_STANDBY({node.value}, {pair.uuid});")
+
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(pair.all_nodes))])
+    sync_block.add(f"__asm__ volatile({nops});")
+    sync_block.add(f"__builtin_IMCE_SETFLAG(0);")
+
+    # Combine with existing code
+    return code + sync_block
 
 
   def create_loop_from_call(self, call_ctx : 'BuilderContext', to_process_in_edges=None):
@@ -891,8 +1061,8 @@ class RecvSendWrapper(ImceCodeBlock):
       count = in_total_bytes // (32 * num_blocks)
 
     # Create a new RecvSendWrapper that represents the inner logic
-    inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks, 
-                            self.send_block, self.in_edges, self.out_edges, self.annotation)
+    inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks,
+                            self.send_block, self.in_edges, self.out_edges, self.annotation, builder=self.builder)
 
     return SimpleFor(count, inner, f"call_created_loop")
 

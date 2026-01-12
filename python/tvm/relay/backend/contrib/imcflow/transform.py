@@ -3527,10 +3527,6 @@ class MemoryAllocator:
               pkt_cnt_per_height = height_offset//32
               pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
 
-              # Assert that all pkt_cnts are multiples of 4 (for 4x unrolling)
-              for pkt_cnt in pkt_cnts:
-                assert pkt_cnt % 4 == 0, f"pkt_cnt {pkt_cnt} must be a multiple of 4 for INODE_RECV 4x unrolling (edge: {edge})"
-
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               # base address = origin_base + height_base * height_offset
               # cnt = height_size * height_offset / sizeof(int)
@@ -3597,10 +3593,6 @@ class MemoryAllocator:
               pkt_cnt_per_height = height_offset//32
               # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
               pkt_cnts = [pkt_cnt_per_height * h for h in output_tile_sizes]
-
-              # Assert that all pkt_cnts are multiples of 4 (for 4x unrolling)
-              for pkt_cnt in pkt_cnts:
-                assert pkt_cnt % 4 == 0, f"pkt_cnt {pkt_cnt} must be a multiple of 4 for INODE_RECV 4x unrolling (edge: {edge})"
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               c_output_var_offsets = [base * height_offset for base in output_tile_bases]

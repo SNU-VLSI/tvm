@@ -671,16 +671,19 @@ def run_simulation(eval_dir):
         eval_dir=eval_dir
       )
     except KeyboardInterrupt:
-      simul_err   = True
       interrupted = True
       print("❌ Simulation interrupted by user")
     except Exception as e:
-      simul_err   = True
+      simul_err = True
       print(f"❌ Simulation failed for {runner.name}: {e}")
-
-    # Collect runner-specific logs to runner subdirectory
-    if not simul_err or interrupted:
-      runner.collect_logs(log_dest_dir=runner_log_dir, test_name=eval_dir)
+    finally:
+      # Always collect logs regardless of success/failure/interruption
+      try:
+        print(f"📦 Collecting logs to {runner_log_dir}...")
+        runner.collect_logs(log_dest_dir=runner_log_dir, test_name=eval_dir)
+        print(f"✅ Logs collected successfully")
+      except Exception as e:
+        print(f"⚠️  Failed to collect logs: {e}")
 
     # Re-raise KeyboardInterrupt after collecting logs
     if interrupted:

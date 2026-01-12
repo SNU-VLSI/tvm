@@ -1,0 +1,152 @@
+"""
+Send-Recv Pair Synchronization Support
+
+This module provides UUID-based synchronization for send-recv pairs across
+multi-node hardware. Each send-recv pair (including multicasts) is assigned
+a unique UUID, and all participating nodes synchronize after send/recv operations.
+"""
+
+from typing import List, Dict, Set, Tuple
+from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
+from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.relay.op.contrib.imcflow import CustomIDToNode
+from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
+import logging
+
+
+class SendRecvPair:
+    """Represents a send-recv pair with multicast support"""
+
+    def __init__(self, uuid: int, sender_node: NodeID, receiver_nodes: Set[NodeID], edges: List[TensorEdge]):
+        self.uuid = uuid
+        self.sender_node = sender_node
+        self.receiver_nodes = receiver_nodes  # Can be multiple for multicast
+        self.edges = edges  # All edges in this pair share the same UUID
+
+    @property
+    def all_nodes(self) -> List[NodeID]:
+        """Returns all participating nodes (sender + all receivers)"""
+        return [self.sender_node] + sorted(list(self.receiver_nodes), key=lambda x: x.value)
+
+    def __repr__(self):
+        receiver_str = ','.join([r.name for r in sorted(self.receiver_nodes, key=lambda x: x.value)])
+        return f"Pair(uuid={self.uuid}, {self.sender_node.name}->[{receiver_str}])"
+
+
+class SendRecvPairManager:
+    """Manages send-recv pair UUID assignment with multicast support
+
+    Groups tensor edges by source graph node to handle multicasts.
+    For example, if node A sends to both B and C, edges A->B and A->C
+    are grouped into one pair with UUID assigned to all three nodes.
+    """
+
+    def __init__(self, edges: List[TensorEdge], exclude_const: bool = True):
+        """Initialize pair manager and assign UUIDs
+
+        Args:
+            edges: List of tensor edges to process
+            exclude_const: If True, skip constant edges (no sync needed)
+        """
+        self.pairs: Dict[int, SendRecvPair] = {}  # {uuid: SendRecvPair}
+        self.edge_to_pair: Dict[TensorEdge, SendRecvPair] = {}  # {edge: SendRecvPair}
+        self.exclude_const = exclude_const
+        self._assign_uuids(edges)
+
+        # Log assignment results
+        print(f"[SendRecvPairManager] Assigned {len(self.pairs)} UUIDs for {len(edges)} edges")
+        for pair in sorted(self.pairs.values(), key=lambda p: p.uuid):
+            print(f"  {pair}")
+
+    def _assign_uuids(self, edges: List[TensorEdge]):
+        """Assign UUIDs to send-recv pairs
+
+        Groups edges by source graph node ID to handle multicasts.
+        Each group gets a unique UUID (0-255).
+        """
+        # Filter out constant edges if requested
+        filtered_edges = []
+        for edge in edges:
+            if self.exclude_const:
+                src_graph_id = edge.src_id.graph_node_id
+                try:
+                    from tvm.relay.dataflow_pattern import is_constant
+                    ConstPat = is_constant()
+                    if ConstPat.match(CustomIDToNode()[src_graph_id]):
+                        continue  # Skip constant edges
+                except (KeyError, Exception):
+                    pass
+            filtered_edges.append(edge)
+
+        # Group edges by source graph node (handles multicast)
+        # Key: (outer_src_gid, inner_src_gid)
+        edge_groups: Dict[Tuple, List[TensorEdge]] = {}
+
+        for edge in filtered_edges:
+            src_gid = edge.src_id.graph_node_id
+            # Normalize to tuple format
+            if isinstance(src_gid, tuple):
+                key = src_gid
+            else:
+                key = (src_gid,)
+
+            if key not in edge_groups:
+                edge_groups[key] = []
+            edge_groups[key].append(edge)
+
+        # Assign UUIDs to each group
+        uuid = 1  # Start from 1 (0 is reserved for flag clear)
+        for src_gid_key, group_edges in sorted(edge_groups.items(), key=lambda x: str(x[0])):
+            if uuid > 255:
+                raise RuntimeError(f"UUID overflow: more than 255 send-recv pairs in function")
+
+            # Determine sender node (from first edge's src)
+            first_edge = group_edges[0]
+            sender_hw_node = self._get_hw_node(first_edge.src_id)
+
+            # Collect all receiver nodes
+            receiver_nodes = set()
+            for edge in group_edges:
+                recv_node = self._get_hw_node(edge.dst_id)
+                # Handle tuple hw node (from split operations)
+                if isinstance(recv_node, tuple):
+                    for node in recv_node:
+                        receiver_nodes.add(node)
+                else:
+                    receiver_nodes.add(recv_node)
+
+            # Create pair
+            pair = SendRecvPair(uuid, sender_hw_node, receiver_nodes, group_edges)
+            self.pairs[uuid] = pair
+
+            # Map each edge to this pair
+            for edge in group_edges:
+                self.edge_to_pair[edge] = pair
+
+            uuid += 1
+
+    def _get_hw_node(self, tensor_id) -> NodeID:
+        """Get hardware node ID for a tensor ID"""
+        gid = tensor_id.graph_node_id
+        if isinstance(gid, tuple):
+            gid = gid[-1]  # Use inner ID for composite calls
+        hw_node = DevConfig().get_hw_node(gid)
+        return hw_node
+
+    def get_pair(self, edge: TensorEdge) -> SendRecvPair:
+        """Get the send-recv pair for a given edge"""
+        return self.edge_to_pair.get(edge, None)
+
+    def get_uuid(self, edge: TensorEdge) -> int:
+        """Get UUID for a given edge"""
+        pair = self.get_pair(edge)
+        return pair.uuid if pair else None
+
+    def needs_sync(self, edge: TensorEdge) -> bool:
+        """Check if this edge needs synchronization"""
+        return edge in self.edge_to_pair
+
+    def get_participating_nodes(self, edge: TensorEdge) -> List[NodeID]:
+        """Get all nodes participating in sync for this edge"""
+        pair = self.get_pair(edge)
+        return pair.all_nodes if pair else []

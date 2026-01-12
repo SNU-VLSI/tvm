@@ -209,7 +209,7 @@ class MultHandler(OperationHandler):
     if call.curr_composite_id is not None:
       call.post_op_stack.append(block)
     else:
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone").create_loop_from_call(call, to_process_in_edges)
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone", builder=call.builder).create_loop_from_call(call, to_process_in_edges)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
@@ -278,7 +278,7 @@ class ConcatHandler(OperationHandler):
       call.post_op_stack.append(block)
     else:
       # Standalone concat needs RECV/SEND wrapper
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "concat_standalone").create_loop_from_call(call)
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "concat_standalone", builder=call.builder).create_loop_from_call(call)
       call.codeblocks.append(call.get_hid(), wrapped_block, CodePhase.EXEC)
 
 
@@ -346,7 +346,7 @@ class MinMaxQuantizeHandler(OperationHandler):
       call.post_op_stack.append(block)
     else:
       # Standalone minmax quantize needs RECV/SEND wrapper
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "min_max_quantize_standalone").create_loop_from_call(call)
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "min_max_quantize_standalone", builder=call.builder).create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
@@ -375,7 +375,7 @@ class ReLUHandler(OperationHandler):
       call.post_op_stack.append(block)
     else:
       # Standalone ReLU needs RECV/SEND wrapper
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "relu_standalone").create_loop_from_call(call)
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "relu_standalone", builder=call.builder).create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
@@ -447,7 +447,7 @@ class BatchNormHandler(OperationHandler):
       # TODO: how to scale?
       call.post_op_stack.append(block)
     else:
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "bn_standalone").create_loop_from_call(call)
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "bn_standalone", builder=call.builder).create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 @register_operation_handler
