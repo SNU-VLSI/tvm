@@ -753,6 +753,9 @@ class RecvSendWrapper(ImceCodeBlock):
       dst_hw_node = DevConfig().get_hw_node(dst_graph_node_id)
       if dst_hw_node is not None and isinstance(dst_hw_node, NodeID) and dst_hw_node.is_inode():
         code += f"__builtin_IMCE_STANDBY({dst_hw_node.value}, {SYNC_OUTPUT_FLAG});"
+        # Store producer sync granularity for INode RECV to use
+        if te_out_info.producer_sync_granularity is None:
+          te_out_info.producer_sync_granularity = self.num_out_blocks
 
     return code.render()
 

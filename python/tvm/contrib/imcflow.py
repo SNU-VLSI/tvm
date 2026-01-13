@@ -529,11 +529,12 @@ class InstEdgeInfo(EdgeInfo):
 
 class TensorEdgeInfo(EdgeInfo):
   LOCAL_FIFO = -2
-  def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1, block_tiling_info: BlockTileInfo = None):
+  def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1, block_tiling_info: BlockTileInfo = None, producer_sync_granularity: int = None):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
     self.owner = None
     self.block_tiling_info = block_tiling_info
+    self.producer_sync_granularity = producer_sync_granularity  # Number of SENDs per STANDBY from producer IMCE
 
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id
