@@ -288,27 +288,35 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
 
 def setup_dir(test_name, suffix=""):
   def clean_dir_recursive(path):
-    """Recursively clean all files but keep all directory inodes intact
-
-    Skips the 'logs' directory to preserve logs from different runners.
-    """
+    """Recursively clean all files but keep directory structure intact."""
     for item in os.listdir(path):
       item_path = os.path.join(path, item)
       if os.path.isfile(item_path) or os.path.islink(item_path):
         os.remove(item_path)
-      elif os.path.isdir(item_path):
-        # Skip logs directory to preserve runner-specific logs
-        if item == "logs":
-          continue
-        # Recursively clean subdirectory but keep the directory itself
+      elif os.path.isdir(item_path) and item != "logs":
         clean_dir_recursive(item_path)
+
+  def clean_runner_logs(logs_path, runner_dirs):
+    """Clean specific runner log directories."""
+    for runner_dir in runner_dirs:
+      runner_path = os.path.join(logs_path, runner_dir)
+      if os.path.exists(runner_path):
+        shutil.rmtree(runner_path)
 
   dir_name = f"{test_name}{suffix}"
   if not os.path.exists(dir_name):
     os.makedirs(dir_name)
   else:
-    # clean up all files recursively but keep all directory structures intact
     clean_dir_recursive(dir_name)
+    # Clean runner-specific logs based on IMCFLOW_RUNNER
+    runner_env = os.getenv('IMCFLOW_RUNNER', 'py').lower()
+    logs_path = os.path.join(dir_name, "logs")
+    if runner_env == 'rtl':
+      clean_runner_logs(logs_path, ['rtl_runner'])
+    elif runner_env == 'both':
+      clean_runner_logs(logs_path, ['py_runner', 'rtl_runner'])
+    else:  # 'py' or default
+      clean_runner_logs(logs_path, ['py_runner'])
 
   os.makedirs(os.path.join(dir_name, "logs"), exist_ok=True)
   os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)

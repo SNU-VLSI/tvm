@@ -98,9 +98,11 @@ build_single_node() {
     if [ "$node_type" == "inode" ]; then
         SOURCE_FILE="${BUILD_DIR}/inode.cpp"
         TARGET_UPPER="INODE"
+        TARGET_STR="INODE"
     else
         SOURCE_FILE="${BUILD_DIR}/imce.cpp"
         TARGET_UPPER="IMCE"
+        TARGET_STR="imce"
     fi
 
     # Check if source file exists
@@ -121,9 +123,10 @@ build_single_node() {
     # Step 1: Compile C++ to object file
     echo -e "${GREEN}[1/7]${NC} Compiling ${SOURCE_FILE##*/} to ${OBJ_FILE##*/}..."
     clang -O1 --target=${TARGET_UPPER} -c -fPIC \
+        $([ "$TARGET_UPPER" == "IMCE" ] && echo "-mllvm=-force-hardware-loops") \
         -mllvm=-force-nested-hardware-loop \
-        -mllvm=-${TARGET_UPPER}_hid=${hid} \
-        -mllvm=-${TARGET_UPPER}_wid=${wid} \
+        -mllvm=-${TARGET_STR}_hid=${hid} \
+        -mllvm=-${TARGET_STR}_wid=${wid} \
         -o "${OBJ_FILE}" "${SOURCE_FILE}"
 
     if [ $? -ne 0 ]; then
