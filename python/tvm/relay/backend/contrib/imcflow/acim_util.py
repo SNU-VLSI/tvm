@@ -182,8 +182,8 @@ class ConfigData(dict):
     reg_val |= (self["ksel"] & 0x7) << 0
     reg_val |= (self["pad"] & 0x7) << 3
     reg_val |= (self["stride"] & 0x3) << 6
-    reg_val |= (self["H"] & 0x7F) << 8
-    reg_val |= (self["W"] & 0x7F) << 15
+    reg_val |= (self["W"] & 0x7F) << 8
+    reg_val |= (self["H"] & 0x7F) << 15
     reg_val |= (self["adcmode"] & 0x3) << 22
     reg_val |= (self["vmode"] & 0x3) << 24
     reg_val |= (self["multmode_set"] & 0xFF) << 26
