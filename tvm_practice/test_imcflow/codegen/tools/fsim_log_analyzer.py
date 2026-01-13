@@ -10,9 +10,16 @@ Includes packet tracking capabilities for NoC analysis.
 import argparse
 import fnmatch
 import os
+import random
 import re
+import select
+import subprocess
 import sys
+import tempfile
+import termios
+import threading
 import time
+import tty
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -82,6 +89,132 @@ class PacketTrace:
         return [e.node for e in sorted(self.events, key=lambda x: x.timestamp)]
 
 
+class KeyboardHandler:
+    """Handles non-blocking keyboard input for interactive selection."""
+
+    debug_file = None
+    _original_settings = None
+
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+
+    @staticmethod
+    def enable_debug(log_file: str):
+        """Enable debug logging to a file."""
+        KeyboardHandler.debug_file = open(log_file, 'w')
+
+    @staticmethod
+    def _debug(msg: str):
+        """Write debug message to log file."""
+        if KeyboardHandler.debug_file:
+            KeyboardHandler.debug_file.write(f"[{time.time():.3f}] {msg}\n")
+            KeyboardHandler.debug_file.flush()
+
+    @staticmethod
+    def enable_cbreak_mode():
+        """Enable cbreak mode: no echo, no line buffering, but ANSI codes work."""
+        fd = sys.stdin.fileno()
+        try:
+            KeyboardHandler._original_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            KeyboardHandler._debug("Enabled cbreak mode")
+        except Exception as e:
+            KeyboardHandler._debug(f"ERROR enabling cbreak mode: {e}")
+
+    @staticmethod
+    def restore_terminal():
+        """Restore original terminal settings."""
+        if KeyboardHandler._original_settings:
+            fd = sys.stdin.fileno()
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, KeyboardHandler._original_settings)
+                KeyboardHandler._debug("Restored terminal settings")
+            except Exception as e:
+                KeyboardHandler._debug(f"ERROR restoring terminal: {e}")
+
+    @staticmethod
+    def get_key(timeout: float = 0.0) -> Optional[str]:
+        """
+        Get a key press without blocking.
+        Assumes terminal is already in cbreak mode.
+
+        Args:
+            timeout: Time to wait for input (0 = non-blocking)
+
+        Returns:
+            Key string or None if no input available.
+            Special keys: 'UP', 'DOWN', 'ENTER', 'SPACE', etc.
+        """
+        try:
+            KeyboardHandler._debug(f"get_key called with timeout={timeout}")
+
+            # Check if input is available
+            KeyboardHandler._debug("Calling select.select...")
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
+            KeyboardHandler._debug(f"select returned: ready={len(ready)}")
+
+            if not ready:
+                return None
+
+            KeyboardHandler._debug("Input available, reading...")
+
+            # Read the key (terminal already in cbreak mode)
+            ch = sys.stdin.read(1)
+            KeyboardHandler._debug(f"Read character: {repr(ch)} (ord={ord(ch) if ch else 'None'})")
+
+            # Handle escape sequences (arrow keys, etc.)
+            if ch == '\x1b':  # ESC
+                KeyboardHandler._debug("ESC sequence detected")
+                # Try to read the rest of the escape sequence
+                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if ready:
+                    ch2 = sys.stdin.read(1)
+                    KeyboardHandler._debug(f"ESC+{repr(ch2)}")
+                    if ch2 == '[':
+                        ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        if ready:
+                            ch3 = sys.stdin.read(1)
+                            KeyboardHandler._debug(f"ESC+[+{repr(ch3)}")
+                            if ch3 == 'A':
+                                KeyboardHandler._debug("Returning UP")
+                                return 'UP'
+                            elif ch3 == 'B':
+                                KeyboardHandler._debug("Returning DOWN")
+                                return 'DOWN'
+                            elif ch3 == 'C':
+                                KeyboardHandler._debug("Returning RIGHT")
+                                return 'RIGHT'
+                            elif ch3 == 'D':
+                                KeyboardHandler._debug("Returning LEFT")
+                                return 'LEFT'
+                KeyboardHandler._debug("Returning ESC")
+                return 'ESC'
+            elif ch == '\r' or ch == '\n':
+                KeyboardHandler._debug("Returning ENTER")
+                return 'ENTER'
+            elif ch == ' ':
+                KeyboardHandler._debug("Returning SPACE")
+                return 'SPACE'
+            elif ch == '\x03':  # Ctrl+C
+                KeyboardHandler._debug("Returning CTRL_C")
+                return 'CTRL_C'
+            elif ch == 'q' or ch == 'Q':
+                KeyboardHandler._debug("Returning q")
+                return 'q'
+            elif ch == 'j':
+                KeyboardHandler._debug("Returning j")
+                return 'j'
+            elif ch == 'k':
+                KeyboardHandler._debug("Returning k")
+                return 'k'
+            else:
+                KeyboardHandler._debug(f"Returning character: {repr(ch)}")
+                return ch
+        except Exception as e:
+            KeyboardHandler._debug(f"ERROR in get_key: {type(e).__name__}: {e}")
+            return None
+
+
 class LogMonitor:
     """Monitors log files for changes to detect simulation deadlock."""
 
@@ -98,6 +231,7 @@ class LogMonitor:
         include_patterns: Optional[list[str]] = None,
         exclude_patterns: Optional[list[str]] = None,
         verbose: bool = False,
+        debug: bool = False,
     ):
         """
         Initialize the log monitor.
@@ -110,6 +244,7 @@ class LogMonitor:
             include_patterns: Glob patterns to include (if set, only matching files are monitored)
             exclude_patterns: Glob patterns to exclude
             verbose: Print detailed information
+            debug: Enable debug logging to /tmp/fsim_log_analyzer_debug.log
         """
         self.log_dir = Path(log_dir) if log_dir else self.DEFAULT_LOG_DIR
         self.check_interval = check_interval
@@ -118,10 +253,21 @@ class LogMonitor:
         self.include_patterns = include_patterns or []
         self.exclude_patterns = exclude_patterns or []
         self.verbose = verbose
+        self.debug = debug
+
+        if self.debug:
+            debug_log = "/tmp/fsim_log_analyzer_debug.log"
+            KeyboardHandler.enable_debug(debug_log)
+            KeyboardHandler._debug(f"Debug logging enabled to {debug_log}")
 
         self.file_statuses: dict[str, FileStatus] = {}
         self.last_any_change: float = time.time()
         self.monitoring_start: float = 0
+
+        # Selection state for keyboard navigation
+        self.selection_mode: bool = False
+        self.selected_index: int = 0
+        self.selectable_files: list[Path] = []
 
     def _matches_pattern(self, filename: str, patterns: list[str]) -> bool:
         """Check if filename matches any of the given glob patterns."""
@@ -164,6 +310,73 @@ class LogMonitor:
             return stat.st_size, stat.st_mtime
         except OSError:
             return 0, 0
+
+    def _open_file_in_vscode(self, file_path: Path):
+        """Open a file in VS Code."""
+        try:
+            subprocess.Popen(
+                ['code', str(file_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except Exception as e:
+            # Silently fail - we don't want to crash the monitor
+            pass
+
+    def _handle_keyboard_input(self, key: Optional[str]) -> bool:
+        """
+        Handle keyboard input for file selection.
+
+        Args:
+            key: Key pressed by user
+
+        Returns:
+            True if should continue monitoring, False if should exit
+        """
+        if key is None:
+            return True
+
+        KeyboardHandler._debug(f"_handle_keyboard_input: key={repr(key)}, selection_mode={self.selection_mode}, selected_index={self.selected_index}")
+
+        # Handle Ctrl+C
+        if key == 'CTRL_C':
+            KeyboardHandler._debug("Handling CTRL_C - exiting")
+            return False
+
+        # If not in selection mode, any navigation key enters selection mode
+        if not self.selection_mode:
+            KeyboardHandler._debug(f"Not in selection mode, checking if key enters selection mode")
+            if key in ['UP', 'DOWN', 'j', 'k'] and self.selectable_files:
+                self.selection_mode = True
+                self.selected_index = 0
+                KeyboardHandler._debug(f"Entered selection mode! selectable_files count={len(self.selectable_files)}")
+            return True
+
+        # In selection mode - handle navigation and selection
+        KeyboardHandler._debug("In selection mode, handling navigation")
+        if key in ['UP', 'k']:
+            if self.selectable_files:
+                old_index = self.selected_index
+                self.selected_index = (self.selected_index - 1) % len(self.selectable_files)
+                KeyboardHandler._debug(f"UP/k: moved from {old_index} to {self.selected_index}")
+        elif key in ['DOWN', 'j']:
+            if self.selectable_files:
+                old_index = self.selected_index
+                self.selected_index = (self.selected_index + 1) % len(self.selectable_files)
+                KeyboardHandler._debug(f"DOWN/j: moved from {old_index} to {self.selected_index}")
+        elif key in ['ENTER', 'SPACE']:
+            if self.selectable_files and 0 <= self.selected_index < len(self.selectable_files):
+                selected_file = self.selectable_files[self.selected_index]
+                KeyboardHandler._debug(f"Opening file: {selected_file}")
+                self._open_file_in_vscode(selected_file)
+        elif key == 'q':
+            # Exit selection mode
+            KeyboardHandler._debug("Exiting selection mode")
+            self.selection_mode = False
+            self.selected_index = 0
+
+        return True
 
     def _update_file_status(self, path: Path, current_time: float) -> bool:
         """
@@ -281,18 +494,34 @@ class LogMonitor:
             )
             print(f"  Deadlock timer: [{bar}] {progress*100:.0f}%")
 
-        if result["changed_files"] and self.verbose:
+        # Update selectable files list
+        self.selectable_files = result["changed_files"][:10]  # Limit to 10 files
+
+        if result["changed_files"]:
             print(
                 f"\n  Recently changed files ({len(result['changed_files'])}):"
             )
-            for f in result["changed_files"][:5]:
-                print(f"    - {f.name}")
-            if len(result["changed_files"]) > 5:
-                print(f"    ... and {len(result['changed_files']) - 5} more")
+            # Show up to 10 files with numbers for selection
+            display_count = min(len(result["changed_files"]), 10)
+            for i in range(display_count):
+                f = result["changed_files"][i]
+                # Show selection indicator if in selection mode
+                if self.selection_mode and i == self.selected_index:
+                    indicator = "→"
+                else:
+                    indicator = " "
+                print(f"    {indicator} [{i+1}] {f.name}")
+
+            if len(result["changed_files"]) > 10:
+                print(f"    ... and {len(result['changed_files']) - 10} more")
 
         print("\n" + "-" * 70)
-        print("  Press Ctrl+C to stop monitoring")
+        if self.selection_mode:
+            print("  ↑↓/jk: navigate | Enter/Space: open in VS Code | q: exit selection")
+        else:
+            print("  ↑↓/jk: enter selection mode | Ctrl+C: stop monitoring")
         print("=" * 70)
+        sys.stdout.flush()  # Ensure output is displayed immediately
 
     def monitor(self, duration: Optional[float] = None) -> bool:
         """
@@ -314,13 +543,38 @@ class LogMonitor:
         self.last_any_change = time.time()
         deadlock_detected = False
 
-        try:
-            while True:
-                result = self.check_once()
-                self._print_status(result)
+        # Enable cbreak mode for responsive keyboard input
+        KeyboardHandler.enable_cbreak_mode()
 
-                if result["potential_deadlock"]:
-                    deadlock_detected = True
+        try:
+            # Do initial file check so result is never None
+            result = self.check_once()
+            self._print_status(result)
+            last_check_time = time.time()
+
+            while True:
+                current_time = time.time()
+
+                # Check files at regular intervals
+                if current_time - last_check_time >= self.check_interval:
+                    result = self.check_once()
+                    self._print_status(result)
+                    last_check_time = current_time
+
+                    if result and result["potential_deadlock"]:
+                        deadlock_detected = True
+
+                # Check for keyboard input frequently (every 100ms)
+                key = KeyboardHandler.get_key(timeout=0.1)
+                if not self._handle_keyboard_input(key):
+                    # User pressed Ctrl+C
+                    break
+
+                # If navigation key was pressed, redraw immediately
+                # Always redraw on navigation keys (don't check result)
+                if key in ['UP', 'DOWN', 'j', 'k', 'q', 'ENTER', 'SPACE']:
+                    KeyboardHandler._debug(f"Navigation key {key} pressed, redrawing...")
+                    self._print_status(result)
 
                 if (
                     duration
@@ -329,10 +583,13 @@ class LogMonitor:
                     print("\nMonitoring duration reached.")
                     break
 
-                time.sleep(self.check_interval)
-
         except KeyboardInterrupt:
+            pass
+        finally:
+            # Always restore terminal settings
+            KeyboardHandler.restore_terminal()
             print("\n\nMonitoring stopped by user.")
+            sys.stdout.flush()
 
         return deadlock_detected
 
@@ -643,20 +900,133 @@ def _parse_patterns(pattern_str: Optional[str]) -> list[str]:
     return [p.strip() for p in pattern_str.split(",") if p.strip()]
 
 
+class DebugTestDirectory:
+    """Creates and manages a test directory with simulated file activity for debugging."""
+
+    def __init__(self):
+        self.test_dir = Path(tempfile.mkdtemp(prefix="fsim_debug_"))
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.files = []
+
+    def create_test_files(self, count: int = 10):
+        """Create test log files."""
+        print(f"Creating {count} test files in {self.test_dir}")
+
+        # Create various test files with realistic names
+        test_names = [
+            "testbench.u_core.u_stage1.log",
+            "testbench.u_core.u_stage2.log",
+            "testbench.u_core.u_mem.log",
+            "testbench.u_noc.u_router[0].log",
+            "testbench.u_noc.u_router[1].log",
+            "testbench.u_imce.u_ctrl.log",
+            "testbench.u_imce.u_datapath.log",
+            "testbench.u_bridge.u_axi.log",
+            "testbench.u_bridge.u_demux.log",
+            "run.log",
+        ]
+
+        for i, name in enumerate(test_names[:count]):
+            file_path = self.test_dir / name
+            # Create file with some initial content
+            with open(file_path, 'w') as f:
+                f.write(f"[0] Test log file: {name}\n")
+                f.write(f"[100] Initialized at {time.time()}\n")
+            self.files.append(file_path)
+
+        print(f"Created {len(self.files)} test files")
+
+    def _update_files_loop(self):
+        """Background thread that periodically updates random files."""
+        cycle = 0
+        while not self.stop_event.is_set():
+            # Update 1-3 random files each cycle
+            num_updates = random.randint(1, min(3, len(self.files)))
+            files_to_update = random.sample(self.files, num_updates)
+
+            for file_path in files_to_update:
+                try:
+                    with open(file_path, 'a') as f:
+                        timestamp = int(time.time() * 1000)
+                        f.write(f"[{timestamp}] Cycle {cycle}: Random activity\n")
+                except Exception:
+                    pass
+
+            cycle += 1
+            # Update every 0.5-2 seconds
+            time.sleep(random.uniform(0.5, 2.0))
+
+    def start_activity(self):
+        """Start background thread to simulate file activity."""
+        if self.thread is None or not self.thread.is_alive():
+            self.stop_event.clear()
+            self.thread = threading.Thread(target=self._update_files_loop, daemon=True)
+            self.thread.start()
+            print("Started simulated file activity (updates every 0.5-2s)")
+
+    def stop_activity(self):
+        """Stop background activity thread."""
+        if self.thread and self.thread.is_alive():
+            self.stop_event.set()
+            self.thread.join(timeout=2.0)
+
+    def cleanup(self):
+        """Clean up test directory."""
+        self.stop_activity()
+        # Note: We don't delete the directory automatically so user can inspect it
+        # User can manually delete /tmp/fsim_debug_* directories later
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+
+
 def cmd_monitor(args):
     """Handle the monitor command."""
-    monitor = LogMonitor(
-        log_dir=args.log_dir,
-        check_interval=args.interval,
-        deadlock_threshold=args.threshold,
-        extensions=tuple(args.extensions.split(",")),
-        include_patterns=_parse_patterns(args.include),
-        exclude_patterns=_parse_patterns(args.exclude),
-        verbose=args.verbose,
-    )
+    test_dir = None
+    log_dir = args.log_dir
 
-    deadlock = monitor.monitor(duration=args.duration)
-    sys.exit(1 if deadlock else 0)
+    # If debug mode and no log_dir specified, create test directory
+    if args.debug and log_dir is None:
+        print("=" * 70)
+        print("  DEBUG MODE - Creating test environment")
+        print("=" * 70)
+        test_dir = DebugTestDirectory()
+        test_dir.create_test_files(count=10)
+        test_dir.start_activity()
+        log_dir = test_dir.test_dir
+        print(f"Test directory: {log_dir}")
+        print("Debug logging: /tmp/fsim_log_analyzer_debug.log")
+        print("=" * 70)
+        print()
+
+    try:
+        monitor = LogMonitor(
+            log_dir=log_dir,
+            check_interval=args.interval,
+            deadlock_threshold=args.threshold,
+            extensions=tuple(args.extensions.split(",")),
+            include_patterns=_parse_patterns(args.include),
+            exclude_patterns=_parse_patterns(args.exclude),
+            verbose=args.verbose,
+            debug=args.debug,
+        )
+
+        if args.debug and test_dir is None:
+            print("Debug mode enabled - logging to /tmp/fsim_log_analyzer_debug.log")
+            print()
+
+        deadlock = monitor.monitor(duration=args.duration)
+        sys.exit(1 if deadlock else 0)
+    finally:
+        if test_dir:
+            print("\n\nCleaning up test environment...")
+            test_dir.cleanup()
+            print(f"Test directory preserved at: {test_dir.test_dir}")
+            print("You can inspect it or delete with: rm -rf /tmp/fsim_debug_*")
 
 
 def cmd_summary(args):
@@ -1058,6 +1428,12 @@ Examples:
         "-v",
         action="store_true",
         help="Show detailed information",
+    )
+    monitor_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging to /tmp/fsim_log_analyzer_debug.log. "
+             "If --log-dir is not specified, creates a test directory with simulated file activity.",
     )
     monitor_parser.set_defaults(func=cmd_monitor)
 
