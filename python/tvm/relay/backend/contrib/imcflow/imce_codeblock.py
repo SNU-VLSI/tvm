@@ -735,9 +735,6 @@ class RecvSendWrapper(ImceCodeBlock):
         else:
           te_out_info = te_out_infos[0]
 
-      # Producer IMCE signals start of output (flag 0)
-      code += f"__builtin_IMCE_SETFLAG(0);"
-
       for i in range(self.num_out_blocks):
         for te_out_info in [te_out_info]: #TODO: current version doesn't need it
           if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
@@ -750,12 +747,12 @@ class RecvSendWrapper(ImceCodeBlock):
             for out_edge in output_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
-      # Producer IMCE signals end of output (flag 2)
-      code += f"__builtin_IMCE_SETFLAG(2);"
-
-      # FIXME: the NOP count here is hardcoded
-      # nops = " ".join([f"\"nop\\n\"" for _ in range(5)])
-      # code += f"__asm__ volatile({nops});"
+      # Find if the consumer is an inode. If so, get the inode id and place OP_STANDBY
+      SYNC_OUTPUT_FLAG = 2
+      dst_graph_node_id = getInnerNodeID(te_out_info.owner.dst_id.graph_node_id)
+      dst_hw_node = DevConfig().get_hw_node(dst_graph_node_id)
+      if dst_hw_node is not None and isinstance(dst_hw_node, NodeID) and dst_hw_node.is_inode():
+        code += f"__builtin_IMCE_STANDBY({dst_hw_node.value}, {SYNC_OUTPUT_FLAG});"
 
     return code.render()
 

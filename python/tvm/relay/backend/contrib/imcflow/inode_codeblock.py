@@ -132,42 +132,21 @@ class RecvBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
-    self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\\n nop\");")) # BUGFIX_LOAD_USE_HAZARD
+
+    # Consumer INODE sets flag for the Producer to sync.
+    SYNC_OUTPUT_FLAG = 2
+
     # Unroll 4x with stride of 128 bytes (4 * 32)
     def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
-      return (f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
+      return (f"__builtin_INODE_SET_FLAG(0);\n"
+              f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
               f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 32, 0, 0, {fid});\n"
               f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 64, 0, 0, {fid});\n"
-              f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});")
+              f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});\n"
+              f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
     self.body.add(SimpleFor(loop_cnt_var, unrolled_recv_body))
 
-    # Consumer INODE waits for producer IMCE to signal completion
-    # Find producer IMCE ID from the tensor edge
-    SYNC_OUTPUT_FLAG = 2
-    producer_imce_ids = set()
-
-    # Get tensor edge info to find the producer
-    if target_edge in DevConfig().TensorEdgetoInfo:
-      te_info = DevConfig().TensorEdgetoInfo[target_edge]
-      if te_info.policy_info:
-        # The first router in policy_info is the source (producer)
-        producer_router_id = te_info.policy_info[0].router_id
-        if producer_router_id.is_imce():
-          producer_imce_ids.add(producer_router_id.value)
-
-    # Add STANDBY calls for each producer IMCE
-    for producer_imce_id in sorted(producer_imce_ids):
-      # Find producer name for annotation
-      producer_name = None
-      if target_edge in DevConfig().TensorEdgetoInfo:
-        te_info = DevConfig().TensorEdgetoInfo[target_edge]
-        if te_info.policy_info and te_info.policy_info[0].router_id.value == producer_imce_id:
-          producer_name = te_info.policy_info[0].router_id.name
-
-      if producer_name:
-        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({producer_imce_id}, {SYNC_OUTPUT_FLAG}); // {producer_name}"))
-      else:
-        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({producer_imce_id}, {SYNC_OUTPUT_FLAG});"))
 
 
 class RecvBlockInterleaved(InodeCodeBlock):
@@ -261,7 +240,7 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
-    self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\\n nop\");")) # BUGFIX_LOAD_USE_HAZARD
     # Unroll 4x with stride of 128 bytes (4 * 32)
     def unrolled_send_body(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id):
       return (f"__builtin_INODE_SEND({base_addr_var} + {iter}*128, 0, {policy_addr}, {fid});\n"
