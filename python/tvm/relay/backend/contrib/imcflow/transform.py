@@ -2052,10 +2052,18 @@ class CompositeSplitter:
 
             def visit_call(self, call):
                 if isinstance(call.op, tvm.ir.Op) and call.op.name == "add":
-                    # Check if both args come from different sources
+                    # Check if args come from different sources
+                    # Valid converge point: one arg is Call (from internal op) and
+                    # other arg is either Call or Var (function parameter for external input)
                     arg0_is_call = isinstance(call.args[0], relay.Call)
                     arg1_is_call = isinstance(call.args[1], relay.Call)
-                    if arg0_is_call and arg1_is_call:
+                    arg0_is_param = isinstance(call.args[0], relay.Var) and call.args[0] in self.param_set
+                    arg1_is_param = isinstance(call.args[1], relay.Var) and call.args[1] in self.param_set
+
+                    # Converge point if: (Call, Call) or (Call, Param) or (Param, Call)
+                    has_call = arg0_is_call or arg1_is_call
+                    has_param_or_call = (arg0_is_call or arg0_is_param) and (arg1_is_call or arg1_is_param)
+                    if has_call and has_param_or_call:
                         self.converge_op = call
                 super().visit_call(call)
 
@@ -3107,17 +3115,63 @@ class AnnotGenerator:
 
                           if len(unique_regions) == 1:
                             debug_print(f"[ConvergeCheck] All predecessors in same region - DEADLOCK RISK")
-                            force_new_region = True
 
-                            # Record branch_from_var converge point with deadlock risk
-                            self.converge_point_summary.append({
-                              "node": getNodeDebugID(node),
-                              "diverge_node": None,
-                              "type": "branch_from_var",
-                              "branches": branch_from_var_info_list,
-                              "is_unbalanced": True,
-                              "action": "force_new_region (deadlock risk)"
-                            })
+                            # If composite, record for deferred split (same as diverge-converge case)
+                            if IsComposite:
+                              debug_print(f"[ConvergeCheck] Recording composite for deferred split (branch_from_var)")
+                              converge_op = CompositeSplitter.find_converge_op_in_composite(node)
+                              if converge_op is not None:
+                                needs_split = True
+                                # Determine pre_region: use candidate_region if available, else create new
+                                if len(candidate_regions) > 0:
+                                  pre_region = candidate_regions[0]
+                                else:
+                                  pre_region = self.createRegion()
+                                # post_region is always a new region (after converge point)
+                                post_region = self.createRegion()
+
+                                # Record split info for deferred processing
+                                self.split_pending[node] = {
+                                  "converge_op": converge_op,
+                                  "pre_region": pre_region,
+                                  "post_region": post_region,
+                                  "pre_composite": None,   # Will be filled after mutation
+                                  "post_composite": None,  # Will be filled after mutation
+                                }
+                                debug_print(f"[ConvergeCheck] Recorded split_pending for {getNodeDebugID(node)} (branch_from_var)")
+
+                                # Record with split action
+                                self.converge_point_summary.append({
+                                  "node": getNodeDebugID(node),
+                                  "diverge_node": None,
+                                  "type": "branch_from_var",
+                                  "branches": branch_from_var_info_list,
+                                  "is_unbalanced": True,
+                                  "action": "split_composite (deadlock risk)"
+                                })
+                              else:
+                                debug_print(f"[ConvergeCheck] No converge op found in composite (branch_from_var)")
+                                force_new_region = True
+                                # Record branch_from_var converge point with deadlock risk
+                                self.converge_point_summary.append({
+                                  "node": getNodeDebugID(node),
+                                  "diverge_node": None,
+                                  "type": "branch_from_var",
+                                  "branches": branch_from_var_info_list,
+                                  "is_unbalanced": True,
+                                  "action": "force_new_region (deadlock risk, no internal converge op)"
+                                })
+                            else:
+                              force_new_region = True
+                              # Record branch_from_var converge point with deadlock risk
+                              self.converge_point_summary.append({
+                                "node": getNodeDebugID(node),
+                                "diverge_node": None,
+                                "type": "branch_from_var",
+                                "branches": branch_from_var_info_list,
+                                "is_unbalanced": True,
+                                "action": "force_new_region (deadlock risk)"
+                              })
                           else:
                             debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
                             # Record branch_from_var converge point without deadlock risk
