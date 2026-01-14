@@ -2084,7 +2084,7 @@ class CompositeSplitter:
             curr = body
             while isinstance(curr, relay.Call) and isinstance(curr.op, tvm.ir.Op):
                 op_name = curr.op.name
-                if curr == converge_op or op_name == "add":
+                if curr == converge_op or op_name == converge_op.op.name:
                     break
                 post_ops.append(op_name)
                 if curr.args:
@@ -2128,8 +2128,10 @@ class CompositeSplitter:
 
         Strategy:
         1. Inline the composite function body
-        2. Build pattern for post-converge part (add → output) and partition
-        3. Build pattern for pre-converge parts (input → add inputs) and partition
+        2. Post-BFS traverse the graph to build patterns dynamically
+        3. Build pre-converge pattern (input → converge_op inputs)
+        4. Build post-converge pattern (converge_op → output)
+        5. Apply partition with generated patterns
 
         Args:
             composite_call: The original composite function call
@@ -2151,6 +2153,7 @@ class CompositeSplitter:
 
         func = composite_call.op
         body = func.body
+        param_set = set(func.params)
 
         # Step 1: Inline the composite - create var_map and bind
         var_map = {}
@@ -2159,38 +2162,136 @@ class CompositeSplitter:
 
         inlined_body = relay.bind(body, var_map)
 
-        # Step 2: Analyze composite structure to build patterns
-        # Collect ops after converge (add → output)
-        post_ops = CompositeSplitter._collect_ops_before_converge(body, converge_op)
-        debug_print(f"[CompositeSplitter] Post-converge ops: {post_ops}")
+        # Step 2: Post-BFS traverse to collect nodes and their order
+        # We need to identify: pre-converge nodes, converge node, post-converge nodes
+        class GraphAnalyzer(relay.ExprVisitor):
+            def __init__(self, converge_op, param_set):
+                super().__init__()
+                self.converge_op = converge_op
+                self.param_set = param_set
+                self.node_order = []  # Post-order traversal result
+                self.converge_idx = -1
+                self.visited = set()
 
-        # Step 3: Build post-converge pattern (add and everything after)
-        x = wildcard()
-        y = wildcard()
-        post_pattern = is_op("add")(x, y)
+            def visit(self, expr):
+                if expr in self.visited:
+                    return
+                self.visited.add(expr)
+                super().visit(expr)
+                # Post-order: add after visiting children
+                if isinstance(expr, relay.Call):
+                    self.node_order.append(expr)
+                    # Check if this is the converge op
+                    if self._is_same_op(expr, self.converge_op):
+                        self.converge_idx = len(self.node_order) - 1
 
-        # Chain post-converge ops in reverse order (since we collected output→input)
-        for op_name in reversed(post_ops):
-            if op_name == "nn.relu":
-                post_pattern = is_op("nn.relu")(post_pattern)
-            elif op_name == "qnn.imcflow_min_max_quantize":
-                post_pattern = is_op("qnn.imcflow_min_max_quantize")(
-                    post_pattern, is_constant(), is_constant()
-                )
-            elif op_name == "qnn.imcflow_nu_quantize":
-                post_pattern = is_op("qnn.imcflow_nu_quantize")(
-                    post_pattern, is_constant()
-                )
-            elif op_name == "imcflow.fused_batch_norm":
-                post_pattern = is_op("imcflow.fused_batch_norm")(
-                    post_pattern, is_constant(), is_constant()
-                )
-            elif op_name == "nn.bias_add":
-                post_pattern = is_op("nn.bias_add")(post_pattern, is_constant())
+            def _is_same_op(self, expr, target):
+                """Check if expr matches target converge op structure."""
+                if not isinstance(expr, relay.Call) or not isinstance(target, relay.Call):
+                    return False
+                if not isinstance(expr.op, tvm.ir.Op) or not isinstance(target.op, tvm.ir.Op):
+                    return False
+                return expr.op.name == target.op.name == "add"
+
+        analyzer = GraphAnalyzer(converge_op, param_set)
+        analyzer.visit(body)
+
+        debug_print(f"[CompositeSplitter] Graph analysis:")
+        debug_print(f"  Total nodes: {len(analyzer.node_order)}")
+        debug_print(f"  Converge idx: {analyzer.converge_idx}")
+        for i, node in enumerate(analyzer.node_order):
+            op_name = node.op.name if isinstance(node.op, tvm.ir.Op) else "fn"
+            marker = " <-- CONVERGE" if i == analyzer.converge_idx else ""
+            debug_print(f"    [{i}] {op_name}{marker}")
+
+        if analyzer.converge_idx < 0:
+            debug_print(f"[CompositeSplitter] Converge op not found in traversal")
+            return None
+
+        # Step 3: Build patterns dynamically by traversing the graph
+        def build_pattern_for_expr(expr, stop_at=None, pattern_cache=None):
+            """
+            Build dataflow pattern by traversing expression.
+            Args:
+                expr: Expression to build pattern for
+                stop_at: If not None, stop traversal and return wildcard() when reaching this expr
+                pattern_cache: Cache for already built patterns
+            Returns:
+                DFPattern for the expression
+            """
+            if pattern_cache is None:
+                pattern_cache = {}
+
+            if expr in pattern_cache:
+                return pattern_cache[expr]
+
+            # Stop condition
+            if stop_at is not None and expr is stop_at:
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
+
+            if isinstance(expr, relay.Var):
+                # Var -> wildcard
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
+
+            elif isinstance(expr, relay.Constant):
+                # Constant -> is_constant
+                pattern = is_constant()
+                pattern_cache[expr] = pattern
+                return pattern
+
+            elif isinstance(expr, relay.Call):
+                if isinstance(expr.op, tvm.ir.Op):
+                    op_name = expr.op.name
+
+                    # Build arg patterns recursively
+                    arg_patterns = []
+                    for arg in expr.args:
+                        arg_pattern = build_pattern_for_expr(arg, stop_at, pattern_cache)
+                        arg_patterns.append(arg_pattern)
+
+                    pattern = is_op(op_name)(*arg_patterns)
+                    pattern_cache[expr] = pattern
+                    return pattern
+                else:
+                    # Function call - treat as wildcard
+                    pattern = wildcard()
+                    pattern_cache[expr] = pattern
+                    return pattern
+
+            elif isinstance(expr, relay.TupleGetItem):
+                # TupleGetItem - build pattern for tuple and get item
+                tuple_pattern = build_pattern_for_expr(expr.tuple_value, stop_at, pattern_cache)
+                # For TupleGetItem, we need to match the whole thing
+                # This is tricky with dataflow patterns, use wildcard for now
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
+
             else:
-                debug_print(f"[CompositeSplitter] Unknown post-converge op: {op_name}")
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
 
-        # Step 4: Apply partition to create post-converge composite
+        # Step 4: Build post-converge pattern (from converge_op to output)
+        # Post pattern: everything from converge_op to body output
+        debug_print(f"[CompositeSplitter] Building post-converge pattern...")
+        post_pattern = build_pattern_for_expr(body, stop_at=None)
+
+        # Find where converge_op is in the pattern and replace everything before it with wildcard
+        # Actually, we want: converge_op and everything after it
+        # So we build pattern from body, but stop at converge_op's inputs (replace with wildcard)
+        post_pattern_cache = {}
+        for arg in converge_op.args:
+            post_pattern_cache[arg] = wildcard()
+
+        post_pattern = build_pattern_for_expr(body, stop_at=None, pattern_cache=post_pattern_cache)
+        debug_print(f"[CompositeSplitter] Post-converge pattern built")
+
+        # Step 5: Apply partition for post-converge
         post_composite_name = f"{composite_name_prefix}.post_converge"
         try:
             result_expr = post_pattern.partition(
@@ -2202,42 +2303,31 @@ class CompositeSplitter:
             debug_print(f"[CompositeSplitter] Post-converge partition failed: {e}")
             return None
 
-        # Step 5: Build pre-converge pattern for main branch (conv chain)
-        # Analyze converge_op inputs to determine branch patterns
+        # Step 6: Build pre-converge pattern for each branch that is a Call (not Var/Constant)
         pre_composite_name = f"{composite_name_prefix}.pre_converge"
 
-        # Build pattern for conv → bias → relu chain (typical pre-converge pattern)
-        pre_pattern = None
+        # Find the main branch (the one that has Call nodes, not just Var)
+        for i, arg in enumerate(converge_op.args):
+            if isinstance(arg, relay.Call):
+                # This is a branch with computations - build pattern for it
+                debug_print(f"[CompositeSplitter] Building pre-converge pattern for arg[{i}]...")
 
-        # Try to detect the main conv branch pattern
-        # Common pattern: qconv/qdwconv → bias_add → relu
-        conv_pattern = is_op("nn.imcflow_qconv")(wildcard(), is_constant(), is_constant())
-        conv_pattern_dw = is_op("nn.imcflow_qdwconv")(wildcard(), is_constant(), is_constant())
+                # Build pattern for this branch (stop at function params)
+                pre_pattern_cache = {}
+                for param in param_set:
+                    pre_pattern_cache[param] = wildcard()
 
-        # Try qconv with bias and relu
-        pre_pattern_qconv = is_op("nn.relu")(
-            is_op("nn.bias_add")(conv_pattern, is_constant())
-        )
-        pre_pattern_qdwconv = is_op("nn.relu")(
-            is_op("nn.bias_add")(conv_pattern_dw, is_constant())
-        )
+                pre_pattern = build_pattern_for_expr(arg, stop_at=None, pattern_cache=pre_pattern_cache)
 
-        # Also try without relu
-        pre_pattern_qconv_no_relu = is_op("nn.bias_add")(conv_pattern, is_constant())
-        pre_pattern_qdwconv_no_relu = is_op("nn.bias_add")(conv_pattern_dw, is_constant())
-
-        # Try each pattern
-        for pattern_to_try in [pre_pattern_qconv, pre_pattern_qdwconv,
-                               pre_pattern_qconv_no_relu, pre_pattern_qdwconv_no_relu]:
-            try:
-                result_expr = pattern_to_try.partition(
-                    result_expr,
-                    {"Composite": pre_composite_name}
-                )
-                debug_print(f"[CompositeSplitter] Pre-converge partition successful")
-                break
-            except Exception as e:
-                continue
+                try:
+                    result_expr = pre_pattern.partition(
+                        result_expr,
+                        {"Composite": pre_composite_name}
+                    )
+                    debug_print(f"[CompositeSplitter] Pre-converge partition successful for arg[{i}]")
+                except Exception as e:
+                    debug_print(f"[CompositeSplitter] Pre-converge partition failed for arg[{i}]: {e}")
+                    # Continue without pre-converge composite for this branch
 
         return {
             "result_expr": result_expr,
@@ -3514,10 +3604,12 @@ def partitionRound(mod, handle_branch_from_var_converge=True):
 
       # Step 3: Annotate and partition with updated graph and regions
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_annotated")
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
-      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_merged")
       target_mod = transform.PartitionGraph()(target_mod)
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
 
       for new_gv, new_func in target_mod.functions.items():
         if new_gv.name_hint == "main":
