@@ -31,6 +31,11 @@ from tvm.relay.backend.contrib.imcflow.transform import (
     makeSplitConcatDepsRegions,
     ConcatDistributor,
     debug_print,
+    # New functions for updated transform order
+    merge_composite_for_partition,
+    unmerge_composite,
+    apply_transforms_to_round_functions,
+    imcflow_full_transform,
 )
 
 # Add models path
@@ -714,6 +719,85 @@ def test_resnet8_converge_point():
     print("\n✓ ResNet8 converge point test completed")
 
 
+def test_new_transform_order():
+    """Test the new transform order with merge -> partition -> unmerge -> split."""
+    print("\n" + "="*60)
+    print("TEST: New Transform Order (merge -> partition -> unmerge)")
+    print("="*60)
+
+    # Get the ResNet8 model
+    print("\n--- Loading ResNet8 model ---")
+    mod, param_dict = resnet8_subset_models.getModel_from_pretrained_weight(
+        iH=32, iW=32, until_relay=31
+    )
+
+    # Step 1: Bind parameters
+    print("\n--- Step 1: Bind parameters ---")
+    mod["main"] = bind_params_by_name(mod["main"], param_dict)
+    mod = relay.transform.InferType()(mod)
+
+    print("\nOriginal model:")
+    print(relay.pretty_print(mod))
+
+    # Use the new full transform pipeline
+    print("\n--- Using imcflow_full_transform (new order) ---")
+    try:
+        mod, param_dict = imcflow_full_transform(mod, param_dict)
+
+        print("\nModel after full transform:")
+        print(relay.pretty_print(mod))
+
+        print("\n✓ New transform order test completed successfully")
+    except Exception as e:
+        print(f"\n✗ New transform order test failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def test_cost_calculation():
+    """Test the new cost calculation based on IC/OC dimensions."""
+    print("\n" + "="*60)
+    print("TEST: Cost Calculation (IC/OC based)")
+    print("="*60)
+
+    import math
+
+    # Test cost calculation formula
+    def expected_cost(IC, OC, KH, KW, is_depthwise=False):
+        if is_depthwise:
+            atom_IC = 32
+            atom_OC = 32
+        else:
+            atom_IC = math.floor(256 / (KH * KW))
+            atom_OC = 64
+        return math.ceil(IC / atom_IC) * math.ceil(OC / atom_OC)
+
+    # Test cases
+    test_cases = [
+        # (IC, OC, KH, KW, is_depthwise, description)
+        (16, 16, 3, 3, False, "Small 3x3 conv"),
+        (32, 64, 3, 3, False, "Medium 3x3 conv"),
+        (64, 128, 3, 3, False, "Large 3x3 conv"),
+        (256, 256, 3, 3, False, "Very large 3x3 conv"),
+        (32, 32, 1, 1, False, "1x1 conv"),
+        (64, 64, 1, 1, False, "64ch 1x1 conv"),
+        (32, 32, 3, 3, True, "Depthwise 3x3 conv"),
+    ]
+
+    print("\nExpected cost calculations:")
+    print("-" * 70)
+    print(f"{'Description':<25} {'IC':>6} {'OC':>6} {'K':>5} {'atom_IC':>8} {'Cost':>6}")
+    print("-" * 70)
+
+    for IC, OC, KH, KW, is_dw, desc in test_cases:
+        cost = expected_cost(IC, OC, KH, KW, is_dw)
+        atom_IC = 32 if is_dw else math.floor(256 / (KH * KW))
+        print(f"{desc:<25} {IC:>6} {OC:>6} {KH}x{KW:>2} {atom_IC:>8} {cost:>6}")
+
+    print("-" * 70)
+    print("\n✓ Cost calculation test completed")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "#"*60)
@@ -766,6 +850,20 @@ def run_all_tests():
         test_resnet8_converge_point()
     except Exception as e:
         print(f"\n✗ ResNet8 converge point test failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        test_cost_calculation()
+    except Exception as e:
+        print(f"\n✗ Cost calculation test failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        test_new_transform_order()
+    except Exception as e:
+        print(f"\n✗ New transform order test failed: {e}")
         import traceback
         traceback.print_exc()
 

@@ -1135,6 +1135,100 @@ def merge_composite_ops(mod):
     transformed = transform.MergeComposite(imcflow.pattern_table())(mod)
     return transformed
 
+
+def merge_composite_for_partition(mod):
+    """
+    Merge composite ops before partitionRound for simpler converge point detection.
+
+    This function merges ops into composites using the imcflow pattern table,
+    making the graph simpler for region partitioning.
+
+    After partitionRound, use unmerge_composite to inline the composites back.
+    """
+    for global_var, func in mod.functions.items():
+        if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+            attr_record = func.attrs
+            func_no_attr = relay.Function(func.params, func.body)
+            target_mod = tvm.IRModule.from_expr(func_no_attr)
+            transformed = transform.MergeComposite(imcflow.pattern_table())(target_mod)
+            _, transformed_func = transformed.functions.items()[0]
+            transformed_func = relay.Function(transformed_func.params, transformed_func.body,
+                                              ret_type=transformed_func.ret_type, attrs=attr_record)
+            mod[global_var] = transformed_func
+    mod = relay.transform.InferType()(mod)
+    return mod
+
+
+def unmerge_composite(mod):
+    """
+    Unmerge (inline) composites after partitionRound.
+
+    This function inlines all composite functions back to their original ops,
+    so that subsequent transforms (split_conv_to_atomic, etc.) can process them.
+
+    Uses a custom ExprMutator to inline composite function calls by substituting
+    the function body with actual arguments.
+    """
+
+    class CompositeInliner(relay.ExprMutator):
+        """Inline composite function calls by substituting function body with args."""
+
+        def visit_call(self, call):
+            # First visit args recursively
+            new_args = [self.visit(arg) for arg in call.args]
+
+            # Check if this is a composite function call
+            if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs:
+                composite_func = call.op
+                composite_name = composite_func.attrs["Composite"]
+                debug_print(f"[CompositeInliner] Inlining composite: {composite_name}")
+
+                # Create substitution map: param -> arg
+                subst_map = {}
+                for param, arg in zip(composite_func.params, new_args):
+                    subst_map[param] = arg
+
+                # Substitute parameters in the function body
+                class ParamSubstitutor(relay.ExprMutator):
+                    def __init__(self, subst_map):
+                        super().__init__()
+                        self.subst_map = subst_map
+
+                    def visit_var(self, var):
+                        if var in self.subst_map:
+                            return self.subst_map[var]
+                        return var
+
+                substitutor = ParamSubstitutor(subst_map)
+                inlined_body = substitutor.visit(composite_func.body)
+
+                # Recursively inline any nested composites
+                return self.visit(inlined_body)
+
+            # Not a composite, just update args if changed
+            if new_args != list(call.args):
+                return relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+            return call
+
+    for global_var, func in mod.functions.items():
+        # Process round functions (created by partitionRound)
+        if isinstance(func, relay.Function) and "Compiler" in func.attrs:
+            compiler = func.attrs["Compiler"]
+            # Match round functions like "tvmgen_default_imcflow_main_47_round_imcflow_region1"
+            if re.match(r".*_round_imcflow_region\d+", compiler) or re.match(r"imcflow.*", compiler):
+                attr_record = func.attrs
+
+                # Inline composites
+                inliner = CompositeInliner()
+                new_body = inliner.visit(func.body)
+
+                # Create new function with inlined body
+                new_func = relay.Function(func.params, new_body, ret_type=func.ret_type, attrs=attr_record)
+                mod[global_var] = new_func
+
+    mod = relay.transform.InferType()(mod)
+    return mod
+
 @relay.transform.function_pass(opt_level=0)
 class DenseToConv:
     def __init__(self):
@@ -2479,6 +2573,15 @@ class AnnotGenerator:
           return isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.NO_COST_OPS
 
         def getCost(self, call):
+          """
+          Calculate cost for a call node based on conv IC/OC dimensions.
+
+          Cost calculation:
+          - conv or conv-starting composite: ceil(IC/atom_IC) * ceil(OC/64)
+            where atom_IC = floor(256/(KH*KW)) for regular conv, 32 for depthwise
+          - composite without conv: cost = 1
+          - other supported ops: cost = 1
+          """
           if not isinstance(call, Call):
             return 0
           IsComposite = self.isComposite(call)
@@ -2505,14 +2608,97 @@ class AnnotGenerator:
               for a in call.args:
                 self.visit(a)
 
+          def _get_conv_cost(conv_call):
+            """Calculate cost for a conv op based on IC/OC dimensions."""
+            try:
+              # Get kernel shape for KH, KW
+              weight = conv_call.args[1]
+              if hasattr(weight, 'checked_type') and weight.checked_type is not None:
+                weight_shape = [int(d) for d in weight.checked_type.shape]
+              elif isinstance(weight, relay.Constant):
+                weight_shape = list(weight.data.shape)
+              else:
+                return 1  # Fallback to cost 1 if shape unknown
+
+              # Get input shape for IC
+              input_arg = conv_call.args[0]
+              if hasattr(input_arg, 'checked_type') and input_arg.checked_type is not None:
+                input_shape = [int(d) for d in input_arg.checked_type.shape]
+                IC = input_shape[1]  # NCHW format
+              else:
+                return 1  # Fallback
+
+              # Extract dimensions based on conv type
+              if conv_call.op.name in ["nn.conv2d", "nn.imcflow_qconv"]:
+                OC, _, KH, KW = weight_shape  # OIHW format
+              elif conv_call.op.name in ["nn.imcflow_qdwconv"]:
+                # Depthwise: weight shape is (IC, 1, KH, KW)
+                _, _, KH, KW = weight_shape
+                OC = IC  # Depthwise: OC == IC
+              else:
+                return 1
+
+              # Check if depthwise
+              groups = conv_call.attrs.groups if hasattr(conv_call.attrs, 'groups') else 1
+              is_depthwise = (groups == IC) if groups > 1 else False
+
+              # Calculate atom_IC
+              if is_depthwise:
+                atom_IC = 32
+                atom_OC = 32
+              else:
+                atom_IC = math.floor(256 / (KH * KW)) if (KH * KW) > 0 else 32
+                atom_OC = 64
+
+              # Calculate cost
+              cost = math.ceil(IC / atom_IC) * math.ceil(OC / atom_OC)
+              return max(1, cost)
+            except Exception as e:
+              debug_print(f"[getCost] Error calculating conv cost: {e}")
+              return 1
+
+          def _find_conv_in_composite(composite_func):
+            """Find conv call in composite function body."""
+            class ConvFinder(tvm.relay.ExprVisitor):
+              def __init__(self):
+                super().__init__()
+                self.conv_call = None
+
+              def visit_call(self, call):
+                if isinstance(call.op, tvm.ir.Op):
+                  if call.op.name in ["nn.conv2d", "nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+                    self.conv_call = call
+                super().visit_call(call)
+
+            finder = ConvFinder()
+            finder.visit(composite_func.body)
+            return finder.conv_call
+
           if IsNoCostCall:
             return 0
-          if IsComposite or IsSupportedOp:
-            return 1
+
+          # Handle composite functions
+          if IsComposite:
+            composite_func = call.op
+            conv_call = _find_conv_in_composite(composite_func)
+            if conv_call is not None:
+              return _get_conv_cost(conv_call)
+            else:
+              # Composite without conv
+              return 1
+
+          # Handle supported ops directly
+          if IsSupportedOp:
+            if call.op.name in ["nn.conv2d", "nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+              return _get_conv_cost(call)
+            else:
+              return 1
+
           if IsSuperNode:
             obj = _CostVisitor(self.getCost)
             obj.visit(call.op.body)
             return obj.Cost
+
           # Unsupported node: cost 0 so it doesn't affect capacity, but it's not placed anyway
           return 0
 
@@ -3292,6 +3478,102 @@ def partitionRound(mod, handle_skip_connection_converge=True):
           mod[new_gv] = new_func
 
   return mod
+
+
+def apply_transforms_to_round_functions(mod, param_dict):
+    """
+    Apply subsequent transforms to each round function after partitionRound.
+
+    This function applies the following transforms to each round function:
+    1. unmerge_composite - Inline composites back
+    2. split_conv_to_atomic - Split conv to atomic ops
+    3. merge_composite_ops - Re-merge with full pattern table
+    4. makeSplitConcatDepsRegions - Handle split/concat dependencies
+    5. ConcatDistributor - Distribute concat operations
+
+    Args:
+        mod: IRModule after partitionRound
+        param_dict: Parameter dictionary
+
+    Returns:
+        Transformed IRModule and updated param_dict
+    """
+    debug_print(f"\n{'='*70}")
+    debug_print(f"[apply_transforms_to_round_functions] Starting")
+    debug_print(f"{'='*70}")
+
+    # Step 1: Unmerge composites in all round functions
+    debug_print(f"\n--- Step 1: Unmerge composites ---")
+    mod = unmerge_composite(mod)
+
+    # Step 2: Split conv to atomic ops
+    debug_print(f"\n--- Step 2: Split conv to atomic ops ---")
+    mod, param_dict = split_conv_to_atomic(mod, param_dict)
+
+    # Step 3: Re-merge composite ops
+    debug_print(f"\n--- Step 3: Merge composite ops ---")
+    mod = merge_composite_ops(mod)
+
+    # Step 4: Make split/concat deps regions
+    debug_print(f"\n--- Step 4: Make split/concat deps regions ---")
+    mod = makeSplitConcatDepsRegions(mod)
+
+    # Step 5: Concat distributor
+    debug_print(f"\n--- Step 5: Concat distributor ---")
+    mod = ConcatDistributor(max_inputs=4).run(mod)
+
+    debug_print(f"\n{'='*70}")
+    debug_print(f"[apply_transforms_to_round_functions] Complete")
+    debug_print(f"{'='*70}\n")
+
+    return mod, param_dict
+
+
+def imcflow_full_transform(mod, param_dict, handle_skip_connection_converge=True):
+    """
+    Full IMCFlow transformation pipeline with new order.
+
+    New order:
+    1. partitionImcflowSubGraph - Partition IMCFlow subgraph
+    2. merge_composite_for_partition - Merge composites for simpler graph
+    3. partitionRound - Partition into regions (converge point detection)
+    4. apply_transforms_to_round_functions - Apply subsequent transforms to each round
+
+    Args:
+        mod: Input IRModule
+        param_dict: Parameter dictionary
+        handle_skip_connection_converge: Whether to handle skip connection converge points
+
+    Returns:
+        Transformed IRModule and updated param_dict
+    """
+    debug_print(f"\n{'#'*70}")
+    debug_print(f"# IMCFlow Full Transform Pipeline (New Order)")
+    debug_print(f"{'#'*70}")
+
+    # Step 1: Partition IMCFlow subgraph
+    debug_print(f"\n=== Step 1: Partition IMCFlow Subgraph ===")
+    mod = partitionImcflowSubGraph(mod)
+    mod = relay.transform.InferType()(mod)
+
+    # Step 2: Merge composites for simpler graph
+    debug_print(f"\n=== Step 2: Merge Composites for Partition ===")
+    mod = merge_composite_for_partition(mod)
+
+    # Step 3: Partition into regions
+    debug_print(f"\n=== Step 3: Partition Round ===")
+    mod = partitionRound(mod, handle_skip_connection_converge=handle_skip_connection_converge)
+
+    # Step 4: Apply subsequent transforms to each round function
+    debug_print(f"\n=== Step 4: Apply Transforms to Round Functions ===")
+    mod, param_dict = apply_transforms_to_round_functions(mod, param_dict)
+
+    debug_print(f"\n{'#'*70}")
+    debug_print(f"# IMCFlow Full Transform Complete")
+    debug_print(f"{'#'*70}\n")
+
+    return mod, param_dict
+
 
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
