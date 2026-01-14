@@ -1888,24 +1888,75 @@ class CompositeSplitter:
         return finder.converge_op
 
     @staticmethod
+    def _collect_ops_before_converge(body, converge_op):
+        """
+        Collect the chain of operations from output back to converge_op (exclusive).
+        Returns list of op names in output-to-input order.
+        """
+        post_ops = []
+        if isinstance(body, relay.Call):
+            curr = body
+            while isinstance(curr, relay.Call) and isinstance(curr.op, tvm.ir.Op):
+                op_name = curr.op.name
+                if curr == converge_op or op_name == "add":
+                    break
+                post_ops.append(op_name)
+                if curr.args:
+                    curr = curr.args[0]
+                else:
+                    break
+        return post_ops
+
+    @staticmethod
+    def _collect_ops_in_branch(start_expr, stop_at_param=True):
+        """
+        Collect ops in a branch from start_expr back to inputs.
+        Returns list of (op_name, has_const_args) tuples.
+        """
+        ops = []
+        visited = set()
+
+        def traverse(expr):
+            if expr in visited:
+                return
+            visited.add(expr)
+
+            if isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op):
+                op_name = expr.op.name
+                has_const = any(isinstance(arg, relay.Constant) for arg in expr.args)
+                ops.append((op_name, has_const))
+                for arg in expr.args:
+                    traverse(arg)
+            elif isinstance(expr, relay.Var):
+                return  # Stop at function params
+            elif isinstance(expr, relay.Constant):
+                return  # Stop at constants
+
+        traverse(start_expr)
+        return ops
+
+    @staticmethod
     def split_composite_at_converge(composite_call, converge_op, composite_name_prefix="imcflow"):
         """
-        Split a composite function at the converge point.
+        Split a composite function at the converge point into two composites.
 
         Strategy:
-        1. Inline the composite function
-        2. Use pattern.partition() to create pre-converge composite
-        3. Use pattern.partition() to create post-converge composite
+        1. Inline the composite function body
+        2. Build pattern for post-converge part (add → output) and partition
+        3. Build pattern for pre-converge parts (input → add inputs) and partition
 
         Args:
             composite_call: The original composite function call
-            converge_op: The converge operation inside the composite
+            converge_op: The converge operation inside the composite (add node)
             composite_name_prefix: Prefix for new composite names
 
         Returns:
-            Tuple of (pre_expr, post_pattern_attrs) or None if split not possible
-            - pre_expr: Expression for the pre-converge part
-            - post_pattern_attrs: Attributes for the post-converge composite
+            Dict with split info or None if split not possible:
+            {
+                "result_expr": The transformed expression,
+                "pre_composite_name": Name of pre-converge composite,
+                "post_composite_name": Name of post-converge composite,
+            }
         """
         from tvm.relay.dataflow_pattern import wildcard, is_op, is_constant
 
@@ -1922,46 +1973,91 @@ class CompositeSplitter:
 
         inlined_body = relay.bind(body, var_map)
 
-        # Step 2: Build pattern for post-converge part (add and everything after)
-        # This captures: add(x, y) -> ... -> output
+        # Step 2: Analyze composite structure to build patterns
+        # Collect ops after converge (add → output)
+        post_ops = CompositeSplitter._collect_ops_before_converge(body, converge_op)
+        debug_print(f"[CompositeSplitter] Post-converge ops: {post_ops}")
+
+        # Step 3: Build post-converge pattern (add and everything after)
         x = wildcard()
         y = wildcard()
         post_pattern = is_op("add")(x, y)
 
-        # Check what ops follow the add
-        if isinstance(body, relay.Call):
-            curr = body
-            while isinstance(curr, relay.Call) and isinstance(curr.op, tvm.ir.Op):
-                op_name = curr.op.name
-                if op_name == "add":
-                    break
-                elif op_name == "nn.relu":
-                    post_pattern = is_op("nn.relu")(post_pattern)
-                elif op_name == "qnn.imcflow_min_max_quantize":
-                    post_pattern = is_op("qnn.imcflow_min_max_quantize")(
-                        post_pattern, is_constant(), is_constant()
-                    )
-                elif op_name == "qnn.imcflow_nu_quantize":
-                    post_pattern = is_op("qnn.imcflow_nu_quantize")(
-                        post_pattern, is_constant()
-                    )
-                # Move to the input of current op
-                if curr.args:
-                    curr = curr.args[0]
-                else:
-                    break
+        # Chain post-converge ops in reverse order (since we collected output→input)
+        for op_name in reversed(post_ops):
+            if op_name == "nn.relu":
+                post_pattern = is_op("nn.relu")(post_pattern)
+            elif op_name == "qnn.imcflow_min_max_quantize":
+                post_pattern = is_op("qnn.imcflow_min_max_quantize")(
+                    post_pattern, is_constant(), is_constant()
+                )
+            elif op_name == "qnn.imcflow_nu_quantize":
+                post_pattern = is_op("qnn.imcflow_nu_quantize")(
+                    post_pattern, is_constant()
+                )
+            elif op_name == "imcflow.fused_batch_norm":
+                post_pattern = is_op("imcflow.fused_batch_norm")(
+                    post_pattern, is_constant(), is_constant()
+                )
+            elif op_name == "nn.bias_add":
+                post_pattern = is_op("nn.bias_add")(post_pattern, is_constant())
+            else:
+                debug_print(f"[CompositeSplitter] Unknown post-converge op: {op_name}")
 
-        # Step 3: Apply partition to create post-converge composite
+        # Step 4: Apply partition to create post-converge composite
         post_composite_name = f"{composite_name_prefix}.post_converge"
         try:
             result_expr = post_pattern.partition(
                 inlined_body,
                 {"Composite": post_composite_name}
             )
-            return result_expr, post_composite_name
+            debug_print(f"[CompositeSplitter] Post-converge partition successful")
         except Exception as e:
-            debug_print(f"[CompositeSplitter] Failed to partition: {e}")
+            debug_print(f"[CompositeSplitter] Post-converge partition failed: {e}")
             return None
+
+        # Step 5: Build pre-converge pattern for main branch (conv chain)
+        # Analyze converge_op inputs to determine branch patterns
+        pre_composite_name = f"{composite_name_prefix}.pre_converge"
+
+        # Build pattern for conv → bias → relu chain (typical pre-converge pattern)
+        pre_pattern = None
+
+        # Try to detect the main conv branch pattern
+        # Common pattern: qconv/qdwconv → bias_add → relu
+        conv_pattern = is_op("nn.imcflow_qconv")(wildcard(), is_constant(), is_constant())
+        conv_pattern_dw = is_op("nn.imcflow_qdwconv")(wildcard(), is_constant(), is_constant())
+
+        # Try qconv with bias and relu
+        pre_pattern_qconv = is_op("nn.relu")(
+            is_op("nn.bias_add")(conv_pattern, is_constant())
+        )
+        pre_pattern_qdwconv = is_op("nn.relu")(
+            is_op("nn.bias_add")(conv_pattern_dw, is_constant())
+        )
+
+        # Also try without relu
+        pre_pattern_qconv_no_relu = is_op("nn.bias_add")(conv_pattern, is_constant())
+        pre_pattern_qdwconv_no_relu = is_op("nn.bias_add")(conv_pattern_dw, is_constant())
+
+        # Try each pattern
+        for pattern_to_try in [pre_pattern_qconv, pre_pattern_qdwconv,
+                               pre_pattern_qconv_no_relu, pre_pattern_qdwconv_no_relu]:
+            try:
+                result_expr = pattern_to_try.partition(
+                    result_expr,
+                    {"Composite": pre_composite_name}
+                )
+                debug_print(f"[CompositeSplitter] Pre-converge partition successful")
+                break
+            except Exception as e:
+                continue
+
+        return {
+            "result_expr": result_expr,
+            "pre_composite_name": pre_composite_name,
+            "post_composite_name": post_composite_name,
+        }
 
     @staticmethod
     def create_pre_converge_composite(expr, branch_ops, composite_name_prefix="imcflow"):
@@ -2235,6 +2331,9 @@ class AnnotGenerator:
           self.outer = outer_self
           # Track most recently assigned region to attach nodes with no input regions
           self.last_assigned_region = None
+          # Track composites that need to be split (deferred until after region assignment)
+          # Format: {original_composite: {"converge_op": op, "pre_region": region, "post_region": region}}
+          self.split_pending = {}
 
         def createRegion(self):
           Region = []
@@ -2451,7 +2550,7 @@ class AnnotGenerator:
                 # Converge point check: detect branch latency mismatch
                 # ====================================================
                 force_new_region = False
-                split_result = None
+                needs_split = False
 
                 if self._is_converge_point(node, rev_edges):
                   debug_print(f"[ConvergeCheck] Detected converge point: {getNodeDebugID(node)}")
@@ -2485,28 +2584,46 @@ class AnnotGenerator:
                         debug_print(f"[ConvergeCheck] All branches in same region - DEADLOCK RISK")
                         force_new_region = True
 
-                        # If composite, try to split at converge point
+                        # If composite, record for deferred split
                         if IsComposite:
-                          debug_print(f"[ConvergeCheck] Attempting to split composite at converge point")
+                          debug_print(f"[ConvergeCheck] Recording composite for deferred split")
                           converge_op = CompositeSplitter.find_converge_op_in_composite(node)
                           if converge_op is not None:
-                            split_result = CompositeSplitter.split_composite_at_converge(
-                              node, converge_op, "imcflow"
-                            )
-                            if split_result is not None:
-                              debug_print(f"[ConvergeCheck] Composite split successful")
-                              # TODO: Handle split result - replace node with split composites
-                              # For now, just force new region for the converge point
+                            needs_split = True
+                            # Determine pre_region: use candidate_region if available, else create new
+                            if len(candidate_regions) > 0:
+                              pre_region = candidate_regions[0]
                             else:
-                              debug_print(f"[ConvergeCheck] Composite split failed, using new region")
+                              pre_region = self.createRegion()
+                            # post_region: always create new region for the converge part
+                            post_region = self.createRegion()
+
+                            # Record split info for deferred processing
+                            self.split_pending[node] = {
+                              "converge_op": converge_op,
+                              "pre_region": pre_region,
+                              "post_region": post_region,
+                              "pre_composite": None,   # Will be filled after mutation
+                              "post_composite": None,  # Will be filled after mutation
+                            }
+                            debug_print(f"[ConvergeCheck] Recorded split_pending for {getNodeDebugID(node)}")
+                          else:
+                            debug_print(f"[ConvergeCheck] No converge op found in composite")
                       else:
                         debug_print(f"[ConvergeCheck] Branches in different regions - no deadlock risk")
 
                 # ====================================================
                 # Selection policy with converge point handling
                 # ====================================================
-                if force_new_region:
-                  # Converge point with unbalanced branches -> new region
+                if needs_split:
+                  # Composite will be split - add original to pre_region for now
+                  # After mutation, this will be replaced with pre_composite
+                  # post_composite will be added to post_region
+                  pre_region = self.split_pending[node]["pre_region"]
+                  self.addToRegion(pre_region, node)
+                  debug_print(f"[ConvergeCheck] Added original composite to pre_region (will be split later)")
+                elif force_new_region:
+                  # Non-composite converge point with unbalanced branches -> new region
                   Region = self.createRegion()
                   self.addToRegion(Region, node)
                   debug_print(f"[ConvergeCheck] Created new region for converge point")
@@ -2561,7 +2678,175 @@ class AnnotGenerator:
       annot = _AnnotatorBFS(self)
       annot.run(func)
       self.RegionList = RegionList
-      return self.RegionList
+      self.split_pending = annot.split_pending
+      return self.RegionList, self.split_pending
+
+
+class CompositeGraphMutator(relay.ExprMutator):
+    """
+    Mutator that replaces original composites with split composites.
+
+    After region assignment, this mutator is used to:
+    1. Split composites at converge points
+    2. Update the graph with new composite calls
+    """
+
+    def __init__(self, split_pending):
+        super().__init__()
+        self.split_pending = split_pending
+        # Maps original composite -> (pre_composite_call, post_composite_call)
+        self.split_results = {}
+
+    def visit_call(self, call):
+        # First visit args
+        new_args = [self.visit(arg) for arg in call.args]
+
+        if call in self.split_pending:
+          split_info = self.split_pending[call]
+          debug_print(f"[CompositeGraphMutator] Splitting composite: {getNodeDebugID(call)}")
+
+          # Perform actual split using CompositeSplitter
+          converge_op = split_info["converge_op"]
+          result = CompositeSplitter.split_composite_at_converge(
+            call, converge_op, "imcflow"
+          )
+
+          if result is not None:
+            # Result is now a dict with result_expr, pre_composite_name, post_composite_name
+            new_expr = result["result_expr"]
+            pre_composite_name = result["pre_composite_name"]
+            post_composite_name = result["post_composite_name"]
+
+            debug_print(f"[CompositeGraphMutator] Split successful:")
+            debug_print(f"  - pre_composite: {pre_composite_name}")
+            debug_print(f"  - post_composite: {post_composite_name}")
+
+            # Store split result for region update
+            self.split_results[call] = {
+              "new_expr": new_expr,
+              "split_info": split_info,
+              "pre_composite_name": pre_composite_name,
+              "post_composite_name": post_composite_name,
+            }
+            return new_expr
+          else:
+            debug_print(f"[CompositeGraphMutator] Split failed, keeping original")
+            # Fall through to normal processing
+
+        # Normal call - just update args if changed
+        if new_args != list(call.args):
+          return relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+        return call
+
+
+def _find_composites_by_name(expr, target_names):
+    """
+    Find composite function calls in an expression by their Composite attribute name.
+
+    Args:
+        expr: The expression to search
+        target_names: Set of composite names to find
+
+    Returns:
+        Dict mapping composite name to list of Call nodes
+    """
+    found = {name: [] for name in target_names}
+
+    class CompositeFinder(relay.ExprVisitor):
+        def visit_call(self, call):
+            if isinstance(call.op, relay.Function):
+                attrs = call.op.attrs
+                if attrs and "Composite" in attrs:
+                    comp_name = str(attrs["Composite"])
+                    if comp_name in target_names:
+                        found[comp_name].append(call)
+            super().visit_call(call)
+
+    CompositeFinder().visit(expr)
+    return found
+
+
+def _apply_composite_splits(target_mod, split_pending, RegionList):
+    """
+    Apply composite splits and update region list.
+
+    Args:
+        target_mod: The module to transform
+        split_pending: Dict of composites to split
+        RegionList: List of regions to update
+
+    Returns:
+        (transformed_mod, updated_RegionList)
+    """
+    if not split_pending:
+        return target_mod, RegionList
+
+    debug_print(f"[_apply_composite_splits] Applying {len(split_pending)} composite splits")
+
+    # Get the main function
+    main_func = list(target_mod.functions.items())[0][1]
+
+    # Apply mutation
+    mutator = CompositeGraphMutator(split_pending)
+    new_body = mutator.visit(main_func.body)
+
+    # Create new function with mutated body
+    new_func = relay.Function(
+        main_func.params,
+        new_body,
+        main_func.ret_type,
+        main_func.type_params,
+        main_func.attrs
+    )
+
+    # Update module
+    new_mod = tvm.IRModule.from_expr(new_func)
+
+    # Collect all composite names we need to find
+    composite_names_to_find = set()
+    for original_composite, result_info in mutator.split_results.items():
+        if "pre_composite_name" in result_info:
+            composite_names_to_find.add(result_info["pre_composite_name"])
+        if "post_composite_name" in result_info:
+            composite_names_to_find.add(result_info["post_composite_name"])
+
+    # Find the new composite nodes in the transformed graph
+    found_composites = _find_composites_by_name(new_body, composite_names_to_find)
+
+    # Update RegionList: replace original composites with split results
+    for original_composite, result_info in mutator.split_results.items():
+        split_info = result_info["split_info"]
+        pre_region = split_info["pre_region"]
+        post_region = split_info["post_region"]
+
+        # Remove original composite from its region
+        for region in RegionList:
+            if original_composite in region:
+                region.remove(original_composite)
+                debug_print(f"[_apply_composite_splits] Removed original from region")
+                break
+
+        # Add new composites to their respective regions
+        if "pre_composite_name" in result_info:
+            pre_name = result_info["pre_composite_name"]
+            pre_calls = found_composites.get(pre_name, [])
+            for pre_call in pre_calls:
+                if pre_call not in pre_region:
+                    pre_region.append(pre_call)
+                    debug_print(f"[_apply_composite_splits] Added pre_composite to pre_region")
+
+        if "post_composite_name" in result_info:
+            post_name = result_info["post_composite_name"]
+            post_calls = found_composites.get(post_name, [])
+            for post_call in post_calls:
+                if post_call not in post_region:
+                    post_region.append(post_call)
+                    debug_print(f"[_apply_composite_splits] Added post_composite to post_region")
+
+        debug_print(f"[_apply_composite_splits] Updated regions for split composite")
+
+    return new_mod, RegionList
+
 
 def partitionRound(mod):
   for global_var, func in mod.functions.items():
@@ -2570,8 +2855,16 @@ def partitionRound(mod):
       func_attr = func.attrs
       annotator = AnnotGenerator()
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
-      # RegionList = annotator.createRegion(target_mod)
-      RegionList = annotator.createRegionBFS(target_mod)
+
+      # Step 1: Create regions (with split_pending for deferred splits)
+      RegionList, split_pending = annotator.createRegionBFS(target_mod)
+
+      # Step 2: Apply composite splits if any
+      if split_pending:
+        debug_print(f"[partitionRound] Applying {len(split_pending)} composite splits")
+        target_mod, RegionList = _apply_composite_splits(target_mod, split_pending, RegionList)
+
+      # Step 3: Annotate and partition with updated graph and regions
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
