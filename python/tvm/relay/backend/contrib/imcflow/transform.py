@@ -2302,16 +2302,17 @@ class CompositeSplitter:
 
 
 class AnnotGenerator:
-    def __init__(self, handle_skip_connection_converge=True):
+    def __init__(self, handle_branch_from_var_converge=True):
       """
       Args:
-          handle_skip_connection_converge: If True, treat skip connections (converge points
-              where diverge_node is None due to Var inputs) as unbalanced branches and
-              force new region creation. If False, skip connection converge points are
-              handled with normal selection policy. Default is True.
+          handle_branch_from_var_converge: If True, treat branch_from_var cases (converge points
+              where diverge_node is None because one branch originates from Var inputs outside
+              the function) as unbalanced branches and force new region creation.
+              If False, these converge points are handled with normal selection policy.
+              Default is True.
       """
       self.RegionList = []
-      self.handle_skip_connection_converge = handle_skip_connection_converge
+      self.handle_branch_from_var_converge = handle_branch_from_var_converge
 
     def createRegion(self, mod):
       assert len(mod.functions.items()) == 1, "only one function is allowed in the module"
@@ -2512,11 +2513,11 @@ class AnnotGenerator:
       RegionList = []
 
       class _AnnotatorBFS:
-        def __init__(self, outer_self, target_mod, handle_skip_connection_converge=True):
+        def __init__(self, outer_self, target_mod, handle_branch_from_var_converge=True):
           self.RegionList = RegionList
           self.outer = outer_self
           self.target_mod = target_mod  # Store module for latency/throughput calculations
-          self.handle_skip_connection_converge = handle_skip_connection_converge
+          self.handle_branch_from_var_converge = handle_branch_from_var_converge
           # Track most recently assigned region to attach nodes with no input regions
           self.last_assigned_region = None
           # Track composites that need to be split (deferred until after region assignment)
@@ -2859,7 +2860,6 @@ class AnnotGenerator:
                 # ====================================================
                 force_new_region = False
                 needs_split = False
-                short_branch_preds = []  # Track predecessors that should be moved with converge point
 
                 if self._is_converge_point(node, rev_edges):
                   debug_print(f"\n{'#'*70}")
@@ -2997,19 +2997,19 @@ class AnnotGenerator:
                           "action": "no_action (different regions)"
                         })
                   else:
-                    # No common diverge point found - likely skip connection from Var input
+                    # No common diverge point found - one branch originates from Var input (outside function)
                     debug_print(f"[ConvergeCheck] No diverge point found for this converge point")
-                    debug_print(f"[ConvergeCheck] handle_skip_connection_converge={self.handle_skip_connection_converge}")
+                    debug_print(f"[ConvergeCheck] handle_branch_from_var_converge={self.handle_branch_from_var_converge}")
 
-                    if self.handle_skip_connection_converge:
+                    if self.handle_branch_from_var_converge:
                       # Calculate full branch latency including all ancestors
-                      debug_print(f"[ConvergeCheck] Checking skip connection case...")
+                      debug_print(f"[ConvergeCheck] Checking branch_from_var case...")
 
                       preds = rev_edges.get(node, [])
                       call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
 
-                      # Helper to check if a branch ultimately leads to Var/Const (skip connection)
-                      def is_short_branch(pred, max_depth=20):
+                      # Helper to check if a branch ultimately leads to Var/Const (originates from outside function)
+                      def is_branch_from_var(pred, max_depth=20):
                         """Check if branch has only non-conv ops leading to Var/Const."""
                         visited = set()
                         queue = [pred]
@@ -3056,96 +3056,95 @@ class AnnotGenerator:
                                 queue.append(arg)
                         return total_lat, min_thr if min_thr != float('inf') else 1
 
-                      branch_metrics = []
+                      # First, check if at least one branch actually originates from Var
+                      branch_from_var_flags = []
                       for i, pred in enumerate(call_preds):
-                        is_short = is_short_branch(pred)
-                        lat, thr = get_cumulative_latency(pred)
-                        branch_metrics.append((lat, thr))
+                        from_var = is_branch_from_var(pred)
+                        branch_from_var_flags.append(from_var)
                         debug_print(f"  --- Predecessor {i} ({getNodeDebugID(pred)}) ---")
-                        debug_print(f"    is_short_branch: {is_short}")
-                        debug_print(f"    Cumulative latency={lat}, min_throughput={thr}")
+                        debug_print(f"    is_branch_from_var: {from_var}")
 
-                      debug_print(f"\n[ConvergeCheck] Skip connection branch metrics:")
-                      for i, (lat, thr) in enumerate(branch_metrics):
-                        debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
+                      has_branch_from_var = any(branch_from_var_flags)
+                      debug_print(f"[ConvergeCheck] Has at least one branch_from_var: {has_branch_from_var}")
 
-                      # Collect skip connection branch info for summary
-                      skip_branch_info_list = []
-                      for i, pred in enumerate(call_preds):
-                        is_short = is_short_branch(pred)
-                        lat, thr = branch_metrics[i]
-                        skip_branch_info_list.append({
-                          "ops": [getNodeDebugID(pred)],
-                          "is_short_branch": is_short,
-                          "latency": lat,
-                          "throughput": thr
-                        })
-
-                      is_unbalanced = self._branches_unbalanced(branch_metrics)
-                      debug_print(f"[ConvergeCheck] Skip connection branches unbalanced? {is_unbalanced}")
-
-                      if is_unbalanced:
-                        debug_print(f"[ConvergeCheck] Skip connection UNBALANCED - forcing new region")
-
-                        # Find the short branch predecessors (low latency branch)
-                        min_lat = min(m[0] for m in branch_metrics)
-                        for i, (lat, thr) in enumerate(branch_metrics):
-                          if lat == min_lat and lat < max(m[0] for m in branch_metrics):
-                            short_branch_preds.append(call_preds[i])
-                            debug_print(f"[ConvergeCheck] Short branch pred {i}: {getNodeDebugID(call_preds[i])}")
-
-                        branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
-                        unique_regions = list({id(r): r for r in branch_regions}.values())
-                        debug_print(f"[ConvergeCheck] Branch regions: {len(branch_regions)}, unique: {len(unique_regions)}")
-
-                        if len(unique_regions) == 1:
-                          debug_print(f"[ConvergeCheck] All predecessors in same region - DEADLOCK RISK")
-                          force_new_region = True
-
-                          # Move short branch predecessors to a new region along with converge point
-                          if short_branch_preds:
-                            # Remove from current region first
-                            current_region = unique_regions[0]
-                            for pred in short_branch_preds:
-                              if pred in current_region:
-                                current_region.remove(pred)
-                                debug_print(f"[ConvergeCheck] Removed {getNodeDebugID(pred)} from region {self.RegionList.index(current_region)}")
-
-                          # Record skip connection converge point with deadlock risk
-                          self.converge_point_summary.append({
-                            "node": getNodeDebugID(node),
-                            "diverge_node": None,
-                            "type": "skip-connection",
-                            "branches": skip_branch_info_list,
-                            "is_unbalanced": True,
-                            "action": "force_new_region (deadlock risk)"
-                          })
-                        else:
-                          debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
-                          # Record skip connection converge point without deadlock risk
-                          self.converge_point_summary.append({
-                            "node": getNodeDebugID(node),
-                            "diverge_node": None,
-                            "type": "skip-connection",
-                            "branches": skip_branch_info_list,
-                            "is_unbalanced": True,
-                            "action": "no_action (different regions)"
-                          })
+                      if not has_branch_from_var:
+                        # No branch actually originates from Var - skip branch_from_var handling
+                        debug_print(f"[ConvergeCheck] No branch_from_var found - skipping special handling")
+                        debug_print(f"{'#'*70}\n")
+                        # Fall through to normal selection policy (don't set force_new_region)
                       else:
-                        debug_print(f"[ConvergeCheck] Skip connection branches balanced - no special handling")
-                        # Record balanced skip connection converge point
-                        self.converge_point_summary.append({
-                          "node": getNodeDebugID(node),
-                          "diverge_node": None,
-                          "type": "skip-connection",
-                          "branches": skip_branch_info_list,
-                          "is_unbalanced": False,
-                          "action": "no_action (balanced)"
-                        })
-                    else:
-                      debug_print(f"[ConvergeCheck] Skip connection handling DISABLED - using normal selection")
+                        # At least one branch is from Var - proceed with branch_from_var handling
+                        branch_metrics = []
+                        for i, pred in enumerate(call_preds):
+                          lat, thr = get_cumulative_latency(pred)
+                          branch_metrics.append((lat, thr))
+                          debug_print(f"    Predecessor {i} cumulative latency={lat}, min_throughput={thr}")
 
-                    debug_print(f"{'#'*70}\n")
+                        debug_print(f"\n[ConvergeCheck] Branch from var metrics:")
+                        for i, (lat, thr) in enumerate(branch_metrics):
+                          debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
+
+                        # Collect branch_from_var info for summary
+                        branch_from_var_info_list = []
+                        for i, pred in enumerate(call_preds):
+                          lat, thr = branch_metrics[i]
+                          branch_from_var_info_list.append({
+                            "ops": [getNodeDebugID(pred)],
+                            "is_branch_from_var": branch_from_var_flags[i],
+                            "latency": lat,
+                            "throughput": thr
+                          })
+
+                        is_unbalanced = self._branches_unbalanced(branch_metrics)
+                        debug_print(f"[ConvergeCheck] Branch from var branches unbalanced? {is_unbalanced}")
+
+                        if is_unbalanced:
+                          debug_print(f"[ConvergeCheck] Branch from var UNBALANCED - checking for deadlock risk")
+
+                          branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
+                          unique_regions = list({id(r): r for r in branch_regions}.values())
+                          debug_print(f"[ConvergeCheck] Branch regions: {len(branch_regions)}, unique: {len(unique_regions)}")
+
+                          if len(unique_regions) == 1:
+                            debug_print(f"[ConvergeCheck] All predecessors in same region - DEADLOCK RISK")
+                            force_new_region = True
+
+                            # Record branch_from_var converge point with deadlock risk
+                            self.converge_point_summary.append({
+                              "node": getNodeDebugID(node),
+                              "diverge_node": None,
+                              "type": "branch_from_var",
+                              "branches": branch_from_var_info_list,
+                              "is_unbalanced": True,
+                              "action": "force_new_region (deadlock risk)"
+                            })
+                          else:
+                            debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
+                            # Record branch_from_var converge point without deadlock risk
+                            self.converge_point_summary.append({
+                              "node": getNodeDebugID(node),
+                              "diverge_node": None,
+                              "type": "branch_from_var",
+                              "branches": branch_from_var_info_list,
+                              "is_unbalanced": True,
+                              "action": "no_action (different regions)"
+                            })
+                        else:
+                          debug_print(f"[ConvergeCheck] Branch from var branches balanced - no special handling")
+                          # Record balanced branch_from_var converge point
+                          self.converge_point_summary.append({
+                            "node": getNodeDebugID(node),
+                            "diverge_node": None,
+                            "type": "branch_from_var",
+                            "branches": branch_from_var_info_list,
+                            "is_unbalanced": False,
+                            "action": "no_action (balanced)"
+                          })
+
+                        debug_print(f"{'#'*70}\n")
+                    else:
+                      debug_print(f"[ConvergeCheck] Branch from var handling DISABLED - using normal selection")
+                      debug_print(f"{'#'*70}\n")
 
                 # ====================================================
                 # Selection policy with converge point handling
@@ -3162,11 +3161,6 @@ class AnnotGenerator:
                   Region = self.createRegion()
                   self.addToRegion(Region, node)
                   debug_print(f"[ConvergeCheck] Created new region for converge point (region {self.RegionList.index(Region)})")
-
-                  # Also add short branch predecessors to the same new region
-                  for pred in short_branch_preds:
-                    self.addToRegion(Region, pred)
-                    debug_print(f"[ConvergeCheck] Moved short branch pred {getNodeDebugID(pred)} to new region {self.RegionList.index(Region)}")
                 else:
                   # Normal selection policy
                   uniq = list({id(r): r for r in candidate_regions}.values())
@@ -3224,7 +3218,7 @@ class AnnotGenerator:
 
           # No second pass needed; nodes with no inputs were attached to previous region when possible
 
-      annot = _AnnotatorBFS(self, mod, self.handle_skip_connection_converge)
+      annot = _AnnotatorBFS(self, mod, self.handle_branch_from_var_converge)
       annot.run(func)
       self.RegionList = RegionList
       self.split_pending = annot.split_pending
@@ -3254,9 +3248,9 @@ class AnnotGenerator:
         debug_print(f"    Action: {cp_info['action']}")
         debug_print(f"    Branches ({len(cp_info['branches'])}):")
         for br_idx, br_info in enumerate(cp_info['branches']):
-          if cp_info['type'] == 'skip-connection':
-            is_short = br_info.get('is_short_branch', 'N/A')
-            debug_print(f"      Branch {br_idx}: latency={br_info['latency']}, throughput={br_info['throughput']}, is_short={is_short}")
+          if cp_info['type'] == 'branch_from_var':
+            from_var = br_info.get('is_branch_from_var', 'N/A')
+            debug_print(f"      Branch {br_idx}: latency={br_info['latency']}, throughput={br_info['throughput']}, from_var={from_var}")
             debug_print(f"        Ops: {br_info['ops']}")
           else:
             debug_print(f"      Branch {br_idx}: latency={br_info['latency']}, throughput={br_info['throughput']}, ops_count={br_info.get('ops_count', len(br_info['ops']))}")
@@ -3434,16 +3428,17 @@ def _apply_composite_splits(target_mod, split_pending, RegionList):
     return new_mod, RegionList
 
 
-def partitionRound(mod, handle_skip_connection_converge=True):
+def partitionRound(mod, handle_branch_from_var_converge=True):
   """
   Partition IMCFlow functions into regions for hardware mapping.
 
   Args:
       mod: The TVM IRModule to partition
-      handle_skip_connection_converge: If True, treat skip connections (converge points
-          where diverge_node is None due to Var inputs) as unbalanced branches and
-          force new region creation. If False, skip connection converge points are
-          handled with normal selection policy. Default is True.
+      handle_branch_from_var_converge: If True, treat branch_from_var cases (converge points
+          where diverge_node is None because one branch originates from Var inputs outside
+          the function) as unbalanced branches and force new region creation.
+          If False, these converge points are handled with normal selection policy.
+          Default is True.
 
   Returns:
       Partitioned IRModule
@@ -3452,7 +3447,7 @@ def partitionRound(mod, handle_skip_connection_converge=True):
     if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
       name = global_var.name_hint
       func_attr = func.attrs
-      annotator = AnnotGenerator(handle_skip_connection_converge=handle_skip_connection_converge)
+      annotator = AnnotGenerator(handle_branch_from_var_converge=handle_branch_from_var_converge)
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
 
       # Step 1: Create regions (with split_pending for deferred splits)

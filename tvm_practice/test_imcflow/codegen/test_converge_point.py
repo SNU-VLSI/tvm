@@ -666,10 +666,150 @@ def test_full_partition_round_with_composite():
         traceback.print_exc()
 
 
-def test_resnet8_converge_point():
-    """Test converge point detection on real ResNet8 model."""
+def test_resnet8_basic_block_1():
+    """Test converge point detection on ResNet8 first basic block.
+
+    First basic block structure (until_relay=10):
+        input -> conv -> bn -> mul -> cast
+          |
+        quantize -> conv1 -> bn1 -> quantize -> conv2 -> bn2
+          |                                              |
+          +--------------> residual * y_f_1 ------------+
+                                                        |
+                                                       add (converge point)
+    """
     print("\n" + "="*60)
-    print("TEST: ResNet8 Converge Point Detection")
+    print("TEST: ResNet8 Basic Block 1 Converge Point")
+    print("="*60)
+
+    # Get the first basic block only (until_relay=10 includes the add)
+    print("\n--- Loading ResNet8 Basic Block 1 ---")
+    mod, param_dict = resnet8_subset_models.getModel_from_pretrained_weight(
+        iH=32, iW=32, until_relay=10
+    )
+
+    print("\nOriginal model (basic block 1):")
+    print(relay.pretty_print(mod))
+
+    # Apply new transform order
+    # Step 1: Bind parameters
+    print("\n--- Step 1: Bind parameters ---")
+    mod["main"] = bind_params_by_name(mod["main"], param_dict)
+    mod = relay.transform.InferType()(mod)
+
+    # Step 2: First level imcflow graph partition
+    print("\n--- Step 2: Partition IMCFlow subgraph ---")
+    mod = partitionImcflowSubGraph(mod)
+
+    # Step 3: Merge composites for partition
+    print("\n--- Step 3: Merge composites for partition ---")
+    mod = merge_composite_for_partition(mod)
+
+    print("\nModel before partitionRound:")
+    print(relay.pretty_print(mod))
+
+    # Step 4: partitionRound - this is where converge point detection happens
+    print("\n--- Step 4: Partition Round (with converge point detection) ---")
+    mod = partitionRound(mod)
+    print(relay.pretty_print(mod))
+
+    # Step 5: Unmerge composites
+    print("\n--- Step 5: Unmerge composites ---")
+    mod = unmerge_composite(mod)
+
+    # Step 6: Split conv to atomic ops
+    print("\n--- Step 6: Split conv to atomic ops ---")
+    mod, param_dict = split_conv_to_atomic(mod, param_dict)
+
+    # Step 7: Merge composite ops (final)
+    print("\n--- Step 7: Merge composite ops (final) ---")
+    mod = merge_composite_ops(mod)
+
+    # Step 8: Concat distributor
+    print("\n--- Step 8: Concat distributor ---")
+    mod = ConcatDistributor(max_inputs=4).run(mod)
+
+    print("\nModel after full transform:")
+    print(relay.pretty_print(mod))
+
+    print("\n✓ ResNet8 Basic Block 1 converge point test completed")
+
+
+def test_resnet8_basic_block_2():
+    """Test converge point detection on ResNet8 second basic block.
+
+    Second basic block structure (until_relay=17):
+        From basic block 1 output
+          |
+        quantize -> conv1 (stride=2) -> bn1 -> quantize -> conv2 -> bn2
+          |                                                         |
+          +-> quantize -> conv_downsample (1x1, stride=2) -> bn ----+
+                                                                    |
+                                                                   add (converge point)
+
+    This block has a downsample branch (1x1 conv) for residual connection.
+    """
+    print("\n" + "="*60)
+    print("TEST: ResNet8 Basic Block 2 Converge Point")
+    print("="*60)
+
+    # Get until second basic block (until_relay=17 includes the add)
+    print("\n--- Loading ResNet8 Basic Block 2 ---")
+    mod, param_dict = resnet8_subset_models.getModel_from_pretrained_weight(
+        iH=32, iW=32, until_relay=17
+    )
+
+    print("\nOriginal model (up to basic block 2):")
+    print(relay.pretty_print(mod))
+
+    # Apply new transform order
+    # Step 1: Bind parameters
+    print("\n--- Step 1: Bind parameters ---")
+    mod["main"] = bind_params_by_name(mod["main"], param_dict)
+    mod = relay.transform.InferType()(mod)
+
+    # Step 2: First level imcflow graph partition
+    print("\n--- Step 2: Partition IMCFlow subgraph ---")
+    mod = partitionImcflowSubGraph(mod)
+
+    # Step 3: Merge composites for partition
+    print("\n--- Step 3: Merge composites for partition ---")
+    mod = merge_composite_for_partition(mod)
+
+    print("\nModel before partitionRound:")
+    print(relay.pretty_print(mod))
+
+    # Step 4: partitionRound - this is where converge point detection happens
+    print("\n--- Step 4: Partition Round (with converge point detection) ---")
+    mod = partitionRound(mod)
+    print(relay.pretty_print(mod))
+
+    # Step 5: Unmerge composites
+    print("\n--- Step 5: Unmerge composites ---")
+    mod = unmerge_composite(mod)
+
+    # Step 6: Split conv to atomic ops
+    print("\n--- Step 6: Split conv to atomic ops ---")
+    mod, param_dict = split_conv_to_atomic(mod, param_dict)
+
+    # Step 7: Merge composite ops (final)
+    print("\n--- Step 7: Merge composite ops (final) ---")
+    mod = merge_composite_ops(mod)
+
+    # Step 8: Concat distributor
+    print("\n--- Step 8: Concat distributor ---")
+    mod = ConcatDistributor(max_inputs=4).run(mod)
+
+    print("\nModel after full transform:")
+    print(relay.pretty_print(mod))
+
+    print("\n✓ ResNet8 Basic Block 2 converge point test completed")
+
+
+def test_resnet8_converge_point():
+    """Test converge point detection on real ResNet8 model (full)."""
+    print("\n" + "="*60)
+    print("TEST: ResNet8 Full Model Converge Point Detection")
     print("="*60)
 
     # Get the ResNet8 model (subset31 = full model, orig = 32x32 input)
@@ -681,6 +821,7 @@ def test_resnet8_converge_point():
     print("\nOriginal model:")
     print(relay.pretty_print(mod))
 
+    # Apply new transform order
     # Step 1: Bind parameters
     print("\n--- Step 1: Bind parameters ---")
     mod["main"] = bind_params_by_name(mod["main"], param_dict)
@@ -689,121 +830,38 @@ def test_resnet8_converge_point():
     # Step 2: First level imcflow graph partition
     print("\n--- Step 2: Partition IMCFlow subgraph ---")
     mod = partitionImcflowSubGraph(mod)
-    print(relay.pretty_print(mod))
 
-    # Step 3: Split conv to atomic ops
-    print("\n--- Step 3: Split conv to atomic ops ---")
-    mod, param_dict = split_conv_to_atomic(mod, param_dict)
-
-    # Step 4: Merge composite ops
-    print("\n--- Step 4: Merge composite ops ---")
-    mod = merge_composite_ops(mod)
-
-    # Step 5: Make split/concat deps regions
-    print("\n--- Step 5: Make split/concat deps regions ---")
-    mod = makeSplitConcatDepsRegions(mod)
-
-    # Step 6: Concat distributor
-    print("\n--- Step 6: Concat distributor ---")
-    mod = ConcatDistributor(max_inputs=4).run(mod)
+    # Step 3: Merge composites for partition
+    print("\n--- Step 3: Merge composites for partition ---")
+    mod = merge_composite_for_partition(mod)
 
     print("\nModel before partitionRound:")
     print(relay.pretty_print(mod))
 
-    # Step 7: partitionRound - this is where converge point detection happens
-    print("\n--- Step 7: Partition Round (with converge point detection) ---")
+    # Step 4: partitionRound - this is where converge point detection happens
+    print("\n--- Step 4: Partition Round (with converge point detection) ---")
     mod = partitionRound(mod)
 
-    print("\nModel after partitionRound:")
+    # Step 5: Unmerge composites
+    print("\n--- Step 5: Unmerge composites ---")
+    mod = unmerge_composite(mod)
+
+    # Step 6: Split conv to atomic ops
+    print("\n--- Step 6: Split conv to atomic ops ---")
+    mod, param_dict = split_conv_to_atomic(mod, param_dict)
+
+    # Step 7: Merge composite ops (final)
+    print("\n--- Step 7: Merge composite ops (final) ---")
+    mod = merge_composite_ops(mod)
+
+    # Step 8: Concat distributor
+    print("\n--- Step 8: Concat distributor ---")
+    mod = ConcatDistributor(max_inputs=4).run(mod)
+
+    print("\nModel after full transform:")
     print(relay.pretty_print(mod))
 
     print("\n✓ ResNet8 converge point test completed")
-
-
-def test_new_transform_order():
-    """Test the new transform order using compile_for_imcflow driver."""
-    print("\n" + "="*60)
-    print("TEST: New Transform Order (using imcflow_compiler_driver)")
-    print("="*60)
-
-    import tempfile
-    import shutil
-
-    # Get the ResNet8 model
-    print("\n--- Loading ResNet8 model ---")
-    mod, param_dict = resnet8_subset_models.getModel_from_pretrained_weight(
-        iH=32, iW=32, until_relay=31
-    )
-
-    print("\nOriginal model:")
-    print(relay.pretty_print(mod))
-
-    # Use the compile_for_imcflow driver (skip codegen for faster test)
-    print("\n--- Using compile_for_imcflow driver ---")
-    try:
-        # Create temp directory for output
-        temp_dir = tempfile.mkdtemp(prefix="imcflow_test_")
-
-        mod, param_dict, _ = compile_for_imcflow(
-            mod, param_dict, temp_dir, skip_codegen=True
-        )
-
-        print("\nModel after full transform:")
-        print(relay.pretty_print(mod))
-
-        # Cleanup temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-        print("\n✓ New transform order test completed successfully")
-    except Exception as e:
-        print(f"\n✗ New transform order test failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-def test_cost_calculation():
-    """Test the new cost calculation based on IC/OC dimensions."""
-    print("\n" + "="*60)
-    print("TEST: Cost Calculation (IC/OC based)")
-    print("="*60)
-
-    import math
-
-    # Test cost calculation formula
-    def expected_cost(IC, OC, KH, KW, is_depthwise=False):
-        if is_depthwise:
-            atom_IC = 32
-            atom_OC = 32
-        else:
-            atom_IC = math.floor(256 / (KH * KW))
-            atom_OC = 64
-        return math.ceil(IC / atom_IC) * math.ceil(OC / atom_OC)
-
-    # Test cases
-    test_cases = [
-        # (IC, OC, KH, KW, is_depthwise, description)
-        (16, 16, 3, 3, False, "Small 3x3 conv"),
-        (32, 64, 3, 3, False, "Medium 3x3 conv"),
-        (64, 128, 3, 3, False, "Large 3x3 conv"),
-        (256, 256, 3, 3, False, "Very large 3x3 conv"),
-        (32, 32, 1, 1, False, "1x1 conv"),
-        (64, 64, 1, 1, False, "64ch 1x1 conv"),
-        (32, 32, 3, 3, True, "Depthwise 3x3 conv"),
-    ]
-
-    print("\nExpected cost calculations:")
-    print("-" * 70)
-    print(f"{'Description':<25} {'IC':>6} {'OC':>6} {'K':>5} {'atom_IC':>8} {'Cost':>6}")
-    print("-" * 70)
-
-    for IC, OC, KH, KW, is_dw, desc in test_cases:
-        cost = expected_cost(IC, OC, KH, KW, is_dw)
-        atom_IC = 32 if is_dw else math.floor(256 / (KH * KW))
-        print(f"{desc:<25} {IC:>6} {OC:>6} {KH}x{KW:>2} {atom_IC:>8} {cost:>6}")
-
-    print("-" * 70)
-    print("\n✓ Cost calculation test completed")
-
 
 def run_all_tests():
     """Run all tests."""
@@ -854,23 +912,23 @@ def run_all_tests():
         traceback.print_exc()
 
     try:
+        test_resnet8_basic_block_1()
+    except Exception as e:
+        print(f"\n✗ ResNet8 basic block 1 test failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        test_resnet8_basic_block_2()
+    except Exception as e:
+        print(f"\n✗ ResNet8 basic block 2 test failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
         test_resnet8_converge_point()
     except Exception as e:
         print(f"\n✗ ResNet8 converge point test failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-    try:
-        test_cost_calculation()
-    except Exception as e:
-        print(f"\n✗ Cost calculation test failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-    try:
-        test_new_transform_order()
-    except Exception as e:
-        print(f"\n✗ New transform order test failed: {e}")
         import traceback
         traceback.print_exc()
 
