@@ -34,9 +34,10 @@ from tvm.relay.backend.contrib.imcflow.transform import (
     # New functions for updated transform order
     merge_composite_for_partition,
     unmerge_composite,
-    apply_transforms_to_round_functions,
-    imcflow_full_transform,
 )
+
+# Import from driver for full transform
+from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow
 
 # Add models path
 sys.path.insert(0, '/root/project/tvm/tvm_practice')
@@ -720,10 +721,13 @@ def test_resnet8_converge_point():
 
 
 def test_new_transform_order():
-    """Test the new transform order with merge -> partition -> unmerge -> split."""
+    """Test the new transform order using compile_for_imcflow driver."""
     print("\n" + "="*60)
-    print("TEST: New Transform Order (merge -> partition -> unmerge)")
+    print("TEST: New Transform Order (using imcflow_compiler_driver)")
     print("="*60)
+
+    import tempfile
+    import shutil
 
     # Get the ResNet8 model
     print("\n--- Loading ResNet8 model ---")
@@ -731,21 +735,24 @@ def test_new_transform_order():
         iH=32, iW=32, until_relay=31
     )
 
-    # Step 1: Bind parameters
-    print("\n--- Step 1: Bind parameters ---")
-    mod["main"] = bind_params_by_name(mod["main"], param_dict)
-    mod = relay.transform.InferType()(mod)
-
     print("\nOriginal model:")
     print(relay.pretty_print(mod))
 
-    # Use the new full transform pipeline
-    print("\n--- Using imcflow_full_transform (new order) ---")
+    # Use the compile_for_imcflow driver (skip codegen for faster test)
+    print("\n--- Using compile_for_imcflow driver ---")
     try:
-        mod, param_dict = imcflow_full_transform(mod, param_dict)
+        # Create temp directory for output
+        temp_dir = tempfile.mkdtemp(prefix="imcflow_test_")
+
+        mod, param_dict, _ = compile_for_imcflow(
+            mod, param_dict, temp_dir, skip_codegen=True
+        )
 
         print("\nModel after full transform:")
         print(relay.pretty_print(mod))
+
+        # Cleanup temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
         print("\n✓ New transform order test completed successfully")
     except Exception as e:

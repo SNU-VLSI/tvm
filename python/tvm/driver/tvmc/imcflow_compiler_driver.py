@@ -38,28 +38,35 @@ from tvm.relay.op.contrib import imcflow
 from tvm.relay.op.contrib.imcflow import HashToCustomID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.micro import export_model_library_format
+from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 
+def printModel(result_dir, mod, param_dict, mod_name):
+  RelayVisualizer(
+      relay_mod=mod,
+      relay_param=param_dict,
+      plotter=DotPlotter(),
+      parser=DotVizParser(),
+  ).render(f"{result_dir}/{mod_name}")
 
-def printModel(dir, mod, param_dict, name):
-    """Save model to file for debugging."""
-    os.makedirs(dir, exist_ok=True)
-    with open(f"{dir}/{name}.relay", "w") as f:
-        f.write(relay.pretty_print(mod))
+  with open(f"{result_dir}/{mod_name}.txt", "w") as f:
+    # f.write(pretty_print(mod))
+    f.write(mod.astext(show_meta_data=True))
 
 
 def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=True):
     """
     Transform a Relay module for IMCFlow hardware deployment.
 
-    This function applies the full transformation pipeline:
+    This function applies the full transformation pipeline with the new order:
     1. Bind parameters
     2. Partition IMCFlow subgraph
-    3. Merge composites for partition (optional, for simpler converge detection)
-    4. Partition into rounds
-    5. Split conv to atomic ops
-    6. Merge composite ops
-    7. Handle split/concat dependencies
-    8. Apply various hardware mappings and optimizations
+    3. Merge composites for partition (for simpler converge detection)
+    4. Partition into rounds (with merged composites for accurate cost estimation)
+    5. Unmerge composites (inline back to original ops)
+    6. Split conv to atomic ops
+    7. Merge composite ops (final merge)
+    8. Concat distributor
+    9-26. Flatten, prune, annotate, mappings, NoC, memory, etc.
 
     Args:
         mod: TVM IRModule to transform
@@ -88,37 +95,41 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     mod = imcflow_transform.partitionImcflowSubGraph(mod)
     _print("2_after_L1_partition")
 
-    # Step 3: Split imcflow function conv to atomic ops
-    mod, param_dict = imcflow_transform.split_conv_to_atomic(mod, param_dict)
-    _print("2_after_atom_split")
+    # Step 3: Merge composites for partition (simpler converge detection, accurate cost)
+    mod = imcflow_transform.merge_composite_for_partition(mod)
+    _print("3_after_merge_for_partition")
 
-    # Step 4: Merge composite OPs
-    mod = imcflow_transform.merge_composite_ops(mod)
-    _print("3_after_merge")
-
-    # Step 5: Make split and concat super node
-    mod = imcflow_transform.makeSplitConcatDepsRegions(mod)
-    _print("4_after_split_concat_partition")
-
-    # Step 6: Concat distributor
-    mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(mod)
-    _print("4.5_after_concat_distributor")
-
-    # Step 7: Partition into rounds
+    # Step 4: Partition into rounds (with merged composites)
     mod = imcflow_transform.partitionRound(mod)
-    _print("5_after_annot")
+    _print("4_after_partition_round")
 
-    # Step 8: Flatten top-level functions
+    # Step 5: Flatten top-level functions
     mod = imcflow.flattenImcflowTopFuncs(mod)
-    _print("6_after_flatten")
+    _print("5_after_flatten")
 
-    # Step 9: Prune subgraphs
+    # Step 5: Unmerge composites (inline back to original ops for split_conv_to_atomic)
+    mod = imcflow_transform.unmerge_composite(mod)
+    _print("5_after_unmerge_composite")
+
+    # Step 6: Split imcflow function conv to atomic ops
+    mod, param_dict = imcflow_transform.split_conv_to_atomic(mod, param_dict)
+    _print("6_after_atom_split")
+
+    # Step 7: Merge composite OPs (final merge)
+    mod = imcflow_transform.merge_composite_ops(mod)
+    _print("7_after_final_merge")
+
+    # Step 8: Concat distributor
+    mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(mod)
+    _print("8_after_concat_distributor")
+
+    # Step 10: Prune subgraphs
     mod = imcflow.prune_imcflow_subgraphs(mod)
-    _print("7_after_prune_model")
+    _print("10_after_prune_model")
 
-    # Step 10: Annotate custom IDs
+    # Step 11: Annotate custom IDs
     mod = imcflow_transform.annotateCustomId(mod)
-    _print("7.5_after_annotate_custom_id")
+    _print("11_after_annotate_custom_id")
     imcflow_transform.constructUsefulMappings(mod)
 
     if save_intermediate:
@@ -127,17 +138,17 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
         with open(f"{output_dir}/node_to_custom_id.txt", "w") as f:
             pprint.pprint(HashToCustomID(), stream=f)
 
-    _print("7.6_with_custom_id")
+    _print("12_with_custom_id")
 
-    # Step 11: Legalize layout
+    # Step 13: Legalize layout
     mod, ttype_map = imcflow_transform.legalizeImcflowLayout(mod)
-    _print("7.7_after_mark_in_out")
+    _print("13_after_legalize_layout")
 
-    # Step 12: Re-annotate custom IDs
+    # Step 14: Re-annotate custom IDs
     mod = imcflow_transform.annotateCustomId(mod)
-    _print("8.5_after_annotate_custom_id")
+    _print("14_after_reannotate_custom_id")
 
-    # Step 13: Construct mappings
+    # Step 15: Construct mappings
     imcflow_transform.constructUsefulMappings(mod)
     imcflow_transform.constructCustomIDInFunc(mod)
     imcflow_transform.constructImcflowFuncMap(mod)
@@ -150,15 +161,15 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
         with open(f"{output_dir}/func_map.txt", "w") as f:
             pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
 
-    _print("9_with_custom_id")
+    _print("15_with_mappings")
 
-    # Step 14: Node mapping
+    # Step 16: Node mapping
     imcflow_transform.NodeMapper().run(mod)
     if save_intermediate:
         with open(f"{output_dir}/hw_node_map.txt", "w") as f:
             pprint.pprint(DevConfig().HWNodeMap, stream=f)
 
-    # Step 15: Construct tensor edge list
+    # Step 17: Construct tensor edge list
     imcflow_transform.constructTensorEdgeList(mod)
     if save_intermediate:
         with open(f"{output_dir}/tensor_edge_list.txt", "w") as f:
@@ -167,20 +178,20 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
                 for path in paths:
                     print(path, file=f)
 
-    # Step 16: Active IMCE
+    # Step 18: Active IMCE
     imcflow_transform.constructActiveIMCEDict(mod)
     if save_intermediate:
         with open(f"{output_dir}/active_imce_list.txt", "w") as f:
             pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
 
-    # Step 17: Tensor ID to edge
+    # Step 19: Tensor ID to edge
     imcflow_transform.constructTensorIDToTensorEdgeDict()
     if save_intermediate:
         with open(f"{output_dir}/tensor_id_to_edge.txt", "w") as f:
             for key, paths in DevConfig().TensorIDtoEdge.items():
                 print(f"{key} : {paths}", file=f)
 
-    # Step 18: NoC paths
+    # Step 20: NoC paths
     imcflow_transform.constructNoCPathDict(mod)
     if save_intermediate:
         with open(f"{output_dir}/noc_paths.txt", "w") as f:
@@ -189,34 +200,34 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
                 for k, v in paths.items():
                     print(k, v, file=f)
 
-    # Step 19: Memory allocation
+    # Step 21: Memory allocation
     imcflow_transform.MemoryAllocator().run(mod, ttype_map)
     if save_intermediate:
         with open(f"{output_dir}/mem_layout.txt", "w") as f:
             pprint.pprint(DevConfig().MemLayout, stream=f)
 
-    # Step 20: Policy table generation
+    # Step 22: Policy table generation
     imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths).run(mod)
     if save_intermediate:
         with open(f"{output_dir}/policy_table.txt", "w") as f:
             f.write(DevConfig().format_policy_table())
 
-    # Step 21: NoC visualizations
+    # Step 23: NoC visualizations
     imcflow_transform.generateNoCVisualizations(mod, output_dir + "/noc_visualizations")
 
-    # Step 22: FIFO conflict monitoring
+    # Step 24: FIFO conflict monitoring
     fifo_monitor = imcflow_transform.FIFOConflictMonitor()
     fifo_monitor.run(mod)
     fifo_monitor.print_conflict_summary()
     fifo_monitor.export_conflict_table(f"{output_dir}/fifo_conflict_table.txt")
 
-    # Step 23: Deadlock detection
+    # Step 25: Deadlock detection
     deadlock_detector = imcflow_transform.NoCDeadlockDetector()
     deadlock_detector.run(mod)
     deadlock_detector.print_deadlock_summary()
     deadlock_detector.export_deadlock_table(f"{output_dir}/noc_deadlock_table.txt")
 
-    # Step 24: Export final config
+    # Step 26: Export final config
     config = DevConfig()
 
     def _dump(title, dict_data):
