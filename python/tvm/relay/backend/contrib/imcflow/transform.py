@@ -2670,6 +2670,7 @@ class AnnotGenerator:
                 # ====================================================
                 force_new_region = False
                 needs_split = False
+                short_branch_preds = []  # Track predecessors that should be moved with converge point
 
                 if self._is_converge_point(node, rev_edges):
                   debug_print(f"\n{'#'*70}")
@@ -2842,6 +2843,13 @@ class AnnotGenerator:
                       if is_unbalanced:
                         debug_print(f"[ConvergeCheck] Skip connection UNBALANCED - forcing new region")
 
+                        # Find the short branch predecessors (low latency branch)
+                        min_lat = min(m[0] for m in branch_metrics)
+                        for i, (lat, thr) in enumerate(branch_metrics):
+                          if lat == min_lat and lat < max(m[0] for m in branch_metrics):
+                            short_branch_preds.append(call_preds[i])
+                            debug_print(f"[ConvergeCheck] Short branch pred {i}: {getNodeDebugID(call_preds[i])}")
+
                         branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
                         unique_regions = list({id(r): r for r in branch_regions}.values())
                         debug_print(f"[ConvergeCheck] Branch regions: {len(branch_regions)}, unique: {len(unique_regions)}")
@@ -2849,6 +2857,15 @@ class AnnotGenerator:
                         if len(unique_regions) == 1:
                           debug_print(f"[ConvergeCheck] All predecessors in same region - DEADLOCK RISK")
                           force_new_region = True
+
+                          # Move short branch predecessors to a new region along with converge point
+                          if short_branch_preds:
+                            # Remove from current region first
+                            current_region = unique_regions[0]
+                            for pred in short_branch_preds:
+                              if pred in current_region:
+                                current_region.remove(pred)
+                                debug_print(f"[ConvergeCheck] Removed {getNodeDebugID(pred)} from region {self.RegionList.index(current_region)}")
                         else:
                           debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
                       else:
@@ -2872,7 +2889,12 @@ class AnnotGenerator:
                   # Non-composite converge point with unbalanced branches -> new region
                   Region = self.createRegion()
                   self.addToRegion(Region, node)
-                  debug_print(f"[ConvergeCheck] Created new region for converge point")
+                  debug_print(f"[ConvergeCheck] Created new region for converge point (region {self.RegionList.index(Region)})")
+
+                  # Also add short branch predecessors to the same new region
+                  for pred in short_branch_preds:
+                    self.addToRegion(Region, pred)
+                    debug_print(f"[ConvergeCheck] Moved short branch pred {getNodeDebugID(pred)} to new region {self.RegionList.index(Region)}")
                 else:
                   # Normal selection policy
                   uniq = list({id(r): r for r in candidate_regions}.values())
