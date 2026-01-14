@@ -1491,7 +1491,12 @@ class LatencyThroughputCalculator:
         Returns:
             Latency in cycles
 
-        TODO: Fill in actual formulas based on hardware characteristics
+        Test values for development:
+        - Conv ops: high latency (10-20 cycles) - represents MAC operations
+        - Element-wise ops: low latency (1 cycle)
+        - Quantize ops: medium latency (2-3 cycles)
+
+        TODO: Replace with actual hardware-based formulas
         """
         if not isinstance(op_call, relay.Call):
             return 0
@@ -1500,42 +1505,52 @@ class LatencyThroughputCalculator:
             op_name = op_call.op.name
             attrs = op_call.attrs
 
-            if op_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
-                # TODO: Formula based on kernel_size, channels, etc.
-                # Example skeleton:
-                # kernel_h = attrs.kernel_size[0].value if attrs.kernel_size else 1
-                # kernel_w = attrs.kernel_size[1].value if attrs.kernel_size else 1
-                # channels = attrs.channels.value if attrs.channels else 1
-                # return kernel_h * kernel_w * channels * SOME_FACTOR
-                return 1  # Placeholder
+            if op_name == "nn.imcflow_qconv":
+                # Conv2D: high latency due to MAC operations
+                # Test value: base 10 + kernel_size factor
+                try:
+                    kernel_h = int(attrs.kernel_size[0]) if attrs.kernel_size else 3
+                    kernel_w = int(attrs.kernel_size[1]) if attrs.kernel_size else 3
+                    return 10 + kernel_h * kernel_w
+                except:
+                    return 20  # Default for 3x3 conv
+
+            elif op_name == "nn.imcflow_qdwconv":
+                # Depthwise Conv: slightly lower than regular conv
+                try:
+                    kernel_h = int(attrs.kernel_size[0]) if attrs.kernel_size else 3
+                    kernel_w = int(attrs.kernel_size[1]) if attrs.kernel_size else 3
+                    return 5 + kernel_h * kernel_w
+                except:
+                    return 14  # Default for 3x3 dwconv
 
             elif op_name in ["nn.relu", "nn.bias_add"]:
-                # Element-wise ops: typically 1 cycle
+                # Element-wise ops: very fast
                 return 1
 
             elif op_name == "add":
-                # Add operation latency
+                # Add operation: fast element-wise
                 return 1
 
             elif op_name == "qnn.imcflow_min_max_quantize":
-                # Quantization latency
-                return 1
+                # Quantization: medium latency (comparison + shift)
+                return 3
 
             elif op_name == "qnn.imcflow_nu_quantize":
-                # Non-uniform quantization latency
-                return 1
+                # Non-uniform quantization: slightly higher (LUT lookup)
+                return 4
 
             elif op_name == "imcflow.fused_batch_norm":
-                # Fused batch norm latency
-                return 1
+                # Fused batch norm: multiply + add
+                return 2
 
             elif op_name in ["split", "concatenate"]:
-                # Data movement ops
+                # Data movement ops: depends on data size, use small value
                 return 1
 
             elif op_name in ["multiply", "divide"]:
                 # Arithmetic ops
-                return 1
+                return 2
 
             else:
                 debug_print(f"[LatencyThroughputCalculator] Unknown op: {op_name}")
@@ -1553,40 +1568,64 @@ class LatencyThroughputCalculator:
 
         Returns:
             Throughput (higher is better, represents data elements per cycle)
+            Lower value = bottleneck
 
-        TODO: Fill in actual formulas based on hardware characteristics
+        Test values for development:
+        - Conv ops: low throughput (limited by MAC units)
+        - Element-wise ops: high throughput (fully pipelined)
+        - Quantize ops: medium throughput
+
+        TODO: Replace with actual hardware-based formulas
         """
         if not isinstance(op_call, relay.Call):
-            return 1
+            return 100  # Non-ops don't limit throughput
 
         if isinstance(op_call.op, tvm.ir.Op):
             op_name = op_call.op.name
             attrs = op_call.attrs
 
-            if op_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
-                # TODO: Formula based on parallelism, IMCE utilization
-                # Example skeleton:
-                # out_channels = attrs.channels.value if attrs.channels else 1
-                # return min(out_channels, IMCE_PARALLELISM)
-                return 1  # Placeholder
+            if op_name == "nn.imcflow_qconv":
+                # Conv2D: throughput limited by MAC array
+                # Lower output channels = lower throughput
+                try:
+                    channels = int(attrs.channels) if attrs.channels else 64
+                    # Throughput scales with output channels (up to IMCE limit)
+                    return min(channels, 64)
+                except:
+                    return 32
+
+            elif op_name == "nn.imcflow_qdwconv":
+                # Depthwise Conv: even more limited (1 channel per IMCE)
+                try:
+                    channels = int(attrs.channels) if attrs.channels else 32
+                    return min(channels, 32)
+                except:
+                    return 16
 
             elif op_name in ["nn.relu", "nn.bias_add", "add", "multiply", "divide"]:
-                # Element-wise: high throughput
-                return 1
+                # Element-wise: very high throughput (pipelined)
+                return 256
 
-            elif op_name in ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize"]:
-                return 1
+            elif op_name == "qnn.imcflow_min_max_quantize":
+                # Quantization: medium-high throughput
+                return 128
+
+            elif op_name == "qnn.imcflow_nu_quantize":
+                # Non-uniform quantization: medium (LUT access)
+                return 64
 
             elif op_name == "imcflow.fused_batch_norm":
-                return 1
+                # Fused batch norm: high throughput
+                return 128
 
             elif op_name in ["split", "concatenate"]:
-                return 1
+                # Data movement: high throughput
+                return 256
 
             else:
-                return 1
+                return 100
 
-        return 1
+        return 100
 
     @staticmethod
     def calculate_branch_latency(ops: list) -> int:
