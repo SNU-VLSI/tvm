@@ -2208,8 +2208,16 @@ class CompositeSplitter:
 
 
 class AnnotGenerator:
-    def __init__(self):
+    def __init__(self, handle_skip_connection_converge=True):
+      """
+      Args:
+          handle_skip_connection_converge: If True, treat skip connections (converge points
+              where diverge_node is None due to Var inputs) as unbalanced branches and
+              force new region creation. If False, skip connection converge points are
+              handled with normal selection policy. Default is True.
+      """
       self.RegionList = []
+      self.handle_skip_connection_converge = handle_skip_connection_converge
 
     def createRegion(self, mod):
       assert len(mod.functions.items()) == 1, "only one function is allowed in the module"
@@ -2410,10 +2418,11 @@ class AnnotGenerator:
       RegionList = []
 
       class _AnnotatorBFS:
-        def __init__(self, outer_self, target_mod):
+        def __init__(self, outer_self, target_mod, handle_skip_connection_converge=True):
           self.RegionList = RegionList
           self.outer = outer_self
           self.target_mod = target_mod  # Store module for latency/throughput calculations
+          self.handle_skip_connection_converge = handle_skip_connection_converge
           # Track most recently assigned region to attach nodes with no input regions
           self.last_assigned_region = None
           # Track composites that need to be split (deferred until after region assignment)
@@ -2756,90 +2765,96 @@ class AnnotGenerator:
                         debug_print(f"{'#'*70}\n")
                   else:
                     # No common diverge point found - likely skip connection from Var input
-                    # Calculate full branch latency including all ancestors
-                    debug_print(f"[ConvergeCheck] No diverge point found - checking skip connection case")
+                    debug_print(f"[ConvergeCheck] No diverge point found for this converge point")
+                    debug_print(f"[ConvergeCheck] handle_skip_connection_converge={self.handle_skip_connection_converge}")
 
-                    preds = rev_edges.get(node, [])
-                    call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
+                    if self.handle_skip_connection_converge:
+                      # Calculate full branch latency including all ancestors
+                      debug_print(f"[ConvergeCheck] Checking skip connection case...")
 
-                    # Helper to check if a branch ultimately leads to Var/Const (skip connection)
-                    def is_short_branch(pred, max_depth=20):
-                      """Check if branch has only non-conv ops leading to Var/Const."""
-                      visited = set()
-                      queue = [pred]
-                      depth = 0
-                      has_conv = False
-                      while queue and depth < max_depth:
-                        curr = queue.pop(0)
-                        if curr in visited:
-                          continue
-                        visited.add(curr)
-                        depth += 1
-                        if isinstance(curr, Call):
-                          if isinstance(curr.op, tvm.ir.Op):
-                            if curr.op.name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.conv2d"]:
-                              has_conv = True
-                          for arg in curr.args:
-                            if isinstance(arg, (Call, TupleGetItem)):
-                              queue.append(arg)
-                      return not has_conv
+                      preds = rev_edges.get(node, [])
+                      call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
 
-                    # Calculate cumulative latency for each branch
-                    def get_cumulative_latency(pred, max_depth=50):
-                      """Calculate latency of all ops in the path from this pred back to Var/Const."""
-                      visited = set()
-                      queue = [pred]
-                      total_lat = 0
-                      min_thr = float('inf')
-                      depth = 0
-                      while queue and depth < max_depth:
-                        curr = queue.pop(0)
-                        if curr in visited:
-                          continue
-                        visited.add(curr)
-                        depth += 1
-                        if isinstance(curr, Call):
-                          # Flatten composite ops and add their latency
-                          flattened = branch_analyzer.flatten_composite_ops(curr)
-                          for op in flattened:
-                            total_lat += lat_calc.get_op_latency(op)
-                            min_thr = min(min_thr, lat_calc.get_op_throughput(op))
-                          # Continue to predecessors
-                          for arg in curr.args:
-                            if isinstance(arg, (Call, TupleGetItem)):
-                              queue.append(arg)
-                      return total_lat, min_thr if min_thr != float('inf') else 1
+                      # Helper to check if a branch ultimately leads to Var/Const (skip connection)
+                      def is_short_branch(pred, max_depth=20):
+                        """Check if branch has only non-conv ops leading to Var/Const."""
+                        visited = set()
+                        queue = [pred]
+                        depth = 0
+                        has_conv = False
+                        while queue and depth < max_depth:
+                          curr = queue.pop(0)
+                          if curr in visited:
+                            continue
+                          visited.add(curr)
+                          depth += 1
+                          if isinstance(curr, Call):
+                            if isinstance(curr.op, tvm.ir.Op):
+                              if curr.op.name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.conv2d"]:
+                                has_conv = True
+                            for arg in curr.args:
+                              if isinstance(arg, (Call, TupleGetItem)):
+                                queue.append(arg)
+                        return not has_conv
 
-                    branch_metrics = []
-                    for i, pred in enumerate(call_preds):
-                      is_short = is_short_branch(pred)
-                      lat, thr = get_cumulative_latency(pred)
-                      branch_metrics.append((lat, thr))
-                      debug_print(f"  --- Predecessor {i} ({getNodeDebugID(pred)}) ---")
-                      debug_print(f"    is_short_branch: {is_short}")
-                      debug_print(f"    Cumulative latency={lat}, min_throughput={thr}")
+                      # Calculate cumulative latency for each branch
+                      def get_cumulative_latency(pred, max_depth=50):
+                        """Calculate latency of all ops in the path from this pred back to Var/Const."""
+                        visited = set()
+                        queue = [pred]
+                        total_lat = 0
+                        min_thr = float('inf')
+                        depth = 0
+                        while queue and depth < max_depth:
+                          curr = queue.pop(0)
+                          if curr in visited:
+                            continue
+                          visited.add(curr)
+                          depth += 1
+                          if isinstance(curr, Call):
+                            # Flatten composite ops and add their latency
+                            flattened = branch_analyzer.flatten_composite_ops(curr)
+                            for op in flattened:
+                              total_lat += lat_calc.get_op_latency(op)
+                              min_thr = min(min_thr, lat_calc.get_op_throughput(op))
+                            # Continue to predecessors
+                            for arg in curr.args:
+                              if isinstance(arg, (Call, TupleGetItem)):
+                                queue.append(arg)
+                        return total_lat, min_thr if min_thr != float('inf') else 1
 
-                    debug_print(f"\n[ConvergeCheck] Skip connection branch metrics:")
-                    for i, (lat, thr) in enumerate(branch_metrics):
-                      debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
+                      branch_metrics = []
+                      for i, pred in enumerate(call_preds):
+                        is_short = is_short_branch(pred)
+                        lat, thr = get_cumulative_latency(pred)
+                        branch_metrics.append((lat, thr))
+                        debug_print(f"  --- Predecessor {i} ({getNodeDebugID(pred)}) ---")
+                        debug_print(f"    is_short_branch: {is_short}")
+                        debug_print(f"    Cumulative latency={lat}, min_throughput={thr}")
 
-                    is_unbalanced = self._branches_unbalanced(branch_metrics)
-                    debug_print(f"[ConvergeCheck] Skip connection branches unbalanced? {is_unbalanced}")
+                      debug_print(f"\n[ConvergeCheck] Skip connection branch metrics:")
+                      for i, (lat, thr) in enumerate(branch_metrics):
+                        debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
 
-                    if is_unbalanced:
-                      debug_print(f"[ConvergeCheck] Skip connection UNBALANCED - forcing new region")
+                      is_unbalanced = self._branches_unbalanced(branch_metrics)
+                      debug_print(f"[ConvergeCheck] Skip connection branches unbalanced? {is_unbalanced}")
 
-                      branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
-                      unique_regions = list({id(r): r for r in branch_regions}.values())
-                      debug_print(f"[ConvergeCheck] Branch regions: {len(branch_regions)}, unique: {len(unique_regions)}")
+                      if is_unbalanced:
+                        debug_print(f"[ConvergeCheck] Skip connection UNBALANCED - forcing new region")
 
-                      if len(unique_regions) == 1:
-                        debug_print(f"[ConvergeCheck] All predecessors in same region - DEADLOCK RISK")
-                        force_new_region = True
+                        branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
+                        unique_regions = list({id(r): r for r in branch_regions}.values())
+                        debug_print(f"[ConvergeCheck] Branch regions: {len(branch_regions)}, unique: {len(unique_regions)}")
+
+                        if len(unique_regions) == 1:
+                          debug_print(f"[ConvergeCheck] All predecessors in same region - DEADLOCK RISK")
+                          force_new_region = True
+                        else:
+                          debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
                       else:
-                        debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
+                        debug_print(f"[ConvergeCheck] Skip connection branches balanced - no special handling")
                     else:
-                      debug_print(f"[ConvergeCheck] Skip connection branches balanced - no special handling")
+                      debug_print(f"[ConvergeCheck] Skip connection handling DISABLED - using normal selection")
 
                     debug_print(f"{'#'*70}\n")
 
@@ -2915,7 +2930,7 @@ class AnnotGenerator:
 
           # No second pass needed; nodes with no inputs were attached to previous region when possible
 
-      annot = _AnnotatorBFS(self, mod)
+      annot = _AnnotatorBFS(self, mod, self.handle_skip_connection_converge)
       annot.run(func)
       self.RegionList = RegionList
       self.split_pending = annot.split_pending
@@ -3101,12 +3116,25 @@ def _apply_composite_splits(target_mod, split_pending, RegionList):
     return new_mod, RegionList
 
 
-def partitionRound(mod):
+def partitionRound(mod, handle_skip_connection_converge=True):
+  """
+  Partition IMCFlow functions into regions for hardware mapping.
+
+  Args:
+      mod: The TVM IRModule to partition
+      handle_skip_connection_converge: If True, treat skip connections (converge points
+          where diverge_node is None due to Var inputs) as unbalanced branches and
+          force new region creation. If False, skip connection converge points are
+          handled with normal selection policy. Default is True.
+
+  Returns:
+      Partitioned IRModule
+  """
   for global_var, func in mod.functions.items():
     if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
       name = global_var.name_hint
       func_attr = func.attrs
-      annotator = AnnotGenerator()
+      annotator = AnnotGenerator(handle_skip_connection_converge=handle_skip_connection_converge)
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
 
       # Step 1: Create regions (with split_pending for deferred splits)
