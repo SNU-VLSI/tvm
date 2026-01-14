@@ -2428,6 +2428,9 @@ class AnnotGenerator:
           # Track composites that need to be split (deferred until after region assignment)
           # Format: {original_composite: {"converge_op": op, "pre_region": region, "post_region": region}}
           self.split_pending = {}
+          # Track converge point summary for debugging
+          # Format: [{"node": node, "diverge_node": diverge_node, "branches": [...], "is_unbalanced": bool, "action": str}]
+          self.converge_point_summary = []
 
         def createRegion(self):
           Region = []
@@ -2715,9 +2718,33 @@ class AnnotGenerator:
                     is_unbalanced = self._branches_unbalanced(branch_metrics)
                     debug_print(f"\n[ConvergeCheck] Branches unbalanced? {is_unbalanced}")
 
+                    # Collect branch info for summary
+                    branch_info_list = []
+                    for i, branch_ops in enumerate(branches):
+                      ops_info = []
+                      for op in branch_ops:
+                        op_name = op.op.name if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op) else getNodeDebugID(op)
+                        ops_info.append(op_name)
+                      lat, thr = branch_metrics[i]
+                      branch_info_list.append({
+                        "ops": ops_info,
+                        "latency": lat,
+                        "throughput": thr,
+                        "ops_count": len(branch_ops)
+                      })
+
                     if not is_unbalanced:
                       debug_print(f"[ConvergeCheck] Branches are BALANCED - no special handling needed")
                       debug_print(f"{'#'*70}\n")
+                      # Record balanced converge point
+                      self.converge_point_summary.append({
+                        "node": getNodeDebugID(node),
+                        "diverge_node": getNodeDebugID(diverge_node),
+                        "type": "diverge-converge",
+                        "branches": branch_info_list,
+                        "is_unbalanced": False,
+                        "action": "no_action (balanced)"
+                      })
 
                     if is_unbalanced:
                       debug_print(f"[ConvergeCheck] Branches are UNBALANCED - checking region assignment")
@@ -2761,9 +2788,28 @@ class AnnotGenerator:
                             debug_print(f"[ConvergeCheck] Recorded split_pending for {getNodeDebugID(node)}")
                           else:
                             debug_print(f"[ConvergeCheck] No converge op found in composite")
+
+                        # Record unbalanced converge point with deadlock risk
+                        self.converge_point_summary.append({
+                          "node": getNodeDebugID(node),
+                          "diverge_node": getNodeDebugID(diverge_node),
+                          "type": "diverge-converge",
+                          "branches": branch_info_list,
+                          "is_unbalanced": True,
+                          "action": "force_new_region (deadlock risk)"
+                        })
                       else:
                         debug_print(f"[ConvergeCheck] Branches in different regions - no deadlock risk")
                         debug_print(f"{'#'*70}\n")
+                        # Record unbalanced but no deadlock risk
+                        self.converge_point_summary.append({
+                          "node": getNodeDebugID(node),
+                          "diverge_node": getNodeDebugID(diverge_node),
+                          "type": "diverge-converge",
+                          "branches": branch_info_list,
+                          "is_unbalanced": True,
+                          "action": "no_action (different regions)"
+                        })
                   else:
                     # No common diverge point found - likely skip connection from Var input
                     debug_print(f"[ConvergeCheck] No diverge point found for this converge point")
@@ -2837,6 +2883,18 @@ class AnnotGenerator:
                       for i, (lat, thr) in enumerate(branch_metrics):
                         debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
 
+                      # Collect skip connection branch info for summary
+                      skip_branch_info_list = []
+                      for i, pred in enumerate(call_preds):
+                        is_short = is_short_branch(pred)
+                        lat, thr = branch_metrics[i]
+                        skip_branch_info_list.append({
+                          "ops": [getNodeDebugID(pred)],
+                          "is_short_branch": is_short,
+                          "latency": lat,
+                          "throughput": thr
+                        })
+
                       is_unbalanced = self._branches_unbalanced(branch_metrics)
                       debug_print(f"[ConvergeCheck] Skip connection branches unbalanced? {is_unbalanced}")
 
@@ -2866,10 +2924,38 @@ class AnnotGenerator:
                               if pred in current_region:
                                 current_region.remove(pred)
                                 debug_print(f"[ConvergeCheck] Removed {getNodeDebugID(pred)} from region {self.RegionList.index(current_region)}")
+
+                          # Record skip connection converge point with deadlock risk
+                          self.converge_point_summary.append({
+                            "node": getNodeDebugID(node),
+                            "diverge_node": None,
+                            "type": "skip-connection",
+                            "branches": skip_branch_info_list,
+                            "is_unbalanced": True,
+                            "action": "force_new_region (deadlock risk)"
+                          })
                         else:
                           debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
+                          # Record skip connection converge point without deadlock risk
+                          self.converge_point_summary.append({
+                            "node": getNodeDebugID(node),
+                            "diverge_node": None,
+                            "type": "skip-connection",
+                            "branches": skip_branch_info_list,
+                            "is_unbalanced": True,
+                            "action": "no_action (different regions)"
+                          })
                       else:
                         debug_print(f"[ConvergeCheck] Skip connection branches balanced - no special handling")
+                        # Record balanced skip connection converge point
+                        self.converge_point_summary.append({
+                          "node": getNodeDebugID(node),
+                          "diverge_node": None,
+                          "type": "skip-connection",
+                          "branches": skip_branch_info_list,
+                          "is_unbalanced": False,
+                          "action": "no_action (balanced)"
+                        })
                     else:
                       debug_print(f"[ConvergeCheck] Skip connection handling DISABLED - using normal selection")
 
@@ -2966,6 +3052,30 @@ class AnnotGenerator:
         debug_print(f"\n  Region {region_idx} ({len(region)} nodes):")
         for node in region:
           debug_print(f"    - {getNodeDebugID(node)}")
+
+      # Print converge point summary
+      debug_print(f"\n{'-'*70}")
+      debug_print(f"CONVERGE POINT SUMMARY")
+      debug_print(f"{'-'*70}")
+      debug_print(f"Total converge points detected: {len(annot.converge_point_summary)}")
+      for cp_idx, cp_info in enumerate(annot.converge_point_summary):
+        debug_print(f"\n  Converge Point {cp_idx}:")
+        debug_print(f"    Node: {cp_info['node']}")
+        debug_print(f"    Type: {cp_info['type']}")
+        if cp_info['diverge_node']:
+          debug_print(f"    Diverge Node: {cp_info['diverge_node']}")
+        debug_print(f"    Is Unbalanced: {cp_info['is_unbalanced']}")
+        debug_print(f"    Action: {cp_info['action']}")
+        debug_print(f"    Branches ({len(cp_info['branches'])}):")
+        for br_idx, br_info in enumerate(cp_info['branches']):
+          if cp_info['type'] == 'skip-connection':
+            is_short = br_info.get('is_short_branch', 'N/A')
+            debug_print(f"      Branch {br_idx}: latency={br_info['latency']}, throughput={br_info['throughput']}, is_short={is_short}")
+            debug_print(f"        Ops: {br_info['ops']}")
+          else:
+            debug_print(f"      Branch {br_idx}: latency={br_info['latency']}, throughput={br_info['throughput']}, ops_count={br_info.get('ops_count', len(br_info['ops']))}")
+            debug_print(f"        Ops: {br_info['ops']}")
+
       debug_print(f"\nSplit pending: {len(self.split_pending)} composites")
       debug_print(f"{'='*70}\n")
 
