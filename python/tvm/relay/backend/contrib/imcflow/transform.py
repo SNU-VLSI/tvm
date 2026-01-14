@@ -1465,6 +1465,568 @@ def getOutputNodes(expr, recursive=False):
   _Visitor().visit(expr)
   return OutNodes
 
+
+# ==========================================
+# Converge Point Detection & Branch Analysis
+# ==========================================
+
+class LatencyThroughputCalculator:
+    """
+    Calculate latency and throughput for operations.
+
+    Latency: Total cycles from input arrival to output ready
+    Throughput: Operations per cycle (inverse of initiation interval)
+
+    These values depend on operation type and attributes (kernel size, channels, etc.)
+    """
+
+    @staticmethod
+    def get_op_latency(op_call) -> int:
+        """
+        Get latency for a single operation.
+
+        Args:
+            op_call: relay.Call node (can be inside composite or standalone)
+
+        Returns:
+            Latency in cycles
+
+        TODO: Fill in actual formulas based on hardware characteristics
+        """
+        if not isinstance(op_call, relay.Call):
+            return 0
+
+        if isinstance(op_call.op, tvm.ir.Op):
+            op_name = op_call.op.name
+            attrs = op_call.attrs
+
+            if op_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+                # TODO: Formula based on kernel_size, channels, etc.
+                # Example skeleton:
+                # kernel_h = attrs.kernel_size[0].value if attrs.kernel_size else 1
+                # kernel_w = attrs.kernel_size[1].value if attrs.kernel_size else 1
+                # channels = attrs.channels.value if attrs.channels else 1
+                # return kernel_h * kernel_w * channels * SOME_FACTOR
+                return 1  # Placeholder
+
+            elif op_name in ["nn.relu", "nn.bias_add"]:
+                # Element-wise ops: typically 1 cycle
+                return 1
+
+            elif op_name == "add":
+                # Add operation latency
+                return 1
+
+            elif op_name == "qnn.imcflow_min_max_quantize":
+                # Quantization latency
+                return 1
+
+            elif op_name == "qnn.imcflow_nu_quantize":
+                # Non-uniform quantization latency
+                return 1
+
+            elif op_name == "imcflow.fused_batch_norm":
+                # Fused batch norm latency
+                return 1
+
+            elif op_name in ["split", "concatenate"]:
+                # Data movement ops
+                return 1
+
+            elif op_name in ["multiply", "divide"]:
+                # Arithmetic ops
+                return 1
+
+            else:
+                debug_print(f"[LatencyThroughputCalculator] Unknown op: {op_name}")
+                return 1
+
+        return 0
+
+    @staticmethod
+    def get_op_throughput(op_call) -> int:
+        """
+        Get throughput for a single operation.
+
+        Args:
+            op_call: relay.Call node
+
+        Returns:
+            Throughput (higher is better, represents data elements per cycle)
+
+        TODO: Fill in actual formulas based on hardware characteristics
+        """
+        if not isinstance(op_call, relay.Call):
+            return 1
+
+        if isinstance(op_call.op, tvm.ir.Op):
+            op_name = op_call.op.name
+            attrs = op_call.attrs
+
+            if op_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+                # TODO: Formula based on parallelism, IMCE utilization
+                # Example skeleton:
+                # out_channels = attrs.channels.value if attrs.channels else 1
+                # return min(out_channels, IMCE_PARALLELISM)
+                return 1  # Placeholder
+
+            elif op_name in ["nn.relu", "nn.bias_add", "add", "multiply", "divide"]:
+                # Element-wise: high throughput
+                return 1
+
+            elif op_name in ["qnn.imcflow_min_max_quantize", "qnn.imcflow_nu_quantize"]:
+                return 1
+
+            elif op_name == "imcflow.fused_batch_norm":
+                return 1
+
+            elif op_name in ["split", "concatenate"]:
+                return 1
+
+            else:
+                return 1
+
+        return 1
+
+    @staticmethod
+    def calculate_branch_latency(ops: list) -> int:
+        """
+        Calculate total latency for a branch (sum of all op latencies).
+
+        Args:
+            ops: List of relay.Call nodes in the branch
+
+        Returns:
+            Total latency in cycles
+        """
+        return sum(LatencyThroughputCalculator.get_op_latency(op) for op in ops)
+
+    @staticmethod
+    def calculate_branch_throughput(ops: list) -> int:
+        """
+        Calculate effective throughput for a branch (bottleneck).
+
+        Args:
+            ops: List of relay.Call nodes in the branch
+
+        Returns:
+            Minimum throughput (bottleneck determines overall throughput)
+        """
+        if not ops:
+            return 1
+        throughputs = [LatencyThroughputCalculator.get_op_throughput(op) for op in ops]
+        return min(throughputs) if throughputs else 1
+
+
+class BranchAnalyzer:
+    """
+    Analyze diverge-converge patterns in the computation graph.
+
+    Detects converge points where multiple branches merge, extracts branch
+    operations (including inside composites), and provides branch metrics.
+    """
+
+    def __init__(self, edges, rev_edges):
+        """
+        Args:
+            edges: dict mapping node -> list of successor nodes
+            rev_edges: dict mapping node -> list of predecessor nodes
+        """
+        self.edges = edges
+        self.rev_edges = rev_edges
+
+    def is_converge_point(self, node) -> bool:
+        """
+        Check if a node is a converge point.
+
+        A converge point is where 2+ branches from a common diverge point merge.
+
+        Args:
+            node: The node to check
+
+        Returns:
+            True if this is a converge point
+        """
+        # Get predecessors
+        preds = self.rev_edges.get(node, [])
+        if len(preds) < 2:
+            return False
+
+        # Find ancestors for each predecessor
+        pred_ancestors = []
+        for pred in preds:
+            ancestors = self._get_all_ancestors(pred)
+            pred_ancestors.append(ancestors)
+
+        # Check if there's a common ancestor (diverge point)
+        if len(pred_ancestors) >= 2:
+            common = pred_ancestors[0]
+            for ancestors in pred_ancestors[1:]:
+                common = common & ancestors
+
+            # If there's a common ancestor that's not too far back, it's a converge point
+            if common:
+                return True
+
+        return False
+
+    def _get_all_ancestors(self, node, max_depth=50) -> set:
+        """Get all ancestor nodes up to max_depth."""
+        ancestors = set()
+        queue = [(node, 0)]
+        visited = {node}
+
+        while queue:
+            curr, depth = queue.pop(0)
+            if depth >= max_depth:
+                continue
+
+            for pred in self.rev_edges.get(curr, []):
+                if pred not in visited:
+                    visited.add(pred)
+                    ancestors.add(pred)
+                    queue.append((pred, depth + 1))
+
+        return ancestors
+
+    def find_diverge_point(self, converge_node):
+        """
+        Find the diverge point (common ancestor) for a converge node.
+
+        Args:
+            converge_node: The converge point node
+
+        Returns:
+            The diverge point node, or None if not found
+        """
+        preds = self.rev_edges.get(converge_node, [])
+        if len(preds) < 2:
+            return None
+
+        # Get ancestors for each predecessor with path tracking
+        pred_ancestors = []
+        for pred in preds:
+            ancestors = self._get_all_ancestors(pred)
+            pred_ancestors.append(ancestors)
+
+        # Find common ancestors
+        if len(pred_ancestors) < 2:
+            return None
+
+        common = pred_ancestors[0]
+        for ancestors in pred_ancestors[1:]:
+            common = common & ancestors
+
+        if not common:
+            return None
+
+        # Find the closest common ancestor (diverge point)
+        # by finding the one with shortest max distance from all preds
+        min_dist = float('inf')
+        diverge_point = None
+
+        for ancestor in common:
+            max_dist = 0
+            for pred in preds:
+                dist = self._distance_to_ancestor(pred, ancestor)
+                if dist is not None:
+                    max_dist = max(max_dist, dist)
+
+            if max_dist < min_dist:
+                min_dist = max_dist
+                diverge_point = ancestor
+
+        return diverge_point
+
+    def _distance_to_ancestor(self, node, ancestor, max_depth=50) -> int:
+        """Calculate distance from node to ancestor."""
+        if node == ancestor:
+            return 0
+
+        queue = [(node, 0)]
+        visited = {node}
+
+        while queue:
+            curr, dist = queue.pop(0)
+            if dist >= max_depth:
+                continue
+
+            for pred in self.rev_edges.get(curr, []):
+                if pred == ancestor:
+                    return dist + 1
+                if pred not in visited:
+                    visited.add(pred)
+                    queue.append((pred, dist + 1))
+
+        return None
+
+    def extract_branches(self, diverge_node, converge_node) -> list:
+        """
+        Extract operations in each branch from diverge to converge point.
+
+        Args:
+            diverge_node: The common ancestor where branches split
+            converge_node: The node where branches merge
+
+        Returns:
+            List of lists, where each inner list contains ops in one branch
+            Operations are extracted at the operation level (inside composites)
+        """
+        preds = self.rev_edges.get(converge_node, [])
+        branches = []
+
+        for pred in preds:
+            branch_ops = []
+            self._collect_branch_ops(pred, diverge_node, branch_ops, set())
+            branches.append(branch_ops)
+
+        return branches
+
+    def _collect_branch_ops(self, node, stop_node, ops_list, visited):
+        """
+        Recursively collect operations from node back to stop_node.
+        Flattens composite functions to get individual operations.
+        """
+        if node == stop_node or node in visited:
+            return
+
+        visited.add(node)
+
+        if isinstance(node, relay.Call):
+            # Flatten composite to get individual ops
+            flattened = self.flatten_composite_ops(node)
+            ops_list.extend(flattened)
+
+        # Continue to predecessors
+        for pred in self.rev_edges.get(node, []):
+            self._collect_branch_ops(pred, stop_node, ops_list, visited)
+
+    def flatten_composite_ops(self, call) -> list:
+        """
+        Extract individual operations from a composite function call.
+
+        Args:
+            call: relay.Call node (may be composite or regular op)
+
+        Returns:
+            List of relay.Call nodes representing individual operations
+        """
+        if not isinstance(call, relay.Call):
+            return []
+
+        # Check if this is a composite function
+        if isinstance(call.op, relay.Function) and hasattr(call.op.attrs, "Composite"):
+            # Traverse the composite body to extract ops
+            ops = []
+            self._extract_ops_from_expr(call.op.body, ops)
+            return ops
+        elif isinstance(call.op, tvm.ir.Op):
+            # Regular operation
+            return [call]
+
+        return []
+
+    def _extract_ops_from_expr(self, expr, ops_list):
+        """Recursively extract Call nodes from an expression."""
+        if isinstance(expr, relay.Call):
+            if isinstance(expr.op, tvm.ir.Op):
+                ops_list.append(expr)
+            # Continue into args
+            for arg in expr.args:
+                self._extract_ops_from_expr(arg, ops_list)
+        elif isinstance(expr, relay.Tuple):
+            for field in expr.fields:
+                self._extract_ops_from_expr(field, ops_list)
+        elif isinstance(expr, relay.TupleGetItem):
+            self._extract_ops_from_expr(expr.tuple_value, ops_list)
+
+
+class CompositeSplitter:
+    """
+    Split composite functions at converge points.
+
+    Uses pattern.partition() to create new composite functions with
+    different boundaries.
+    """
+
+    @staticmethod
+    def find_converge_op_in_composite(composite_call) -> relay.Call:
+        """
+        Find the converge operation (typically 'add') inside a composite.
+
+        Args:
+            composite_call: The composite function call
+
+        Returns:
+            The converge operation (add node) or None
+        """
+        if not isinstance(composite_call.op, relay.Function):
+            return None
+
+        body = composite_call.op.body
+
+        # Look for 'add' operation that has multiple input branches
+        class ConvergeOpFinder(relay.ExprVisitor):
+            def __init__(self):
+                super().__init__()
+                self.converge_op = None
+                self.param_set = set()
+
+            def visit_call(self, call):
+                if isinstance(call.op, tvm.ir.Op) and call.op.name == "add":
+                    # Check if both args come from different sources
+                    arg0_is_call = isinstance(call.args[0], relay.Call)
+                    arg1_is_call = isinstance(call.args[1], relay.Call)
+                    if arg0_is_call and arg1_is_call:
+                        self.converge_op = call
+                super().visit_call(call)
+
+        finder = ConvergeOpFinder()
+        finder.param_set = set(composite_call.op.params)
+        finder.visit(body)
+
+        return finder.converge_op
+
+    @staticmethod
+    def split_composite_at_converge(composite_call, converge_op, composite_name_prefix="imcflow"):
+        """
+        Split a composite function at the converge point.
+
+        Strategy:
+        1. Inline the composite function
+        2. Use pattern.partition() to create pre-converge composite
+        3. Use pattern.partition() to create post-converge composite
+
+        Args:
+            composite_call: The original composite function call
+            converge_op: The converge operation inside the composite
+            composite_name_prefix: Prefix for new composite names
+
+        Returns:
+            Tuple of (pre_expr, post_pattern_attrs) or None if split not possible
+            - pre_expr: Expression for the pre-converge part
+            - post_pattern_attrs: Attributes for the post-converge composite
+        """
+        from tvm.relay.dataflow_pattern import wildcard, is_op, is_constant
+
+        if not isinstance(composite_call.op, relay.Function):
+            return None
+
+        func = composite_call.op
+        body = func.body
+
+        # Step 1: Inline the composite - create var_map and bind
+        var_map = {}
+        for param, arg in zip(func.params, composite_call.args):
+            var_map[param] = arg
+
+        inlined_body = relay.bind(body, var_map)
+
+        # Step 2: Build pattern for post-converge part (add and everything after)
+        # This captures: add(x, y) -> ... -> output
+        x = wildcard()
+        y = wildcard()
+        post_pattern = is_op("add")(x, y)
+
+        # Check what ops follow the add
+        if isinstance(body, relay.Call):
+            curr = body
+            while isinstance(curr, relay.Call) and isinstance(curr.op, tvm.ir.Op):
+                op_name = curr.op.name
+                if op_name == "add":
+                    break
+                elif op_name == "nn.relu":
+                    post_pattern = is_op("nn.relu")(post_pattern)
+                elif op_name == "qnn.imcflow_min_max_quantize":
+                    post_pattern = is_op("qnn.imcflow_min_max_quantize")(
+                        post_pattern, is_constant(), is_constant()
+                    )
+                elif op_name == "qnn.imcflow_nu_quantize":
+                    post_pattern = is_op("qnn.imcflow_nu_quantize")(
+                        post_pattern, is_constant()
+                    )
+                # Move to the input of current op
+                if curr.args:
+                    curr = curr.args[0]
+                else:
+                    break
+
+        # Step 3: Apply partition to create post-converge composite
+        post_composite_name = f"{composite_name_prefix}.post_converge"
+        try:
+            result_expr = post_pattern.partition(
+                inlined_body,
+                {"Composite": post_composite_name}
+            )
+            return result_expr, post_composite_name
+        except Exception as e:
+            debug_print(f"[CompositeSplitter] Failed to partition: {e}")
+            return None
+
+    @staticmethod
+    def create_pre_converge_composite(expr, branch_ops, composite_name_prefix="imcflow"):
+        """
+        Create a composite function for pre-converge operations using pattern matching.
+
+        Args:
+            expr: The expression to transform
+            branch_ops: List of operations to include in the composite
+            composite_name_prefix: Prefix for composite name
+
+        Returns:
+            Transformed expression with pre-converge composite
+        """
+        from tvm.relay.dataflow_pattern import wildcard, is_op, is_constant
+
+        if not branch_ops:
+            return expr
+
+        # Build pattern based on the operations in the branch
+        # Start with the first op and chain subsequent ops
+        pattern = None
+
+        for op_call in reversed(branch_ops):
+            if not isinstance(op_call, relay.Call) or not isinstance(op_call.op, tvm.ir.Op):
+                continue
+
+            op_name = op_call.op.name
+
+            if pattern is None:
+                # First op - use wildcards for inputs
+                if op_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+                    pattern = is_op(op_name)(wildcard(), is_constant(), is_constant())
+                elif op_name == "nn.bias_add":
+                    pattern = is_op(op_name)(wildcard(), is_constant())
+                elif op_name == "nn.relu":
+                    pattern = is_op(op_name)(wildcard())
+                elif op_name == "add":
+                    pattern = is_op(op_name)(wildcard(), wildcard())
+                else:
+                    pattern = is_op(op_name)(wildcard())
+            else:
+                # Chain with previous pattern
+                if op_name == "nn.relu":
+                    pattern = is_op(op_name)(pattern)
+                elif op_name == "nn.bias_add":
+                    pattern = is_op(op_name)(pattern, is_constant())
+                elif op_name in ["qnn.imcflow_min_max_quantize"]:
+                    pattern = is_op(op_name)(pattern, is_constant(), is_constant())
+
+        if pattern is None:
+            return expr
+
+        pre_composite_name = f"{composite_name_prefix}.pre_converge"
+        try:
+            result_expr = pattern.partition(
+                expr,
+                {"Composite": pre_composite_name}
+            )
+            return result_expr
+        except Exception as e:
+            debug_print(f"[CompositeSplitter] Failed to create pre-converge composite: {e}")
+            return expr
+
+
 class AnnotGenerator:
     def __init__(self):
       self.RegionList = []
@@ -1819,8 +2381,38 @@ class AnnotGenerator:
                 q.append(v)
           return order, gb.edges, gb.rev_edges
 
+        def _is_converge_point(self, node, rev_edges):
+          """Check if node is a converge point (2+ inputs from common diverge point)."""
+          preds = rev_edges.get(node, [])
+          call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
+          return len(call_preds) >= 2
+
+        def _branches_unbalanced(self, branch_metrics):
+          """Check if branches have different latency or throughput (threshold=0)."""
+          if len(branch_metrics) < 2:
+            return False
+          lats = [m[0] for m in branch_metrics]
+          thrs = [m[1] for m in branch_metrics]
+          return len(set(lats)) > 1 or len(set(thrs)) > 1
+
+        def _get_branch_last_nodes_regions(self, node, rev_edges):
+          """Get the regions of the last nodes in each branch before converge point."""
+          preds = rev_edges.get(node, [])
+          call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
+          regions = []
+          for pred in call_preds:
+            region = self.getRegion(pred)
+            if region is not None:
+              regions.append(region)
+          return regions
+
         def run(self, fn):
           order, edges, rev_edges = self._topo_bfs_order(fn)
+
+          # Initialize branch analyzer for converge point detection
+          branch_analyzer = BranchAnalyzer(edges, rev_edges)
+          lat_calc = LatencyThroughputCalculator()
+
           for node in order:
             if isinstance(node, Call):
               IsComposite = self.isComposite(node)
@@ -1855,26 +2447,90 @@ class AnnotGenerator:
                   if d in candidate_regions:
                     candidate_regions.remove(d)
 
-                # Selection policy: if multiple distinct input regions, just use first one
-                uniq = list({id(r): r for r in candidate_regions}.values())
-                if len(uniq) == 1:
-                  Region = uniq[0]
+                # ====================================================
+                # Converge point check: detect branch latency mismatch
+                # ====================================================
+                force_new_region = False
+                split_result = None
+
+                if self._is_converge_point(node, rev_edges):
+                  debug_print(f"[ConvergeCheck] Detected converge point: {getNodeDebugID(node)}")
+
+                  # Find diverge point and extract branches
+                  diverge_node = branch_analyzer.find_diverge_point(node)
+                  if diverge_node is not None:
+                    debug_print(f"[ConvergeCheck] Diverge point: {getNodeDebugID(diverge_node)}")
+
+                    branches = branch_analyzer.extract_branches(diverge_node, node)
+                    debug_print(f"[ConvergeCheck] Found {len(branches)} branches")
+
+                    # Calculate branch metrics
+                    branch_metrics = []
+                    for i, branch_ops in enumerate(branches):
+                      lat = lat_calc.calculate_branch_latency(branch_ops)
+                      thr = lat_calc.calculate_branch_throughput(branch_ops)
+                      branch_metrics.append((lat, thr))
+                      debug_print(f"[ConvergeCheck] Branch {i}: latency={lat}, throughput={thr}, ops={len(branch_ops)}")
+
+                    # Check if branches are unbalanced
+                    if self._branches_unbalanced(branch_metrics):
+                      debug_print(f"[ConvergeCheck] Branches are UNBALANCED - forcing new region")
+
+                      # Check if input branches are in the same region (deadlock risk)
+                      branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
+                      unique_regions = list({id(r): r for r in branch_regions}.values())
+
+                      if len(unique_regions) == 1:
+                        # All branches in same region -> deadlock risk -> force new region
+                        debug_print(f"[ConvergeCheck] All branches in same region - DEADLOCK RISK")
+                        force_new_region = True
+
+                        # If composite, try to split at converge point
+                        if IsComposite:
+                          debug_print(f"[ConvergeCheck] Attempting to split composite at converge point")
+                          converge_op = CompositeSplitter.find_converge_op_in_composite(node)
+                          if converge_op is not None:
+                            split_result = CompositeSplitter.split_composite_at_converge(
+                              node, converge_op, "imcflow"
+                            )
+                            if split_result is not None:
+                              debug_print(f"[ConvergeCheck] Composite split successful")
+                              # TODO: Handle split result - replace node with split composites
+                              # For now, just force new region for the converge point
+                            else:
+                              debug_print(f"[ConvergeCheck] Composite split failed, using new region")
+                      else:
+                        debug_print(f"[ConvergeCheck] Branches in different regions - no deadlock risk")
+
+                # ====================================================
+                # Selection policy with converge point handling
+                # ====================================================
+                if force_new_region:
+                  # Converge point with unbalanced branches -> new region
+                  Region = self.createRegion()
                   self.addToRegion(Region, node)
-                elif len(uniq) > 1:
-                  Region = uniq[0]
-                  # Region = self.createRegion()
-                  self.addToRegion(Region, node)
+                  debug_print(f"[ConvergeCheck] Created new region for converge point")
                 else:
-                  # No input region (inputs likely Var/Const). Prefer previous node's region if available.
-                  #TODO: just traverse call node..(?) no need to consider Var and Const node..
-                  Region = None
-                  if self.last_assigned_region is not None:
-                    # Capacity gate when attaching to previous region
-                    if self.getRegionSize(self.last_assigned_region) + self.getCost(node) <= ImcflowDeviceConfig.IMCE_NUM:
-                      Region = self.last_assigned_region
-                  if Region is None:
-                    Region = self.createRegion()
-                  self.addToRegion(Region, node)
+                  # Normal selection policy
+                  uniq = list({id(r): r for r in candidate_regions}.values())
+                  if len(uniq) == 1:
+                    Region = uniq[0]
+                    self.addToRegion(Region, node)
+                  elif len(uniq) > 1:
+                    Region = uniq[0]
+                    # Region = self.createRegion()
+                    self.addToRegion(Region, node)
+                  else:
+                    # No input region (inputs likely Var/Const). Prefer previous node's region if available.
+                    #TODO: just traverse call node..(?) no need to consider Var and Const node..
+                    Region = None
+                    if self.last_assigned_region is not None:
+                      # Capacity gate when attaching to previous region
+                      if self.getRegionSize(self.last_assigned_region) + self.getCost(node) <= ImcflowDeviceConfig.IMCE_NUM:
+                        Region = self.last_assigned_region
+                    if Region is None:
+                      Region = self.createRegion()
+                    self.addToRegion(Region, node)
 
             elif isinstance(node, TupleGetItem):
               # Attach to tuple region; create one if absent
