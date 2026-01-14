@@ -1480,8 +1480,15 @@ class LatencyThroughputCalculator:
     These values depend on operation type and attributes (kernel size, channels, etc.)
     """
 
-    @staticmethod
-    def get_op_latency(op_call) -> int:
+    def __init__(self, module=None):
+        """
+        Args:
+            module: The TVM IRModule containing the functions being analyzed.
+                    Used to resolve types and access function definitions.
+        """
+        self.module = module
+
+    def get_op_latency(self, op_call) -> int:
         """
         Get latency for a single operation.
 
@@ -1505,24 +1512,17 @@ class LatencyThroughputCalculator:
             op_name = op_call.op.name
             attrs = op_call.attrs
 
-            if op_name == "nn.imcflow_qconv":
-                # Conv2D: high latency due to MAC operations
-                # Test value: base 10 + kernel_size factor
-                try:
-                    kernel_h = int(attrs.kernel_size[0]) if attrs.kernel_size else 3
-                    kernel_w = int(attrs.kernel_size[1]) if attrs.kernel_size else 3
-                    return 10 + kernel_h * kernel_w
-                except:
-                    return 20  # Default for 3x3 conv
+            if op_name in ["nn.imcflow_qdwconv", "nn.imcflow_qconv", "nn.conv2d"]:
+                # Conv2D: high latency due to linebuffer fill delay
+                input_tensor_type = transform_utils.get_type(self.module, op_call.args[0])
+                input_shape = input_tensor_type.shape
+                N, IC, IH, IW = list(input_shape)
+                kernel_h = int(attrs.kernel_size[0]) if attrs.kernel_size else 3
+                kernel_w = int(attrs.kernel_size[1]) if attrs.kernel_size else 3
+                padding, strides = attrs.padding, attrs.strides
 
-            elif op_name == "nn.imcflow_qdwconv":
-                # Depthwise Conv: slightly lower than regular conv
-                try:
-                    kernel_h = int(attrs.kernel_size[0]) if attrs.kernel_size else 3
-                    kernel_w = int(attrs.kernel_size[1]) if attrs.kernel_size else 3
-                    return 5 + kernel_h * kernel_w
-                except:
-                    return 14  # Default for 3x3 dwconv
+                latency = IW * max(0, (kernel_h - padding[0])) + max(0, (kernel_w - padding[1]))
+                return latency
 
             elif op_name in ["nn.relu", "nn.bias_add"]:
                 # Element-wise ops: very fast
@@ -1534,15 +1534,15 @@ class LatencyThroughputCalculator:
 
             elif op_name == "qnn.imcflow_min_max_quantize":
                 # Quantization: medium latency (comparison + shift)
-                return 3
+                return 1
 
             elif op_name == "qnn.imcflow_nu_quantize":
                 # Non-uniform quantization: slightly higher (LUT lookup)
-                return 4
+                return 1
 
             elif op_name == "imcflow.fused_batch_norm":
                 # Fused batch norm: multiply + add
-                return 2
+                return 1
 
             elif op_name in ["split", "concatenate"]:
                 # Data movement ops: depends on data size, use small value
@@ -1550,7 +1550,7 @@ class LatencyThroughputCalculator:
 
             elif op_name in ["multiply", "divide"]:
                 # Arithmetic ops
-                return 2
+                return 1
 
             else:
                 debug_print(f"[LatencyThroughputCalculator] Unknown op: {op_name}")
@@ -1558,8 +1558,7 @@ class LatencyThroughputCalculator:
 
         return 0
 
-    @staticmethod
-    def get_op_throughput(op_call) -> int:
+    def get_op_throughput(self, op_call) -> int:
         """
         Get throughput for a single operation.
 
@@ -1584,51 +1583,39 @@ class LatencyThroughputCalculator:
             op_name = op_call.op.name
             attrs = op_call.attrs
 
-            if op_name == "nn.imcflow_qconv":
+            if op_name in ["nn.imcflow_qdwconv", "nn.imcflow_qconv", "nn.conv2d"]:
                 # Conv2D: throughput limited by MAC array
                 # Lower output channels = lower throughput
-                try:
-                    channels = int(attrs.channels) if attrs.channels else 64
-                    # Throughput scales with output channels (up to IMCE limit)
-                    return min(channels, 64)
-                except:
-                    return 32
-
-            elif op_name == "nn.imcflow_qdwconv":
-                # Depthwise Conv: even more limited (1 channel per IMCE)
-                try:
-                    channels = int(attrs.channels) if attrs.channels else 32
-                    return min(channels, 32)
-                except:
-                    return 16
+                strides = attrs.strides
+                stride_val = int(strides[1]) if strides else 1
+                return 1.0 / stride_val
 
             elif op_name in ["nn.relu", "nn.bias_add", "add", "multiply", "divide"]:
                 # Element-wise: very high throughput (pipelined)
-                return 256
+                return 1
 
             elif op_name == "qnn.imcflow_min_max_quantize":
                 # Quantization: medium-high throughput
-                return 128
+                return 1
 
             elif op_name == "qnn.imcflow_nu_quantize":
                 # Non-uniform quantization: medium (LUT access)
-                return 64
+                return 1
 
             elif op_name == "imcflow.fused_batch_norm":
                 # Fused batch norm: high throughput
-                return 128
+                return 1
 
             elif op_name in ["split", "concatenate"]:
                 # Data movement: high throughput
-                return 256
+                return 1
 
             else:
-                return 100
+                return 1
 
-        return 100
+        return 1
 
-    @staticmethod
-    def calculate_branch_latency(ops: list) -> int:
+    def calculate_branch_latency(self, ops: list) -> int:
         """
         Calculate total latency for a branch (sum of all op latencies).
 
@@ -1638,10 +1625,9 @@ class LatencyThroughputCalculator:
         Returns:
             Total latency in cycles
         """
-        return sum(LatencyThroughputCalculator.get_op_latency(op) for op in ops)
+        return sum(self.get_op_latency(op) for op in ops)
 
-    @staticmethod
-    def calculate_branch_throughput(ops: list) -> int:
+    def calculate_branch_throughput(self, ops: list) -> int:
         """
         Calculate effective throughput for a branch (bottleneck).
 
@@ -1653,7 +1639,7 @@ class LatencyThroughputCalculator:
         """
         if not ops:
             return 1
-        throughputs = [LatencyThroughputCalculator.get_op_throughput(op) for op in ops]
+        throughputs = [self.get_op_throughput(op) for op in ops]
         return min(throughputs) if throughputs else 1
 
 
@@ -1679,6 +1665,7 @@ class BranchAnalyzer:
         Check if a node is a converge point.
 
         A converge point is where 2+ branches from a common diverge point merge.
+        This includes cases where one predecessor IS the diverge point (skip connection).
 
         Args:
             node: The node to check
@@ -1691,19 +1678,21 @@ class BranchAnalyzer:
         if len(preds) < 2:
             return False
 
-        # Find ancestors for each predecessor
-        pred_ancestors = []
+        # Find ancestors for each predecessor (including the predecessor itself)
+        pred_ancestor_sets = []
         for pred in preds:
             ancestors = self._get_all_ancestors(pred)
-            pred_ancestors.append(ancestors)
+            ancestors.add(pred)  # Include the predecessor itself
+            pred_ancestor_sets.append(ancestors)
 
         # Check if there's a common ancestor (diverge point)
-        if len(pred_ancestors) >= 2:
-            common = pred_ancestors[0]
-            for ancestors in pred_ancestors[1:]:
+        # Also check if one predecessor is ancestor of another (skip connection case)
+        if len(pred_ancestor_sets) >= 2:
+            common = pred_ancestor_sets[0]
+            for ancestors in pred_ancestor_sets[1:]:
                 common = common & ancestors
 
-            # If there's a common ancestor that's not too far back, it's a converge point
+            # If there's a common ancestor, it's a converge point
             if common:
                 return True
 
@@ -1743,9 +1732,11 @@ class BranchAnalyzer:
             return None
 
         # Get ancestors for each predecessor with path tracking
+        # Include the predecessor itself in case it IS the diverge point (skip connection)
         pred_ancestors = []
         for pred in preds:
             ancestors = self._get_all_ancestors(pred)
+            ancestors.add(pred)  # Include pred itself for skip connection detection
             pred_ancestors.append(ancestors)
 
         # Find common ancestors
@@ -2365,9 +2356,10 @@ class AnnotGenerator:
       RegionList = []
 
       class _AnnotatorBFS:
-        def __init__(self, outer_self):
+        def __init__(self, outer_self, target_mod):
           self.RegionList = RegionList
           self.outer = outer_self
+          self.target_mod = target_mod  # Store module for latency/throughput calculations
           # Track most recently assigned region to attach nodes with no input regions
           self.last_assigned_region = None
           # Track composites that need to be split (deferred until after region assignment)
@@ -2549,7 +2541,7 @@ class AnnotGenerator:
 
           # Initialize branch analyzer for converge point detection
           branch_analyzer = BranchAnalyzer(edges, rev_edges)
-          lat_calc = LatencyThroughputCalculator()
+          lat_calc = LatencyThroughputCalculator(self.target_mod)
 
           for node in order:
             if isinstance(node, Call):
@@ -2714,7 +2706,7 @@ class AnnotGenerator:
 
           # No second pass needed; nodes with no inputs were attached to previous region when possible
 
-      annot = _AnnotatorBFS(self)
+      annot = _AnnotatorBFS(self, mod)
       annot.run(func)
       self.RegionList = RegionList
       self.split_pending = annot.split_pending
