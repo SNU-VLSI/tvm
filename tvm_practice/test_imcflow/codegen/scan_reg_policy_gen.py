@@ -20,7 +20,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../python"))
 
 import tvm
 from tvm import relay
-from tvm.contrib.imcflow import ImcflowDeviceConfig, NodeID, RouterEntry
+from tvm.contrib.imcflow import (
+    ImcflowDeviceConfig,
+    NodeID,
+    RouterEntry,
+    DataBlock,
+    InstEdgeInfo,
+)
 
 
 class ScanRegPolicyGenerator:
@@ -35,6 +41,7 @@ class ScanRegPolicyGenerator:
         self.NoCPaths = {}
         self.PolicyTable_2D = {}
         self.table_capacity = 32
+        self.router_entry_list = {}
         
     def construct_noc_path(self) -> Dict:
         """
@@ -86,6 +93,9 @@ class ScanRegPolicyGenerator:
         
         if not self.NoCPaths:
             raise ValueError("NoCPaths not constructed. Call construct_noc_path() first.")
+
+        # Reset router entry cache per generation
+        self.router_entry_list = {}
         
         # Initialize policy tables for all nodes
         # Each policy table starts with an all-zeros entry at address 0
@@ -183,6 +193,8 @@ class ScanRegPolicyGenerator:
             """
             source_coord = NodeID.to_coord(source_node)
             dest_coord = NodeID.to_coord(dest_node)
+
+            router_entries: List[Tuple[NodeID, int]] = []
             
             # If same node, no routing needed
             if source_coord == dest_coord:
@@ -212,7 +224,9 @@ class ScanRegPolicyGenerator:
                 target_addr = len(policy_tables[next_node])
                 entry[direction]["addr"] = target_addr
                 entry[direction]["enable"] = True
+                entry_addr = len(policy_tables[current_node])
                 policy_tables[current_node].append(entry)
+                router_entries.append((current_node, entry_addr))
                 
                 # Move to next node
                 current_coord = next_coord
@@ -226,7 +240,12 @@ class ScanRegPolicyGenerator:
                 "South": {"enable": False, "addr": 0},
                 "West": {"enable": False, "addr": 0}
             }
+            final_addr = len(policy_tables[dest_node])
             policy_tables[dest_node].append(final_entry)
+            router_entries.append((dest_node, final_addr))
+
+            # Cache router entries for InstEdgeInfo creation
+            self.router_entry_list[dest_node] = router_entries
             
             print(f"  Created path: {source_node.name} -> {dest_node.name} "
                   f"(hops: {len(path_coords)})")
@@ -248,6 +267,21 @@ class ScanRegPolicyGenerator:
                       f"({entry_count}/{self.table_capacity} capacity)")
         
         return policy_tables
+
+    def add_edge_info(self, func_name: str = "scan_reg") -> None:
+        """
+        Create InstEdgeInfo objects from generated policy tables and register them.
+        """
+        if not self.PolicyTable_2D:
+            raise ValueError("Policy table not generated. Call gen_policy_table() first.")
+
+        for imce_node, entry_list in self.router_entry_list.items():
+            router_entry_objs = [
+                RouterEntry(node_id, addr, self.PolicyTable_2D[node_id][addr])
+                for node_id, addr in entry_list
+            ]
+            edgeinfo = InstEdgeInfo(router_entry_objs, None)
+            ImcflowDeviceConfig().add_inst_edge_info(func_name, imce_node, edgeinfo)
     
     def export_policy_table(self, output_path: str) -> None:
         """
@@ -310,6 +344,40 @@ class ScanRegPolicyGenerator:
                        f"(split_idx: {split_idx})\n")
         
         print(f"NoC paths exported to: {output_path}")
+    
+    def allocate(self, func_name: str = "scan_reg") -> None:
+        """
+        Allocate memory for scan register policy tables.
+        
+        This allocates memory blocks for policy tables to each inode's memory layout,
+        similar to how PolicyTableGenerator.allocate() works in transform.py.
+        
+        Args:
+            func_name: Function name to use for memory layout organization
+        """
+        if not self.PolicyTable_2D:
+            raise ValueError("Policy table not generated. Call gen_policy_table() first.")
+        
+        print("\n" + "="*60)
+        print("ALLOCATING MEMORY FOR SCAN REGISTER POLICY TABLES")
+        print("="*60)
+        
+        # Allocate memory for policy tables
+        total_allocated = 0
+        for node_id, policy_table in self.PolicyTable_2D.items():
+            if len(policy_table) == 0:
+                continue            
+            mem_size = len(policy_table) * 32
+            mem_block = DataBlock(f"{node_id.name}_scan_reg_policy", mem_size)
+            inode_id = node_id.master() if node_id.is_imce() else node_id            
+            ImcflowDeviceConfig().MemLayout[func_name][f"{inode_id.name}_data"].allocate(mem_block, phase="init")
+            
+            total_allocated += mem_size
+            print(f"  {node_id.name:12s}: {mem_size:5d} bytes "
+                  f"({len(policy_table):2d} entries) -> {inode_id.name}")
+        
+        print(f"\nTotal allocated: {total_allocated} bytes")
+        print(f"Memory allocated to ImcflowDeviceConfig().MemLayout['{func_name}']")
 
 
 def run_scan_reg_policy_generation(output_dir: str = "./scan_reg_policy") -> None:
@@ -334,10 +402,22 @@ def run_scan_reg_policy_generation(output_dir: str = "./scan_reg_policy") -> Non
     
     # Step 2: Generate policy table
     policy_table = generator.gen_policy_table()
+
+    # Step 3: Register InstEdgeInfo for each IMCE
+    generator.add_edge_info(func_name="scan_reg")
+
+    # Step 4: Allocate memory for policy tables
+    generator.allocate(func_name="scan_reg")
+        
+    ImcflowDeviceConfig().NoCPaths["scan_reg"] = noc_paths
+    ImcflowDeviceConfig().PolicyTableDict["scan_reg"] = policy_table
     
-    # Step 3: Export results
-    generator.export_noc_paths(os.path.join(output_dir, "scan_reg_noc_paths.txt"))
-    generator.export_policy_table(os.path.join(output_dir, "scan_reg_policy_table.txt"))
+    
+    breakpoint()
+    
+    # # Step 4: Export results
+    # generator.export_noc_paths(os.path.join(output_dir, "scan_reg_noc_paths.txt"))
+    # generator.export_policy_table(os.path.join(output_dir, "scan_reg_policy_table.txt"))
     
     print("\n" + "="*60)
     print("SCAN REGISTER POLICY GENERATION COMPLETE")
@@ -371,24 +451,12 @@ if __name__ == "__main__":
         default="./scan_reg_policy",
         help="Output directory for generated files (default: ./scan_reg_policy)"
     )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Enable verbose output"
-    )
-    
+
     args = parser.parse_args()
     
     # Run the generation
     try:
         generator = run_scan_reg_policy_generation(output_dir=args.output_dir)
-        
-        if args.verbose:
-            print("\n" + "="*60)
-            print("DETAILED POLICY TABLE")
-            print("="*60)
-            pprint.pprint(generator.PolicyTable_2D)
         
         print("\n✅ Success!")
         
