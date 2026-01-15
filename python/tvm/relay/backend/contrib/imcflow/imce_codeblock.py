@@ -766,7 +766,9 @@ class RecvSendWrapper(ImceCodeBlock):
     Returns a SimpleFor object.
     """
 
-    assert len(self.out_edges) == 1, "Only single output edge is supported in create_loop_from_call"
+    sinple_out_edge = (len(self.out_edges) == 1)
+    multicast = all(edge.src_id == self.out_edges[0].src_id for edge in self.out_edges) and (not sinple_out_edge)
+    assert sinple_out_edge or multicast, "Only single output edge or multicast is supported in create_loop_from_call"
 
     call = call_ctx.call
     

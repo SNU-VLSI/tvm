@@ -1328,6 +1328,96 @@ def cmd_packet_cmd_stats(args):
     print("=" * 70)
 
 
+def count_recv_before_step(log_file: Path, imce_name: str) -> list[dict]:
+    """
+    Parse log file and count successful OP_RECV before each OP_STEP success.
+
+    Args:
+        log_file: Path to the log file (e.g., now.debug.log)
+        imce_name: IMCE identifier (e.g., "IMCE.2.1")
+
+    Returns:
+        List of dicts with step_index, recv_count, pc, uid info
+    """
+    # Pattern to match successful instruction lines for the specific IMCE
+    # Example: IMCE.3.1 | SUC INST | PC : 0 | NEXT_PC : 1 | OP_RECV({...})
+    pattern = re.compile(
+        rf'{re.escape(imce_name)}\s*\|\s*SUC INST\s*\|.*\|\s*(OP_RECV|OP_STEP)'
+    )
+    # Pattern to extract PC value
+    pc_pattern = re.compile(r'PC\s*:\s*(\d+)')
+    # Pattern to extract uid value
+    uid_pattern = re.compile(r'uid:(\d+)')
+
+    results = []
+    recv_count = 0
+
+    with open(log_file, 'r') as f:
+        for line in f:
+            match = pattern.search(line)
+            if match:
+                op_type = match.group(1)
+                if op_type == 'OP_RECV':
+                    rd = re.match(r'.*rd.*: (\d+)', line).group(1)
+                    if rd == "0":
+                      print(rd)
+                      recv_count += 1
+                elif op_type == 'OP_STEP':
+                    # Extract PC and uid from line
+                    pc_match = pc_pattern.search(line)
+                    uid_match = uid_pattern.search(line)
+                    pc = int(pc_match.group(1)) if pc_match else -1
+                    uid = int(uid_match.group(1)) if uid_match else -1
+
+                    results.append({
+                        'step_index': len(results),
+                        'recv_count': recv_count,
+                        'pc': pc,
+                        'uid': uid,
+                    })
+                    recv_count = 0  # Reset for next STEP
+
+    return results
+
+
+def cmd_recv_before_step(args):
+    """Handle the recv-before-step command."""
+    log_file = Path(args.file)
+
+    if not log_file.exists():
+        print(f"Error: Log file not found: {log_file}", file=sys.stderr)
+        sys.exit(1)
+
+    results = count_recv_before_step(log_file, args.imce)
+
+    print("=" * 70)
+    print(f"  RECV Count Before STEP - {args.imce}")
+    print("=" * 70)
+    print(f"  Log file: {log_file}")
+    print(f"  Total STEPs: {len(results)}")
+    print("-" * 70)
+
+    if not results:
+        print(f"  No OP_STEP found for {args.imce}")
+    else:
+        print(f"  {'STEP#':>6} {'RECV Count':>12} {'PC':>8} {'UID':>10}")
+        print("  " + "-" * 40)
+
+        total_recv = 0
+        for r in results:
+            print(f"  {r['step_index']:>6} {r['recv_count']:>12} {r['pc']:>8} {r['uid']:>10}")
+            total_recv += r['recv_count']
+
+        print("  " + "-" * 40)
+        print(f"  {'TOTAL':>6} {total_recv:>12}")
+
+        if results:
+            avg_recv = total_recv / len(results)
+            print(f"  {'AVG':>6} {avg_recv:>12.1f}")
+
+    print("=" * 70)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="FSIM Log Analyzer Tool",
@@ -1366,6 +1456,9 @@ Examples:
   %(prog)s packet-node-stats -d <log_dir>  # Node traffic statistics
   %(prog)s packet-hotspots -d <log_dir>  # Find traffic hotspots
   %(prog)s packet-cmd-stats -d <log_dir>  # Command type statistics
+
+  # IMCE instruction analysis
+  %(prog)s recv-before-step --imce IMCE.2.1 -f <log_file>  # Count RECV before STEP
 """,
     )
 
@@ -1582,6 +1675,24 @@ Examples:
         help="Show detailed information",
     )
     packet_cmd_stats_parser.set_defaults(func=cmd_packet_cmd_stats)
+
+    # Recv before step command
+    recv_before_step_parser = subparsers.add_parser(
+        "recv-before-step",
+        help="Count successful OP_RECV before each OP_STEP for an IMCE",
+    )
+    recv_before_step_parser.add_argument(
+        "--imce",
+        required=True,
+        help="IMCE identifier (e.g., 'IMCE.2.1')",
+    )
+    recv_before_step_parser.add_argument(
+        "--file",
+        "-f",
+        required=True,
+        help="Path to the log file (e.g., now.debug.log)",
+    )
+    recv_before_step_parser.set_defaults(func=cmd_recv_before_step)
 
     args = parser.parse_args()
 
