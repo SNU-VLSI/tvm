@@ -627,7 +627,7 @@ def run_simulation(eval_dir, HOST_ISA):
   os.makedirs(host_build_dir, exist_ok=True)
 
   # Build in the test-specific directory (use current directory "." since eval_dir is now relative)
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", "x86"]
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", HOST_ISA]
   build_log_path = os.path.join(log_dir, "build.log")
 
   with open(build_log_path, "w") as log_file:
@@ -649,6 +649,11 @@ def run_simulation(eval_dir, HOST_ISA):
       raise subprocess.CalledProcessError(process.returncode, build_command)
 
   print(f"✅ Build completed, log saved to: {build_log_path}")
+
+  # Run gem5 simulation
+  if (HOST_ISA == "arm"):
+    print("\n-- Skipping gem5 simulation for ARM architecture --")
+    return None
 
   # Get the appropriate runner(s) based on IMCFLOW_RUNNER env var
   runners = get_runner()  # Returns single runner or list of runners
@@ -878,10 +883,13 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 
   # Run simulation (build + gem5 execution)
   try:
-    imcflow_output = run_simulation(eval_dir)
+    imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
   except KeyboardInterrupt:
     print("\n⚠️  Simulation interrupted - skipping output comparison")
     raise  # Re-raise to let pytest handle the interruption
+
+  if (config.HOST_ISA == "arm"):
+    return None
 
   # Compare the reference CPU output with IMCFLOW simulated output
   if input_data_dict is not None:

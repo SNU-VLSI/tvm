@@ -63,6 +63,21 @@ from tvm.relay.backend.contrib.imcflow.inode_codeblock import (
 )
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 
+if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
+  print("IMCFLOW_HOST_OS: baremetal")
+  IMCFLOW_ADDR = 0x80000000
+  IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
+  INT_ACK_GEN_ADDR = 0
+  INT_ACK_GEN_LEN = 0
+elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
+  print("IMCFLOW_HOST_OS: linux")
+  IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
+  IMCFLOW_LEN = os.environ["IMCFLOW_LEN"]
+  INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
+  INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
+else:
+  raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
+
 
 # ============================================================================
 # Helper Functions for Memory Layout Access
@@ -443,12 +458,29 @@ class ScanKernelCodegen:
     def __init__(
         self,
         func_name: str,
-        scan_packet_count: int,
-        os: str = "linux"
+        scan_packet_count: int
     ):
         self.func_name = func_name
         self.scan_packet_count = scan_packet_count
-        self.os = os
+
+        # Initialize base address macros (similar to ext_codegen.py)
+        self.base_address_macros = {
+            "IMCFLOW_ADDR": IMCFLOW_ADDR,
+            "IMCFLOW_LEN": IMCFLOW_LEN,
+            "INT_ACK_GEN_ADDR": INT_ACK_GEN_ADDR,
+            "INT_ACK_GEN_LEN": INT_ACK_GEN_LEN,
+            "IMCFLOW_DEVICE": '"/dev/uio5"',
+            "INT_ACK_GEN_DEVICE": '"/dev/uio4"',
+            "STATE_REG_IDX": 0,
+            "PC_REG_IDX": 2,
+            "INTR_DONE_REG_IDX": 7,
+            "SET_IDLE_CODE": 0,
+            "SET_RUN_CODE": 1,
+            "SET_PROGRAM_CODE": 2,
+            "INODE_PC_START_P0_ENUM_VAL": 0,
+            "INODE_PC_START_EXTERN_ENUM_VAL": 1,
+            "INODE_NUM": DevConfig().INODE_NUM,
+        }
 
     def generate_header(self) -> str:
         """Generate C header includes."""
@@ -462,24 +494,18 @@ class ScanKernelCodegen:
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-#define IMCFLOW_ADDR 0x80000000
-#define IMCFLOW_LEN 0x10000000
-#define IMCFLOW_DEVICE "/dev/uio5"
-#define INT_ACK_GEN_DEVICE "/dev/uio4"
-#define STATE_REG_IDX 0
-#define PC_REG_IDX 2
-#define INTR_DONE_REG_IDX 7
-#define SET_IDLE_CODE 0
-#define SET_RUN_CODE 1
-#define SET_PROGRAM_CODE 2
-#define INODE_PC_START_P0_ENUM_VAL 0
-#define INODE_PC_START_EXTERN_ENUM_VAL 1
-#define INODE_NUM 16
-
-// short16 type definition
-typedef short short16 __attribute__((ext_vector_type(16)));
 """
+
+    def generate_base_addr_macros(self) -> str:
+        """Generate base address macro definitions from environment variables."""
+        lines = []
+        for key, value in self.base_address_macros.items():
+            lines.append(f"#define {key} {value}")
+        lines.append("")
+        lines.append("// short16 type definition")
+        lines.append("typedef short short16 __attribute__((ext_vector_type(16)));")
+        lines.append("")
+        return '\n'.join(lines)
 
     def generate_extern_declarations(self) -> str:
         """Generate extern declarations for policy and instruction binary files."""
@@ -711,6 +737,7 @@ int main(void) {{
         """
         code_parts = [
             self.generate_header(),
+            self.generate_base_addr_macros(),
             self.generate_extern_declarations(),
             self.generate_utilities(),
             self.generate_scan_data_array(scan_values),
@@ -756,15 +783,13 @@ class ScanCodegenSuite:
         self,
         func_name: str,
         build_dir: str,
-        scan_packet_count: int,
-        host_isa: str = "arm",
-        os_type: str = "linux"
+        scan_packet_count: int
     ):
         self.func_name = func_name
         self.build_dir = build_dir
         self.scan_packet_count = scan_packet_count
-        self.host_isa = host_isa
-        self.os_type = os_type
+        self.host_os = os.getenv("IMCFLOW_HOST_OS", "linux")
+        self.host_isa = os.getenv("IMCFLOW_HOST_ISA", "arm")
 
         # Create build directory
         os.makedirs(build_dir, exist_ok=True)
@@ -951,7 +976,7 @@ __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
             # 5. Generate kernel wrapper
             print("\n[5/5] Generating kernel wrapper...")
             kernel_codegen = ScanKernelCodegen(
-                self.func_name, self.scan_packet_count, self.os_type
+                self.func_name, self.scan_packet_count
             )
             kernel_code = kernel_codegen.generate(scan_values)
 
