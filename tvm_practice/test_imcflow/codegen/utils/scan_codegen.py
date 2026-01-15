@@ -516,12 +516,13 @@ class ScanKernelCodegen:
         # Collect all policy and imem blocks
         binary_blocks = []
         for region_name in mem_layout.keys():
-            if isinstance(region_name, str) and region_name.endswith("_data"):
+            # Check both data regions (for policy tables) and instruction regions (for imem)
+            if isinstance(region_name, str) and (region_name.endswith("_data") or region_name.endswith("_inst")):
                 region = mem_layout[region_name]
                 for block in region.blocks.values():
                     block_id_str = str(block.id)
                     # Include policy tables (contains "policy") and imem blocks (contains "_imem")
-                    if "policy" in block_id_str or "_imem" in block_id_str:
+                    if "policy" in block_id_str or "imem" in block_id_str:
                         binary_blocks.append((block_id_str, block))
 
         # Generate extern declarations for each block
@@ -546,12 +547,13 @@ class ScanKernelCodegen:
         # Collect all policy and imem blocks
         binary_blocks = []
         for region_name in mem_layout.keys():
-            if isinstance(region_name, str) and region_name.endswith("_data"):
+            # Check both data regions (for policy tables) and instruction regions (for imem)
+            if isinstance(region_name, str) and (region_name.endswith("_data") or region_name.endswith("_inst")):
                 region = mem_layout[region_name]
                 for block in region.blocks.values():
                     block_id_str = str(block.id)
                     # Include policy tables (contains "policy") and imem blocks (contains "_imem")
-                    if "policy" in block_id_str or "_imem" in block_id_str:
+                    if "policy" in block_id_str or "_imem" in block_id_str or "imem" in block_id_str:
                         binary_blocks.append((block_id_str, block))
 
         # Generate transfer code for each block
