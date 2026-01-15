@@ -2900,6 +2900,309 @@ class AnnotGenerator:
               regions.append(region)
           return regions
 
+        def _record_composite_split(self, node, candidate_regions):
+          """
+          Record split_pending info for a composite at a converge point.
+
+          Returns:
+            needs_split: True if composite was recorded for split, False otherwise
+          """
+          converge_op = CompositeSplitter.find_converge_op_in_composite(node)
+          if converge_op is None:
+            debug_print(f"[ConvergeCheck] No converge op found in composite")
+            return False
+
+          # Determine pre_region: use candidate_region if available, else create new
+          if len(candidate_regions) > 0:
+            pre_region = candidate_regions[0]
+          else:
+            pre_region = self.createRegion()
+          # post_region: always create new region for the converge part
+          post_region = self.createRegion()
+
+          # Record split info for deferred processing
+          self.split_pending[node] = {
+            "converge_op": converge_op,
+            "pre_region": pre_region,
+            "post_region": post_region,
+            "pre_composite": None,   # Will be filled after mutation
+            "post_composite": None,  # Will be filled after mutation
+          }
+          debug_print(f"[ConvergeCheck] Recorded split_pending for {getNodeDebugID(node)}")
+          return True
+
+        def _record_converge_summary(self, node, diverge_node, converge_type, branch_info_list, is_unbalanced, action):
+          """Record converge point info to summary for debugging."""
+          self.converge_point_summary.append({
+            "node": getNodeDebugID(node),
+            "diverge_node": getNodeDebugID(diverge_node) if diverge_node else None,
+            "type": converge_type,
+            "branches": branch_info_list,
+            "is_unbalanced": is_unbalanced,
+            "action": action
+          })
+
+        def _handle_unbalanced_converge(self, node, rev_edges, IsComposite, candidate_regions,
+                                        converge_type, diverge_node, branch_info_list):
+          """
+          Handle unbalanced converge point - check for deadlock risk and record split if needed.
+
+          Args:
+            node: The converge point node
+            rev_edges: Reverse edges from graph
+            IsComposite: Whether node is a composite
+            candidate_regions: Available regions for assignment
+            converge_type: "diverge-converge" or "branch_from_var"
+            diverge_node: The diverge point node (None for branch_from_var)
+            branch_info_list: List of branch info dicts for summary
+
+          Returns:
+            (force_new_region, needs_split): Tuple of booleans
+          """
+          force_new_region = False
+          needs_split = False
+
+          debug_print(f"[ConvergeCheck] Branches are UNBALANCED - checking region assignment")
+
+          # Check if input branches are in the same region (deadlock risk)
+          branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
+          debug_print(f"[ConvergeCheck] Branch regions count: {len(branch_regions)}")
+          for i, reg in enumerate(branch_regions):
+            region_idx = self.RegionList.index(reg) if reg in self.RegionList else -1
+            debug_print(f"    Branch {i} region idx: {region_idx}, size: {len(reg)}")
+          unique_regions = list({id(r): r for r in branch_regions}.values())
+          debug_print(f"[ConvergeCheck] Unique regions: {len(unique_regions)}")
+
+          if len(unique_regions) == 1:
+            # All branches in same region -> deadlock risk
+            debug_print(f"[ConvergeCheck] All branches in same region - DEADLOCK RISK")
+
+            if IsComposite:
+              debug_print(f"[ConvergeCheck] Recording composite for deferred split")
+              needs_split = self._record_composite_split(node, candidate_regions)
+              if needs_split:
+                action = "split_composite (deadlock risk)"
+              else:
+                force_new_region = True
+                action = "force_new_region (deadlock risk, no internal converge op)"
+            else:
+              force_new_region = True
+              action = "force_new_region (deadlock risk)"
+
+            self._record_converge_summary(node, diverge_node, converge_type,
+                                          branch_info_list, True, action)
+          else:
+            debug_print(f"[ConvergeCheck] Branches in different regions - no deadlock risk")
+            debug_print(f"{'#'*70}\n")
+            self._record_converge_summary(node, diverge_node, converge_type,
+                                          branch_info_list, True, "no_action (different regions)")
+
+          return force_new_region, needs_split
+
+        def _extract_branches_for_converge(self, node, rev_edges, branch_analyzer, diverge_node=None):
+          """
+          Extract branches leading to a converge point.
+
+          Args:
+            node: The converge point node
+            rev_edges: Reverse edges from graph
+            branch_analyzer: BranchAnalyzer instance
+            diverge_node: If provided, extract branches between diverge and converge.
+                          If None, extract all ancestor ops for each predecessor.
+
+          Returns:
+            branches: List of branch ops lists
+            from_var_flags: List of booleans indicating if each branch originates from Var/Const
+          """
+          preds = rev_edges.get(node, [])
+          call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
+
+          if diverge_node is not None:
+            # Use existing extract_branches for diverge-converge case
+            branches = branch_analyzer.extract_branches(diverge_node, node)
+            from_var_flags = [False] * len(branches)
+          else:
+            # Trace back from each predecessor to collect all ancestor ops
+            branches = []
+            from_var_flags = []
+            for pred in call_preds:
+              branch_ops, is_from_var = self._trace_branch_to_input(pred, branch_analyzer)
+              branches.append(branch_ops)
+              from_var_flags.append(is_from_var)
+
+          return branches, from_var_flags
+
+        def _trace_branch_to_input(self, pred, branch_analyzer, max_depth=50):
+          """
+          Trace back from pred to collect all ancestor ops until hitting Var/Const.
+
+          Returns:
+            (branch_ops, is_from_var): List of ops and whether branch has no conv
+          """
+          visited = set()
+          queue = [pred]
+          branch_ops = []
+          has_conv = False
+          depth = 0
+
+          while queue and depth < max_depth:
+            curr = queue.pop(0)
+            if curr in visited:
+              continue
+            visited.add(curr)
+            depth += 1
+
+            if isinstance(curr, Call):
+              # Flatten composite ops
+              flattened = branch_analyzer.flatten_composite_ops(curr)
+              branch_ops.extend(flattened)
+
+              # Check for conv
+              if isinstance(curr.op, tvm.ir.Op):
+                if curr.op.name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.conv2d"]:
+                  has_conv = True
+
+              # Continue to predecessors
+              for arg in curr.args:
+                if isinstance(arg, (Call, TupleGetItem)):
+                  queue.append(arg)
+
+          return branch_ops, not has_conv  # is_from_var = not has_conv
+
+        def _calculate_branch_metrics(self, branches, lat_calc):
+          """
+          Calculate latency and throughput for each branch.
+
+          Args:
+            branches: List of branch ops lists
+            lat_calc: LatencyThroughputCalculator instance
+
+          Returns:
+            List of (latency, throughput) tuples
+          """
+          branch_metrics = []
+          for i, branch_ops in enumerate(branches):
+            debug_print(f"\n  --- Branch {i} details ---")
+            for j, op in enumerate(branch_ops):
+              op_lat = lat_calc.get_op_latency(op)
+              op_thr = lat_calc.get_op_throughput(op)
+              op_name = op.op.name if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op) else getNodeDebugID(op)
+              debug_print(f"    Op {j}: {op_name}, lat={op_lat}, thr={op_thr}")
+            lat = lat_calc.calculate_branch_latency(branch_ops)
+            thr = lat_calc.calculate_branch_throughput(branch_ops)
+            branch_metrics.append((lat, thr))
+            debug_print(f"  Branch {i} TOTAL: latency={lat}, throughput={thr}, ops_count={len(branch_ops)}")
+          return branch_metrics
+
+        def _build_branch_info_list(self, branches, branch_metrics, from_var_flags=None):
+          """
+          Build branch info list for converge point summary.
+
+          Args:
+            branches: List of branch ops lists
+            branch_metrics: List of (latency, throughput) tuples
+            from_var_flags: Optional list of from_var flags (None = all False)
+
+          Returns:
+            List of branch info dicts
+          """
+          branch_info_list = []
+          for i, branch_ops in enumerate(branches):
+            ops_info = []
+            for op in branch_ops:
+              op_name = op.op.name if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op) else getNodeDebugID(op)
+              ops_info.append(op_name)
+            lat, thr = branch_metrics[i]
+            info = {
+              "ops": ops_info,
+              "latency": lat,
+              "throughput": thr,
+              "ops_count": len(branch_ops),
+              "is_branch_from_var": from_var_flags[i] if from_var_flags else False
+            }
+            branch_info_list.append(info)
+          return branch_info_list
+
+        def _handle_converge_point(self, node, rev_edges, branch_analyzer, lat_calc,
+                                   IsComposite, candidate_regions):
+          """
+          Handle converge point detection and processing.
+
+          Returns:
+            (force_new_region, needs_split): Tuple of booleans
+          """
+          force_new_region = False
+          needs_split = False
+
+          debug_print(f"\n{'#'*70}")
+          debug_print(f"[ConvergeCheck] CONVERGE POINT DETECTED")
+          debug_print(f"{'#'*70}")
+          debug_print(f"  Node ID: {getNodeDebugID(node)}")
+          debug_print(f"  Node Expr:\n{node}")
+          debug_print(f"{'#'*70}")
+
+          # Find diverge point
+          diverge_node = branch_analyzer.find_diverge_point(node)
+
+          if diverge_node is not None:
+            debug_print(f"\n[ConvergeCheck] Diverge point found: {getNodeDebugID(diverge_node)}")
+            debug_print(f"  Diverge Expr:\n{diverge_node}")
+            converge_type = "diverge-converge"
+          else:
+            debug_print(f"[ConvergeCheck] No diverge point found for this converge point")
+            debug_print(f"[ConvergeCheck] handle_branch_from_var_converge={self.handle_branch_from_var_converge}")
+
+            if not self.handle_branch_from_var_converge:
+              debug_print(f"[ConvergeCheck] Branch from var handling DISABLED - using normal selection")
+              debug_print(f"{'#'*70}\n")
+              return force_new_region, needs_split
+            converge_type = "branch_from_var"
+
+          # Extract branches (unified for both cases)
+          branches, from_var_flags = self._extract_branches_for_converge(
+            node, rev_edges, branch_analyzer, diverge_node
+          )
+          debug_print(f"\n[ConvergeCheck] Extracted {len(branches)} branches")
+
+          # For branch_from_var, check if at least one branch actually originates from Var
+          if diverge_node is None:
+            has_branch_from_var = any(from_var_flags)
+            debug_print(f"[ConvergeCheck] Has at least one branch_from_var: {has_branch_from_var}")
+            for i, flag in enumerate(from_var_flags):
+              debug_print(f"  Branch {i}: is_branch_from_var={flag}")
+
+            if not has_branch_from_var:
+              debug_print(f"[ConvergeCheck] No branch_from_var found - skipping special handling")
+              debug_print(f"{'#'*70}\n")
+              return force_new_region, needs_split
+
+          # Calculate branch metrics (unified)
+          branch_metrics = self._calculate_branch_metrics(branches, lat_calc)
+
+          debug_print(f"\n[ConvergeCheck] Branch metrics summary:")
+          for i, (lat, thr) in enumerate(branch_metrics):
+            debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
+
+          # Check if branches are unbalanced
+          is_unbalanced = self._branches_unbalanced(branch_metrics)
+          debug_print(f"\n[ConvergeCheck] Branches unbalanced? {is_unbalanced}")
+
+          # Build branch info list (unified with from_var field)
+          branch_info_list = self._build_branch_info_list(branches, branch_metrics, from_var_flags)
+
+          if not is_unbalanced:
+            debug_print(f"[ConvergeCheck] Branches are BALANCED - no special handling needed")
+            debug_print(f"{'#'*70}\n")
+            self._record_converge_summary(node, diverge_node, converge_type,
+                                          branch_info_list, False, "no_action (balanced)")
+          else:
+            force_new_region, needs_split = self._handle_unbalanced_converge(
+              node, rev_edges, IsComposite, candidate_regions,
+              converge_type, diverge_node, branch_info_list
+            )
+
+          return force_new_region, needs_split
+
         def run(self, fn):
           order, edges, rev_edges = self._topo_bfs_order(fn)
 
@@ -2960,335 +3263,10 @@ class AnnotGenerator:
                 needs_split = False
 
                 if self._is_converge_point(node, rev_edges):
-                  debug_print(f"\n{'#'*70}")
-                  debug_print(f"[ConvergeCheck] CONVERGE POINT DETECTED")
-                  debug_print(f"{'#'*70}")
-                  debug_print(f"  Node ID: {getNodeDebugID(node)}")
-                  debug_print(f"  Node Expr:\n{node}")
-                  debug_print(f"{'#'*70}")
-
-                  # Find diverge point and extract branches
-                  diverge_node = branch_analyzer.find_diverge_point(node)
-                  if diverge_node is not None:
-                    debug_print(f"\n[ConvergeCheck] Diverge point found: {getNodeDebugID(diverge_node)}")
-                    debug_print(f"  Diverge Expr:\n{diverge_node}")
-
-                    branches = branch_analyzer.extract_branches(diverge_node, node)
-                    debug_print(f"\n[ConvergeCheck] Extracted {len(branches)} branches")
-
-                    # Calculate branch metrics
-                    branch_metrics = []
-                    for i, branch_ops in enumerate(branches):
-                      debug_print(f"\n  --- Branch {i} details ---")
-                      branch_lat_sum = 0
-                      branch_thr_min = float('inf')
-                      for j, op in enumerate(branch_ops):
-                        op_lat = lat_calc.get_op_latency(op)
-                        op_thr = lat_calc.get_op_throughput(op)
-                        branch_lat_sum += op_lat
-                        branch_thr_min = min(branch_thr_min, op_thr)
-                        op_name = op.op.name if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op) else getNodeDebugID(op)
-                        debug_print(f"    Op {j}: {op_name}, lat={op_lat}, thr={op_thr}")
-                      lat = lat_calc.calculate_branch_latency(branch_ops)
-                      thr = lat_calc.calculate_branch_throughput(branch_ops)
-                      branch_metrics.append((lat, thr))
-                      debug_print(f"  Branch {i} TOTAL: latency={lat}, throughput={thr}, ops_count={len(branch_ops)}")
-
-                    # Check if branches are unbalanced
-                    debug_print(f"\n[ConvergeCheck] Branch metrics summary:")
-                    for i, (lat, thr) in enumerate(branch_metrics):
-                      debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
-
-                    is_unbalanced = self._branches_unbalanced(branch_metrics)
-                    debug_print(f"\n[ConvergeCheck] Branches unbalanced? {is_unbalanced}")
-
-                    # Collect branch info for summary
-                    branch_info_list = []
-                    for i, branch_ops in enumerate(branches):
-                      ops_info = []
-                      for op in branch_ops:
-                        op_name = op.op.name if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op) else getNodeDebugID(op)
-                        ops_info.append(op_name)
-                      lat, thr = branch_metrics[i]
-                      branch_info_list.append({
-                        "ops": ops_info,
-                        "latency": lat,
-                        "throughput": thr,
-                        "ops_count": len(branch_ops)
-                      })
-
-                    if not is_unbalanced:
-                      debug_print(f"[ConvergeCheck] Branches are BALANCED - no special handling needed")
-                      debug_print(f"{'#'*70}\n")
-                      # Record balanced converge point
-                      self.converge_point_summary.append({
-                        "node": getNodeDebugID(node),
-                        "diverge_node": getNodeDebugID(diverge_node),
-                        "type": "diverge-converge",
-                        "branches": branch_info_list,
-                        "is_unbalanced": False,
-                        "action": "no_action (balanced)"
-                      })
-
-                    if is_unbalanced:
-                      debug_print(f"[ConvergeCheck] Branches are UNBALANCED - checking region assignment")
-
-                      # Check if input branches are in the same region (deadlock risk)
-                      branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
-                      debug_print(f"[ConvergeCheck] Branch regions count: {len(branch_regions)}")
-                      for i, reg in enumerate(branch_regions):
-                        region_idx = self.RegionList.index(reg) if reg in self.RegionList else -1
-                        debug_print(f"    Branch {i} region idx: {region_idx}, size: {len(reg)}")
-                      unique_regions = list({id(r): r for r in branch_regions}.values())
-                      debug_print(f"[ConvergeCheck] Unique regions: {len(unique_regions)}")
-
-                      if len(unique_regions) == 1:
-                        # All branches in same region -> deadlock risk -> force new region
-                        debug_print(f"[ConvergeCheck] All branches in same region - DEADLOCK RISK")
-                        force_new_region = True
-
-                        # If composite, record for deferred split
-                        if IsComposite:
-                          debug_print(f"[ConvergeCheck] Recording composite for deferred split")
-                          converge_op = CompositeSplitter.find_converge_op_in_composite(node)
-                          if converge_op is not None:
-                            needs_split = True
-                            # Determine pre_region: use candidate_region if available, else create new
-                            if len(candidate_regions) > 0:
-                              pre_region = candidate_regions[0]
-                            else:
-                              pre_region = self.createRegion()
-                            # post_region: always create new region for the converge part
-                            post_region = self.createRegion()
-
-                            # Record split info for deferred processing
-                            self.split_pending[node] = {
-                              "converge_op": converge_op,
-                              "pre_region": pre_region,
-                              "post_region": post_region,
-                              "pre_composite": None,   # Will be filled after mutation
-                              "post_composite": None,  # Will be filled after mutation
-                            }
-                            debug_print(f"[ConvergeCheck] Recorded split_pending for {getNodeDebugID(node)}")
-                          else:
-                            debug_print(f"[ConvergeCheck] No converge op found in composite")
-
-                        # Record unbalanced converge point with deadlock risk
-                        self.converge_point_summary.append({
-                          "node": getNodeDebugID(node),
-                          "diverge_node": getNodeDebugID(diverge_node),
-                          "type": "diverge-converge",
-                          "branches": branch_info_list,
-                          "is_unbalanced": True,
-                          "action": "force_new_region (deadlock risk)"
-                        })
-                      else:
-                        debug_print(f"[ConvergeCheck] Branches in different regions - no deadlock risk")
-                        debug_print(f"{'#'*70}\n")
-                        # Record unbalanced but no deadlock risk
-                        self.converge_point_summary.append({
-                          "node": getNodeDebugID(node),
-                          "diverge_node": getNodeDebugID(diverge_node),
-                          "type": "diverge-converge",
-                          "branches": branch_info_list,
-                          "is_unbalanced": True,
-                          "action": "no_action (different regions)"
-                        })
-                  else:
-                    # No common diverge point found - one branch originates from Var input (outside function)
-                    debug_print(f"[ConvergeCheck] No diverge point found for this converge point")
-                    debug_print(f"[ConvergeCheck] handle_branch_from_var_converge={self.handle_branch_from_var_converge}")
-
-                    if self.handle_branch_from_var_converge:
-                      # Calculate full branch latency including all ancestors
-                      debug_print(f"[ConvergeCheck] Checking branch_from_var case...")
-
-                      preds = rev_edges.get(node, [])
-                      call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
-
-                      # Helper to check if a branch ultimately leads to Var/Const (originates from outside function)
-                      def is_branch_from_var(pred, max_depth=20):
-                        """Check if branch has only non-conv ops leading to Var/Const."""
-                        visited = set()
-                        queue = [pred]
-                        depth = 0
-                        has_conv = False
-                        while queue and depth < max_depth:
-                          curr = queue.pop(0)
-                          if curr in visited:
-                            continue
-                          visited.add(curr)
-                          depth += 1
-                          if isinstance(curr, Call):
-                            if isinstance(curr.op, tvm.ir.Op):
-                              if curr.op.name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.conv2d"]:
-                                has_conv = True
-                            for arg in curr.args:
-                              if isinstance(arg, (Call, TupleGetItem)):
-                                queue.append(arg)
-                        return not has_conv
-
-                      # Calculate cumulative latency for each branch
-                      def get_cumulative_latency(pred, max_depth=50):
-                        """Calculate latency of all ops in the path from this pred back to Var/Const."""
-                        visited = set()
-                        queue = [pred]
-                        total_lat = 0
-                        min_thr = float('inf')
-                        depth = 0
-                        while queue and depth < max_depth:
-                          curr = queue.pop(0)
-                          if curr in visited:
-                            continue
-                          visited.add(curr)
-                          depth += 1
-                          if isinstance(curr, Call):
-                            # Flatten composite ops and add their latency
-                            flattened = branch_analyzer.flatten_composite_ops(curr)
-                            for op in flattened:
-                              total_lat += lat_calc.get_op_latency(op)
-                              min_thr = min(min_thr, lat_calc.get_op_throughput(op))
-                            # Continue to predecessors
-                            for arg in curr.args:
-                              if isinstance(arg, (Call, TupleGetItem)):
-                                queue.append(arg)
-                        return total_lat, min_thr if min_thr != float('inf') else 1
-
-                      # First, check if at least one branch actually originates from Var
-                      branch_from_var_flags = []
-                      for i, pred in enumerate(call_preds):
-                        from_var = is_branch_from_var(pred)
-                        branch_from_var_flags.append(from_var)
-                        debug_print(f"  --- Predecessor {i} ({getNodeDebugID(pred)}) ---")
-                        debug_print(f"    is_branch_from_var: {from_var}")
-
-                      has_branch_from_var = any(branch_from_var_flags)
-                      debug_print(f"[ConvergeCheck] Has at least one branch_from_var: {has_branch_from_var}")
-
-                      if not has_branch_from_var:
-                        # No branch actually originates from Var - skip branch_from_var handling
-                        debug_print(f"[ConvergeCheck] No branch_from_var found - skipping special handling")
-                        debug_print(f"{'#'*70}\n")
-                        # Fall through to normal selection policy (don't set force_new_region)
-                      else:
-                        # At least one branch is from Var - proceed with branch_from_var handling
-                        branch_metrics = []
-                        for i, pred in enumerate(call_preds):
-                          lat, thr = get_cumulative_latency(pred)
-                          branch_metrics.append((lat, thr))
-                          debug_print(f"    Predecessor {i} cumulative latency={lat}, min_throughput={thr}")
-
-                        debug_print(f"\n[ConvergeCheck] Branch from var metrics:")
-                        for i, (lat, thr) in enumerate(branch_metrics):
-                          debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
-
-                        # Collect branch_from_var info for summary
-                        branch_from_var_info_list = []
-                        for i, pred in enumerate(call_preds):
-                          lat, thr = branch_metrics[i]
-                          branch_from_var_info_list.append({
-                            "ops": [getNodeDebugID(pred)],
-                            "is_branch_from_var": branch_from_var_flags[i],
-                            "latency": lat,
-                            "throughput": thr
-                          })
-
-                        is_unbalanced = self._branches_unbalanced(branch_metrics)
-                        debug_print(f"[ConvergeCheck] Branch from var branches unbalanced? {is_unbalanced}")
-
-                        if is_unbalanced:
-                          debug_print(f"[ConvergeCheck] Branch from var UNBALANCED - checking for deadlock risk")
-
-                          branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
-                          unique_regions = list({id(r): r for r in branch_regions}.values())
-                          debug_print(f"[ConvergeCheck] Branch regions: {len(branch_regions)}, unique: {len(unique_regions)}")
-
-                          if len(unique_regions) == 1:
-                            debug_print(f"[ConvergeCheck] All predecessors in same region - DEADLOCK RISK")
-
-                            # If composite, record for deferred split (same as diverge-converge case)
-                            if IsComposite:
-                              debug_print(f"[ConvergeCheck] Recording composite for deferred split (branch_from_var)")
-                              converge_op = CompositeSplitter.find_converge_op_in_composite(node)
-                              if converge_op is not None:
-                                needs_split = True
-                                # Determine pre_region: use candidate_region if available, else create new
-                                if len(candidate_regions) > 0:
-                                  pre_region = candidate_regions[0]
-                                else:
-                                  pre_region = self.createRegion()
-                                # post_region is always a new region (after converge point)
-                                post_region = self.createRegion()
-
-                                # Record split info for deferred processing
-                                self.split_pending[node] = {
-                                  "converge_op": converge_op,
-                                  "pre_region": pre_region,
-                                  "post_region": post_region,
-                                  "pre_composite": None,   # Will be filled after mutation
-                                  "post_composite": None,  # Will be filled after mutation
-                                }
-                                debug_print(f"[ConvergeCheck] Recorded split_pending for {getNodeDebugID(node)} (branch_from_var)")
-
-                                # Record with split action
-                                self.converge_point_summary.append({
-                                  "node": getNodeDebugID(node),
-                                  "diverge_node": None,
-                                  "type": "branch_from_var",
-                                  "branches": branch_from_var_info_list,
-                                  "is_unbalanced": True,
-                                  "action": "split_composite (deadlock risk)"
-                                })
-                              else:
-                                debug_print(f"[ConvergeCheck] No converge op found in composite (branch_from_var)")
-                                force_new_region = True
-                                # Record branch_from_var converge point with deadlock risk
-                                self.converge_point_summary.append({
-                                  "node": getNodeDebugID(node),
-                                  "diverge_node": None,
-                                  "type": "branch_from_var",
-                                  "branches": branch_from_var_info_list,
-                                  "is_unbalanced": True,
-                                  "action": "force_new_region (deadlock risk, no internal converge op)"
-                                })
-                            else:
-                              force_new_region = True
-                              # Record branch_from_var converge point with deadlock risk
-                              self.converge_point_summary.append({
-                                "node": getNodeDebugID(node),
-                                "diverge_node": None,
-                                "type": "branch_from_var",
-                                "branches": branch_from_var_info_list,
-                                "is_unbalanced": True,
-                                "action": "force_new_region (deadlock risk)"
-                              })
-                          else:
-                            debug_print(f"[ConvergeCheck] Predecessors in different regions - no deadlock risk")
-                            # Record branch_from_var converge point without deadlock risk
-                            self.converge_point_summary.append({
-                              "node": getNodeDebugID(node),
-                              "diverge_node": None,
-                              "type": "branch_from_var",
-                              "branches": branch_from_var_info_list,
-                              "is_unbalanced": True,
-                              "action": "no_action (different regions)"
-                            })
-                        else:
-                          debug_print(f"[ConvergeCheck] Branch from var branches balanced - no special handling")
-                          # Record balanced branch_from_var converge point
-                          self.converge_point_summary.append({
-                            "node": getNodeDebugID(node),
-                            "diverge_node": None,
-                            "type": "branch_from_var",
-                            "branches": branch_from_var_info_list,
-                            "is_unbalanced": False,
-                            "action": "no_action (balanced)"
-                          })
-
-                        debug_print(f"{'#'*70}\n")
-                    else:
-                      debug_print(f"[ConvergeCheck] Branch from var handling DISABLED - using normal selection")
-                      debug_print(f"{'#'*70}\n")
+                  force_new_region, needs_split = self._handle_converge_point(
+                    node, rev_edges, branch_analyzer, lat_calc,
+                    IsComposite, candidate_regions
+                  )
 
                 # ====================================================
                 # Selection policy with converge point handling
