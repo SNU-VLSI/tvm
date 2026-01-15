@@ -2052,6 +2052,32 @@ class ImcflowLayoutLegalizer:
         debug_print("[insert_packing_unpacking] TupleGetItem: index", tgi.index, " | In layout:", val_layout, " | Out layout:", layout)
         return new_tgi
 
+      def _select_target_rule(self, rules, arg_layouts):
+        """Select target rule based on first tensor layout in arg_layouts.
+
+        For binary ops like add, we need all inputs to have the same layout.
+        This method finds a rule that matches the first non-scalar layout.
+        """
+        # Find first non-scalar layout as base
+        base_layout = None
+        for layout in arg_layouts:
+          if layout not in [LayoutType.SCALAR, LayoutType.C]:
+            base_layout = layout
+            break
+
+        # Find a rule that contains base_layout
+        if base_layout is not None:
+          for rule in rules:
+            inputs_options, _ = rule
+            for option in inputs_options:
+              if len(option) == len(arg_layouts) and base_layout in option:
+                return option
+
+        # Fallback: return first rule's first option
+        if rules and rules[0][0]:
+          return rules[0][0][0]
+        return None
+
       def visit_call(self, call):
         new_args = [self.visit(arg) for arg in call.args]
         arg_layouts = [self.layout_map[arg] for arg in new_args]
@@ -2066,22 +2092,42 @@ class ImcflowLayoutLegalizer:
             transformed_args.append(new_arg)
             target_arg_layouts[idx] = new_layout
         elif isinstance(call.op, tvm.ir.Op):
-          for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
-            req_layouts = get_required_layout_from_op(call, "inputs", i, True)
-            tgt_layout = None
-            for r in req_layouts:
-              if self._layout_equal(curr_layout, r):
-                tgt_layout = r
+          # Get all layout rules for this op
+          rules = get_required_layout_rules(call, cpu_node=True)
+
+          if rules:
+            # Step 1: Find a rule that matches current input layouts as a whole
+            matched_option = None
+            for rule in rules:
+              inputs_options, _ = rule
+              for option in inputs_options:
+                if len(option) == len(arg_layouts):
+                  if all(self._layout_equal(curr, req) for curr, req in zip(arg_layouts, option)):
+                    matched_option = option
+                    break
+              if matched_option:
                 break
-            if tgt_layout is None and req_layouts:
-              #TODO: if multiple required layouts, choose the best one
-              if LayoutType.MK in req_layouts and LayoutType.NCHW in req_layouts:
-                tgt_layout = req_layouts[req_layouts.index(LayoutType.NCHW)]
-              else:
-                tgt_layout = req_layouts[0]
-            new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout)
-            transformed_args.append(new_arg)
-            target_arg_layouts[i] = new_layout
+
+            # Step 2: If no match, select a target rule based on first input's layout
+            if matched_option is None:
+              matched_option = self._select_target_rule(rules, arg_layouts)
+
+            # Step 3: Transform all inputs to match the target rule
+            if matched_option:
+              for i, (arg, curr_layout, tgt_layout) in enumerate(zip(new_args, arg_layouts, matched_option)):
+                new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout)
+                transformed_args.append(new_arg)
+                target_arg_layouts[i] = new_layout
+            else:
+              # Fallback to original per-argument logic if no rule found
+              for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
+                transformed_args.append(arg)
+                target_arg_layouts[i] = curr_layout
+          else:
+            # No rules defined, keep original layouts
+            for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
+              transformed_args.append(arg)
+              target_arg_layouts[i] = curr_layout
         else:
           for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
             tgt_layout = LayoutType.NCHW if isinstance(curr_layout, LayoutType) else curr_layout
