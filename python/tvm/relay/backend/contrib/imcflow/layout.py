@@ -2151,17 +2151,34 @@ class ImcflowLayoutLegalizer:
       def visit_function(self, fn):
         new_body = self.visit(fn.body)
         ret_layout = self.layout_map[new_body]
-        if not self._layout_equal(ret_layout, LayoutType.NCHW) and ret_layout in [LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT, LayoutType.NHWC16C, LayoutType.NHWC64C]: 
+
+        # Helper to get original channel count from fn.ret_type
+        def get_original_channels(ret_type, index=None):
+          if isinstance(ret_type, TensorType):
+            if len(ret_type.shape) >= 2:
+              return int(ret_type.shape[1])
+          elif isinstance(ret_type, TupleType):
+            if index is not None and index < len(ret_type.fields):
+              field_type = ret_type.fields[index]
+              if isinstance(field_type, TensorType) and len(field_type.shape) >= 2:
+                return int(field_type.shape[1])
+          return None
+
+        if not self._layout_equal(ret_layout, LayoutType.NCHW) and ret_layout in [LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT, LayoutType.NHWC16C, LayoutType.NHWC64C]:
           if isinstance(ret_layout, (tuple, list)):
             # best-effort: transform tuple fields individually
             new_fields = []
             for idx, field in enumerate(new_body.fields if isinstance(new_body, relay.Tuple) else [new_body]):
               layout = ret_layout[idx] if isinstance(ret_layout, (tuple, list)) else ret_layout
-              converted, _ = self._convert_layout(field, layout, LayoutType.NCHW, self._channels_from_expr(field, idx))
+              # Use original fn.ret_type to get correct channel count
+              channel_hint = get_original_channels(fn.ret_type, idx)
+              converted, _ = self._convert_layout(field, layout, LayoutType.NCHW, channel_hint)
               new_fields.append(converted)
             new_body = relay.Tuple(new_fields) if isinstance(new_body, relay.Tuple) else new_fields[0]
           else:
-            new_body, _ = self._convert_layout(new_body, ret_layout, LayoutType.NCHW, self._channels_from_expr(new_body))
+            # Use original fn.ret_type to get correct channel count
+            channel_hint = get_original_channels(fn.ret_type)
+            new_body, _ = self._convert_layout(new_body, ret_layout, LayoutType.NCHW, channel_hint)
         self.layout_map[fn] = ret_layout
         return relay.Function(fn.params, new_body, None, fn.type_params, fn.attrs)
 
