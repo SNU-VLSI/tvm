@@ -560,7 +560,8 @@ class ConvBlock(ImceCallCodeBlock):
     if self.remain > 0:
       print(f"[ConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
       tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")
-      tail_loop = SimpleFor(self.remain, tail_body, f"{self.annotation}_tail_loop")
+      tail_loop = SimpleFor(self.remain*4, tail_body, f"{self.annotation}_tail_loop")
+      add_to_map(self.load_edge_info.owner, RecvSendNum("recv", self.remain*4), is_send=False)
       root.add(tail_loop)
 
     return root
