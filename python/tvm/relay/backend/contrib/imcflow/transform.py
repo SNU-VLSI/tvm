@@ -3451,12 +3451,62 @@ class CompositeGraphMutator(relay.ExprMutator):
 
             debug_print(f"[CompositeGraphMutator] Split successful: pre={pre_composite_name}, post={post_composite_name}")
 
+            # Extract the IMMEDIATE pre and post composite calls from this split's result
+            # The structure of new_expr is: Let(bindings, post_call(pre_call(...), other_branch))
+            # We only want the composites created by THIS split, not nested ones from previous splits
+            pre_calls_from_split = []
+            post_calls_from_split = []
+
+            def get_composite_info(call_node, let_bindings):
+                """Get composite name if call_node is a composite call."""
+                func = call_node.op
+                if isinstance(func, relay.Var) and func in let_bindings:
+                    func = let_bindings[func]
+                if isinstance(func, relay.Function) and func.attrs and "Composite" in func.attrs:
+                    return str(func.attrs["Composite"])
+                return None
+
+            def extract_immediate_composites(expr, let_bindings=None):
+                """Extract only the immediate pre and post composites, not nested ones."""
+                if let_bindings is None:
+                    let_bindings = {}
+
+                # Handle Let expressions - collect bindings
+                if isinstance(expr, relay.Let):
+                    if isinstance(expr.value, relay.Function):
+                        let_bindings[expr.var] = expr.value
+                    return extract_immediate_composites(expr.body, let_bindings)
+
+                # Handle Call expressions - this should be the post_converge call
+                if isinstance(expr, relay.Call):
+                    comp_name = get_composite_info(expr, let_bindings)
+                    if comp_name == post_composite_name:
+                        post_calls_from_split.append(expr)
+                        # Now look for pre_converge in the IMMEDIATE args (not recursively)
+                        for arg in expr.args:
+                            # Traverse through Lets to find the Call
+                            inner_expr = arg
+                            inner_bindings = dict(let_bindings)
+                            while isinstance(inner_expr, relay.Let):
+                                if isinstance(inner_expr.value, relay.Function):
+                                    inner_bindings[inner_expr.var] = inner_expr.value
+                                inner_expr = inner_expr.body
+                            if isinstance(inner_expr, relay.Call):
+                                arg_comp = get_composite_info(inner_expr, inner_bindings)
+                                if arg_comp == pre_composite_name:
+                                    pre_calls_from_split.append(inner_expr)
+
+            extract_immediate_composites(new_expr)
+            debug_print(f"[CompositeGraphMutator] Extracted from split: {len(pre_calls_from_split)} pre, {len(post_calls_from_split)} post")
+
             # Store split result for region update
             self.split_results[call] = {
               "new_expr": new_expr,
               "split_info": split_info,
               "pre_composite_name": pre_composite_name,
               "post_composite_name": post_composite_name,
+              "pre_calls": pre_calls_from_split,
+              "post_calls": post_calls_from_split,
             }
             return new_expr
           else:
@@ -3472,6 +3522,7 @@ class CompositeGraphMutator(relay.ExprMutator):
 def _find_composites_by_name(expr, target_names):
     """
     Find composite function calls in an expression by their Composite attribute name.
+    Handles both direct function calls and let-bound function calls.
 
     Args:
         expr: The expression to search
@@ -3483,16 +3534,39 @@ def _find_composites_by_name(expr, target_names):
     found = {name: [] for name in target_names}
 
     class CompositeFinder(relay.ExprVisitor):
+        def __init__(self):
+            super().__init__()
+            # Track let-bound functions: Var -> Function
+            self.let_bindings = {}
+
+        def visit_let(self, let):
+            # Track let bindings where value is a Function
+            if isinstance(let.value, relay.Function):
+                self.let_bindings[let.var] = let.value
+            self.visit(let.value)
+            self.visit(let.body)
+
         def visit_call(self, call):
-            if isinstance(call.op, relay.Function):
-                attrs = call.op.attrs
+            # Get the actual function (either direct or let-bound)
+            func = call.op
+            if isinstance(func, relay.Var) and func in self.let_bindings:
+                func = self.let_bindings[func]
+
+            if isinstance(func, relay.Function):
+                attrs = func.attrs
                 if attrs and "Composite" in attrs:
                     comp_name = str(attrs["Composite"])
                     if comp_name in target_names:
                         found[comp_name].append(call)
+                        debug_print(f"[_find_composites_by_name] Found composite '{comp_name}': {getNodeDebugID(call)}")
             super().visit_call(call)
 
     CompositeFinder().visit(expr)
+
+    # Debug: report what was found
+    for name in target_names:
+        debug_print(f"[_find_composites_by_name] Target '{name}': found {len(found[name])} calls")
+
     return found
 
 
@@ -3530,45 +3604,127 @@ def _apply_composite_splits(target_mod, split_pending, RegionList, main_func):
     # Update module
     new_mod = tvm.IRModule.from_expr(new_func)
 
-    # Collect all composite names we need to find
-    composite_names_to_find = set()
-    for original_composite, result_info in mutator.split_results.items():
-        if "pre_composite_name" in result_info:
-            composite_names_to_find.add(result_info["pre_composite_name"])
-        if "post_composite_name" in result_info:
-            composite_names_to_find.add(result_info["post_composite_name"])
-
-    # Find the new composite nodes in the transformed graph
-    found_composites = _find_composites_by_name(new_body, composite_names_to_find)
-
     # Update RegionList: replace original composites with split results
+    # Use the pre_calls and post_calls extracted during mutation (specific to each split)
     for original_composite, result_info in mutator.split_results.items():
         split_info = result_info["split_info"]
         pre_region = split_info["pre_region"]
         post_region = split_info["post_region"]
 
+        pre_region_idx = RegionList.index(pre_region) if pre_region in RegionList else -1
+        post_region_idx = RegionList.index(post_region) if post_region in RegionList else -1
+        debug_print(f"[_apply_composite_splits] Processing split for {getNodeDebugID(original_composite)}")
+        debug_print(f"  pre_region_idx={pre_region_idx}, post_region_idx={post_region_idx}")
+
         # Remove original composite from its region
-        for region in RegionList:
+        removed_from_region = -1
+        for region_idx, region in enumerate(RegionList):
             if original_composite in region:
                 region.remove(original_composite)
+                removed_from_region = region_idx
                 break
+        debug_print(f"  Removed original from region {removed_from_region}")
 
-        # Add new composites to their respective regions
-        if "pre_composite_name" in result_info:
-            pre_name = result_info["pre_composite_name"]
-            pre_calls = found_composites.get(pre_name, [])
-            for pre_call in pre_calls:
-                if pre_call not in pre_region:
-                    pre_region.append(pre_call)
+        # Add new composites to their respective regions using the extracted calls
+        # These are specific to THIS split, not all composites with the same name
+        pre_calls = result_info.get("pre_calls", [])
+        post_calls = result_info.get("post_calls", [])
 
-        if "post_composite_name" in result_info:
-            post_name = result_info["post_composite_name"]
-            post_calls = found_composites.get(post_name, [])
-            for post_call in post_calls:
-                if post_call not in post_region:
-                    post_region.append(post_call)
+        debug_print(f"  pre_composite: {len(pre_calls)} calls from this split")
+        for pre_call in pre_calls:
+            if pre_call not in pre_region:
+                pre_region.append(pre_call)
+                debug_print(f"    Added pre_call {getNodeDebugID(pre_call)} to pre_region")
 
-    return new_mod, RegionList
+        debug_print(f"  post_composite: {len(post_calls)} calls from this split")
+        for post_call in post_calls:
+            if post_call not in post_region:
+                post_region.append(post_call)
+                debug_print(f"    Added post_call {getNodeDebugID(post_call)} to post_region")
+
+    # Update RegionList to use NEW nodes from the mutated graph
+    # The mutation may have created new Python objects for nodes whose args changed
+    # We need to map OLD nodes to NEW nodes using structural equality
+    def _collect_all_calls(expr):
+        """Collect all Call nodes from an expression"""
+        calls = []
+        class CallCollector(relay.ExprVisitor):
+            def visit_call(self, call):
+                calls.append(call)
+                super().visit_call(call)
+        CallCollector().visit(expr)
+        return calls
+
+    new_calls = _collect_all_calls(new_body)
+
+    # Build a map from (composite_name OR op_name) to new_calls
+    # This allows matching by semantic identity when structural equality fails
+    def get_node_key(node):
+        """Get a key for matching nodes by their semantic identity."""
+        if isinstance(node.op, relay.Function):
+            attrs = node.op.attrs
+            if attrs and "Composite" in attrs:
+                return ("composite", str(attrs["Composite"]))
+        if isinstance(node.op, tvm.ir.Op):
+            return ("op", node.op.name)
+        return ("other", str(type(node.op)))
+
+    # Group new_calls by their key
+    from collections import defaultdict
+    new_calls_by_key = defaultdict(list)
+    for nc in new_calls:
+        key = get_node_key(nc)
+        new_calls_by_key[key].append(nc)
+
+    # Build updated RegionList with NEW nodes
+    updated_RegionList = []
+    for region in RegionList:
+        updated_region = []
+        for old_node in region:
+            # First try exact structural equality
+            found = False
+            for new_node in new_calls:
+                if tvm.ir.structural_equal(old_node, new_node, map_free_vars=True):
+                    if new_node not in updated_region:
+                        updated_region.append(new_node)
+                    found = True
+                    break
+
+            if not found:
+                # Try matching by semantic key (op name or composite name)
+                old_key = get_node_key(old_node)
+                matching_new_calls = new_calls_by_key.get(old_key, [])
+
+                # Find a new call with the same key that's not already in a region
+                for new_node in matching_new_calls:
+                    # Check if this new_node is already used
+                    already_used = False
+                    for existing_region in updated_RegionList + [updated_region]:
+                        if new_node in existing_region:
+                            already_used = True
+                            break
+                    if not already_used:
+                        updated_region.append(new_node)
+                        found = True
+                        debug_print(f"[_apply_composite_splits] Matched by key {old_key}: {getNodeDebugID(old_node)} -> {getNodeDebugID(new_node)}")
+                        break
+
+            if not found:
+                # Keep the old node if no match found
+                debug_print(f"[_apply_composite_splits] WARNING: No match for {getNodeDebugID(old_node)}")
+                if old_node not in updated_region:
+                    updated_region.append(old_node)
+        updated_RegionList.append(updated_region)
+
+    # Debug: print updated region summary
+    debug_print(f"\n[_apply_composite_splits] UPDATED REGION SUMMARY")
+    debug_print(f"Total regions: {len(updated_RegionList)}")
+    for region_idx, region in enumerate(updated_RegionList):
+        debug_print(f"  Region {region_idx} ({len(region)} nodes):")
+        for node in region:
+            debug_print(f"    - {getNodeDebugID(node)}")
+
+    return new_mod, updated_RegionList
 
 
 def partitionRound(mod, handle_branch_from_var_converge=True):
