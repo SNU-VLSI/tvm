@@ -1073,68 +1073,68 @@ def run_all_tests():
     print("# IMCFLOW Converge Point Detection Tests")
     print("#"*60)
 
-    # try:
-    #     test_latency_throughput_calculator()
-    # except Exception as e:
-    #     print(f"\n✗ LatencyThroughputCalculator test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_latency_throughput_calculator()
+    except Exception as e:
+        print(f"\n✗ LatencyThroughputCalculator test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_branch_analyzer()
-    # except Exception as e:
-    #     print(f"\n✗ BranchAnalyzer test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_branch_analyzer()
+    except Exception as e:
+        print(f"\n✗ BranchAnalyzer test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_branch_analyzer_unbalanced()
-    # except Exception as e:
-    #     print(f"\n✗ BranchAnalyzer unbalanced test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_branch_analyzer_unbalanced()
+    except Exception as e:
+        print(f"\n✗ BranchAnalyzer unbalanced test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_composite_splitter()
-    # except Exception as e:
-    #     print(f"\n✗ CompositeSplitter test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_composite_splitter()
+    except Exception as e:
+        print(f"\n✗ CompositeSplitter test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_composite_graph_mutator()
-    # except Exception as e:
-    #     print(f"\n✗ CompositeGraphMutator test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_composite_graph_mutator()
+    except Exception as e:
+        print(f"\n✗ CompositeGraphMutator test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_composite_graph_mutator_with_resnet_pattern()
-    # except Exception as e:
-    #     print(f"\n✗ CompositeGraphMutator ResNet pattern test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_composite_graph_mutator_with_resnet_pattern()
+    except Exception as e:
+        print(f"\n✗ CompositeGraphMutator ResNet pattern test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_full_partition_round()
-    # except Exception as e:
-    #     print(f"\n✗ Full partitionRound test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_full_partition_round()
+    except Exception as e:
+        print(f"\n✗ Full partitionRound test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_full_partition_round_with_composite()
-    # except Exception as e:
-    #     print(f"\n✗ Full partitionRound with composite test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_full_partition_round_with_composite()
+    except Exception as e:
+        print(f"\n✗ Full partitionRound with composite test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # try:
-    #     test_resnet8_basic_block_1()
-    # except Exception as e:
-    #     print(f"\n✗ ResNet8 basic block 1 test failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        test_resnet8_basic_block_1()
+    except Exception as e:
+        print(f"\n✗ ResNet8 basic block 1 test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
     try:
         test_resnet8_basic_block_2()
@@ -1142,7 +1142,6 @@ def run_all_tests():
         print(f"\n✗ ResNet8 basic block 2 test failed: {e}")
         import traceback
         traceback.print_exc()
-    return
 
     try:
         test_resnet8_converge_point()
