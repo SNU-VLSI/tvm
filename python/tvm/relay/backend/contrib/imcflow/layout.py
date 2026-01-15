@@ -1945,6 +1945,18 @@ class ImcflowLayoutLegalizer:
             return int(ttype.shape[1]) * 256
         return None
 
+      def _get_blocked_channels(self, expr, layout):
+        """Get total channel count from a blocked layout tensor."""
+        ttype = get_type(self.module, expr)
+        if isinstance(ttype, TensorType) and len(ttype.shape) == 5:
+          if layout in (LayoutType.NCHW16C, LayoutType.NCHW64C):
+            # Shape: (N, CG, H, W, block) -> CG * block
+            return int(ttype.shape[1]) * int(ttype.shape[4])
+          elif layout in (LayoutType.NHWC16C, LayoutType.NHWC64C):
+            # Shape: (N, H, W, CG, block) -> CG * block
+            return int(ttype.shape[3]) * int(ttype.shape[4])
+        return None
+
       def _convert_layout(self, expr, curr_layout, target_layout, channel_hint=None):
         if target_layout is None or curr_layout is None or self._layout_equal(curr_layout, target_layout):
           return expr, curr_layout if curr_layout is not None else target_layout
@@ -1962,6 +1974,16 @@ class ImcflowLayoutLegalizer:
           return expr, target_layout
         
         if curr_layout in block_layouts and target_layout in block_layouts:
+          # Check if channel slicing is needed when converting between blocked layouts
+          if channel_hint is not None:
+            curr_channels = self._get_blocked_channels(expr, curr_layout)
+            if curr_channels is not None and curr_channels > channel_hint:
+              # Need to go through NCHW with slice to reduce channels
+              expr, _ = self._convert_layout(expr, curr_layout, LayoutType.NCHW, channel_hint)
+              expr = relay.op.layout_transform(expr, "NCHW", self._layout_to_str(target_layout))
+              self.layout_map[expr] = target_layout
+              return expr, target_layout
+          # Direct conversion (channels match or no hint)
           layout_str_from = self._layout_to_str(curr_layout)
           layout_str_to = self._layout_to_str(target_layout)
           expr = relay.op.layout_transform(expr, layout_str_from, layout_str_to)
@@ -2088,7 +2110,9 @@ class ImcflowLayoutLegalizer:
           target_func = self.module[call.op.name_hint]
           expected_layouts = self.imcflow_func_layout_map[call.op.name_hint][0]
           for idx, (arg, curr_layout, tgt_layout) in enumerate(zip(new_args, arg_layouts, expected_layouts)):
-            new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout)
+            # Get original channel count for proper slicing during layout conversion
+            channel_hint = self._channels_from_expr(arg)
+            new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout, channel_hint)
             transformed_args.append(new_arg)
             target_arg_layouts[idx] = new_layout
         elif isinstance(call.op, tvm.ir.Op):
@@ -2115,7 +2139,9 @@ class ImcflowLayoutLegalizer:
             # Step 3: Transform all inputs to match the target rule
             if matched_option:
               for i, (arg, curr_layout, tgt_layout) in enumerate(zip(new_args, arg_layouts, matched_option)):
-                new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout)
+                # Get original channel count for proper slicing during layout conversion
+                channel_hint = self._channels_from_expr(arg)
+                new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout, channel_hint)
                 transformed_args.append(new_arg)
                 target_arg_layouts[i] = new_layout
             else:
