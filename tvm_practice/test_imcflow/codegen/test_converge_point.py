@@ -730,7 +730,7 @@ def test_full_partition_round():
             print(f"  {node.op.name} <- {pred_names} (preds={len(preds)})")
 
     try:
-        RegionList, split_pending = annotator.createRegionBFS(target_mod)
+        RegionList, split_pending, _ = annotator.createRegionBFS(target_mod)
         print(f"\nRegions created: {len(RegionList)}")
         for i, region in enumerate(RegionList):
             print(f"  Region {i}: {len(region)} nodes")
@@ -842,7 +842,7 @@ def test_full_partition_round_with_composite():
     target_mod = relay.transform.InferType()(target_mod)
 
     try:
-        RegionList, split_pending = annotator.createRegionBFS(target_mod)
+        RegionList, split_pending, _ = annotator.createRegionBFS(target_mod)
         print(f"\nRegions created: {len(RegionList)}")
         for i, region in enumerate(RegionList):
             print(f"  Region {i}: {len(region)} nodes")

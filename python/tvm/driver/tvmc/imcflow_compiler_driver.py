@@ -109,23 +109,23 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
 
     # Step 5: Unmerge composites (inline back to original ops for split_conv_to_atomic)
     mod = imcflow_transform.unmerge_composite(mod)
-    _print("5_after_unmerge_composite")
+    _print("6_after_unmerge_composite")
 
     # Step 6: Split imcflow function conv to atomic ops
     mod, param_dict = imcflow_transform.split_conv_to_atomic(mod, param_dict)
-    _print("6_after_atom_split")
+    _print("8_after_atom_split")
 
     # Step 7: Merge composite OPs (final merge)
     mod = imcflow_transform.merge_composite_ops(mod)
-    _print("7_after_final_merge")
+    _print("8_after_final_merge")
 
     # Step 8: Concat distributor
     mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(mod)
-    _print("8_after_concat_distributor")
+    _print("9_after_concat_distributor")
 
     # Step 10: Prune subgraphs
-    mod = imcflow.prune_imcflow_subgraphs(mod)
-    _print("10_after_prune_model")
+    # mod = imcflow.prune_imcflow_subgraphs(mod)
+    _print("10_after_prune_model_disabled")
 
     # Step 11: Annotate custom IDs
     mod = imcflow_transform.annotateCustomId(mod)
