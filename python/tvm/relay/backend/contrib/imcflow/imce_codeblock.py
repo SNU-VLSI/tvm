@@ -683,7 +683,7 @@ class RecvSendWrapper(ImceCodeBlock):
           code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
           owner_edge = te_info.owner
           add_to_map(owner_edge, RecvSendNum("recv", 1), is_send=False)
-  
+
     # --- 2. Generate Body ---
     # Here we call content() on the child block(s)
     code += self.body
@@ -699,7 +699,7 @@ class RecvSendWrapper(ImceCodeBlock):
       te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(
           src_id, "out")
 
-      # handle split ops in middle of functions. For example, qconv2d -> split 
+      # handle split ops in middle of functions. For example, qconv2d -> split
       output_edges=self.out_edges
       split_case = all(isinstance(dst_node, relay.Call) and dst_node.op == relay.op.get("split") for dst_node in [CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)] for edge in self.out_edges])
       # if not te_out_infos: # local edge
@@ -734,7 +734,7 @@ class RecvSendWrapper(ImceCodeBlock):
           te_out_info = te_out_infos[0] # we need just one edge info due to multicast
         else:
           te_out_info = te_out_infos[0]
-      
+
       for i in range(self.num_out_blocks):
         for te_out_info in [te_out_info]: #TODO: current version doesn't need it
           if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
@@ -746,6 +746,16 @@ class RecvSendWrapper(ImceCodeBlock):
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
             for out_edge in output_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
+
+      # Find if the consumer is an inode. If so, get the inode id and place OP_STANDBY
+      SYNC_OUTPUT_FLAG = 2
+      dst_graph_node_id = getInnerNodeID(te_out_info.owner.dst_id.graph_node_id)
+      dst_hw_node = DevConfig().get_hw_node(dst_graph_node_id)
+      if dst_hw_node is not None and isinstance(dst_hw_node, NodeID) and dst_hw_node.is_inode():
+        code += f"__builtin_IMCE_STANDBY({dst_hw_node.value}, {SYNC_OUTPUT_FLAG});"
+        # Store producer sync granularity for INode RECV to use
+        if te_out_info.producer_sync_granularity is None:
+          te_out_info.producer_sync_granularity = self.num_out_blocks
 
     return code.render()
 

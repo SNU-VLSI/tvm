@@ -4,9 +4,10 @@ set(MAIN_TEST_FOLDER "one_relu_evl" CACHE STRING "Path to main script (not neede
 set(MAIN_SCRIPT "relu.c" CACHE STRING "Path to main script (not needed for x86)")
 
 set(TVM_BUILD_HOST_RUNNER ON CACHE BOOL "Build host runner")
-set(MLF_TAR "${CMAKE_CURRENT_LIST_DIR}/../../${MAIN_TEST_FOLDER}/lib_graph_system-lib.tar" CACHE FILEPATH "Path to MLF tarball")
+# Paths are relative to the test directory (when host_binary_make is copied to {test}_evl/host_binary_make/)
+set(MLF_TAR "${CMAKE_CURRENT_LIST_DIR}/../../lib_graph_system-lib.tar" CACHE FILEPATH "Path to MLF tarball")
 # H_OBJ_PATH now points to the build directory, CMake will recursively find all .host.o files
-set(H_OBJ_PATH "${CMAKE_CURRENT_LIST_DIR}/../../${MAIN_TEST_FOLDER}/build" CACHE PATH "Path to host object files")
+set(H_OBJ_PATH "${CMAKE_CURRENT_LIST_DIR}/../../build" CACHE PATH "Path to host object files")
 
 if(${ISA} STREQUAL "ARM")
   include("${CMAKE_CURRENT_LIST_DIR}/config_arm.cmake")

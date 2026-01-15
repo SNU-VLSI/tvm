@@ -15,6 +15,7 @@ from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
 import os
+import shutil
 import subprocess
 import copy
 import pprint
@@ -32,10 +33,16 @@ from models import models_for_test
 # Import shared input generator
 from input_generator import InputGenerator
 
+# Import ImcFlow runner abstraction
+from imcflow_runner import get_runner
+
 np.random.seed(1234)
 
-DEBUG=1
+DEBUG_EXECUTOR=1
 DEBUG_SUBSET=1
+
+# Print environment configuration at startup
+print(f"Environment: IMCFLOW_RUNNER={os.getenv('IMCFLOW_RUNNER', 'py')}, IMCFLOW_DEBUG={os.getenv('IMCFLOW_DEBUG', '0')}")
 
 # ============================================================================
 # Model Registry
@@ -91,6 +98,17 @@ MODEL_REGISTRY = {
     "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
 
     # ResNet8 variants
+    "resnet8_subset04_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=4), "ones"),
+    "resnet8_subset05_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=5), "ones"),
+    "resnet8_subset06_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=6), "ones"),
+    "resnet8_subset07_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=7), "ones"),
+    "resnet8_subset08_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=8), "ones"),
+    "resnet8_subset09_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=9), "ones"),
+    "resnet8_subset25_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=25), "ones"),
+
+    # ResNet8 variants
+    "resnet8_subset04_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=4), "ones"),
+    "resnet8_subset05_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=5), "ones"),
     "resnet8_subset06_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=6), "ones"),
     "resnet8_subset07_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=7), "ones"),
     "resnet8_subset08_pretrained_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=8, iW=8, until_relay=8), "ones"),
@@ -270,21 +288,35 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
 
 def setup_dir(test_name, suffix=""):
   def clean_dir_recursive(path):
-    """Recursively clean all files but keep all directory inodes intact"""
+    """Recursively clean all files but keep directory structure intact."""
     for item in os.listdir(path):
       item_path = os.path.join(path, item)
       if os.path.isfile(item_path) or os.path.islink(item_path):
         os.remove(item_path)
-      elif os.path.isdir(item_path):
-        # Recursively clean subdirectory but keep the directory itself
+      elif os.path.isdir(item_path) and item != "logs":
         clean_dir_recursive(item_path)
+
+  def clean_runner_logs(logs_path, runner_dirs):
+    """Clean specific runner log directories."""
+    for runner_dir in runner_dirs:
+      runner_path = os.path.join(logs_path, runner_dir)
+      if os.path.exists(runner_path):
+        shutil.rmtree(runner_path)
 
   dir_name = f"{test_name}{suffix}"
   if not os.path.exists(dir_name):
     os.makedirs(dir_name)
   else:
-    # clean up all files recursively but keep all directory structures intact
     clean_dir_recursive(dir_name)
+    # Clean runner-specific logs based on IMCFLOW_RUNNER
+    runner_env = os.getenv('IMCFLOW_RUNNER', 'py').lower()
+    logs_path = os.path.join(dir_name, "logs")
+    if runner_env == 'rtl':
+      clean_runner_logs(logs_path, ['rtl_runner'])
+    elif runner_env == 'both':
+      clean_runner_logs(logs_path, ['py_runner', 'rtl_runner'])
+    else:  # 'py' or default
+      clean_runner_logs(logs_path, ['py_runner'])
 
   os.makedirs(os.path.join(dir_name, "logs"), exist_ok=True)
   os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
@@ -346,7 +378,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
     graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict,
                                          executor=executor_, runtime=runtime_)
 
-  if DEBUG:
+  if DEBUG_EXECUTOR:
     executor = debug_executor.create(graph, lib, device=ctx)
   else:
     executor = graph_executor.create(graph, lib, device=ctx)
@@ -363,7 +395,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
   # Run inference
   executor.run()
 
-  if DEBUG:
+  if DEBUG_EXECUTOR:
     print("Debug executor output tensors:")
     tvm_dict = executor.debug_datum.get_output_tensors()
     print(tvm_dict)
@@ -574,7 +606,8 @@ def run_simulation(eval_dir, HOST_ISA):
     eval_dir: Evaluation directory containing the model
 
   Returns:
-    imcflow_output: The IMCFLOW simulation output as numpy array, or None if output file doesn't exist
+    imcflow_output: The IMCFLOW simulation output as numpy array, or None if output file doesn't exist.
+                    When running both runners, returns the py_runner output for backward compatibility.
   """
   log_dir = f"{eval_dir}/logs"
 
@@ -584,10 +617,17 @@ def run_simulation(eval_dir, HOST_ISA):
 
   # Build the host binary
   print("\n--- Building Host Binary ---")
-  host_build_dir = "./host_binary_make/build"
-  if not os.path.exists(host_build_dir):
-    os.makedirs(host_build_dir)
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", eval_dir, HOST_ISA]
+
+  # Copy host_binary_make template to test directory if it doesn't exist
+  test_host_binary_dir = f"{eval_dir}/host_binary_make"
+  print(f"Copying host_binary_make template to {test_host_binary_dir}")
+  shutil.copytree("./host_binary_make.template", test_host_binary_dir, dirs_exist_ok=True)
+
+  host_build_dir = f"{test_host_binary_dir}/build"
+  os.makedirs(host_build_dir, exist_ok=True)
+
+  # Build in the test-specific directory (use current directory "." since eval_dir is now relative)
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", "x86"]
   build_log_path = os.path.join(log_dir, "build.log")
 
   with open(build_log_path, "w") as log_file:
@@ -610,55 +650,133 @@ def run_simulation(eval_dir, HOST_ISA):
 
   print(f"✅ Build completed, log saved to: {build_log_path}")
 
-  # Run gem5 simulation
-  if (HOST_ISA == "arm"):
-    print("\n-- Skipping gem5 simulation for ARM architecture --")
-    return None
-  print("\n--- Running gem5+py_sim Simulation ---")
-  imcflow_gem5_dir = "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/py_runner"
-  sim_command = ["direnv", "exec", ".", "./run.sh", "tvm_host_runner", "no", eval_dir]
-  sim_log_path = os.path.join(log_dir, "gem5.log")
+  # Get the appropriate runner(s) based on IMCFLOW_RUNNER env var
+  runners = get_runner()  # Returns single runner or list of runners
 
-  with open(sim_log_path, "w") as log_file:
+  # Normalize to list for uniform handling
+  if not isinstance(runners, list):
+    runners = [runners]
+
+  # Dictionary to store outputs from each runner
+  outputs = {}
+
+  # Run each runner sequentially
+  for runner in runners:
+    if len(runners) > 1:
+      print(f"\n{'='*60}")
+      print(f"Running {runner.name}")
+      print(f"{'='*60}")
+
+    # Setup runner (VCS compilation for RTL if needed)
+    runner.setup()
+
+    # Create runner-specific log directory
+    runner_log_dir = os.path.join(log_dir, runner.name)
+    os.makedirs(runner_log_dir, exist_ok=True)
+
+    # Run gem5 simulation
+    interrupted = False
+    simul_err = False
     try:
-      process = subprocess.Popen(
-        sim_command,
-        cwd=imcflow_gem5_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
+      runner.run(
+        binary_name="tvm_host_runner",
+        gdb_mode="no",
+        test_name=eval_dir,
+        eval_dir=eval_dir
       )
-
-      # Stream output line by line to both terminal and log file
-      for line in process.stdout:
-        print(line, end='')
-        log_file.write(line)
-
-      process.wait()
-      if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, sim_command)
-      print(f"✅ Simulation completed, log saved to: {sim_log_path}")
-    except Exception as e:
-      print(f"❌ Simulation failed with error: {e}")
     except KeyboardInterrupt:
+      simul_err   = True
+      interrupted = True
       print("❌ Simulation interrupted by user")
+    except Exception as e:
+      simul_err   = True
+      print(f"❌ Simulation failed for {runner.name}: {e}")
 
-  print(f"✅ move imcflow simulator log to {log_dir}")
-  imcflow_sim_log_paths = glob.glob(f"{imcflow_gem5_dir}/logs/now*.log")
-  for sim_log in imcflow_sim_log_paths:
-    base_name = os.path.basename(sim_log)
-    new_log_path = os.path.join(log_dir, base_name)
-    os.rename(sim_log, new_log_path)
+    # Logs are automatically written to runner_log_dir during run()
+    # No collection needed
 
-  # Load and return the simulation output
-  imcflow_output_path = os.path.abspath(os.path.join(eval_dir, "test_outputs", "output.npy"))
-  if os.path.exists(imcflow_output_path):
-    imcflow_output = np.load(imcflow_output_path)
-    print(f"✅ Loaded IMCFLOW output from: {imcflow_output_path}")
-    return imcflow_output
+    # Re-raise KeyboardInterrupt
+    if interrupted:
+      raise KeyboardInterrupt("Simulation interrupted by user")
+
+    # Load the output from this runner
+    runner_output_path = runner.get_output_path(test_name=eval_dir)
+
+    if not simul_err:
+      if os.path.exists(runner_output_path):
+        output_data = np.load(runner_output_path)
+        print(f"✅ {runner.name} output found at: {runner_output_path}")
+        outputs[runner.name] = output_data
+      else:
+        print(f"⚠️  {runner.name} output not found at: {runner_output_path}")
+        outputs[runner.name] = None
+
+  # If running both runners, compare outputs
+  if len(runners) > 1:
+    print(f"\n--- Comparing Runner Outputs ---")
+    _compare_runner_outputs(outputs)
+
+  # Return py_runner output for backward compatibility (or first runner's output)
+  if "py_runner" in outputs:
+    return outputs["py_runner"]
+  elif outputs:
+    return list(outputs.values())[0]
   else:
-    print(f"⚠️  IMCFLOW output not found at: {imcflow_output_path}")
     return None
+
+
+def _compare_runner_outputs(outputs):
+  """Compare outputs from different runners
+
+  Args:
+    outputs: Dictionary mapping runner name to output array
+  """
+  runner_names = list(outputs.keys())
+  if len(runner_names) < 2:
+    return
+
+  # Get reference output (first runner)
+  ref_name = runner_names[0]
+  ref_output = outputs[ref_name]
+
+  if ref_output is None:
+    print(f"❌ Cannot compare: {ref_name} output is None")
+    return
+
+  # Compare against other runners
+  all_match = True
+  for runner_name in runner_names[1:]:
+    other_output = outputs[runner_name]
+
+    if other_output is None:
+      print(f"❌ {runner_name} output is None")
+      all_match = False
+      continue
+
+    # Shape and dtype check
+    if ref_output.shape != other_output.shape:
+      print(f"❌ Shape mismatch: {ref_name}{ref_output.shape} vs {runner_name}{other_output.shape}")
+      all_match = False
+      continue
+
+    # Value comparison
+    if ref_output.dtype in [np.float32, np.float64]:
+      if np.allclose(ref_output, other_output, rtol=1e-5, atol=1e-8):
+        print(f"✅ {ref_name} == {runner_name}")
+      else:
+        diff = np.sum(~np.isclose(ref_output, other_output, rtol=1e-5, atol=1e-8))
+        print(f"❌ {ref_name} != {runner_name} ({diff}/{ref_output.size} differ)")
+        all_match = False
+    else:
+      if np.array_equal(ref_output, other_output):
+        print(f"✅ {ref_name} == {runner_name}")
+      else:
+        diff = np.sum(ref_output != other_output)
+        print(f"❌ {ref_name} != {runner_name} ({diff}/{ref_output.size} differ)")
+        all_match = False
+
+  if not all_match:
+    print(f"⚠️  Runner outputs differ")
 
 
 def compare_outputs(cpu_output, imcflow_output):
@@ -759,10 +877,11 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
   config = DevConfig()
 
   # Run simulation (build + gem5 execution)
-  imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
-
-  if (config.HOST_ISA == "arm"):
-    return None
+  try:
+    imcflow_output = run_simulation(eval_dir)
+  except KeyboardInterrupt:
+    print("\n⚠️  Simulation interrupted - skipping output comparison")
+    raise  # Re-raise to let pytest handle the interruption
 
   # Compare the reference CPU output with IMCFLOW simulated output
   if input_data_dict is not None:

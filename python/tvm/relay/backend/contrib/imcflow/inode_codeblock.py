@@ -132,9 +132,40 @@ class RecvBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
-    self.body.add(SimpleFor(loop_cnt_var,
-                      lambda iter, base_addr_var=base_var, fid=fifo_id:
-                        f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});"))
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\\n nop\");")) # BUGFIX_LOAD_USE_HAZARD
+
+    # Consumer INODE sets flag for the Producer to sync.
+    SYNC_OUTPUT_FLAG = 2
+
+    # Check producer's sync granularity
+    edge_info = DevConfig().get_tensor_edge_info(target_edge)
+    producer_sync_granularity = edge_info.producer_sync_granularity if edge_info and edge_info.producer_sync_granularity else 4
+
+    # Always unroll 4x (pkt_cnt is always divided by 4 as per requirement)
+    # But sync frequency depends on producer_sync_granularity
+    if producer_sync_granularity == 1:
+      # Producer syncs every SEND, so INode must sync every RECV (but still unroll 4x in batches)
+      # Need to loop 4x more (pkt_cnt * 4) since we're doing 1 RECV per iteration instead of 4
+      expanded_loop_cnt_var = UniqueVar(f"{target_edge.simple_name()}_expanded_loop_count", dtype="int")
+      self.body.add(TextBlock(f"{expanded_loop_cnt_var} = {loop_cnt_var} * 4;"))
+
+      def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
+        return (f"__builtin_INODE_SET_FLAG(0);\n"
+                f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
+                f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
+
+      self.body.add(SimpleFor(expanded_loop_cnt_var, unrolled_recv_body))
+    else:
+      # Producer syncs every 4 SENDs (default behavior), INode syncs every 4 RECVs
+      def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
+        return (f"__builtin_INODE_SET_FLAG(0);\n"
+                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
+                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 32, 0, 0, {fid});\n"
+                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 64, 0, 0, {fid});\n"
+                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});\n"
+                f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
+      self.body.add(SimpleFor(loop_cnt_var, unrolled_recv_body))
+
 
 
 class RecvBlockInterleaved(InodeCodeBlock):
@@ -226,11 +257,16 @@ class SendBlock(InodeCodeBlock):
     loop_cnt_var = UniqueVar(f"{target_edge.simple_name()}_tile_loop_count", dtype="int")
     base_var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
-    
+
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
-    self.body.add(SimpleFor(loop_cnt_var,
-                      lambda iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id:
-                        f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});"))
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\\n nop\");")) # BUGFIX_LOAD_USE_HAZARD
+    # Unroll 4x with stride of 128 bytes (4 * 32)
+    def unrolled_send_body(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id):
+      return (f"__builtin_INODE_SEND({base_addr_var} + {iter}*128, 0, {policy_addr}, {fid});\n"
+              f"__builtin_INODE_SEND({base_addr_var} + {iter}*128 + 32, 0, {policy_addr}, {fid});\n"
+              f"__builtin_INODE_SEND({base_addr_var} + {iter}*128 + 64, 0, {policy_addr}, {fid});\n"
+              f"__builtin_INODE_SEND({base_addr_var} + {iter}*128 + 96, 0, {policy_addr}, {fid});")
+    self.body.add(SimpleFor(loop_cnt_var, unrolled_send_body))
 
 class SendBlockInterleaved(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
