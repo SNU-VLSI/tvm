@@ -3294,12 +3294,12 @@ class AnnotGenerator:
                 # Selection policy with converge point handling
                 # ====================================================
                 if needs_split:
-                  # Composite will be split - add original to pre_region for now
+                  # Composite will be split - add original to post_region for now
                   # After mutation, this will be replaced with pre_composite
                   # post_composite will be added to post_region
-                  pre_region = self.split_pending[node]["pre_region"]
-                  self.addToRegion(pre_region, node)
-                  debug_print(f"[ConvergeCheck] Added original composite to pre_region (will be split later)")
+                  post_region = self.split_pending[node]["post_region"]
+                  self.addToRegion(post_region, node)
+                  debug_print(f"[ConvergeCheck] Added original composite to post_region (will be split later)")
                 elif force_new_region:
                   # Non-composite converge point with unbalanced branches -> new region
                   Region = self.createRegion()
@@ -3419,8 +3419,10 @@ class CompositeGraphMutator(relay.ExprMutator):
     def __init__(self, split_pending):
         super().__init__()
         self.split_pending = split_pending
-        # Maps original composite -> (pre_composite_call, post_composite_call)
+        # Maps original composite -> split info
         self.split_results = {}
+        # Maps old_node -> new_node for nodes whose args changed during mutation
+        self.node_replacements = {}
 
     def visit_call(self, call):
         # First visit args
@@ -3515,7 +3517,10 @@ class CompositeGraphMutator(relay.ExprMutator):
 
         # Normal call - just update args if changed
         if new_args != list(call.args):
-          return relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+          new_call = relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+          # Track the replacement so RegionList can be updated
+          self.node_replacements[call] = new_call
+          return new_call
         return call
 
 
@@ -3655,63 +3660,20 @@ def _apply_composite_splits(target_mod, split_pending, RegionList, main_func):
         CallCollector().visit(expr)
         return calls
 
-    new_calls = _collect_all_calls(new_body)
-
-    # Build a map from (composite_name OR op_name) to new_calls
-    # This allows matching by semantic identity when structural equality fails
-    def get_node_key(node):
-        """Get a key for matching nodes by their semantic identity."""
-        if isinstance(node.op, relay.Function):
-            attrs = node.op.attrs
-            if attrs and "Composite" in attrs:
-                return ("composite", str(attrs["Composite"]))
-        if isinstance(node.op, tvm.ir.Op):
-            return ("op", node.op.name)
-        return ("other", str(type(node.op)))
-
-    # Group new_calls by their key
-    from collections import defaultdict
-    new_calls_by_key = defaultdict(list)
-    for nc in new_calls:
-        key = get_node_key(nc)
-        new_calls_by_key[key].append(nc)
-
-    # Build updated RegionList with NEW nodes
+    # Build updated RegionList using the node_replacements mapping from mutation
+    # This is safe because we track exactly which old node maps to which new node
     updated_RegionList = []
     for region in RegionList:
         updated_region = []
         for old_node in region:
-            # First try exact structural equality
-            found = False
-            for new_node in new_calls:
-                if tvm.ir.structural_equal(old_node, new_node, map_free_vars=True):
-                    if new_node not in updated_region:
-                        updated_region.append(new_node)
-                    found = True
-                    break
-
-            if not found:
-                # Try matching by semantic key (op name or composite name)
-                old_key = get_node_key(old_node)
-                matching_new_calls = new_calls_by_key.get(old_key, [])
-
-                # Find a new call with the same key that's not already in a region
-                for new_node in matching_new_calls:
-                    # Check if this new_node is already used
-                    already_used = False
-                    for existing_region in updated_RegionList + [updated_region]:
-                        if new_node in existing_region:
-                            already_used = True
-                            break
-                    if not already_used:
-                        updated_region.append(new_node)
-                        found = True
-                        debug_print(f"[_apply_composite_splits] Matched by key {old_key}: {getNodeDebugID(old_node)} -> {getNodeDebugID(new_node)}")
-                        break
-
-            if not found:
-                # Keep the old node if no match found
-                debug_print(f"[_apply_composite_splits] WARNING: No match for {getNodeDebugID(old_node)}")
+            # Check if this node was replaced during mutation
+            if old_node in mutator.node_replacements:
+                new_node = mutator.node_replacements[old_node]
+                if new_node not in updated_region:
+                    updated_region.append(new_node)
+                debug_print(f"[_apply_composite_splits] Replaced: {getNodeDebugID(old_node)} -> {getNodeDebugID(new_node)}")
+            else:
+                # Node was not mutated, keep as is
                 if old_node not in updated_region:
                     updated_region.append(old_node)
         updated_RegionList.append(updated_region)
