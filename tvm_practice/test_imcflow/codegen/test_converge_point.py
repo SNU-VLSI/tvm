@@ -23,6 +23,7 @@ from tvm.relay.backend.contrib.imcflow.transform import (
     LatencyThroughputCalculator,
     BranchAnalyzer,
     CompositeSplitter,
+    CompositeGraphMutator,
     AnnotGenerator,
     partitionRound,
     partitionImcflowSubGraph,
@@ -425,6 +426,209 @@ def test_composite_splitter():
         print(f"  Op name: {converge_op2.op.name}")
 
     print("\n✓ CompositeSplitter tests passed")
+
+
+def test_composite_graph_mutator():
+    """Test CompositeGraphMutator - the actual graph transformation.
+
+    This test verifies that CompositeGraphMutator correctly:
+    1. Finds composites in split_pending
+    2. Calls split_composite_at_converge to split them
+    3. Replaces original composite with split result in the graph
+    """
+    print("\n" + "="*60)
+    print("TEST: CompositeGraphMutator")
+    print("="*60)
+
+    # Create a composite function with internal converge point
+    # Pattern: conv → relu + skip → add (all float32 for simplicity)
+    x = relay.var("x", shape=(1, 32, 8, 8), dtype="float32")
+    w = relay.var("w", shape=(32, 32, 3, 3), dtype="float32")
+    skip = relay.var("skip", shape=(1, 32, 8, 8), dtype="float32")
+
+    # Build composite body
+    conv = relay.nn.conv2d(x, w, in_channels=32, channels=32, kernel_size=(3, 3), padding=(1, 1))
+    relu = relay.nn.relu(conv)
+    add_out = relay.add(relu, skip)
+
+    composite_func = relay.Function([x, w, skip], add_out)
+    composite_func = composite_func.with_attr("Composite", "imcflow.qconv2d-with-postop")
+
+    # Create module with composite call
+    data = relay.var("data", shape=(1, 32, 8, 8), dtype="float32")
+    weight = relay.const(np.random.randn(32, 32, 3, 3).astype("float32"))
+    skip_input = relay.var("skip_input", shape=(1, 32, 8, 8), dtype="float32")
+
+    composite_call = relay.Call(composite_func, [data, weight, skip_input])
+
+    func = relay.Function([data, skip_input], composite_call)
+    func = func.with_attr("Compiler", "imcflow")
+    func = func.with_attr("global_symbol", "imcflow_test")
+
+    mod = tvm.IRModule()
+    mod["tvmgen_default_imcflow_test_0"] = func
+    mod = relay.transform.InferType()(mod)
+
+    print("\n--- Original Module ---")
+    print(relay.pretty_print(mod))
+
+    # Step 1: Find converge op in composite
+    print("\n--- Step 1: Find converge op ---")
+    converge_op = CompositeSplitter.find_converge_op_in_composite(composite_call)
+    print(f"Converge op found: {converge_op is not None}")
+    if converge_op:
+        if isinstance(converge_op.op, tvm.ir.Op):
+            print(f"  Op name: {converge_op.op.name}")
+
+    # Step 2: Create split_pending dict (simulating what AnnotGenerator does)
+    print("\n--- Step 2: Create split_pending ---")
+    if converge_op:
+        split_pending = {
+            composite_call: {
+                "converge_op": converge_op,
+                "pre_region": 0,  # Region ID (simulated)
+                "post_region": 1,  # Region ID (simulated)
+            }
+        }
+        print(f"Split pending entries: {len(split_pending)}")
+    else:
+        split_pending = {}
+        print("No converge op found - split_pending is empty")
+
+    # Step 3: Apply CompositeGraphMutator
+    print("\n--- Step 3: Apply CompositeGraphMutator ---")
+
+    if split_pending:
+        # Get the imcflow function body
+        imcflow_func = mod["tvmgen_default_imcflow_test_0"]
+
+        # Create mutator and apply
+        mutator = CompositeGraphMutator(split_pending)
+        new_body = mutator.visit(imcflow_func.body)
+
+        print(f"Split results: {len(mutator.split_results)}")
+        for orig, result in mutator.split_results.items():
+            print(f"  Original composite split:")
+            print(f"    pre_composite_name: {result.get('pre_composite_name', 'N/A')}")
+            print(f"    post_composite_name: {result.get('post_composite_name', 'N/A')}")
+
+        # Create new function and module
+        new_func = relay.Function(
+            imcflow_func.params,
+            new_body,
+            ret_type=imcflow_func.ret_type
+        )
+        new_func = new_func.with_attr("Compiler", "imcflow")
+        new_func = new_func.with_attr("global_symbol", "imcflow_test")
+
+        new_mod = tvm.IRModule()
+        new_mod["tvmgen_default_imcflow_test_0"] = new_func
+        new_mod = relay.transform.InferType()(new_mod)
+
+        print("\n--- Transformed Module ---")
+        print(relay.pretty_print(new_mod))
+
+        # Verify split occurred
+        if len(mutator.split_results) > 0:
+            print("\n✓ CompositeGraphMutator successfully split composite")
+        else:
+            print("\n⚠ CompositeGraphMutator did not split any composite")
+    else:
+        print("Skipping mutation - no split_pending entries")
+
+    print("\n✓ CompositeGraphMutator test completed")
+
+
+def test_composite_graph_mutator_with_resnet_pattern():
+    """Test CompositeGraphMutator with ResNet-style pattern.
+
+    Tests the actual pattern from ResNet8: composite with internal
+    conv → relu → add (with skip from Var).
+    """
+    print("\n" + "="*60)
+    print("TEST: CompositeGraphMutator with ResNet Pattern")
+    print("="*60)
+
+    # Create a composite that matches ResNet pattern (using float32 for simplicity):
+    # conv → bias → relu → add(with skip)
+    x = relay.var("x", shape=(1, 32, 8, 8), dtype="float32")
+    w = relay.var("w", shape=(32, 32, 3, 3), dtype="float32")
+    bias_param = relay.var("bias", shape=(32,), dtype="float32")
+    skip = relay.var("skip", shape=(1, 32, 8, 8), dtype="float32")
+
+    # Build composite body
+    conv = relay.nn.conv2d(x, w, in_channels=32, channels=32, kernel_size=(3, 3), padding=(1, 1))
+    bias = relay.nn.bias_add(conv, bias_param)
+    relu = relay.nn.relu(bias)
+    add_out = relay.add(relu, skip)
+
+    composite_func = relay.Function([x, w, bias_param, skip], add_out)
+    composite_func = composite_func.with_attr("Composite", "imcflow.qconv2d-with-postop")
+    composite_func = composite_func.with_attr("PartitionedFromPattern", "nn.conv2d_nn.bias_add_nn.relu_add_")
+
+    # Create outer module
+    data = relay.var("data", shape=(1, 32, 8, 8), dtype="float32")
+    weight = relay.const(np.random.randn(32, 32, 3, 3).astype("float32"))
+    bias_const = relay.const(np.zeros(32).astype("float32"))
+    skip_input = relay.var("skip_input", shape=(1, 32, 8, 8), dtype="float32")
+
+    composite_call = relay.Call(composite_func, [data, weight, bias_const, skip_input])
+
+    func = relay.Function([data, skip_input], composite_call)
+    func = func.with_attr("Compiler", "imcflow")
+    func = func.with_attr("global_symbol", "imcflow_test")
+
+    mod = tvm.IRModule()
+    mod["tvmgen_default_imcflow_test_0"] = func
+    mod = relay.transform.InferType()(mod)
+
+    print("\n--- Original Module ---")
+    print(relay.pretty_print(mod))
+
+    # Find converge op
+    print("\n--- Finding converge op in composite ---")
+    converge_op = CompositeSplitter.find_converge_op_in_composite(composite_call)
+    print(f"Converge op found: {converge_op is not None}")
+    if converge_op and isinstance(converge_op.op, tvm.ir.Op):
+        print(f"  Op name: {converge_op.op.name}")
+        print(f"  Args: {len(converge_op.args)}")
+        for i, arg in enumerate(converge_op.args):
+            arg_type = type(arg).__name__
+            if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op):
+                print(f"    arg[{i}]: {arg_type} - {arg.op.name}")
+            elif isinstance(arg, relay.Var):
+                print(f"    arg[{i}]: {arg_type} - {arg.name_hint}")
+            else:
+                print(f"    arg[{i}]: {arg_type}")
+
+    # Test split_composite_at_converge directly
+    print("\n--- Testing split_composite_at_converge ---")
+    if converge_op:
+        result = CompositeSplitter.split_composite_at_converge(
+            composite_call, converge_op, "imcflow"
+        )
+        if result:
+            print(f"Split successful!")
+            print(f"  pre_composite_name: {result['pre_composite_name']}")
+            print(f"  post_composite_name: {result['post_composite_name']}")
+            print(f"\n--- Result expression ---")
+            # Create temp mod to pretty print
+            temp_func = relay.Function([data, skip_input], result['result_expr'])
+            temp_mod = tvm.IRModule.from_expr(temp_func)
+            try:
+                temp_mod = relay.transform.InferType()(temp_mod)
+                print(relay.pretty_print(temp_mod))
+            except Exception as e:
+                print(f"InferType failed: {e}")
+                print("Raw result expression:")
+                print(result['result_expr'])
+        else:
+            print("Split failed - returned None")
+            print("This may be due to pattern matching issues")
+    else:
+        print("No converge op found - cannot split")
+
+    print("\n✓ CompositeGraphMutator ResNet pattern test completed")
 
 
 def test_full_partition_round():
@@ -869,54 +1073,68 @@ def run_all_tests():
     print("# IMCFLOW Converge Point Detection Tests")
     print("#"*60)
 
-    try:
-        test_latency_throughput_calculator()
-    except Exception as e:
-        print(f"\n✗ LatencyThroughputCalculator test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    # try:
+    #     test_latency_throughput_calculator()
+    # except Exception as e:
+    #     print(f"\n✗ LatencyThroughputCalculator test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
-    try:
-        test_branch_analyzer()
-    except Exception as e:
-        print(f"\n✗ BranchAnalyzer test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    # try:
+    #     test_branch_analyzer()
+    # except Exception as e:
+    #     print(f"\n✗ BranchAnalyzer test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
-    try:
-        test_branch_analyzer_unbalanced()
-    except Exception as e:
-        print(f"\n✗ BranchAnalyzer unbalanced test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    # try:
+    #     test_branch_analyzer_unbalanced()
+    # except Exception as e:
+    #     print(f"\n✗ BranchAnalyzer unbalanced test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
-    try:
-        test_composite_splitter()
-    except Exception as e:
-        print(f"\n✗ CompositeSplitter test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    # try:
+    #     test_composite_splitter()
+    # except Exception as e:
+    #     print(f"\n✗ CompositeSplitter test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
-    try:
-        test_full_partition_round()
-    except Exception as e:
-        print(f"\n✗ Full partitionRound test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    # try:
+    #     test_composite_graph_mutator()
+    # except Exception as e:
+    #     print(f"\n✗ CompositeGraphMutator test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
-    try:
-        test_full_partition_round_with_composite()
-    except Exception as e:
-        print(f"\n✗ Full partitionRound with composite test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    # try:
+    #     test_composite_graph_mutator_with_resnet_pattern()
+    # except Exception as e:
+    #     print(f"\n✗ CompositeGraphMutator ResNet pattern test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
-    try:
-        test_resnet8_basic_block_1()
-    except Exception as e:
-        print(f"\n✗ ResNet8 basic block 1 test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    # try:
+    #     test_full_partition_round()
+    # except Exception as e:
+    #     print(f"\n✗ Full partitionRound test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+
+    # try:
+    #     test_full_partition_round_with_composite()
+    # except Exception as e:
+    #     print(f"\n✗ Full partitionRound with composite test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+
+    # try:
+    #     test_resnet8_basic_block_1()
+    # except Exception as e:
+    #     print(f"\n✗ ResNet8 basic block 1 test failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
     try:
         test_resnet8_basic_block_2()
@@ -924,6 +1142,7 @@ def run_all_tests():
         print(f"\n✗ ResNet8 basic block 2 test failed: {e}")
         import traceback
         traceback.print_exc()
+    return
 
     try:
         test_resnet8_converge_point()

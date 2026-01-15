@@ -3403,7 +3403,8 @@ class AnnotGenerator:
       debug_print(f"\nSplit pending: {len(self.split_pending)} composites")
       debug_print(f"{'='*70}\n")
 
-      return self.RegionList, self.split_pending
+      # Return func as well to ensure the same Python object is used in _apply_composite_splits
+      return self.RegionList, self.split_pending, func
 
 
 class CompositeGraphMutator(relay.ExprMutator):
@@ -3429,10 +3430,17 @@ class CompositeGraphMutator(relay.ExprMutator):
           split_info = self.split_pending[call]
           debug_print(f"[CompositeGraphMutator] Splitting composite: {getNodeDebugID(call)}")
 
+          # Create call with updated args before splitting
+          # This ensures that if any args were mutated (e.g., another composite was split),
+          # we split the correct version with updated dependencies
+          call_to_split = call
+          if new_args != list(call.args):
+            call_to_split = relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+
           # Perform actual split using CompositeSplitter
           converge_op = split_info["converge_op"]
           result = CompositeSplitter.split_composite_at_converge(
-            call, converge_op, "imcflow"
+            call_to_split, converge_op, "imcflow"
           )
 
           if result is not None:
@@ -3441,9 +3449,7 @@ class CompositeGraphMutator(relay.ExprMutator):
             pre_composite_name = result["pre_composite_name"]
             post_composite_name = result["post_composite_name"]
 
-            debug_print(f"[CompositeGraphMutator] Split successful:")
-            debug_print(f"  - pre_composite: {pre_composite_name}")
-            debug_print(f"  - post_composite: {post_composite_name}")
+            debug_print(f"[CompositeGraphMutator] Split successful: pre={pre_composite_name}, post={post_composite_name}")
 
             # Store split result for region update
             self.split_results[call] = {
@@ -3490,7 +3496,7 @@ def _find_composites_by_name(expr, target_names):
     return found
 
 
-def _apply_composite_splits(target_mod, split_pending, RegionList):
+def _apply_composite_splits(target_mod, split_pending, RegionList, main_func):
     """
     Apply composite splits and update region list.
 
@@ -3498,6 +3504,7 @@ def _apply_composite_splits(target_mod, split_pending, RegionList):
         target_mod: The module to transform
         split_pending: Dict of composites to split
         RegionList: List of regions to update
+        main_func: The function object from createRegionBFS (must be the same Python object)
 
     Returns:
         (transformed_mod, updated_RegionList)
@@ -3506,9 +3513,6 @@ def _apply_composite_splits(target_mod, split_pending, RegionList):
         return target_mod, RegionList
 
     debug_print(f"[_apply_composite_splits] Applying {len(split_pending)} composite splits")
-
-    # Get the main function
-    main_func = list(target_mod.functions.items())[0][1]
 
     # Apply mutation
     mutator = CompositeGraphMutator(split_pending)
@@ -3547,7 +3551,6 @@ def _apply_composite_splits(target_mod, split_pending, RegionList):
         for region in RegionList:
             if original_composite in region:
                 region.remove(original_composite)
-                debug_print(f"[_apply_composite_splits] Removed original from region")
                 break
 
         # Add new composites to their respective regions
@@ -3557,7 +3560,6 @@ def _apply_composite_splits(target_mod, split_pending, RegionList):
             for pre_call in pre_calls:
                 if pre_call not in pre_region:
                     pre_region.append(pre_call)
-                    debug_print(f"[_apply_composite_splits] Added pre_composite to pre_region")
 
         if "post_composite_name" in result_info:
             post_name = result_info["post_composite_name"]
@@ -3565,9 +3567,6 @@ def _apply_composite_splits(target_mod, split_pending, RegionList):
             for post_call in post_calls:
                 if post_call not in post_region:
                     post_region.append(post_call)
-                    debug_print(f"[_apply_composite_splits] Added post_composite to post_region")
-
-        debug_print(f"[_apply_composite_splits] Updated regions for split composite")
 
     return new_mod, RegionList
 
@@ -3595,21 +3594,21 @@ def partitionRound(mod, handle_branch_from_var_converge=True):
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
 
       # Step 1: Create regions (with split_pending for deferred splits)
-      RegionList, split_pending = annotator.createRegionBFS(target_mod)
+      RegionList, split_pending, region_func = annotator.createRegionBFS(target_mod)
 
       # Step 2: Apply composite splits if any
       if split_pending:
         debug_print(f"[partitionRound] Applying {len(split_pending)} composite splits")
-        target_mod, RegionList = _apply_composite_splits(target_mod, split_pending, RegionList)
+        target_mod, RegionList = _apply_composite_splits(target_mod, split_pending, RegionList, region_func)
 
       # Step 3: Annotate and partition with updated graph and regions
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
-      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_annotated")
+      printModel("resnet8_evl", target_mod, {}, f"{name}_round_annotated")
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
-      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_merged")
+      printModel("resnet8_evl", target_mod, {}, f"{name}_round_merged")
       target_mod = transform.PartitionGraph()(target_mod)
-      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
+      printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
 
       for new_gv, new_func in target_mod.functions.items():
         if new_gv.name_hint == "main":
