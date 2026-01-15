@@ -666,6 +666,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       block = WriteIMCUBlock(node, "imcu write")
       self.codeblocks.append(node, block, CodePhase.INIT)
 
+    # sync before imce compute
+    for inode in NodeID.inodes():
+      block = SyncAllINodes(inode, "sync before compute enable")
+      self.codeblocks.append(inode, block, CodePhase.INIT)
+
     # imce compute
     active_imces = DevConfig().ActiveIMCEPerFunc[func_name]
     for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
