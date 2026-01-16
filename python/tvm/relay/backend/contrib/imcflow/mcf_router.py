@@ -16,6 +16,7 @@ from typing import Dict, List, Tuple, Set, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
+import pulp
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,6 @@ class MCFRouter:
     def __init__(
         self,
         topology: MeshTopology,
-        edge_capacity: int = 1,
         minimize_congestion: bool = True,
     ):
         """
@@ -169,22 +169,11 @@ class MCFRouter:
 
         Args:
             topology: The mesh topology
-            edge_capacity: Maximum number of commodities that can share an edge
-                          (use large number for soft constraint)
             minimize_congestion: If True, minimize max congestion. If False, minimize total usage.
         """
         self.topology = topology
-        self.edge_capacity = edge_capacity
         self.minimize_congestion = minimize_congestion
         self._solver = None
-
-    def _check_pulp_available(self) -> bool:
-        """Check if PuLP is available"""
-        try:
-            import pulp
-            return True
-        except ImportError:
-            return False
 
     def route(self, commodities: List[Commodity]) -> MCFRoutingResult:
         """
@@ -197,35 +186,45 @@ class MCFRouter:
             MCFRoutingResult containing all routes and statistics
         """
         if not commodities:
-            return MCFRoutingResult(
-                routes={},
-                edge_usage={},
-                max_edge_congestion=0,
-                total_edge_usage=0,
-                solver_status="empty"
-            )
+          raise ValueError("No commodities provided for routing.")
 
         # Filter out same-node commodities
         valid_commodities = [c for c in commodities if c.source != c.destination]
 
         if not valid_commodities:
-            return MCFRoutingResult(
-                routes={c.id: RoutingResult(c, [c.source], []) for c in commodities},
-                edge_usage={},
-                max_edge_congestion=0,
-                total_edge_usage=0,
-                solver_status="all_local"
-            )
-
-        if not self._check_pulp_available():
-            logger.warning("PuLP not available, falling back to greedy routing")
-            return self._route_greedy(valid_commodities)
+          raise ValueError("All commodities have same source and destination.")
 
         return self._route_ilp(valid_commodities)
 
     def _route_ilp(self, commodities: List[Commodity]) -> MCFRoutingResult:
-        """Route using ILP solver (PuLP)"""
-        import pulp
+        """Route using ILP solver (PuLP) with adaptive capacity.
+
+        Starts with edge_capacity=1 (no conflicts) and increments until feasible.
+        """
+        # Start with edge_capacity=1 and increment until feasible
+        current_capacity = 1
+        max_capacity = len(commodities)  # Upper bound
+
+        while current_capacity <= max_capacity:
+            result = self._try_route_with_capacity(commodities, current_capacity)
+            if result is not None:
+                if current_capacity > 1:
+                    logger.info(f"MCF routing found solution with edge_capacity={current_capacity}")
+                return result
+
+            logger.debug(f"MCF routing infeasible with edge_capacity={current_capacity}, trying {current_capacity + 1}")
+            current_capacity += 1
+
+        # Fallback: solve without capacity constraint
+        logger.warning("MCF routing failed with all capacities, solving without constraint")
+        return self._try_route_with_capacity(commodities, None)
+
+    def _try_route_with_capacity(
+        self,
+        commodities: List[Commodity],
+        capacity: Optional[int]
+    ) -> Optional[MCFRoutingResult]:
+        """Try to route with given edge capacity. Returns None if infeasible."""
 
         # Create problem
         if self.minimize_congestion:
@@ -247,10 +246,6 @@ class MCFRouter:
                     cat=pulp.LpBinary
                 )
 
-        # Create congestion variable for each edge (if minimizing congestion)
-        if self.minimize_congestion:
-            max_congestion = pulp.LpVariable("max_congestion", lowBound=0, cat=pulp.LpInteger)
-
         # Edge usage count variables
         edge_usage_vars = {}
         for e in all_edges:
@@ -261,17 +256,6 @@ class MCFRouter:
             )
             # Edge usage = sum of all commodities using this edge
             prob += edge_usage_vars[e] == pulp.lpSum(x[k.id][e] for k in commodities)
-
-        # Objective function
-        if self.minimize_congestion:
-            # Minimize maximum congestion
-            prob += max_congestion
-            # Constraint: max_congestion >= usage of each edge
-            for e in all_edges:
-                prob += max_congestion >= edge_usage_vars[e]
-        else:
-            # Minimize total edge usage
-            prob += pulp.lpSum(edge_usage_vars[e] for e in all_edges)
 
         # Flow conservation constraints
         for k in commodities:
@@ -293,18 +277,29 @@ class MCFRouter:
                     # Intermediate: in_flow = out_flow
                     prob += in_flow == out_flow, f"flow_conservation_{k.id}_{node.row}_{node.col}"
 
-        # Optional: Hard capacity constraints
-        if self.edge_capacity < len(commodities):
+        # Hard capacity constraints (if specified)
+        if capacity is not None:
             for e in all_edges:
-                prob += edge_usage_vars[e] <= self.edge_capacity
+                prob += edge_usage_vars[e] <= capacity
+
+        # Objective function
+        if self.minimize_congestion:
+            max_congestion = pulp.LpVariable("max_congestion", lowBound=0, cat=pulp.LpInteger)
+            # Minimize maximum congestion
+            prob += max_congestion
+            # Constraint: max_congestion >= usage of each edge
+            for e in all_edges:
+                prob += max_congestion >= edge_usage_vars[e]
+        else:
+            # Minimize total edge usage
+            prob += pulp.lpSum(edge_usage_vars[e] for e in all_edges)
 
         # Solve
         solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=60)
         status = prob.solve(solver)
 
         if status != pulp.LpStatusOptimal:
-            logger.warning(f"ILP solver status: {pulp.LpStatus[status]}, falling back to greedy")
-            return self._route_greedy(commodities)
+            return None  # Infeasible with this capacity
 
         # Extract routes from solution
         routes = {}
@@ -330,7 +325,7 @@ class MCFRouter:
             edge_usage={e: v for e, v in edge_usage.items() if v},
             max_edge_congestion=max_cong,
             total_edge_usage=total_usage,
-            solver_status=pulp.LpStatus[status]
+            solver_status=f"{pulp.LpStatus[status]} (cap={capacity})"
         )
 
     def _reconstruct_path(
@@ -361,117 +356,6 @@ class MCFRouter:
             path.append(current)
 
         return path
-
-    def _route_greedy(self, commodities: List[Commodity]) -> MCFRoutingResult:
-        """
-        Fallback greedy routing when ILP is not available
-
-        Uses shortest path with congestion-aware cost function
-        """
-        routes = {}
-        edge_usage: Dict[Edge, List[int]] = {}
-
-        # Sort commodities by Manhattan distance (shorter first)
-        sorted_commodities = sorted(
-            commodities,
-            key=lambda c: abs(c.source.row - c.destination.row) +
-                         abs(c.source.col - c.destination.col)
-        )
-
-        for k in sorted_commodities:
-            # Find path using BFS with congestion awareness
-            path = self._find_path_bfs(k.source, k.destination, edge_usage)
-
-            if path:
-                edges = []
-                for i in range(len(path) - 1):
-                    e = Edge(path[i], path[i + 1])
-                    edges.append(e)
-                    if e not in edge_usage:
-                        edge_usage[e] = []
-                    edge_usage[e].append(k.id)
-
-                routes[k.id] = RoutingResult(k, path, edges)
-            else:
-                # Fallback to X-Y routing
-                path = self._xy_routing(k.source, k.destination)
-                edges = []
-                for i in range(len(path) - 1):
-                    e = Edge(path[i], path[i + 1])
-                    edges.append(e)
-                    if e not in edge_usage:
-                        edge_usage[e] = []
-                    edge_usage[e].append(k.id)
-                routes[k.id] = RoutingResult(k, path, edges)
-
-        max_cong = max(len(v) for v in edge_usage.values()) if edge_usage else 0
-        total_usage = sum(len(v) for v in edge_usage.values())
-
-        return MCFRoutingResult(
-            routes=routes,
-            edge_usage={e: v for e, v in edge_usage.items() if v},
-            max_edge_congestion=max_cong,
-            total_edge_usage=total_usage,
-            solver_status="greedy"
-        )
-
-    def _find_path_bfs(
-        self,
-        source: Coord,
-        destination: Coord,
-        current_usage: Dict[Edge, List[int]]
-    ) -> Optional[List[Coord]]:
-        """BFS with congestion-aware edge cost"""
-        from collections import deque
-
-        queue = deque([(source, [source], 0)])
-        visited = {source: 0}
-
-        best_path = None
-        best_cost = float('inf')
-
-        while queue:
-            current, path, cost = queue.popleft()
-
-            if current == destination:
-                if cost < best_cost:
-                    best_cost = cost
-                    best_path = path
-                continue
-
-            if cost >= best_cost:
-                continue
-
-            for neighbor, _ in self.topology.get_neighbors(current):
-                edge = Edge(current, neighbor)
-                edge_cost = 1 + len(current_usage.get(edge, []))
-                new_cost = cost + edge_cost
-
-                if neighbor not in visited or visited[neighbor] > new_cost:
-                    visited[neighbor] = new_cost
-                    queue.append((neighbor, path + [neighbor], new_cost))
-
-        return best_path
-
-    def _xy_routing(self, source: Coord, destination: Coord) -> List[Coord]:
-        """Simple X-Y routing (move horizontally first, then vertically)"""
-        path = [source]
-        current = source
-
-        # Move horizontally (X direction)
-        while current.col != destination.col:
-            step = 1 if current.col < destination.col else -1
-            current = Coord(current.row, current.col + step)
-            path.append(current)
-
-        # Move vertically (Y direction)
-        while current.row != destination.row:
-            step = 1 if current.row < destination.row else -1
-            current = Coord(current.row + step, current.col)
-            path.append(current)
-
-        return path
-
 
 class NoCPathsAdapter:
     """
