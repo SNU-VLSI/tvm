@@ -560,7 +560,8 @@ class ConvBlock(ImceCallCodeBlock):
     if self.remain > 0:
       print(f"[ConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
       tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")
-      tail_loop = SimpleFor(self.remain, tail_body, f"{self.annotation}_tail_loop")
+      tail_loop = SimpleFor(self.remain*4, tail_body, f"{self.annotation}_tail_loop")
+      add_to_map(self.load_edge_info.owner, RecvSendNum("recv", self.remain*4), is_send=False)
       root.add(tail_loop)
 
     return root
@@ -766,7 +767,9 @@ class RecvSendWrapper(ImceCodeBlock):
     Returns a SimpleFor object.
     """
 
-    assert len(self.out_edges) == 1, "Only single output edge is supported in create_loop_from_call"
+    sinple_out_edge = (len(self.out_edges) == 1)
+    multicast = all(edge.src_id == self.out_edges[0].src_id for edge in self.out_edges) and (not sinple_out_edge)
+    assert sinple_out_edge or multicast, "Only single output edge or multicast is supported in create_loop_from_call"
 
     call = call_ctx.call
     
