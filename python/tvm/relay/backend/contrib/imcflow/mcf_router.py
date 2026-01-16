@@ -16,9 +16,26 @@ from typing import Dict, List, Tuple, Set, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
+import os
 import pulp
 
 logger = logging.getLogger(__name__)
+
+
+# Debug print utility
+_DEBUG_ENABLED = None
+
+def _is_debug_enabled():
+    global _DEBUG_ENABLED
+    if _DEBUG_ENABLED is None:
+        debug_var = os.environ.get('IMCFLOW_DEBUG', '0')
+        _DEBUG_ENABLED = debug_var == '1' or debug_var.lower() == 'true'
+    return _DEBUG_ENABLED
+
+def debug_print(*args, **kwargs):
+    """Print debug message only if IMCFLOW_DEBUG is enabled"""
+    if _is_debug_enabled():
+        print(*args, **kwargs)
 
 
 class Direction(Enum):
@@ -254,15 +271,21 @@ class MCFRouter:
         Returns:
             MCFRoutingResult containing all routes and statistics
         """
+        debug_print(f"[MCFRouter] Starting routing for {len(commodities)} commodities")
+
         if not commodities:
           raise ValueError("No commodities provided for routing.")
 
         # Filter out same-node commodities
         valid_commodities = [c for c in commodities if c.source != c.destination]
+        skipped = len(commodities) - len(valid_commodities)
+        if skipped > 0:
+            debug_print(f"[MCFRouter] Skipped {skipped} same-node commodities")
 
         if not valid_commodities:
           raise ValueError("All commodities have same source and destination.")
 
+        debug_print(f"[MCFRouter] Routing {len(valid_commodities)} valid commodities on {self.topology.rows}x{self.topology.cols} mesh")
         return self._route_ilp(valid_commodities)
 
     def _route_ilp(self, commodities: List[Commodity]) -> MCFRoutingResult:
@@ -274,17 +297,24 @@ class MCFRouter:
         current_capacity = 1
         max_capacity = len(commodities)  # Upper bound
 
+        debug_print(f"[MCFRouter] Trying adaptive capacity from 1 to {max_capacity}")
+
         while current_capacity <= max_capacity:
             result = self._try_route_with_capacity(commodities, current_capacity)
             if result is not None:
                 if current_capacity > 1:
+                    debug_print(f"[MCFRouter] Found solution with edge_capacity={current_capacity}")
                     logger.info(f"MCF routing found solution with edge_capacity={current_capacity}")
+                else:
+                    debug_print(f"[MCFRouter] Found solution with edge_capacity=1 (no conflicts)")
                 return result
 
+            debug_print(f"[MCFRouter] Infeasible with edge_capacity={current_capacity}, trying {current_capacity + 1}")
             logger.debug(f"MCF routing infeasible with edge_capacity={current_capacity}, trying {current_capacity + 1}")
             current_capacity += 1
 
         # Fallback: solve without capacity constraint
+        debug_print(f"[MCFRouter] WARNING: Failed with all capacities, solving without constraint")
         logger.warning("MCF routing failed with all capacities, solving without constraint")
         result = self._try_route_with_capacity(commodities, None)
         if result is None:
@@ -342,6 +372,8 @@ class MCFRouter:
         Supports multicast: commodities with same source share edges and
         count as 1 towards edge capacity.
         """
+        cap_str = str(capacity) if capacity is not None else "unlimited"
+        debug_print(f"[MCFRouter] Solving ILP with edge_capacity={cap_str}")
 
         # Create problem
         prob = pulp.LpProblem("MCF_Multicast", pulp.LpMinimize)
@@ -375,6 +407,9 @@ class MCFRouter:
         y = {}
         multicast_groups = {src: grp for src, grp in source_groups.items() if len(grp) > 1}
         unicast_commodities = [c for src, grp in source_groups.items() if len(grp) == 1 for c in grp]
+
+        debug_print(f"[MCFRouter]   Multicast groups: {len(multicast_groups)}, Unicast commodities: {len(unicast_commodities)}")
+        debug_print(f"[MCFRouter]   Total edges in mesh: {len(all_edges)}")
 
         for source in multicast_groups:
             gid = group_id_map[source]
@@ -463,7 +498,10 @@ class MCFRouter:
         status = prob.solve(solver)
 
         if status != pulp.LpStatusOptimal:
+            debug_print(f"[MCFRouter]   Solver status: {pulp.LpStatus[status]} (not optimal)")
             return None  # Infeasible with this capacity
+
+        debug_print(f"[MCFRouter]   Solver status: {pulp.LpStatus[status]}")
 
         # ============================================================
         # Extract routes from solution
@@ -492,6 +530,9 @@ class MCFRouter:
         # Count multicast groups
         num_multicast = len(multicast_groups)
         num_unicast = len(unicast_commodities)
+
+        debug_print(f"[MCFRouter]   Result: max_congestion={max_cong}, total_usage={total_usage}")
+        debug_print(f"[MCFRouter]   Routed {len(routes)} commodities successfully")
 
         return MCFRoutingResult(
             routes=routes,

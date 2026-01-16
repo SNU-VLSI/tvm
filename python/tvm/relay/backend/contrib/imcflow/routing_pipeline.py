@@ -4,7 +4,7 @@ NoC Routing Pipeline with Pluggable Routers
 This module provides a 3-phase routing pipeline for generating policy tables:
 - Phase 1 (Router): Generate paths - PLUGGABLE (MCF, XY, custom, etc.)
 - Phase 2 (Tree Builder): Build multicast trees - REUSABLE
-- Phase 3 (Policy Table Generator): Generate policy entries - REUSABLE
+- Phase 3 (PolicyTableBuilder): Generate policy entries - REUSABLE
 
 Architecture:
                     ┌─────────────────┐
@@ -26,9 +26,9 @@ Architecture:
                     │ PathTreeBuilder │  ← Reusable
                     └────────┬────────┘
                              ▼
-                    ┌─────────────────┐
-                    │PolicyTableGen   │  ← Reusable
-                    └─────────────────┘
+                    ┌───────────────────┐
+                    │PolicyTableBuilder │  ← Reusable
+                    └───────────────────┘
 
 Usage:
     # With MCF Router (default)
@@ -55,6 +55,11 @@ from .mcf_router import (
     MeshTopology,
     Commodity,
     Coord,
+)
+from .xy_router import (
+    XYRouter,
+    XYRouterAdapter,
+    create_xy_router,
 )
 from .path_tree_builder import (
     PathTreeBuilder,
@@ -129,7 +134,7 @@ class RoutingPipeline:
     This is the main entry point for policy table generation. It orchestrates:
     - Phase 1: Routing (using provided router)
     - Phase 2: Tree building (PathTreeBuilder)
-    - Phase 3: Policy table generation (PolicyTableGenerator)
+    - Phase 3: Policy table generation (PolicyTableBuilder)
 
     The router is pluggable - you can use MCFRouter, XYRouter, or any custom
     router that implements the BaseRouter interface.
@@ -350,13 +355,19 @@ def create_policy_table_generator(
 
     Args:
         noc_paths: NoCPaths dictionary
-        router_type: Router type ("mcf", "xy", etc.)
+        router_type: Router type ("mcf" or "xy")
         **kwargs: Additional arguments for the generator
 
     Returns:
         PolicyTableGenerator instance
     """
+    mesh_rows = kwargs.pop('mesh_rows', 4)
+    mesh_cols = kwargs.pop('mesh_cols', 5)
+
     if router_type == "mcf":
-        return PolicyTableGenerator(noc_paths, router=None, **kwargs)
+        return PolicyTableGenerator(noc_paths, router=None, mesh_rows=mesh_rows, mesh_cols=mesh_cols, **kwargs)
+    elif router_type == "xy":
+        router = create_xy_router(mesh_rows=mesh_rows, mesh_cols=mesh_cols)
+        return PolicyTableGenerator(noc_paths, router=router, mesh_rows=mesh_rows, mesh_cols=mesh_cols, **kwargs)
     else:
-        raise ValueError(f"Unknown router type: {router_type}")
+        raise ValueError(f"Unknown router type: {router_type}. Supported: 'mcf', 'xy'")

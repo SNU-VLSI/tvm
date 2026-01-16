@@ -88,7 +88,7 @@ class NodeCapacityError(Exception):
         )
 
 
-class PolicyTableGenerator:
+class PolicyTableBuilder:
     """Generates policy tables from path tree structures.
 
     This is Phase 3 of the routing pipeline:
@@ -102,7 +102,7 @@ class PolicyTableGenerator:
     """
 
     def __init__(self, table_capacity: int = 32):
-        """Initialize PolicyTableGenerator.
+        """Initialize PolicyTableBuilder.
 
         Args:
             table_capacity: Maximum number of entries per node's policy table.
@@ -315,8 +315,8 @@ class EdgeInfoGenerator:
         """Initialize EdgeInfoGenerator.
 
         Args:
-            policy_tables: Generated policy tables from PolicyTableGenerator
-            router_entries: Router entry mapping from PolicyTableGenerator
+            policy_tables: Generated policy tables from PolicyTableBuilder
+            router_entries: Router entry mapping from PolicyTableBuilder
             noc_paths: Original NoCPaths dictionary
         """
         self.policy_tables = policy_tables
@@ -437,7 +437,7 @@ def generate_policy_tables(
         NodeCapacityError: If any node exceeds capacity
     """
     # Phase 3a: Generate policy tables
-    generator = PolicyTableGenerator(table_capacity=table_capacity)
+    generator = PolicyTableBuilder(table_capacity=table_capacity)
     policy_tables = generator.generate(tree_result, noc_paths)
 
     # Phase 3b: Generate EdgeInfo

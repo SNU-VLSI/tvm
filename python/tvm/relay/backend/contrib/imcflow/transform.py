@@ -5548,16 +5548,18 @@ class MemoryAllocator:
           self.run_(mod, func_info.func_node, gv.name_hint, ttype_map[gv.name_hint])
 
 # PolicyTableGenerator is now in separate modules:
-# - policy_table_generator_legacy.py: Original XY/YX routing (PolicyTableGeneratorLegacy)
-# - routing_pipeline.py: New 3-phase pipeline with pluggable routers (PolicyTableGenerator)
+# - routing_pipeline.py: 3-phase pipeline with pluggable routers (PolicyTableGenerator)
+# - mcf_router.py: MCF (ILP-based) router
+# - xy_router.py: XY/YX dimension-ordered router
 #
-# Import for backward compatibility:
-from tvm.relay.backend.contrib.imcflow.policy_table_generator_legacy import PolicyTableGeneratorLegacy
+# Import for use:
 from tvm.relay.backend.contrib.imcflow.routing_pipeline import (
     PolicyTableGenerator,
     RoutingPipeline,
     BaseRouter,
     create_mcf_router,
+    create_xy_router,
+    create_policy_table_generator,
 )
 
 
