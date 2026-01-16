@@ -194,6 +194,9 @@ class RoutingPipeline:
 
         routing_result = self.router.route(commodities)
 
+        # Dump routing results for debugging
+        self._dump_routing_results(func_name, routing_result, noc_paths)
+
         # Phase 2: Build trees
         tree_builder = PathTreeBuilder(
             tensor_id_extractor=self.config.tensor_id_extractor or self._default_tensor_id_extractor
@@ -209,6 +212,133 @@ class RoutingPipeline:
         )
 
         return policy_tables
+
+    def _dump_routing_results(self, func_name: str, routing_result, noc_paths: Dict) -> None:
+        """Dump routing results for debugging.
+
+        Creates a file showing each noc_path edge and the corresponding route.
+        """
+        import os
+
+        # Get output directory from environment or use default
+        output_dir = os.environ.get('IMCFLOW_DEBUG_DIR', '/tmp')
+        output_file = os.path.join(output_dir, f'routing_result_{func_name}.txt')
+
+        with open(output_file, 'w') as f:
+            f.write(f"Routing Results for {func_name}\n")
+            f.write("=" * 80 + "\n\n")
+
+            # Build a map from (src_coord, dst_coord) to edges for lookup
+            coord_to_edges = {}
+            for edge, mapping_info in noc_paths.items():
+                src_node = mapping_info[0]
+                dst_node = mapping_info[1]
+                src_coord = NodeID.to_coord(src_node)
+                dst_coord = NodeID.to_coord(dst_node)
+                key = (src_coord, dst_coord)
+                if key not in coord_to_edges:
+                    coord_to_edges[key] = []
+                coord_to_edges[key].append((edge, mapping_info))
+
+            # Dump each commodity's route
+            for cid in routing_result.get_all_commodity_ids():
+                commodity = routing_result.get_commodity(cid)
+                path = routing_result.get_path(cid)
+
+                src = commodity.source
+                dst = commodity.destination
+
+                # Find corresponding edge
+                edge_info = ""
+                if commodity.metadata:
+                    edge, mapping_info = commodity.metadata
+                    src_node = mapping_info[0]
+                    dst_node = mapping_info[1]
+                    edge_info = f"{src_node.name} -> {dst_node.name}"
+                    if isinstance(edge, TensorEdge):
+                        edge_info += f" [{edge.src_id.tensor_type}]"
+
+                # Format path
+                path_str = ' -> '.join(f'({c.row},{c.col})' for c in path)
+
+                # Check for detours
+                detour_info = ""
+                expected_path = self._compute_xy_path(src, dst)
+                if len(path) != len(expected_path):
+                    detour_info = f" [DETOUR: expected {len(expected_path)} hops, got {len(path)}]"
+
+                # Check directions used
+                directions_used = []
+                for i in range(len(path) - 1):
+                    curr, next_ = path[i], path[i + 1]
+                    if next_.row < curr.row:
+                        directions_used.append('N')
+                    elif next_.row > curr.row:
+                        directions_used.append('S')
+                    elif next_.col > curr.col:
+                        directions_used.append('E')
+                    elif next_.col < curr.col:
+                        directions_used.append('W')
+
+                f.write(f"Commodity {cid}: {edge_info}\n")
+                f.write(f"  Source: ({src.row},{src.col}), Dest: ({dst.row},{dst.col})\n")
+                f.write(f"  Path: {path_str}{detour_info}\n")
+                f.write(f"  Directions: {' '.join(directions_used)}\n")
+                f.write("\n")
+
+            # Summary: group by source node
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("Summary by Source Node\n")
+            f.write("=" * 80 + "\n\n")
+
+            source_groups = {}
+            for cid in routing_result.get_all_commodity_ids():
+                commodity = routing_result.get_commodity(cid)
+                src = (commodity.source.row, commodity.source.col)
+                if src not in source_groups:
+                    source_groups[src] = []
+                source_groups[src].append(cid)
+
+            for src, cids in sorted(source_groups.items()):
+                f.write(f"Source ({src[0]},{src[1]}):\n")
+                for cid in cids:
+                    commodity = routing_result.get_commodity(cid)
+                    path = routing_result.get_path(cid)
+                    dst = commodity.destination
+                    directions = []
+                    for i in range(len(path) - 1):
+                        curr, next_ = path[i], path[i + 1]
+                        if next_.row < curr.row:
+                            directions.append('N')
+                        elif next_.row > curr.row:
+                            directions.append('S')
+                        elif next_.col > curr.col:
+                            directions.append('E')
+                        elif next_.col < curr.col:
+                            directions.append('W')
+                    f.write(f"  -> ({dst.row},{dst.col}): {' '.join(directions)}\n")
+                f.write("\n")
+
+        print(f"[DEBUG] Routing results dumped to: {output_file}")
+
+    @staticmethod
+    def _compute_xy_path(src: Coord, dst: Coord) -> List[Coord]:
+        """Compute XY routing path (X/col first, then Y/row)."""
+        path = [src]
+        r, c = src.row, src.col
+        dr, dc = dst.row, dst.col
+
+        # X (column) first
+        while c != dc:
+            c += 1 if c < dc else -1
+            path.append(Coord(r, c))
+
+        # Y (row) second
+        while r != dr:
+            r += 1 if r < dr else -1
+            path.append(Coord(r, c))
+
+        return path
 
     def _noc_paths_to_commodities(self, noc_paths: Dict) -> List[Commodity]:
         """Convert NoCPaths to list of Commodity objects."""

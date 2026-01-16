@@ -425,6 +425,7 @@ class MCFRouter:
         # ============================================================
 
         # 1. Flow conservation for each commodity
+        # Ensure simple path (no cycles, no branching)
         for k in commodities:
             for node in self.topology.get_all_nodes():
                 in_edges = [e for e in all_edges if e.dst == node]
@@ -434,11 +435,20 @@ class MCFRouter:
                 out_flow = pulp.lpSum(x[k.id][e] for e in out_edges) if out_edges else 0
 
                 if node == k.source:
-                    prob += out_flow - in_flow == 1, f"flow_{k.id}_src"
+                    # Source: exactly 1 outgoing, 0 incoming (no cycles back to source)
+                    prob += out_flow == 1, f"flow_{k.id}_src_out"
+                    if in_edges:
+                        prob += in_flow == 0, f"flow_{k.id}_src_in"
                 elif node == k.destination:
-                    prob += in_flow - out_flow == 1, f"flow_{k.id}_dst"
+                    # Destination: exactly 1 incoming, 0 outgoing (no cycles from destination)
+                    prob += in_flow == 1, f"flow_{k.id}_dst_in"
+                    if out_edges:
+                        prob += out_flow == 0, f"flow_{k.id}_dst_out"
                 else:
+                    # Intermediate: conservation + at most 1 outgoing (simple path)
                     prob += in_flow == out_flow, f"flow_{k.id}_{node.row}_{node.col}"
+                    if out_edges:
+                        prob += out_flow <= 1, f"simple_{k.id}_{node.row}_{node.col}"
 
         # 2. Multicast group edge variable: y[g][e] >= x[k][e] for all k in group g
         #    This ensures y[g][e] = 1 if ANY commodity in the group uses edge e
@@ -512,6 +522,30 @@ class MCFRouter:
 
         for k in commodities:
             used_edges = [e for e in all_edges if pulp.value(x[k.id][e]) > 0.5]
+
+            # Debug: Check for multiple outgoing edges from same node
+            out_degree = {}
+            for e in used_edges:
+                if e.src not in out_degree:
+                    out_degree[e.src] = []
+                out_degree[e.src].append(e.dst)
+
+            multi_out = {src: dsts for src, dsts in out_degree.items() if len(dsts) > 1}
+            if multi_out:
+                print(f"[MCFRouter DEBUG] Commodity {k.id} ({k.source} -> {k.destination}):")
+                print(f"  Multiple outgoing edges detected: {multi_out}")
+                # Print all used edges for this commodity
+                print(f"  All used edges: {used_edges}")
+                # Check flow conservation violation
+                for node in multi_out.keys():
+                    in_edges = [e for e in used_edges if e.dst == node]
+                    out_edges = [e for e in used_edges if e.src == node]
+                    print(f"  At {node}: in={in_edges}, out={out_edges}")
+                    # Also print x values
+                    for e in out_edges:
+                        val = pulp.value(x[k.id][e])
+                        print(f"    x[{k.id}][{e}] = {val}")
+
             path = self._reconstruct_path(k.source, k.destination, used_edges)
             routes[k.id] = RoutingResult(k, path, used_edges)
 
@@ -552,9 +586,19 @@ class MCFRouter:
         if not edges:
             return [source]
 
-        # Build adjacency from edges
+        # Build adjacency from edges - check for conflicts
         adj = {}
         for e in edges:
+            if e.src in adj:
+                # Multiple edges from same source - this is a problem!
+                logger.warning(
+                    f"Multiple edges from {e.src}: "
+                    f"existing {e.src}->{adj[e.src]}, new {e.src}->{e.dst}"
+                )
+                print(
+                    f"[MCFRouter WARNING] Multiple edges from {e.src}: "
+                    f"existing {e.src}->{adj[e.src]}, new {e.src}->{e.dst}"
+                )
             adj[e.src] = e.dst
 
         path = [source]
@@ -564,10 +608,23 @@ class MCFRouter:
         while current != destination and current in adj:
             if current in visited:
                 logger.warning(f"Cycle detected in path reconstruction")
+                print(f"[MCFRouter WARNING] Cycle detected: path so far = {path}, current = {current}")
                 break
             visited.add(current)
             current = adj[current]
             path.append(current)
+
+        # Check if we reached the destination
+        if path[-1] != destination:
+            logger.warning(
+                f"Path reconstruction incomplete: {source} -> {destination}, "
+                f"stopped at {path[-1]}, edges={edges}"
+            )
+            print(
+                f"[MCFRouter WARNING] Incomplete path: {source} -> {destination}, "
+                f"stopped at {path[-1]}"
+            )
+            print(f"  Edges: {edges}")
 
         return path
 
