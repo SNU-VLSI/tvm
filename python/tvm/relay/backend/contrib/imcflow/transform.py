@@ -3700,12 +3700,12 @@ def partitionRound(mod, handle_branch_from_var_converge=True):
 
       # Step 3: Annotate and partition with updated graph and regions
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
-      printModel("resnet8_evl", target_mod, {}, f"{name}_round_annotated")
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_annotated")
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
-      printModel("resnet8_evl", target_mod, {}, f"{name}_round_merged")
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_merged")
       target_mod = transform.PartitionGraph()(target_mod)
-      printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
 
       for new_gv, new_func in target_mod.functions.items():
         if new_gv.name_hint == "main":
@@ -5566,13 +5566,35 @@ from tvm.relay.backend.contrib.imcflow.routing_pipeline import (
 class TensorPathVisualizer:
     """
     Visualizes tensor routing paths in the 2D mesh NoC topology.
-    
+
     For each imcflow function, generates an image showing:
     - 2D mesh grid with inodes and imces as labeled squares
     - Tensor paths as colored lines between nodes
     - Each tensor gets a unique color
+
+    Paths are classified into three groups:
+    - inst: Instruction paths (edges that are NodeID, not TensorEdge)
+    - const: Constant tensor paths (weight, config, min, max, fused_scale, fused_bias, bias, scale, threshold)
+    - data: Runtime data tensor paths (odata, data, lhs, rhs, func_out*, var)
     """
-    
+
+    # Tensor type classification constants (aligned with mcf_router.py)
+    CONST_TENSOR_TYPES = frozenset([
+        'weight', 'config', 'min', 'max', 'fused_scale', 'fused_bias',
+        'bias', 'scale', 'threshold'
+    ])
+    DATA_TENSOR_TYPES = frozenset([
+        'odata', 'data', 'lhs', 'rhs', 'var',
+        *[f"func_out{i}" for i in range(30)]
+    ])
+
+    # Group display configuration
+    GROUP_CONFIG = {
+        'inst': {'name': 'Instructions', 'color_scheme': 'Purples', 'base_color': 'purple'},
+        'const': {'name': 'Constants', 'color_scheme': 'Blues', 'base_color': 'blue'},
+        'data': {'name': 'Data', 'color_scheme': 'Oranges', 'base_color': 'orange'},
+    }
+
     def __init__(self, output_dir="noc_visualizations"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -5589,7 +5611,66 @@ class TensorPathVisualizer:
             self.LineCollection = LineCollection
         except ImportError:
             raise ImportError("matplotlib is required for visualization. Install with: pip install matplotlib")
-    
+
+        # Check for plotly (optional, for interactive visualization)
+        self.plotly_available = False
+        try:
+            import plotly.graph_objects as go
+            self.go = go
+            self.plotly_available = True
+        except ImportError:
+            pass  # Plotly is optional
+
+    def _classify_edge(self, edge):
+        """
+        Classify an edge into one of the three groups: inst, const, data.
+
+        Parameters
+        ----------
+        edge : TensorEdge or NodeID
+            The edge to classify
+
+        Returns
+        -------
+        str
+            One of 'inst', 'const', or 'data'
+        """
+        # Instruction edges are NodeID, not TensorEdge
+        if not isinstance(edge, TensorEdge):
+            return 'inst'
+
+        # Get tensor type from TensorEdge
+        tensor_type = edge.src_id.tensor_type if hasattr(edge.src_id, 'tensor_type') else None
+
+        if tensor_type in self.CONST_TENSOR_TYPES:
+            return 'const'
+        elif tensor_type in self.DATA_TENSOR_TYPES:
+            return 'data'
+        else:
+            # Unknown type - default to data (more conservative)
+            debug_print(f"[TensorPathVisualizer] Unknown tensor_type '{tensor_type}', defaulting to 'data' group")
+            return 'data'
+
+    def _group_paths_by_category(self, noc_paths):
+        """
+        Group NoC paths by their category (inst, const, data).
+
+        Parameters
+        ----------
+        noc_paths : dict
+            Dictionary mapping edges to mapping_info
+
+        Returns
+        -------
+        dict
+            Dictionary mapping group name to dict of {edge: mapping_info}
+        """
+        groups = {'inst': {}, 'const': {}, 'data': {}}
+        for edge, mapping_info in noc_paths.items():
+            group = self._classify_edge(edge)
+            groups[group][edge] = mapping_info
+        return groups
+
     def visualize_all_functions(self, mod):
         """
         Generate visualizations for all imcflow functions in the module.
@@ -5608,8 +5689,12 @@ class TensorPathVisualizer:
     def visualize_function(self, func_name):
         """
         Generate visualization for a single imcflow function.
-        Creates separate images for each tensor type (odata, weight, bias, etc.)
-        
+        Creates separate images for:
+        - Each tensor type (odata, weight, bias, etc.)
+        - Each group category (inst, const, data)
+        - Overview of all paths
+        - Interactive HTML visualization (if plotly available)
+
         Parameters
         ----------
         func_name : str
@@ -5619,15 +5704,15 @@ class TensorPathVisualizer:
         if func_name not in ImcflowDeviceConfig().NoCPaths:
             debug_print(f"No NoC paths found for function {func_name}")
             return
-        
+
         noc_paths = ImcflowDeviceConfig().NoCPaths[func_name]
         tensor_edge_list = ImcflowDeviceConfig().TensorEdgeListDict.get(func_name, [])
-        
+
         # Create subdirectory for this function
         func_output_dir = os.path.join(self.output_dir, func_name)
         os.makedirs(func_output_dir, exist_ok=True)
-        
-        # Group NoC paths by tensor type
+
+        # Group NoC paths by tensor type (for individual tensor type images)
         paths_by_type = {}
         for edge, mapping_info in noc_paths.items():
             if isinstance(edge, TensorEdge):
@@ -5635,46 +5720,81 @@ class TensorPathVisualizer:
                 if tensor_type not in paths_by_type:
                     paths_by_type[tensor_type] = {}
                 paths_by_type[tensor_type][edge] = mapping_info
-        
-        # Create a visualization for each tensor type
-        if not paths_by_type:
-            debug_print(f"No tensor edges found for function {func_name}")
-            return
-        
-        # Create individual visualizations for each tensor type
-        for tensor_type, type_paths in sorted(paths_by_type.items()):
-            debug_print(f"  Creating visualization for {tensor_type}: {len(type_paths)} paths")
-            
-            # Create the visualization
-            fig, ax = self._create_mesh_grid(title=f"{func_name} - {tensor_type} Paths")
-            
-            # Draw tensor paths for this type only
-            self._draw_tensor_paths(ax, type_paths, tensor_edge_list)
-            
+
+        # Group NoC paths by category (inst, const, data)
+        paths_by_group = self._group_paths_by_category(noc_paths)
+
+        # Log group statistics
+        debug_print(f"  Path groups: inst={len(paths_by_group['inst'])}, "
+                   f"const={len(paths_by_group['const'])}, data={len(paths_by_group['data'])}")
+
+        # ============================================================
+        # 1. Create visualizations for each GROUP (inst, const, data)
+        # ============================================================
+        debug_print(f"  Creating group-based visualizations...")
+        for group_name, group_paths in paths_by_group.items():
+            if not group_paths:
+                continue
+
+            group_config = self.GROUP_CONFIG[group_name]
+            debug_print(f"    Creating {group_name} ({group_config['name']}): {len(group_paths)} paths")
+
+            fig, ax = self._create_mesh_grid(
+                title=f"{func_name} - {group_config['name']} Paths ({len(group_paths)} paths)"
+            )
+
+            # Draw paths for this group
+            self._draw_tensor_paths(ax, group_paths, tensor_edge_list)
+
             # Save the figure
-            output_path = os.path.join(func_output_dir, f"{tensor_type}.png")
+            output_path = os.path.join(func_output_dir, f"group_{group_name}.png")
             self.plt.savefig(output_path, dpi=300, bbox_inches='tight')
             self.plt.close(fig)
-            
-            debug_print(f"    Saved: {output_path}")
+            debug_print(f"      Saved: {output_path}")
+
+        # ============================================================
+        # 2. Create visualizations for each TENSOR TYPE
+        # ============================================================
+        if not paths_by_type:
+            debug_print(f"No tensor edges found for function {func_name}")
+        else:
+            # Create individual visualizations for each tensor type
+            for tensor_type, type_paths in sorted(paths_by_type.items()):
+                debug_print(f"  Creating visualization for {tensor_type}: {len(type_paths)} paths")
+
+                fig, ax = self._create_mesh_grid(title=f"{func_name} - {tensor_type} Paths")
+                self._draw_tensor_paths(ax, type_paths, tensor_edge_list)
+
+                output_path = os.path.join(func_output_dir, f"{tensor_type}.png")
+                self.plt.savefig(output_path, dpi=300, bbox_inches='tight')
+                self.plt.close(fig)
+                debug_print(f"    Saved: {output_path}")
+
+        # ============================================================
+        # 3. Create overview image with ALL paths
+        # ============================================================
+        debug_print(f"  Creating overview with all paths")
+        fig, ax = self._create_mesh_grid(title=f"{func_name} - All Paths (Overview)")
+
+        self._draw_tensor_paths(ax, noc_paths, tensor_edge_list)
         
-        # Also create an overview image with all tensor types
-        debug_print(f"  Creating overview with all {len(paths_by_type)} tensor types")
-        fig, ax = self._create_mesh_grid(title=f"{func_name} - All Tensor Paths (Overview)")
-        
-        # Collect all tensor edges
-        all_type_paths = {}
-        for type_paths in paths_by_type.values():
-            all_type_paths.update(type_paths)
-        
-        self._draw_tensor_paths(ax, all_type_paths, tensor_edge_list)
-        
-        overview_path = os.path.join(func_output_dir, "00_overview_all_types.png")
+        overview_path = os.path.join(func_output_dir, "00_overview_all_paths.png")
         self.plt.savefig(overview_path, dpi=300, bbox_inches='tight')
         self.plt.close(fig)
-        
         debug_print(f"    Saved: {overview_path}")
-        debug_print(f"Completed visualization for {func_name}: {len(paths_by_type)} tensor types")
+
+        # ============================================================
+        # 4. Create INTERACTIVE visualization (HTML with Plotly)
+        # ============================================================
+        if self.plotly_available:
+            debug_print(f"  Creating interactive HTML visualization...")
+            self._create_interactive_visualization(func_name, noc_paths, paths_by_group, func_output_dir)
+        else:
+            debug_print(f"  Skipping interactive visualization (plotly not installed)")
+
+        debug_print(f"Completed visualization for {func_name}: "
+                   f"groups=(inst={len(paths_by_group['inst'])}, const={len(paths_by_group['const'])}, "
+                   f"data={len(paths_by_group['data'])}), types={len(paths_by_type)}")
     
     def _create_mesh_grid(self, title="NoC Tensor Routing Paths"):
         """
@@ -5948,37 +6068,264 @@ class TensorPathVisualizer:
             cmap = cm.get_cmap('hsv')
             return [cmap(i/n) for i in range(n)]
 
+    def _create_interactive_visualization(self, func_name, noc_paths, paths_by_group, output_dir):
+        """
+        Create an interactive HTML visualization using Plotly.
+
+        Features:
+        - Click on a path to highlight it and see detailed information
+        - Hover tooltips showing edge info
+        - Filter by group (inst, const, data)
+        - Pan and zoom
+
+        Parameters
+        ----------
+        func_name : str
+            Name of the function being visualized
+        noc_paths : dict
+            Dictionary mapping edges to mapping_info
+        paths_by_group : dict
+            Dictionary mapping group names to their paths
+        output_dir : str
+            Output directory for the HTML file
+        """
+        if not self.plotly_available:
+            return
+
+        import plotly.graph_objects as go
+
+        # Grid dimensions
+        rows = ImcflowDeviceConfig.INODE_NUM
+        cols = ImcflowDeviceConfig.NODE_COL_NUM
+        node_size = 1.0
+        spacing = 0.5
+
+        fig = go.Figure()
+
+        # ============================================================
+        # Draw mesh nodes
+        # ============================================================
+        node_x = []
+        node_y = []
+        node_text = []
+        node_colors = []
+
+        for node_id in NodeID:
+            coord = NodeID.to_coord(node_id)
+            row, col = coord
+            x = col * (node_size + spacing) + spacing + node_size / 2
+            y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size / 2
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(node_id.name)
+            node_colors.append('lightblue' if node_id.is_inode() else 'lightgreen')
+
+        fig.add_trace(go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers+text',
+            marker=dict(size=40, color=node_colors, line=dict(width=2, color='darkgray')),
+            text=node_text,
+            textposition='middle center',
+            textfont=dict(size=10, color='black'),
+            hoverinfo='text',
+            hovertext=[f"Node: {t}" for t in node_text],
+            name='Nodes',
+            showlegend=False
+        ))
+
+        # ============================================================
+        # Draw paths for each group
+        # ============================================================
+        group_colors = {
+            'inst': 'purple',
+            'const': 'blue',
+            'data': 'orange'
+        }
+
+        # Track path data for click handler
+        all_path_data = []
+
+        for group_name, group_paths in paths_by_group.items():
+            if not group_paths:
+                continue
+
+            base_color = group_colors.get(group_name, 'gray')
+            group_config = self.GROUP_CONFIG[group_name]
+
+            for edge_idx, (edge, mapping_info) in enumerate(group_paths.items()):
+                source_node = mapping_info[0]
+                dest_node = mapping_info[1]
+
+                # Build edge info string
+                if isinstance(edge, TensorEdge):
+                    tensor_type = edge.src_id.tensor_type
+                    src_custom_id = edge.src_id.graph_node_id
+                    dst_custom_id = edge.dst_id.graph_node_id
+                    src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
+                    dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
+                    edge_info = (f"Group: {group_config['name']}<br>"
+                                f"Type: {tensor_type}<br>"
+                                f"HW: {source_node.name} → {dest_node.name}<br>"
+                                f"Graph ID: {src_id_str} → {dst_id_str}")
+                    if edge.split_idx is not None:
+                        edge_info += f"<br>Split: [{edge.split_idx}]"
+                else:
+                    edge_info = (f"Group: {group_config['name']}<br>"
+                                f"Type: Instruction<br>"
+                                f"HW: {source_node.name} → {dest_node.name}")
+
+                # Get path coordinates
+                path_coords = []
+                if isinstance(edge, TensorEdge) and edge in ImcflowDeviceConfig().TensorEdgetoInfo:
+                    edge_info_obj = ImcflowDeviceConfig().TensorEdgetoInfo[edge]
+                    if edge_info_obj.policy_info:
+                        path_nodes = [entry.router_id for entry in edge_info_obj.policy_info]
+                        for node_id in path_nodes:
+                            coord = NodeID.to_coord(node_id)
+                            row, col = coord
+                            x = col * (node_size + spacing) + spacing + node_size / 2
+                            y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size / 2
+                            path_coords.append((x, y))
+
+                # Fallback: direct line
+                if not path_coords:
+                    src_coord = NodeID.to_coord(source_node)
+                    dst_coord = NodeID.to_coord(dest_node)
+                    src_x = src_coord[1] * (node_size + spacing) + spacing + node_size / 2
+                    src_y = (rows - 1 - src_coord[0]) * (node_size + spacing) + spacing + node_size / 2
+                    dst_x = dst_coord[1] * (node_size + spacing) + spacing + node_size / 2
+                    dst_y = (rows - 1 - dst_coord[0]) * (node_size + spacing) + spacing + node_size / 2
+                    path_coords = [(src_x, src_y), (dst_x, dst_y)]
+
+                if path_coords:
+                    xs, ys = zip(*path_coords)
+
+                    # Add small offset to avoid exact overlap
+                    offset = (edge_idx % 5) * 0.03
+
+                    fig.add_trace(go.Scatter(
+                        x=[x + offset for x in xs],
+                        y=[y + offset for y in ys],
+                        mode='lines+markers',
+                        line=dict(color=base_color, width=2),
+                        marker=dict(size=6, color=base_color),
+                        opacity=0.6,
+                        hoverinfo='text',
+                        hovertext=edge_info,
+                        name=f"{group_config['name']}: {source_node.name}→{dest_node.name}",
+                        legendgroup=group_name,
+                        showlegend=(edge_idx == 0),  # Only show first path in legend
+                        legendgrouptitle_text=group_config['name'] if edge_idx == 0 else None
+                    ))
+
+                    all_path_data.append({
+                        'group': group_name,
+                        'edge': str(edge),
+                        'src': source_node.name,
+                        'dst': dest_node.name,
+                        'info': edge_info
+                    })
+
+        # ============================================================
+        # Layout configuration
+        # ============================================================
+        fig_width = cols * (node_size + spacing) + spacing
+        fig_height = rows * (node_size + spacing) + spacing
+
+        fig.update_layout(
+            title=dict(
+                text=f"{func_name} - Interactive NoC Path Visualization<br>"
+                     f"<sup>Groups: inst={len(paths_by_group['inst'])}, "
+                     f"const={len(paths_by_group['const'])}, data={len(paths_by_group['data'])}</sup>",
+                x=0.5,
+                font=dict(size=16)
+            ),
+            xaxis=dict(
+                range=[0, fig_width + 0.5],
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                scaleanchor='y',
+                scaleratio=1
+            ),
+            yaxis=dict(
+                range=[0, fig_height + 0.5],
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False
+            ),
+            hovermode='closest',
+            showlegend=True,
+            legend=dict(
+                title="Path Groups (click to toggle)",
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=1.02,
+                bgcolor="rgba(255,255,255,0.9)",
+                bordercolor="gray",
+                borderwidth=1
+            ),
+            width=900,
+            height=700,
+            margin=dict(r=200)
+        )
+
+        # Add instructions annotation
+        fig.add_annotation(
+            x=0.5, y=-0.1,
+            xref='paper', yref='paper',
+            text="Hover over paths for details. Click legend items to filter groups.",
+            showarrow=False,
+            font=dict(size=11, color='gray')
+        )
+
+        # Save as HTML
+        output_path = os.path.join(output_dir, "interactive.html")
+        fig.write_html(output_path, include_plotlyjs=True, full_html=True)
+        debug_print(f"    Saved interactive visualization: {output_path}")
+
+
 def generateNoCVisualizations(mod, output_dir="noc_visualizations"):
     """
     Generate NoC path visualizations for all imcflow functions in the module.
-    
+
     This function should be called after PolicyTableGenerator has run and
     populated ImcflowDeviceConfig with NoC paths and tensor edge information.
-    
+
     For each imcflow function, creates:
     - A subdirectory named after the function
-    - Separate images for each tensor type (odata.png, weight.png, bias.png, etc.)
-    - An overview image showing all tensor types together (00_overview_all_types.png)
-    
+    - Group-based images (group_inst.png, group_const.png, group_data.png)
+    - Tensor type images (odata.png, weight.png, bias.png, etc.)
+    - An overview image showing all paths (00_overview_all_paths.png)
+    - Interactive HTML visualization (interactive.html) - requires plotly
+
+    Groups:
+    - inst: Instruction paths (non-TensorEdge)
+    - const: Constant tensors (weight, config, min, max, fused_scale, fused_bias, bias, scale, threshold)
+    - data: Runtime data tensors (odata, data, lhs, rhs, func_out*, var)
+
     Parameters
     ----------
     mod : tvm.IRModule
         The module containing imcflow functions
     output_dir : str, optional
         Base directory to save visualization images (default: "noc_visualizations")
-    
+
     Output Structure
     ----------------
     noc_visualizations/
         function_name_1/
-            00_overview_all_types.png
-            odata.png
+            00_overview_all_paths.png    # All paths overview
+            group_inst.png               # Instruction paths only
+            group_const.png              # Constant tensor paths only
+            group_data.png               # Data tensor paths only
+            interactive.html             # Interactive visualization (plotly)
+            odata.png                    # Individual tensor type
             weight.png
             bias.png
             ...
         function_name_2/
-            00_overview_all_types.png
-            odata.png
             ...
     
     Example
