@@ -142,8 +142,74 @@ class RoutingResult:
 
 
 @dataclass
-class MCFRoutingResult:
-    """Complete result of multi-commodity flow routing"""
+class BaseRoutingResult:
+    """Base class for routing results from any router implementation.
+
+    All router implementations should return a result that inherits from this class.
+    Provides common interface and helper methods for Phase 2 (Tree Builder).
+    """
+    routes: Dict[int, RoutingResult]  # commodity_id -> routing result
+
+    def get_path(self, commodity_id: int) -> List[Coord]:
+        """Get the path for a specific commodity."""
+        if commodity_id not in self.routes:
+            raise KeyError(f"Commodity {commodity_id} not found in routes")
+        return self.routes[commodity_id].path
+
+    def get_edges(self, commodity_id: int) -> List[Edge]:
+        """Get the edges used by a specific commodity."""
+        if commodity_id not in self.routes:
+            raise KeyError(f"Commodity {commodity_id} not found in routes")
+        return self.routes[commodity_id].edges
+
+    def get_commodity(self, commodity_id: int) -> Commodity:
+        """Get the commodity object by id."""
+        if commodity_id not in self.routes:
+            raise KeyError(f"Commodity {commodity_id} not found in routes")
+        return self.routes[commodity_id].commodity
+
+    def get_all_commodity_ids(self) -> List[int]:
+        """Get all commodity ids."""
+        return list(self.routes.keys())
+
+    def get_commodities_by_source(self, source: Coord) -> List[int]:
+        """Get all commodity ids that originate from a given source."""
+        return [
+            cid for cid, route in self.routes.items()
+            if route.commodity.source == source
+        ]
+
+    def get_commodities_passing_through(self, node: Coord) -> List[int]:
+        """Get all commodity ids whose path passes through a given node."""
+        result = []
+        for cid, route in self.routes.items():
+            if node in route.path:
+                result.append(cid)
+        return result
+
+    def get_commodities_by_metadata_key(self, key_func) -> Dict[Any, List[int]]:
+        """Group commodity ids by a key extracted from metadata.
+
+        Args:
+            key_func: Function that takes commodity.metadata and returns a grouping key.
+                      Return None to exclude the commodity from grouping.
+
+        Returns:
+            Dictionary mapping keys to lists of commodity ids.
+        """
+        groups: Dict[Any, List[int]] = {}
+        for cid, route in self.routes.items():
+            key = key_func(route.commodity.metadata)
+            if key is not None:
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append(cid)
+        return groups
+
+
+@dataclass
+class MCFRoutingResult(BaseRoutingResult):
+    """Complete result of multi-commodity flow routing using ILP solver."""
     routes: Dict[int, RoutingResult]  # commodity_id -> routing result
     edge_usage: Dict[Edge, List[int]]  # edge -> list of commodity ids using it
     max_edge_congestion: int
@@ -220,15 +286,50 @@ class MCFRouter:
 
         # Fallback: solve without capacity constraint
         logger.warning("MCF routing failed with all capacities, solving without constraint")
-        return self._try_route_with_capacity(commodities, None)
+        result = self._try_route_with_capacity(commodities, None)
+        if result is None:
+            raise RuntimeError(
+                f"MCF routing failed completely for {len(commodities)} commodities. "
+                "ILP solver could not find a feasible solution even without capacity constraints."
+            )
+        return result
 
-    def _group_by_source(self, commodities: List[Commodity]) -> Dict[Coord, List[Commodity]]:
-        """Group commodities by their source coordinate for multicast handling."""
+    def _get_multicast_key(self, commodity: Commodity) -> Tuple:
+        """
+        Get multicast grouping key for a commodity.
+
+        Multicast requires both:
+        1. Same HW source coordinate
+        2. Same source graph_node_id (same data being transmitted)
+
+        Returns:
+            Tuple of (source_coord, graph_node_id) or (source_coord, None) if no metadata
+        """
+        graph_node_id = None
+        if commodity.metadata is not None:
+            # metadata is (TensorEdge, mapping_info)
+            edge = commodity.metadata[0]
+            if hasattr(edge, 'src_id') and hasattr(edge.src_id, 'graph_node_id'):
+                graph_node_id = edge.src_id.graph_node_id
+        return (commodity.source, graph_node_id)
+
+    def _group_by_source(self, commodities: List[Commodity]) -> Dict[Tuple, List[Commodity]]:
+        """
+        Group commodities by their multicast key for multicast handling.
+
+        Two commodities are in the same multicast group only if:
+        1. Same HW source coordinate
+        2. Same source graph_node_id (i.e., transmitting the same data)
+
+        Returns:
+            Dict mapping (source_coord, graph_node_id) to list of commodities
+        """
         groups = {}
         for c in commodities:
-            if c.source not in groups:
-                groups[c.source] = []
-            groups[c.source].append(c)
+            key = self._get_multicast_key(c)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(c)
         return groups
 
     def _try_route_with_capacity(
@@ -693,6 +794,94 @@ if __name__ == "__main__":
                 print(f"  {edge}: commodities {users}")
 
         print("✓ PASS: Edge sharing works correctly")
+
+        # ============================================================
+        print("\n" + "=" * 70)
+        print("Test 6: graph_node_id based multicast grouping")
+        print("=" * 70)
+
+        # Mock TensorEdge-like object for metadata
+        class MockSrcId:
+            def __init__(self, graph_node_id):
+                self.graph_node_id = graph_node_id
+
+        class MockEdge:
+            def __init__(self, graph_node_id):
+                self.src_id = MockSrcId(graph_node_id)
+
+        # Same HW source (0,0), but different graph_node_ids
+        # Should NOT be multicast - they're different data
+        commodities = [
+            Commodity(0, Coord(0, 0), Coord(2, 0), metadata=(MockEdge(100), None)),  # graph_node_id=100
+            Commodity(1, Coord(0, 0), Coord(0, 2), metadata=(MockEdge(200), None)),  # graph_node_id=200
+        ]
+
+        result = router.route(commodities)
+        print(f"Status: {result.solver_status}")
+        print(f"Max congestion: {result.max_edge_congestion}")
+
+        # These should NOT be grouped as multicast (different graph_node_ids)
+        if "mcast=0" in result.solver_status and "ucast=2" in result.solver_status:
+            print("✓ PASS: Different graph_node_ids = no multicast (2 unicast)")
+        else:
+            print(f"✗ FAIL: Should be 2 unicast, got: {result.solver_status}")
+            all_passed = False
+
+        # ============================================================
+        print("\n" + "=" * 70)
+        print("Test 7: Same HW source + same graph_node_id = multicast")
+        print("=" * 70)
+
+        # Same HW source (0,0) AND same graph_node_id
+        # Should BE multicast - they're the same data
+        commodities = [
+            Commodity(0, Coord(0, 0), Coord(2, 0), metadata=(MockEdge(100), None)),  # graph_node_id=100
+            Commodity(1, Coord(0, 0), Coord(0, 2), metadata=(MockEdge(100), None)),  # graph_node_id=100 (same!)
+            Commodity(2, Coord(0, 0), Coord(2, 2), metadata=(MockEdge(100), None)),  # graph_node_id=100 (same!)
+        ]
+
+        result = router.route(commodities)
+        print(f"Status: {result.solver_status}")
+        print(f"Max congestion: {result.max_edge_congestion}")
+
+        # These SHOULD be grouped as multicast (same graph_node_id)
+        if "mcast=1" in result.solver_status and "ucast=0" in result.solver_status:
+            print("✓ PASS: Same graph_node_id = multicast (1 group)")
+        else:
+            print(f"✗ FAIL: Should be 1 multicast group, got: {result.solver_status}")
+            all_passed = False
+
+        if result.max_edge_congestion == 1:
+            print("✓ PASS: Multicast achieves cap=1")
+        else:
+            print(f"✗ FAIL: Expected cap=1, got {result.max_edge_congestion}")
+            all_passed = False
+
+        # ============================================================
+        print("\n" + "=" * 70)
+        print("Test 8: Mixed - same HW source, some same/different graph_node_ids")
+        print("=" * 70)
+
+        commodities = [
+            # Multicast group: graph_node_id=100 from (0,0)
+            Commodity(0, Coord(0, 0), Coord(2, 0), metadata=(MockEdge(100), None)),
+            Commodity(1, Coord(0, 0), Coord(2, 2), metadata=(MockEdge(100), None)),
+            # Unicast: graph_node_id=200 from (0,0) - same HW source, different data!
+            Commodity(2, Coord(0, 0), Coord(0, 2), metadata=(MockEdge(200), None)),
+            # Unicast: graph_node_id=300 from (1,1)
+            Commodity(3, Coord(1, 1), Coord(3, 3), metadata=(MockEdge(300), None)),
+        ]
+
+        result = router.route(commodities)
+        print(f"Status: {result.solver_status}")
+        print(f"Max congestion: {result.max_edge_congestion}")
+
+        # Should be: 1 multicast group (commodities 0,1) + 2 unicast (commodities 2,3)
+        if "mcast=1" in result.solver_status and "ucast=2" in result.solver_status:
+            print("✓ PASS: Correctly split by graph_node_id (1 mcast + 2 ucast)")
+        else:
+            print(f"✗ FAIL: Should be 1 mcast + 2 ucast, got: {result.solver_status}")
+            all_passed = False
 
         # ============================================================
         print("\n" + "=" * 70)
