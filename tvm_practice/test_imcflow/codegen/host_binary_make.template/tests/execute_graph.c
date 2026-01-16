@@ -228,6 +228,9 @@ int main(int argc, char** argv) {
   const char* graph_path = argc > 3 ? argv[3] : "mlf/executor-config/graph/default.graph";
   const char* params_path = argc > 4 ? argv[4] : "mlf/parameters/default.params";
   const char* runner_name = argc > 5 ? argv[5] : "";
+  const char* scan_reg_file = argc > 6 ? argv[6] : "";
+
+  program_scan_reg(scan_reg_file);
 
   // Construct input and output directories based on test name
   char input_dir[256];
