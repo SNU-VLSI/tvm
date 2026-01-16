@@ -5595,6 +5595,30 @@ class TensorPathVisualizer:
         'data': {'name': 'Data', 'color_scheme': 'Oranges', 'base_color': 'orange'},
     }
 
+    # Visualization style configuration (easy to customize)
+    # Marker styles: 'o'=circle, 's'=square, '^'=triangle up, 'v'=triangle down,
+    #                '>'=triangle right, 'D'=diamond, '*'=star, 'p'=pentagon
+    START_MARKER = 's'        # Start point marker (square)
+    START_MARKER_SIZE = 10    # Start point marker size
+    MID_MARKER = 'o'          # Intermediate point marker (circle)
+    MID_MARKER_SIZE = 6       # Intermediate point marker size
+    END_MARKER = '*'          # End point marker (triangle down)
+    END_MARKER_SIZE = 10      # End point marker size
+
+    # Plotly marker styles: circle, square, diamond, cross, x, triangle-up, triangle-down, etc.
+    START_MARKER_PLOTLY = 'square'
+    START_MARKER_SIZE_PLOTLY = 12
+    MID_MARKER_PLOTLY = 'circle'
+    MID_MARKER_SIZE_PLOTLY = 8
+    END_MARKER_PLOTLY = 'star'
+    END_MARKER_SIZE_PLOTLY = 12
+
+    LINE_WIDTH = 2.5          # Width of path lines
+    ARROW_HEAD_WIDTH = 0.08   # Width of arrow head
+    ARROW_HEAD_LENGTH = 0.06  # Length of arrow head
+    ARROW_LINE_WIDTH = 1.0    # Width of arrow line
+    OFFSET_UNIT = 0.06        # Base offset unit for parallel paths
+
     def __init__(self, output_dir="noc_visualizations"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -5859,10 +5883,57 @@ class TensorPathVisualizer:
         
         return fig, ax
     
+    def _normalize_segment(self, p1, p2):
+        """
+        Normalize a segment so that both directions map to the same key.
+        Returns tuple of (smaller_point, larger_point) based on lexicographic order.
+        """
+        if (p1[0], p1[1]) <= (p2[0], p2[1]):
+            return (p1, p2)
+        return (p2, p1)
+
+    def _get_path_coords(self, edge, mapping_info, node_size, spacing, rows):
+        """
+        Extract path coordinates for an edge.
+
+        Returns:
+            List of (x, y) coordinates, or None if no valid path
+        """
+        source_node = mapping_info[0]
+        dest_node = mapping_info[1]
+
+        # Try to get full path from router entries
+        if isinstance(edge, TensorEdge) and edge in ImcflowDeviceConfig().TensorEdgetoInfo:
+            edge_info = ImcflowDeviceConfig().TensorEdgetoInfo[edge]
+            if edge_info.policy_info:
+                path_nodes = [entry.router_id for entry in edge_info.policy_info]
+                path_coords = []
+                for node_id in path_nodes:
+                    coord = NodeID.to_coord(node_id)
+                    row, col = coord
+                    x = col * (node_size + spacing) + spacing + node_size / 2
+                    y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size / 2
+                    path_coords.append((x, y))
+                return path_coords
+
+        # Fallback: direct line from source to dest
+        src_coord = NodeID.to_coord(source_node)
+        dst_coord = NodeID.to_coord(dest_node)
+
+        src_x = src_coord[1] * (node_size + spacing) + spacing + node_size / 2
+        src_y = (rows - 1 - src_coord[0]) * (node_size + spacing) + spacing + node_size / 2
+        dst_x = dst_coord[1] * (node_size + spacing) + spacing + node_size / 2
+        dst_y = (rows - 1 - dst_coord[0]) * (node_size + spacing) + spacing + node_size / 2
+
+        return [(src_x, src_y), (dst_x, dst_y)]
+
     def _draw_tensor_paths(self, ax, noc_paths, tensor_edge_list):
         """
-        Draw tensor paths on the mesh grid.
-        
+        Draw tensor paths on the mesh grid using 2-pass algorithm for parallel offset.
+
+        The algorithm ensures that overlapping paths are drawn as parallel lines
+        (strictly horizontal/vertical) instead of tilted lines.
+
         Parameters
         ----------
         ax : matplotlib axis
@@ -5872,167 +5943,201 @@ class TensorPathVisualizer:
         tensor_edge_list : list
             List of TensorEdge objects for this function
         """
-        # Get unique colors for each tensor edge
-        num_tensor_edges = len([e for e in noc_paths.keys() if isinstance(e, TensorEdge)])
-        colors = self._generate_colors(num_tensor_edges)
-        
-        # Node size and spacing (must match _create_mesh_grid)
+        # Constants
         node_size = 1.0
         spacing = 0.5
         rows = ImcflowDeviceConfig.INODE_NUM
-        
-        # Track which tensor edges we've drawn
-        tensor_edge_idx = 0
-        legend_entries = []
-        
-        # Track edge segments to add offsets for overlapping paths
-        segment_usage = {}  # ((x1,y1), (x2,y2)) -> count
-        
+
+        # Get colors
+        num_edges = len(noc_paths)
+        colors = self._generate_colors(num_edges)
+
+        # ============================================================
+        # PASS 1: Extract all paths and collect segment usage
+        # ============================================================
+        path_data = []  # List of (edge, mapping_info, path_coords, color)
+        segment_paths = {}  # normalized_segment -> [path_index, ...]
+
+        edge_idx = 0
         for edge, mapping_info in noc_paths.items():
-            # Only visualize TensorEdge (not instruction edges)
-            if not isinstance(edge, TensorEdge):
-                continue
-            
+            path_coords = self._get_path_coords(edge, mapping_info, node_size, spacing, rows)
+
+            if path_coords and len(path_coords) >= 2:
+                color = colors[edge_idx % len(colors)]
+                path_index = len(path_data)
+                path_data.append((edge, mapping_info, path_coords, color))
+
+                # Collect segments for this path
+                for i in range(len(path_coords) - 1):
+                    p1 = path_coords[i]
+                    p2 = path_coords[i + 1]
+                    seg = self._normalize_segment(p1, p2)
+
+                    if seg not in segment_paths:
+                        segment_paths[seg] = []
+                    segment_paths[seg].append(path_index)
+
+            edge_idx += 1
+
+        # ============================================================
+        # PASS 2 & 3: Greedy path-by-path drawing with consistent offset
+        # Each path gets ONE consistent offset slot across all its segments
+        # ============================================================
+        legend_entries = []
+
+        # Track which slots are claimed on each segment
+        segment_claimed_slots = {seg: set() for seg in segment_paths.keys()}
+
+        # Get the path's segments helper
+        def get_path_segments(path_coords):
+            segments = []
+            for i in range(len(path_coords) - 1):
+                seg = self._normalize_segment(path_coords[i], path_coords[i + 1])
+                segments.append(seg)
+            return segments
+
+        for path_idx, (edge, mapping_info, path_coords, color) in enumerate(path_data):
             source_node = mapping_info[0]
             dest_node = mapping_info[1]
-            
-            # Get color for this edge
-            color = colors[tensor_edge_idx % len(colors)]
-            tensor_edge_idx += 1
-            
-            # Get the full path by looking up router entries
-            if edge in ImcflowDeviceConfig().TensorEdgetoInfo:
-                edge_info = ImcflowDeviceConfig().TensorEdgetoInfo[edge]
-                if edge_info.policy_info:
-                    # Extract path from router entries
-                    path_nodes = [entry.router_id for entry in edge_info.policy_info]
-                    
-                    # Convert path to coordinates and draw
-                    path_coords = []
-                    for node_id in path_nodes:
-                        coord = NodeID.to_coord(node_id)
-                        row, col = coord
-                        x = col * (node_size + spacing) + spacing + node_size/2
-                        y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size/2
-                        path_coords.append((x, y))
-                    
-                    # Draw the path with offsets to avoid overlap
-                    if len(path_coords) > 1:
-                        offset_coords = []
-                        for i, (x, y) in enumerate(path_coords):
-                            if i > 0:
-                                # Calculate offset based on segment usage
-                                prev_pt = path_coords[i-1]
-                                curr_pt = (x, y)
-                                segment = (prev_pt, curr_pt)
-                                segment_rev = (curr_pt, prev_pt)
-                                
-                                # Count usage (consider both directions as same segment)
-                                if segment in segment_usage:
-                                    offset_idx = segment_usage[segment]
-                                    segment_usage[segment] += 1
-                                elif segment_rev in segment_usage:
-                                    offset_idx = segment_usage[segment_rev]
-                                    segment_usage[segment_rev] += 1
-                                else:
-                                    offset_idx = 0
-                                    segment_usage[segment] = 1
-                                
-                                # Apply perpendicular offset
-                                dx = curr_pt[0] - prev_pt[0]
-                                dy = curr_pt[1] - prev_pt[1]
-                                length = (dx**2 + dy**2)**0.5
-                                if length > 0:
-                                    # Perpendicular direction
-                                    perp_x = -dy / length
-                                    perp_y = dx / length
-                                    # Offset amount (alternate positive/negative)
-                                    offset_amount = 0.08 * (offset_idx + 1) * (1 if offset_idx % 2 == 0 else -1)
-                                    x_offset = x + perp_x * offset_amount
-                                    y_offset = y + perp_y * offset_amount
-                                    offset_coords.append((x_offset, y_offset))
-                                else:
-                                    offset_coords.append((x, y))
-                            else:
-                                offset_coords.append((x, y))
-                        
-                        xs, ys = zip(*offset_coords)
-                        line = ax.plot(xs, ys, color=color, linewidth=2.5, alpha=0.8, 
-                                      marker='o', markersize=5, markeredgecolor='white', 
-                                      markeredgewidth=0.5, zorder=10)
-                        
-                        # Add arrow at the end
-                        if len(offset_coords) >= 2:
-                            dx = offset_coords[-1][0] - offset_coords[-2][0]
-                            dy = offset_coords[-1][1] - offset_coords[-2][1]
-                            length = (dx**2 + dy**2)**0.5
-                            if length > 0:
-                                ax.arrow(offset_coords[-2][0], offset_coords[-2][1], dx*0.6, dy*0.6,
-                                       head_width=0.2, head_length=0.15, fc=color, ec=color, 
-                                       alpha=0.9, linewidth=1.5, zorder=11)
-                        
-                        # Create legend entry with NodeID and CustomID information
-                        src_node_name = source_node.name
-                        dst_node_name = dest_node.name
-                        tensor_type = edge.src_id.tensor_type
-                        
-                        # Get custom IDs from the tensor edge
-                        src_custom_id = edge.src_id.graph_node_id
-                        dst_custom_id = edge.dst_id.graph_node_id
-                        
-                        # Format custom IDs (handle tuples for composite functions)
-                        src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
-                        dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
-                        
-                        tensor_label = f"{src_node_name} → {dst_node_name} | ID:{src_id_str}→{dst_id_str} ({tensor_type})"
-                        if edge.split_idx is not None:
-                            tensor_label += f"[{edge.split_idx}]"
-                        legend_entries.append((line[0], tensor_label))
+
+            # Get all segments for this path
+            path_segments = get_path_segments(path_coords)
+
+            # Find a slot that's available on ALL segments of this path
+            # Try slot 0, 1, 2, ... until we find one that works
+            chosen_slot = 0
+            max_possible_slot = max(len(segment_paths.get(seg, [])) for seg in path_segments) + len(path_data)
+
+            for candidate_slot in range(max_possible_slot):
+                # Check if this slot is available on all segments of this path
+                available = True
+                for seg in path_segments:
+                    if candidate_slot in segment_claimed_slots.get(seg, set()):
+                        available = False
+                        break
+                if available:
+                    chosen_slot = candidate_slot
+                    break
+
+            # Claim this slot on all segments of this path
+            for seg in path_segments:
+                if seg not in segment_claimed_slots:
+                    segment_claimed_slots[seg] = set()
+                segment_claimed_slots[seg].add(chosen_slot)
+
+            # Calculate the offset for this path (consistent across all segments)
+            # We use a simple linear offset based on chosen_slot
+            # Centered around 0: slot 0 -> 0, slot 1 -> +offset, slot 2 -> -offset, etc.
+            if chosen_slot == 0:
+                path_offset = 0
+            elif chosen_slot % 2 == 1:
+                path_offset = ((chosen_slot + 1) // 2) * self.OFFSET_UNIT
             else:
-                # Fallback: draw direct line from source to dest
-                src_coord = NodeID.to_coord(source_node)
-                dst_coord = NodeID.to_coord(dest_node)
-                
-                src_x = src_coord[1] * (node_size + spacing) + spacing + node_size/2
-                src_y = (rows - 1 - src_coord[0]) * (node_size + spacing) + spacing + node_size/2
-                dst_x = dst_coord[1] * (node_size + spacing) + spacing + node_size/2
-                dst_y = (rows - 1 - dst_coord[0]) * (node_size + spacing) + spacing + node_size/2
-                
-                line = ax.plot([src_x, dst_x], [src_y, dst_y], 
-                             color=color, linewidth=2.5, alpha=0.8, marker='o', 
-                             markersize=5, markeredgecolor='white', markeredgewidth=0.5, zorder=10)
-                
-                # Add arrow
-                dx = dst_x - src_x
-                dy = dst_y - src_y
-                length = (dx**2 + dy**2)**0.5
+                path_offset = -(chosen_slot // 2) * self.OFFSET_UNIT
+
+            # Build offset path with CONSISTENT offset for entire path
+            all_segments_coords = []
+
+            for i in range(len(path_coords) - 1):
+                p1 = path_coords[i]
+                p2 = path_coords[i + 1]
+
+                # Determine if horizontal or vertical segment
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+
+                # Apply perpendicular offset to BOTH endpoints (same offset for entire path)
+                if abs(dx) > abs(dy):
+                    # Horizontal segment: offset in Y direction
+                    offset_p1 = (p1[0], p1[1] + path_offset)
+                    offset_p2 = (p2[0], p2[1] + path_offset)
+                else:
+                    # Vertical segment: offset in X direction
+                    offset_p1 = (p1[0] + path_offset, p1[1])
+                    offset_p2 = (p2[0] + path_offset, p2[1])
+
+                all_segments_coords.append([offset_p1, offset_p2])
+
+            # Collect all unique points for marker drawing
+            all_points = []
+            for seg_coords in all_segments_coords:
+                if not all_points or all_points[-1] != seg_coords[0]:
+                    all_points.append(seg_coords[0])
+                all_points.append(seg_coords[1])
+
+            # Draw each segment (lines only, no markers)
+            first_line = None
+            for seg_idx, seg_coords in enumerate(all_segments_coords):
+                xs = [seg_coords[0][0], seg_coords[1][0]]
+                ys = [seg_coords[0][1], seg_coords[1][1]]
+
+                line = ax.plot(xs, ys, color=color, linewidth=self.LINE_WIDTH, alpha=0.8,
+                              zorder=10)
+
+                if first_line is None:
+                    first_line = line[0]
+
+            # Draw markers: start, intermediate, end with different styles
+            if all_points:
+                # Start marker (first point)
+                ax.plot(all_points[0][0], all_points[0][1], color=color,
+                       marker=self.START_MARKER, markersize=self.START_MARKER_SIZE,
+                       markeredgecolor='white', markeredgewidth=0.5, zorder=12)
+
+                # Intermediate markers (middle points)
+                for pt in all_points[1:-1]:
+                    ax.plot(pt[0], pt[1], color=color,
+                           marker=self.MID_MARKER, markersize=self.MID_MARKER_SIZE,
+                           markeredgecolor='white', markeredgewidth=0.5, zorder=11)
+
+                # End marker (last point)
+                if len(all_points) > 1:
+                    ax.plot(all_points[-1][0], all_points[-1][1], color=color,
+                           marker=self.END_MARKER, markersize=self.END_MARKER_SIZE,
+                           markeredgecolor='white', markeredgewidth=0.5, zorder=12)
+
+            # Add arrow at the last segment
+            if all_segments_coords:
+                last_seg = all_segments_coords[-1]
+                p1, p2 = last_seg[0], last_seg[1]
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+                length = (dx ** 2 + dy ** 2) ** 0.5
+
                 if length > 0:
-                    ax.arrow(src_x, src_y, dx*0.6, dy*0.6,
-                           head_width=0.2, head_length=0.15, fc=color, ec=color, 
-                           alpha=0.9, linewidth=1.5, zorder=11)
-                
-                # Create legend entry with NodeID and CustomID information
-                src_node_name = source_node.name
-                dst_node_name = dest_node.name
-                tensor_type = edge.src_id.tensor_type
-                
-                # Get custom IDs from the tensor edge
-                src_custom_id = edge.src_id.graph_node_id
-                dst_custom_id = edge.dst_id.graph_node_id
-                
-                # Format custom IDs (handle tuples for composite functions)
-                src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
-                dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
-                
-                tensor_label = f"{src_node_name} → {dst_node_name} | ID:{src_id_str}→{dst_id_str} ({tensor_type})"
-                if edge.split_idx is not None:
-                    tensor_label += f"[{edge.split_idx}]"
-                legend_entries.append((line[0], tensor_label))
-        
+                    # Draw arrow from 50% to 90% of the segment (not reaching end marker)
+                    arrow_start_x = p1[0] + dx * 0.5
+                    arrow_start_y = p1[1] + dy * 0.5
+                    ax.arrow(arrow_start_x, arrow_start_y, dx * 0.3, dy * 0.3,
+                            head_width=self.ARROW_HEAD_WIDTH, head_length=self.ARROW_HEAD_LENGTH,
+                            fc=color, ec=color, alpha=0.9, linewidth=self.ARROW_LINE_WIDTH, zorder=11)
+
+            # Create legend entry
+            if first_line is not None:
+                if isinstance(edge, TensorEdge):
+                    src_node_name = source_node.name
+                    dst_node_name = dest_node.name
+                    tensor_type = edge.src_id.tensor_type
+
+                    src_custom_id = edge.src_id.graph_node_id
+                    dst_custom_id = edge.dst_id.graph_node_id
+
+                    src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
+                    dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
+
+                    tensor_label = f"{src_node_name} → {dst_node_name} | ID:{src_id_str}→{dst_id_str} ({tensor_type})"
+                    if edge.split_idx is not None:
+                        tensor_label += f"[{edge.split_idx}]"
+                else:
+                    # Instruction edge
+                    tensor_label = f"{source_node.name} → {dest_node.name} (inst)"
+
+                legend_entries.append((first_line, tensor_label))
+
         # Add legend if there are paths
         if legend_entries:
             lines, labels = zip(*legend_entries)
-            ax.legend(lines, labels, loc='upper left', bbox_to_anchor=(1.02, 1), 
+            ax.legend(lines, labels, loc='upper left', bbox_to_anchor=(1.02, 1),
                      fontsize=7, framealpha=0.95, edgecolor='gray', fancybox=True)
     
     def _generate_colors(self, n):
@@ -6134,7 +6239,7 @@ class TensorPathVisualizer:
         ))
 
         # ============================================================
-        # Draw paths for each group
+        # Draw paths using 2-pass algorithm for parallel offsets
         # ============================================================
         group_colors = {
             'inst': 'purple',
@@ -6142,17 +6247,17 @@ class TensorPathVisualizer:
             'data': 'orange'
         }
 
-        # Track path data for click handler
-        all_path_data = []
+        # PASS 1: Collect all paths and their segments
+        path_data = []  # List of (edge, mapping_info, path_coords, group_name, edge_info)
+        segment_paths = {}  # normalized_segment -> [path_index, ...]
 
         for group_name, group_paths in paths_by_group.items():
             if not group_paths:
                 continue
 
-            base_color = group_colors.get(group_name, 'gray')
             group_config = self.GROUP_CONFIG[group_name]
 
-            for edge_idx, (edge, mapping_info) in enumerate(group_paths.items()):
+            for edge, mapping_info in group_paths.items():
                 source_node = mapping_info[0]
                 dest_node = mapping_info[1]
 
@@ -6175,56 +6280,169 @@ class TensorPathVisualizer:
                                 f"HW: {source_node.name} → {dest_node.name}")
 
                 # Get path coordinates
-                path_coords = []
-                if isinstance(edge, TensorEdge) and edge in ImcflowDeviceConfig().TensorEdgetoInfo:
-                    edge_info_obj = ImcflowDeviceConfig().TensorEdgetoInfo[edge]
-                    if edge_info_obj.policy_info:
-                        path_nodes = [entry.router_id for entry in edge_info_obj.policy_info]
-                        for node_id in path_nodes:
-                            coord = NodeID.to_coord(node_id)
-                            row, col = coord
-                            x = col * (node_size + spacing) + spacing + node_size / 2
-                            y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size / 2
-                            path_coords.append((x, y))
+                path_coords = self._get_path_coords(edge, mapping_info, node_size, spacing, rows)
 
-                # Fallback: direct line
-                if not path_coords:
-                    src_coord = NodeID.to_coord(source_node)
-                    dst_coord = NodeID.to_coord(dest_node)
-                    src_x = src_coord[1] * (node_size + spacing) + spacing + node_size / 2
-                    src_y = (rows - 1 - src_coord[0]) * (node_size + spacing) + spacing + node_size / 2
-                    dst_x = dst_coord[1] * (node_size + spacing) + spacing + node_size / 2
-                    dst_y = (rows - 1 - dst_coord[0]) * (node_size + spacing) + spacing + node_size / 2
-                    path_coords = [(src_x, src_y), (dst_x, dst_y)]
+                if path_coords and len(path_coords) >= 2:
+                    path_index = len(path_data)
+                    path_data.append((edge, mapping_info, path_coords, group_name, edge_info))
 
-                if path_coords:
-                    xs, ys = zip(*path_coords)
+                    # Collect segments
+                    for i in range(len(path_coords) - 1):
+                        p1 = path_coords[i]
+                        p2 = path_coords[i + 1]
+                        seg = self._normalize_segment(p1, p2)
+                        if seg not in segment_paths:
+                            segment_paths[seg] = []
+                        segment_paths[seg].append(path_index)
 
-                    # Add small offset to avoid exact overlap
-                    offset = (edge_idx % 5) * 0.03
+        # PASS 2 & 3: Greedy path-by-path drawing with consistent offset
+        all_path_data = []
+        group_first_drawn = {'inst': False, 'const': False, 'data': False}
 
-                    fig.add_trace(go.Scatter(
-                        x=[x + offset for x in xs],
-                        y=[y + offset for y in ys],
-                        mode='lines+markers',
-                        line=dict(color=base_color, width=2),
-                        marker=dict(size=6, color=base_color),
-                        opacity=0.6,
-                        hoverinfo='text',
-                        hovertext=edge_info,
-                        name=f"{group_config['name']}: {source_node.name}→{dest_node.name}",
-                        legendgroup=group_name,
-                        showlegend=(edge_idx == 0),  # Only show first path in legend
-                        legendgrouptitle_text=group_config['name'] if edge_idx == 0 else None
-                    ))
+        # Track which slots are claimed on each segment
+        segment_claimed_slots = {seg: set() for seg in segment_paths.keys()}
 
-                    all_path_data.append({
-                        'group': group_name,
-                        'edge': str(edge),
-                        'src': source_node.name,
-                        'dst': dest_node.name,
-                        'info': edge_info
-                    })
+        def get_path_segments(path_coords):
+            segments = []
+            for i in range(len(path_coords) - 1):
+                seg = self._normalize_segment(path_coords[i], path_coords[i + 1])
+                segments.append(seg)
+            return segments
+
+        for path_idx, (edge, mapping_info, path_coords, group_name, edge_info) in enumerate(path_data):
+            source_node = mapping_info[0]
+            dest_node = mapping_info[1]
+            base_color = group_colors.get(group_name, 'gray')
+            group_config = self.GROUP_CONFIG[group_name]
+
+            # Get all segments for this path
+            path_segments = get_path_segments(path_coords)
+
+            # Find a slot that's available on ALL segments of this path
+            chosen_slot = 0
+            max_possible_slot = max(len(segment_paths.get(seg, [])) for seg in path_segments) + len(path_data)
+
+            for candidate_slot in range(max_possible_slot):
+                available = True
+                for seg in path_segments:
+                    if candidate_slot in segment_claimed_slots.get(seg, set()):
+                        available = False
+                        break
+                if available:
+                    chosen_slot = candidate_slot
+                    break
+
+            # Claim this slot on all segments
+            for seg in path_segments:
+                if seg not in segment_claimed_slots:
+                    segment_claimed_slots[seg] = set()
+                segment_claimed_slots[seg].add(chosen_slot)
+
+            # Calculate consistent offset for this path
+            if chosen_slot == 0:
+                path_offset = 0
+            elif chosen_slot % 2 == 1:
+                path_offset = ((chosen_slot + 1) // 2) * self.OFFSET_UNIT
+            else:
+                path_offset = -(chosen_slot // 2) * self.OFFSET_UNIT
+
+            # Build offset coordinates with CONSISTENT offset
+            offset_xs = []
+            offset_ys = []
+
+            for i in range(len(path_coords) - 1):
+                p1 = path_coords[i]
+                p2 = path_coords[i + 1]
+
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+
+                # Apply perpendicular offset (same for entire path)
+                if abs(dx) > abs(dy):
+                    offset_p1 = (p1[0], p1[1] + path_offset)
+                    offset_p2 = (p2[0], p2[1] + path_offset)
+                else:
+                    offset_p1 = (p1[0] + path_offset, p1[1])
+                    offset_p2 = (p2[0] + path_offset, p2[1])
+
+                if i == 0:
+                    offset_xs.append(offset_p1[0])
+                    offset_ys.append(offset_p1[1])
+                offset_xs.append(offset_p2[0])
+                offset_ys.append(offset_p2[1])
+
+            # Determine if this is the first path in this group
+            is_first = not group_first_drawn[group_name]
+            if is_first:
+                group_first_drawn[group_name] = True
+
+            # Draw line (no markers)
+            fig.add_trace(go.Scatter(
+                x=offset_xs,
+                y=offset_ys,
+                mode='lines',
+                line=dict(color=base_color, width=2),
+                opacity=0.6,
+                hoverinfo='text',
+                hovertext=edge_info,
+                name=f"{group_config['name']}: {source_node.name}→{dest_node.name}",
+                legendgroup=group_name,
+                showlegend=is_first,
+                legendgrouptitle_text=group_config['name'] if is_first else None
+            ))
+
+            # Draw start marker
+            if offset_xs:
+                fig.add_trace(go.Scatter(
+                    x=[offset_xs[0]],
+                    y=[offset_ys[0]],
+                    mode='markers',
+                    marker=dict(symbol=self.START_MARKER_PLOTLY, size=self.START_MARKER_SIZE_PLOTLY,
+                               color=base_color, line=dict(width=1, color='white')),
+                    opacity=0.8,
+                    hoverinfo='text',
+                    hovertext=f"START<br>{edge_info}",
+                    legendgroup=group_name,
+                    showlegend=False
+                ))
+
+            # Draw intermediate markers
+            if len(offset_xs) > 2:
+                fig.add_trace(go.Scatter(
+                    x=offset_xs[1:-1],
+                    y=offset_ys[1:-1],
+                    mode='markers',
+                    marker=dict(symbol=self.MID_MARKER_PLOTLY, size=self.MID_MARKER_SIZE_PLOTLY,
+                               color=base_color, line=dict(width=1, color='white')),
+                    opacity=0.6,
+                    hoverinfo='text',
+                    hovertext=edge_info,
+                    legendgroup=group_name,
+                    showlegend=False
+                ))
+
+            # Draw end marker
+            if len(offset_xs) > 1:
+                fig.add_trace(go.Scatter(
+                    x=[offset_xs[-1]],
+                    y=[offset_ys[-1]],
+                    mode='markers',
+                    marker=dict(symbol=self.END_MARKER_PLOTLY, size=self.END_MARKER_SIZE_PLOTLY,
+                               color=base_color, line=dict(width=1, color='white')),
+                    opacity=0.8,
+                    hoverinfo='text',
+                    hovertext=f"END<br>{edge_info}",
+                    legendgroup=group_name,
+                    showlegend=False
+                ))
+
+            all_path_data.append({
+                'group': group_name,
+                'edge': str(edge),
+                'src': source_node.name,
+                'dst': dest_node.name,
+                'info': edge_info
+            })
 
         # ============================================================
         # Layout configuration
