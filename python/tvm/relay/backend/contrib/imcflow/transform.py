@@ -5603,7 +5603,7 @@ class TensorPathVisualizer:
     MID_MARKER = 'o'          # Intermediate point marker (circle)
     MID_MARKER_SIZE = 6       # Intermediate point marker size
     END_MARKER = '*'          # End point marker (triangle down)
-    END_MARKER_SIZE = 10      # End point marker size
+    END_MARKER_SIZE = 15      # End point marker size
 
     # Plotly marker styles: circle, square, diamond, cross, x, triangle-up, triangle-down, etc.
     START_MARKER_PLOTLY = 'square'
@@ -6036,40 +6036,74 @@ class TensorPathVisualizer:
                 path_offset = -(chosen_slot // 2) * self.OFFSET_UNIT
 
             # Build offset path with CONSISTENT offset for entire path
+            # At corner points, apply BOTH X and Y offsets so lines meet orthogonally
             all_segments_coords = []
 
+            # First, determine direction (horizontal/vertical) for each segment
+            segment_directions = []  # True = horizontal, False = vertical
             for i in range(len(path_coords) - 1):
                 p1 = path_coords[i]
                 p2 = path_coords[i + 1]
-
-                # Determine if horizontal or vertical segment
                 dx = p2[0] - p1[0]
                 dy = p2[1] - p1[1]
+                is_horizontal = abs(dx) > abs(dy)
+                segment_directions.append(is_horizontal)
 
-                # Apply perpendicular offset to BOTH endpoints (same offset for entire path)
-                if abs(dx) > abs(dy):
-                    # Horizontal segment: offset in Y direction
-                    offset_p1 = (p1[0], p1[1] + path_offset)
-                    offset_p2 = (p2[0], p2[1] + path_offset)
+            # Build offset coordinates for each segment
+            for i in range(len(path_coords) - 1):
+                p1 = path_coords[i]
+                p2 = path_coords[i + 1]
+                is_horizontal = segment_directions[i]
+
+                # Determine if there's a direction change at p1 (start of this segment)
+                # and at p2 (end of this segment)
+                prev_is_horizontal = segment_directions[i - 1] if i > 0 else is_horizontal
+                next_is_horizontal = segment_directions[i + 1] if i < len(segment_directions) - 1 else is_horizontal
+
+                # Apply offset at p1
+                if i == 0:
+                    # First point: only apply this segment's perpendicular offset
+                    if is_horizontal:
+                        offset_p1 = (p1[0], p1[1] + path_offset)
+                    else:
+                        offset_p1 = (p1[0] + path_offset, p1[1])
+                elif prev_is_horizontal != is_horizontal:
+                    # Corner at p1: apply BOTH X and Y offsets for orthogonal meeting
+                    offset_p1 = (p1[0] + path_offset, p1[1] + path_offset)
                 else:
-                    # Vertical segment: offset in X direction
-                    offset_p1 = (p1[0] + path_offset, p1[1])
-                    offset_p2 = (p2[0] + path_offset, p2[1])
+                    # Same direction continues: apply only this segment's offset
+                    if is_horizontal:
+                        offset_p1 = (p1[0], p1[1] + path_offset)
+                    else:
+                        offset_p1 = (p1[0] + path_offset, p1[1])
 
-                all_segments_coords.append([offset_p1, offset_p2])
+                # Apply offset at p2
+                if i == len(segment_directions) - 1:
+                    # Last point: only apply this segment's perpendicular offset
+                    if is_horizontal:
+                        offset_p2 = (p2[0], p2[1] + path_offset)
+                    else:
+                        offset_p2 = (p2[0] + path_offset, p2[1])
+                elif is_horizontal != next_is_horizontal:
+                    # Corner at p2: apply BOTH X and Y offsets for orthogonal meeting
+                    offset_p2 = (p2[0] + path_offset, p2[1] + path_offset)
+                else:
+                    # Same direction continues: apply only this segment's offset
+                    if is_horizontal:
+                        offset_p2 = (p2[0], p2[1] + path_offset)
+                    else:
+                        offset_p2 = (p2[0] + path_offset, p2[1])
 
-            # Collect all unique points for marker drawing
-            all_points = []
-            for seg_coords in all_segments_coords:
-                if not all_points or all_points[-1] != seg_coords[0]:
-                    all_points.append(seg_coords[0])
-                all_points.append(seg_coords[1])
+                all_segments_coords.append([offset_p1, offset_p2, is_horizontal])
 
-            # Draw each segment (lines only, no markers)
+            # Draw segments (no connectors needed - corners meet at single point)
             first_line = None
-            for seg_idx, seg_coords in enumerate(all_segments_coords):
-                xs = [seg_coords[0][0], seg_coords[1][0]]
-                ys = [seg_coords[0][1], seg_coords[1][1]]
+            corner_points = []  # Points where direction changes (for intermediate markers)
+
+            for seg_idx, seg_data in enumerate(all_segments_coords):
+                offset_p1, offset_p2, is_horizontal = seg_data
+                xs = [offset_p1[0], offset_p2[0]]
+                ys = [offset_p1[1], offset_p2[1]]
 
                 line = ax.plot(xs, ys, color=color, linewidth=self.LINE_WIDTH, alpha=0.8,
                               zorder=10)
@@ -6077,24 +6111,35 @@ class TensorPathVisualizer:
                 if first_line is None:
                     first_line = line[0]
 
-            # Draw markers: start, intermediate, end with different styles
-            if all_points:
-                # Start marker (first point)
-                ax.plot(all_points[0][0], all_points[0][1], color=color,
+                # Record corner point for intermediate marker if direction changes
+                if seg_idx < len(all_segments_coords) - 1:
+                    next_seg = all_segments_coords[seg_idx + 1]
+                    next_is_horizontal = next_seg[2]
+
+                    # If direction changes, the corner point is where segments meet
+                    if is_horizontal != next_is_horizontal:
+                        # offset_p2 and next_seg[0] should be the same point now
+                        corner_points.append(offset_p2)
+
+            # Draw markers
+            if all_segments_coords:
+                # Start marker (first point of first segment)
+                start_pt = all_segments_coords[0][0]
+                ax.plot(start_pt[0], start_pt[1], color=color,
                        marker=self.START_MARKER, markersize=self.START_MARKER_SIZE,
                        markeredgecolor='white', markeredgewidth=0.5, zorder=12)
 
-                # Intermediate markers (middle points)
-                for pt in all_points[1:-1]:
+                # Intermediate markers at corner points
+                for pt in corner_points:
                     ax.plot(pt[0], pt[1], color=color,
                            marker=self.MID_MARKER, markersize=self.MID_MARKER_SIZE,
                            markeredgecolor='white', markeredgewidth=0.5, zorder=11)
 
-                # End marker (last point)
-                if len(all_points) > 1:
-                    ax.plot(all_points[-1][0], all_points[-1][1], color=color,
-                           marker=self.END_MARKER, markersize=self.END_MARKER_SIZE,
-                           markeredgecolor='white', markeredgewidth=0.5, zorder=12)
+                # End marker (last point of last segment)
+                end_pt = all_segments_coords[-1][1]
+                ax.plot(end_pt[0], end_pt[1], color=color,
+                       marker=self.END_MARKER, markersize=self.END_MARKER_SIZE,
+                       markeredgecolor='white', markeredgewidth=0.5, zorder=12)
 
             # Add arrow at the last segment
             if all_segments_coords:
@@ -6346,9 +6391,8 @@ class TensorPathVisualizer:
             else:
                 path_offset = -(chosen_slot // 2) * self.OFFSET_UNIT
 
-            # Build offset coordinates with CONSISTENT offset
-            offset_xs = []
-            offset_ys = []
+            # Build offset coordinates with CONSISTENT offset and corner handling
+            all_segments = []  # List of (offset_p1, offset_p2, is_horizontal)
 
             for i in range(len(path_coords) - 1):
                 p1 = path_coords[i]
@@ -6361,15 +6405,40 @@ class TensorPathVisualizer:
                 if abs(dx) > abs(dy):
                     offset_p1 = (p1[0], p1[1] + path_offset)
                     offset_p2 = (p2[0], p2[1] + path_offset)
+                    is_horizontal = True
                 else:
                     offset_p1 = (p1[0] + path_offset, p1[1])
                     offset_p2 = (p2[0] + path_offset, p2[1])
+                    is_horizontal = False
 
-                if i == 0:
+                all_segments.append((offset_p1, offset_p2, is_horizontal))
+
+            # Build continuous path with corner connectors
+            offset_xs = []
+            offset_ys = []
+            corner_points = []
+
+            for seg_idx, (offset_p1, offset_p2, is_horizontal) in enumerate(all_segments):
+                if seg_idx == 0:
                     offset_xs.append(offset_p1[0])
                     offset_ys.append(offset_p1[1])
+
                 offset_xs.append(offset_p2[0])
                 offset_ys.append(offset_p2[1])
+
+                # Add corner connector if direction changes
+                if seg_idx < len(all_segments) - 1:
+                    next_seg = all_segments[seg_idx + 1]
+                    next_is_horizontal = next_seg[2]
+
+                    if is_horizontal != next_is_horizontal:
+                        # Add corner point (start of next segment)
+                        offset_xs.append(next_seg[0][0])
+                        offset_ys.append(next_seg[0][1])
+                        # Track corner midpoint for marker
+                        corner_pt = ((offset_p2[0] + next_seg[0][0]) / 2,
+                                    (offset_p2[1] + next_seg[0][1]) / 2)
+                        corner_points.append(corner_pt)
 
             # Determine if this is the first path in this group
             is_first = not group_first_drawn[group_name]
@@ -6406,11 +6475,13 @@ class TensorPathVisualizer:
                     showlegend=False
                 ))
 
-            # Draw intermediate markers
-            if len(offset_xs) > 2:
+            # Draw intermediate markers at corner points
+            if corner_points:
+                corner_xs = [pt[0] for pt in corner_points]
+                corner_ys = [pt[1] for pt in corner_points]
                 fig.add_trace(go.Scatter(
-                    x=offset_xs[1:-1],
-                    y=offset_ys[1:-1],
+                    x=corner_xs,
+                    y=corner_ys,
                     mode='markers',
                     marker=dict(symbol=self.MID_MARKER_PLOTLY, size=self.MID_MARKER_SIZE_PLOTLY,
                                color=base_color, line=dict(width=1, color='white')),
