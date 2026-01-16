@@ -324,6 +324,52 @@ class MCFRouter:
             )
         return result
 
+    # Tensor type classification for congestion groups
+    CONST_TENSOR_TYPES = frozenset([
+        'weight', 'config', 'min', 'max', 'fused_scale', 'fused_bias',
+        'bias', 'scale', 'threshold'
+    ])
+    DATA_TENSOR_TYPES = frozenset([
+        'odata', 'data', 'lhs', 'rhs', *[f"func_out{i}" for i in range(30)], 'var'
+    ])
+
+    def _get_commodity_group(self, commodity: Commodity) -> str:
+        """
+        Classify commodity into congestion group.
+
+        Groups:
+        - 'inst': Instruction edges (key is NodeID, not TensorEdge)
+        - 'const': Constant tensors (weight, config, min, max, etc.)
+        - 'data': Runtime data tensors (odata, data, lhs, rhs, etc.)
+
+        These groups don't compete for edges at runtime, so congestion
+        should be calculated separately within each group.
+
+        Returns:
+            Group name: 'inst', 'const', or 'data'
+        """
+        if commodity.metadata is None:
+            return 'data'  # Default to data group
+
+        edge = commodity.metadata[0]
+
+        # Check if this is an instruction edge (key is NodeID, not TensorEdge)
+        if not hasattr(edge, 'src_id'):
+            # NodeID doesn't have src_id attribute, so this is instruction
+            return 'inst'
+
+        # Get tensor type from TensorEdge
+        tensor_type = edge.src_id.tensor_type if hasattr(edge.src_id, 'tensor_type') else None
+
+        if tensor_type in self.CONST_TENSOR_TYPES:
+            return 'const'
+        elif tensor_type in self.DATA_TENSOR_TYPES:
+            return 'data'
+        else:
+            # Unknown type - default to data (more conservative)
+            debug_print(f"[MCFRouter] Unknown tensor_type '{tensor_type}', defaulting to 'data' group")
+            return 'data'
+
     def _get_multicast_key(self, commodity: Commodity) -> Tuple:
         """
         Get multicast grouping key for a commodity.
@@ -458,47 +504,104 @@ class MCFRouter:
                 for k in group:
                     prob += y[gid][e] >= x[k.id][e], f"mcast_{gid}_{k.id}_{edge_to_idx[e]}"
 
-        # 3. Edge usage: multicast groups count as 1, unicast counts individually
-        edge_usage_vars = {}
-        for e in all_edges:
-            edge_usage_vars[e] = pulp.LpVariable(
-                f"usage_{edge_to_idx[e]}",
+        # ============================================================
+        # 3. Edge usage per congestion group
+        # Different tensor types don't compete at runtime, so calculate
+        # congestion separately for: inst, const, data
+        # ============================================================
+
+        # Classify commodities and multicast groups by congestion group
+        congestion_groups = {'inst': [], 'const': [], 'data': []}
+        for c in commodities:
+            cg = self._get_commodity_group(c)
+            congestion_groups[cg].append(c)
+
+        # Also classify multicast groups
+        mcast_by_cgroup = {'inst': [], 'const': [], 'data': []}
+        for src, grp in multicast_groups.items():
+            # All commodities in a multicast group have same type
+            cg = self._get_commodity_group(grp[0])
+            mcast_by_cgroup[cg].append(src)
+
+        # Classify unicast commodities
+        unicast_by_cgroup = {'inst': [], 'const': [], 'data': []}
+        for c in unicast_commodities:
+            cg = self._get_commodity_group(c)
+            unicast_by_cgroup[cg].append(c)
+
+        debug_print(f"[MCFRouter]   Congestion groups: inst={len(congestion_groups['inst'])}, "
+                   f"const={len(congestion_groups['const'])}, data={len(congestion_groups['data'])}")
+
+        # Create edge usage variables for each congestion group
+        edge_usage_by_group = {}
+        for cg_name in ['inst', 'const', 'data']:
+            edge_usage_by_group[cg_name] = {}
+            for e in all_edges:
+                edge_usage_by_group[cg_name][e] = pulp.LpVariable(
+                    f"usage_{cg_name}_{edge_to_idx[e]}",
+                    lowBound=0,
+                    cat=pulp.LpInteger
+                )
+                # Usage = multicast groups in this cg + unicast commodities in this cg
+                mcast_usage = pulp.lpSum(
+                    y[group_id_map[src]][e]
+                    for src in mcast_by_cgroup[cg_name]
+                )
+                ucast_usage = pulp.lpSum(
+                    x[k.id][e]
+                    for k in unicast_by_cgroup[cg_name]
+                )
+                prob += edge_usage_by_group[cg_name][e] == mcast_usage + ucast_usage
+
+        # 4. Capacity constraints (DATA group only - most critical at runtime)
+        # inst and const are not constrained since they don't compete at runtime
+        if capacity is not None:
+            for e in all_edges:
+                prob += edge_usage_by_group['data'][e] <= capacity
+
+        # ============================================================
+        # Objective: minimize max congestion across all groups
+        # + small penalty for tree size (multicast sharing)
+        # ============================================================
+
+        # Max congestion per group
+        max_cong_by_group = {}
+        for cg_name in ['inst', 'const', 'data']:
+            max_cong_by_group[cg_name] = pulp.LpVariable(
+                f"max_cong_{cg_name}",
                 lowBound=0,
                 cat=pulp.LpInteger
             )
-            # Usage = sum of multicast group edges + sum of unicast commodity edges
-            multicast_usage = pulp.lpSum(y[group_id_map[src]][e] for src in multicast_groups)
-            unicast_usage = pulp.lpSum(x[k.id][e] for k in unicast_commodities)
-            prob += edge_usage_vars[e] == multicast_usage + unicast_usage
-
-        # 4. Capacity constraints
-        if capacity is not None:
             for e in all_edges:
-                prob += edge_usage_vars[e] <= capacity
+                prob += max_cong_by_group[cg_name] >= edge_usage_by_group[cg_name][e]
 
-        # ============================================================
-        # Objective: minimize congestion + small penalty for tree size
-        # ============================================================
-
-        max_congestion = pulp.LpVariable("max_congestion", lowBound=0, cat=pulp.LpInteger)
-
-        # Constraint: max_congestion >= usage of each edge
-        for e in all_edges:
-            prob += max_congestion >= edge_usage_vars[e]
+        # Overall max congestion = max of all group congestions (for reporting)
+        overall_max_congestion = pulp.LpVariable("overall_max_cong", lowBound=0, cat=pulp.LpInteger)
+        for cg_name in ['inst', 'const', 'data']:
+            prob += overall_max_congestion >= max_cong_by_group[cg_name]
 
         if self.minimize_congestion:
-            # Primary: minimize max congestion
-            # Secondary: minimize multicast tree sizes (encourage sharing)
-            epsilon = 0.001
+            # Primary: minimize DATA group congestion (most critical at runtime)
+            # Secondary: minimize inst/const congestion as tie-breakers
+            # Tertiary: minimize multicast tree sizes (encourage sharing)
+            epsilon1 = 0.1   # weight for inst/const relative to data
+            epsilon2 = 0.001  # weight for tree size penalty
             tree_size_penalty = pulp.lpSum(
                 y[group_id_map[src]][e]
                 for src in multicast_groups
                 for e in all_edges
             )
-            prob += max_congestion + epsilon * tree_size_penalty
+            prob += (max_cong_by_group['data']
+                     + epsilon1 * (max_cong_by_group['inst'] + max_cong_by_group['const'])
+                     + epsilon2 * tree_size_penalty)
         else:
-            # Minimize total edge usage
-            prob += pulp.lpSum(edge_usage_vars[e] for e in all_edges)
+            # Minimize total edge usage across all groups
+            total_usage = pulp.lpSum(
+                edge_usage_by_group[cg_name][e]
+                for cg_name in ['inst', 'const', 'data']
+                for e in all_edges
+            )
+            prob += total_usage
 
         # ============================================================
         # Solve
@@ -552,28 +655,37 @@ class MCFRouter:
             for e in used_edges:
                 edge_usage[e].append(k.id)
 
-        # Calculate statistics (using actual multicast-aware congestion)
-        max_cong = max(
-            (int(pulp.value(edge_usage_vars[e])) for e in all_edges),
-            default=0
-        )
-        total_usage = sum(
-            int(pulp.value(edge_usage_vars[e])) for e in all_edges
-        )
+        # Calculate statistics (per-group congestion)
+        max_cong_per_group = {}
+        total_usage_per_group = {}
+        for cg_name in ['inst', 'const', 'data']:
+            max_cong_per_group[cg_name] = int(pulp.value(max_cong_by_group[cg_name])) if pulp.value(max_cong_by_group[cg_name]) else 0
+            total_usage_per_group[cg_name] = sum(
+                int(pulp.value(edge_usage_by_group[cg_name][e]) or 0)
+                for e in all_edges
+            )
+
+        overall_max_cong = int(pulp.value(overall_max_congestion)) if pulp.value(overall_max_congestion) else 0
+        total_usage = sum(total_usage_per_group.values())
 
         # Count multicast groups
         num_multicast = len(multicast_groups)
         num_unicast = len(unicast_commodities)
 
-        debug_print(f"[MCFRouter]   Result: max_congestion={max_cong}, total_usage={total_usage}")
+        debug_print(f"[MCFRouter]   Result: overall_max_cong={overall_max_cong}")
+        debug_print(f"[MCFRouter]     Per-group max_cong: inst={max_cong_per_group['inst']}, "
+                   f"const={max_cong_per_group['const']}, data={max_cong_per_group['data']}")
+        debug_print(f"[MCFRouter]     Per-group total_usage: inst={total_usage_per_group['inst']}, "
+                   f"const={total_usage_per_group['const']}, data={total_usage_per_group['data']}")
         debug_print(f"[MCFRouter]   Routed {len(routes)} commodities successfully")
 
         return MCFRoutingResult(
             routes=routes,
             edge_usage={e: v for e, v in edge_usage.items() if v},
-            max_edge_congestion=max_cong,
+            max_edge_congestion=overall_max_cong,
             total_edge_usage=total_usage,
-            solver_status=f"{pulp.LpStatus[status]} (cap={capacity}, mcast={num_multicast}, ucast={num_unicast})"
+            solver_status=f"{pulp.LpStatus[status]} (cap={capacity}, mcast={num_multicast}, ucast={num_unicast}, "
+                         f"cong:inst={max_cong_per_group['inst']}/const={max_cong_per_group['const']}/data={max_cong_per_group['data']})"
         )
 
     def _reconstruct_path(
