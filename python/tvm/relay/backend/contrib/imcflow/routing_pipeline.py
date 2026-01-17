@@ -106,7 +106,7 @@ class MCFRouterAdapter(BaseRouter):
         topology: MeshTopology,
         minimize_congestion: bool = True,
     ):
-        self._router = MCFRouter(topology, minimize_congestion=minimize_congestion)
+        self._router = MCFRouter(topology, minimize_congestion=minimize_congestion, enforce_destination_disjoint=True)
         self._topology = topology
         self._minimize_congestion = minimize_congestion
 

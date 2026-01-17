@@ -246,6 +246,7 @@ class MCFRouter:
         self,
         topology: MeshTopology,
         minimize_congestion: bool = True,
+        enforce_destination_disjoint: bool = False,
     ):
         """
         Initialize MCF Router with multicast support.
@@ -257,9 +258,12 @@ class MCFRouter:
         Args:
             topology: The mesh topology
             minimize_congestion: If True, minimize max congestion. If False, minimize total usage.
+            enforce_destination_disjoint: If True, data commodities with the same destination
+                must use edge-disjoint paths (no shared edges). This is a hard constraint.
         """
         self.topology = topology
         self.minimize_congestion = minimize_congestion
+        self.enforce_destination_disjoint = enforce_destination_disjoint
 
     def route(self, commodities: List[Commodity]) -> MCFRoutingResult:
         """
@@ -285,8 +289,48 @@ class MCFRouter:
         if not valid_commodities:
           raise ValueError("All commodities have same source and destination.")
 
+        # Validate: no multicast group should have same-destination commodities
+        if self.enforce_destination_disjoint:
+            self._validate_no_multicast_same_destination(valid_commodities)
+
         debug_print(f"[MCFRouter] Routing {len(valid_commodities)} valid commodities on {self.topology.rows}x{self.topology.cols} mesh")
         return self._route_ilp(valid_commodities)
+
+    def _validate_no_multicast_same_destination(self, commodities: List[Commodity]) -> None:
+        """
+        Validate that no multicast group has commodities with the same destination.
+
+        When enforce_destination_disjoint is enabled, commodities with the same destination
+        must use edge-disjoint paths. However, multicast commodities (same source) share
+        edges by definition, which would violate this constraint.
+
+        Raises:
+            ValueError: If a multicast group has commodities with the same destination.
+        """
+        # Group commodities by multicast key (source + graph_node_id)
+        source_groups = self._group_by_source(commodities)
+
+        for source_key, group in source_groups.items():
+            if len(group) <= 1:
+                continue  # Not a multicast group
+
+            # Check if this is a data group (only data group has the constraint)
+            group_type = self._get_commodity_group(group[0])
+            if group_type != 'data':
+                continue
+
+            # Check for duplicate destinations within this multicast group
+            destinations = [c.destination for c in group]
+            seen_destinations = set()
+            for c in group:
+                if c.destination in seen_destinations:
+                    raise ValueError(
+                        f"Multicast group from source {source_key} has multiple commodities "
+                        f"with the same destination {c.destination}. This violates the "
+                        f"enforce_destination_disjoint constraint. "
+                        f"Commodities in group: {[(c.id, c.source, c.destination) for c in group]}"
+                    )
+                seen_destinations.add(c.destination)
 
     def _route_ilp(self, commodities: List[Commodity]) -> MCFRoutingResult:
         """Route using ILP solver (PuLP) with adaptive capacity.
@@ -558,6 +602,35 @@ class MCFRouter:
         if capacity is not None:
             for e in all_edges:
                 prob += edge_usage_by_group['data'][e] <= capacity
+
+        # 5. Destination-disjoint constraint for data commodities (hard constraint)
+        # Commodities with same destination must use edge-disjoint paths
+        if self.enforce_destination_disjoint:
+            # Group data commodities by destination
+            data_commodities = congestion_groups['data']
+            dest_groups: Dict[Coord, List[Commodity]] = {}
+            for c in data_commodities:
+                if c.destination not in dest_groups:
+                    dest_groups[c.destination] = []
+                dest_groups[c.destination].append(c)
+
+            # For each destination group with multiple commodities,
+            # add edge-disjoint constraint: at most 1 commodity can use each edge
+            num_disjoint_groups = 0
+            for dest, group in dest_groups.items():
+                if len(group) <= 1:
+                    continue  # No constraint needed for single commodity
+
+                num_disjoint_groups += 1
+                for e in all_edges:
+                    # Sum of x[k][e] for all k in this destination group <= 1
+                    prob += (
+                        pulp.lpSum(x[k.id][e] for k in group) <= 1,
+                        f"dest_disjoint_{dest.row}_{dest.col}_{edge_to_idx[e]}"
+                    )
+
+            if num_disjoint_groups > 0:
+                debug_print(f"[MCFRouter]   Added destination-disjoint constraints for {num_disjoint_groups} destination groups")
 
         # ============================================================
         # Objective: minimize max congestion across all groups
