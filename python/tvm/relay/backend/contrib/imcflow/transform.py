@@ -5988,6 +5988,80 @@ class TensorPathVisualizer:
         # Track which slots are claimed on each segment
         segment_claimed_slots = {seg: set() for seg in segment_paths.keys()}
 
+        # ============================================================
+        # Track markers per node to avoid star/square overlap
+        # ============================================================
+        # Collect all markers (start=square, end=star) per node
+        node_start_markers = {}  # node_id -> list of path_idx
+        node_end_markers = {}    # node_id -> list of path_idx
+
+        for path_idx, (edge, mapping_info, path_coords, color) in enumerate(path_data):
+            source_node = mapping_info[0]
+            dest_node = mapping_info[1]
+
+            # Track start marker at source node
+            src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+            if src_key not in node_start_markers:
+                node_start_markers[src_key] = []
+            node_start_markers[src_key].append(path_idx)
+
+            # Track end marker at dest node
+            dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+            if dst_key not in node_end_markers:
+                node_end_markers[dst_key] = []
+            node_end_markers[dst_key].append(path_idx)
+
+        # Assign marker slots per node (combining start and end markers)
+        # This ensures stars and squares at the same node don't overlap
+        node_marker_slots = {}  # (node_key, marker_type, path_idx) -> slot_index
+        MARKER_OFFSET_UNIT = 0.08  # Offset unit for separating markers
+
+        for node_key in set(node_start_markers.keys()) | set(node_end_markers.keys()):
+            # Collect all markers at this node
+            markers_at_node = []
+            for path_idx in node_start_markers.get(node_key, []):
+                markers_at_node.append(('start', path_idx))
+            for path_idx in node_end_markers.get(node_key, []):
+                markers_at_node.append(('end', path_idx))
+
+            # Assign slots in a grid pattern around the node center
+            for slot_idx, (marker_type, path_idx) in enumerate(markers_at_node):
+                node_marker_slots[(node_key, marker_type, path_idx)] = slot_idx
+
+        def get_marker_offset(node_key, marker_type, path_idx, base_offset):
+            """Calculate additional marker offset to avoid overlap."""
+            key = (node_key, marker_type, path_idx)
+            if key not in node_marker_slots:
+                return (0, 0)
+
+            slot_idx = node_marker_slots[key]
+            if slot_idx == 0:
+                return (0, 0)
+
+            # Spread markers in a grid pattern
+            # slot 1: (+x, 0), slot 2: (-x, 0), slot 3: (0, +y), slot 4: (0, -y)
+            # slot 5: (+x, +y), slot 6: (-x, +y), slot 7: (+x, -y), slot 8: (-x, -y)
+            patterns = [
+                (0, 0),
+                (MARKER_OFFSET_UNIT, 0),
+                (-MARKER_OFFSET_UNIT, 0),
+                (0, MARKER_OFFSET_UNIT),
+                (0, -MARKER_OFFSET_UNIT),
+                (MARKER_OFFSET_UNIT, MARKER_OFFSET_UNIT),
+                (-MARKER_OFFSET_UNIT, MARKER_OFFSET_UNIT),
+                (MARKER_OFFSET_UNIT, -MARKER_OFFSET_UNIT),
+                (-MARKER_OFFSET_UNIT, -MARKER_OFFSET_UNIT),
+            ]
+
+            if slot_idx < len(patterns):
+                return patterns[slot_idx]
+            else:
+                # For more markers, use a circular pattern
+                import math
+                angle = (slot_idx - len(patterns)) * (2 * math.pi / 8)
+                radius = MARKER_OFFSET_UNIT * (1 + (slot_idx - len(patterns)) // 8)
+                return (radius * math.cos(angle), radius * math.sin(angle))
+
         # Get the path's segments helper
         def get_path_segments(path_coords):
             segments = []
@@ -6121,11 +6195,18 @@ class TensorPathVisualizer:
                         # offset_p2 and next_seg[0] should be the same point now
                         corner_points.append(offset_p2)
 
-            # Draw markers
+            # Draw markers with slot-based offsets to avoid overlap
             if all_segments_coords:
-                # Start marker (first point of first segment)
+                # Get node keys for marker slot lookup
+                src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+                dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+
+                # Start marker (first point of first segment) with slot offset
                 start_pt = all_segments_coords[0][0]
-                ax.plot(start_pt[0], start_pt[1], color=color,
+                start_marker_offset = get_marker_offset(src_key, 'start', path_idx, path_offset)
+                start_x = start_pt[0] + start_marker_offset[0]
+                start_y = start_pt[1] + start_marker_offset[1]
+                ax.plot(start_x, start_y, color=color,
                        marker=self.START_MARKER, markersize=self.START_MARKER_SIZE,
                        markeredgecolor='white', markeredgewidth=0.5, zorder=12)
 
@@ -6135,9 +6216,12 @@ class TensorPathVisualizer:
                            marker=self.MID_MARKER, markersize=self.MID_MARKER_SIZE,
                            markeredgecolor='white', markeredgewidth=0.5, zorder=11)
 
-                # End marker (last point of last segment)
+                # End marker (last point of last segment) with slot offset
                 end_pt = all_segments_coords[-1][1]
-                ax.plot(end_pt[0], end_pt[1], color=color,
+                end_marker_offset = get_marker_offset(dst_key, 'end', path_idx, path_offset)
+                end_x = end_pt[0] + end_marker_offset[0]
+                end_y = end_pt[1] + end_marker_offset[1]
+                ax.plot(end_x, end_y, color=color,
                        marker=self.END_MARKER, markersize=self.END_MARKER_SIZE,
                        markeredgecolor='white', markeredgewidth=0.5, zorder=12)
 
@@ -6347,6 +6431,68 @@ class TensorPathVisualizer:
         # Track which slots are claimed on each segment
         segment_claimed_slots = {seg: set() for seg in segment_paths.keys()}
 
+        # ============================================================
+        # Track markers per node to avoid star/square overlap (Plotly)
+        # ============================================================
+        node_start_markers_plotly = {}  # node_id -> list of path_idx
+        node_end_markers_plotly = {}    # node_id -> list of path_idx
+
+        for path_idx, (edge, mapping_info, path_coords, group_name, edge_info) in enumerate(path_data):
+            source_node = mapping_info[0]
+            dest_node = mapping_info[1]
+
+            src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+            if src_key not in node_start_markers_plotly:
+                node_start_markers_plotly[src_key] = []
+            node_start_markers_plotly[src_key].append(path_idx)
+
+            dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+            if dst_key not in node_end_markers_plotly:
+                node_end_markers_plotly[dst_key] = []
+            node_end_markers_plotly[dst_key].append(path_idx)
+
+        node_marker_slots_plotly = {}
+        MARKER_OFFSET_UNIT_PLOTLY = 0.08
+
+        for node_key in set(node_start_markers_plotly.keys()) | set(node_end_markers_plotly.keys()):
+            markers_at_node = []
+            for path_idx in node_start_markers_plotly.get(node_key, []):
+                markers_at_node.append(('start', path_idx))
+            for path_idx in node_end_markers_plotly.get(node_key, []):
+                markers_at_node.append(('end', path_idx))
+
+            for slot_idx, (marker_type, path_idx) in enumerate(markers_at_node):
+                node_marker_slots_plotly[(node_key, marker_type, path_idx)] = slot_idx
+
+        def get_marker_offset_plotly(node_key, marker_type, path_idx):
+            key = (node_key, marker_type, path_idx)
+            if key not in node_marker_slots_plotly:
+                return (0, 0)
+
+            slot_idx = node_marker_slots_plotly[key]
+            if slot_idx == 0:
+                return (0, 0)
+
+            patterns = [
+                (0, 0),
+                (MARKER_OFFSET_UNIT_PLOTLY, 0),
+                (-MARKER_OFFSET_UNIT_PLOTLY, 0),
+                (0, MARKER_OFFSET_UNIT_PLOTLY),
+                (0, -MARKER_OFFSET_UNIT_PLOTLY),
+                (MARKER_OFFSET_UNIT_PLOTLY, MARKER_OFFSET_UNIT_PLOTLY),
+                (-MARKER_OFFSET_UNIT_PLOTLY, MARKER_OFFSET_UNIT_PLOTLY),
+                (MARKER_OFFSET_UNIT_PLOTLY, -MARKER_OFFSET_UNIT_PLOTLY),
+                (-MARKER_OFFSET_UNIT_PLOTLY, -MARKER_OFFSET_UNIT_PLOTLY),
+            ]
+
+            if slot_idx < len(patterns):
+                return patterns[slot_idx]
+            else:
+                import math
+                angle = (slot_idx - len(patterns)) * (2 * math.pi / 8)
+                radius = MARKER_OFFSET_UNIT_PLOTLY * (1 + (slot_idx - len(patterns)) // 8)
+                return (radius * math.cos(angle), radius * math.sin(angle))
+
         def get_path_segments(path_coords):
             segments = []
             for i in range(len(path_coords) - 1):
@@ -6460,11 +6606,15 @@ class TensorPathVisualizer:
                 legendgrouptitle_text=group_config['name'] if is_first else None
             ))
 
-            # Draw start marker
+            # Draw start marker with slot-based offset
             if offset_xs:
+                src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+                start_marker_off = get_marker_offset_plotly(src_key, 'start', path_idx)
+                start_x = offset_xs[0] + start_marker_off[0]
+                start_y = offset_ys[0] + start_marker_off[1]
                 fig.add_trace(go.Scatter(
-                    x=[offset_xs[0]],
-                    y=[offset_ys[0]],
+                    x=[start_x],
+                    y=[start_y],
                     mode='markers',
                     marker=dict(symbol=self.START_MARKER_PLOTLY, size=self.START_MARKER_SIZE_PLOTLY,
                                color=base_color, line=dict(width=1, color='white')),
@@ -6492,11 +6642,15 @@ class TensorPathVisualizer:
                     showlegend=False
                 ))
 
-            # Draw end marker
+            # Draw end marker with slot-based offset
             if len(offset_xs) > 1:
+                dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+                end_marker_off = get_marker_offset_plotly(dst_key, 'end', path_idx)
+                end_x = offset_xs[-1] + end_marker_off[0]
+                end_y = offset_ys[-1] + end_marker_off[1]
                 fig.add_trace(go.Scatter(
-                    x=[offset_xs[-1]],
-                    y=[offset_ys[-1]],
+                    x=[end_x],
+                    y=[end_y],
                     mode='markers',
                     marker=dict(symbol=self.END_MARKER_PLOTLY, size=self.END_MARKER_SIZE_PLOTLY,
                                color=base_color, line=dict(width=1, color='white')),
