@@ -494,6 +494,8 @@ class ScanKernelCodegen:
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <cnpy.h>
+#include <vector>
 """
 
     def generate_base_addr_macros(self) -> str:
@@ -655,21 +657,172 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
         transfer_code_str = "".join(transfer_code)
 
         return f"""
-void {self.func_name}_kernel(void) {{
-    fprintf(stderr, "Starting {self.func_name} kernel\\n");
+#ifdef __cplusplus
+extern "C"
+#endif
+int32_t program_scan_reg(const char* file_name) {{
+    // Check if file_name is provided
+    if (file_name == NULL || file_name[0] == '\\0') {{
+        fprintf(stderr, "Error: NPZ file path is required for program_scan_reg\\n");
+        fprintf(stderr, "Usage: program_scan_reg <npz_file_path>\\n");
+        return -1;
+    }}
+
+    fprintf(stderr, "Starting program_scan_reg from file: %s\\n", file_name);
+
+    // Load NPZ file using cnpy
+    fprintf(stderr, "Loading scan data from NPZ file...\\n");
+    cnpy::npz_t npz_data;
+    try {{
+        npz_data = cnpy::npz_load(file_name);
+    }} catch (const std::exception& e) {{
+        fprintf(stderr, "Error loading NPZ file: %s\\n", e.what());
+        return -1;
+    }}
+
+    // Get arr_0 from NPZ file (64 bytes per IMCE, 16 IMCEs = 1024 bytes total)
+    if (npz_data.find("arr_0") == npz_data.end()) {{
+        fprintf(stderr, "Error: 'arr_0' not found in NPZ file\\n");
+        return -1;
+    }}
+
+    cnpy::NpyArray arr = npz_data["arr_0"];
+    uint8_t* scan_bytes = arr.data<uint8_t>();
+    size_t total_bytes = arr.num_bytes();
+
+    // Allocate memory for scan data (32 packets × 32 bytes = 1024 bytes)
+    const int num_packets = {self.scan_packet_count};
+    const int bytes_per_packet = 32;
+    uint32_t* scan_data = (uint32_t*)malloc(num_packets * bytes_per_packet);
+    if (!scan_data) {{
+        fprintf(stderr, "Error: Failed to allocate memory for scan data\\n");
+        return -1;
+    }}
+
+    // Convert NPZ bytes to scan packets
+    // Each IMCE has 64 bytes → 2 packets (32 bytes each)
+    // 16 IMCEs × 2 packets = 32 packets total
+    const int imce_count = 16;
+    const int bytes_per_imce = 64;
+    if (total_bytes != imce_count * bytes_per_imce) {{
+        fprintf(stderr, "Error: Expected %d bytes in NPZ file (16 IMCEs × 64 bytes), got %zu bytes\\n", 
+                imce_count * bytes_per_imce, total_bytes);
+        free(scan_data);
+        return -1;
+    }}
+
+    // Convert NPZ bytes to scan packets following the same logic as load_scan_values_from_npz
+    // For each IMCE: 64 bytes → 512 bits → bit-reverse → split into reg0/reg1 → 2 packets
+    fprintf(stderr, "Converting NPZ data with bit reversal...\\n");
+    
+    for (int imce_idx = 0; imce_idx < imce_count; imce_idx++) {{
+        uint8_t* imce_bytes = &scan_bytes[imce_idx * bytes_per_imce];
+        
+        // Step 1: Convert 64 bytes to 512-bit string
+        char bit_str[513];  // 512 bits + null terminator
+        for (int i = 0; i < bytes_per_imce; i++) {{
+            for (int b = 0; b < 8; b++) {{
+                bit_str[i * 8 + b] = ((imce_bytes[i] >> (7 - b)) & 1) ? '1' : '0';
+            }}
+        }}
+        bit_str[512] = '\\0';
+        
+        // Step 2: Reverse the entire bit string
+        char rev_bit_str[513];
+        for (int i = 0; i < 512; i++) {{
+            rev_bit_str[i] = bit_str[511 - i];
+        }}
+        rev_bit_str[512] = '\\0';
+        
+        // Step 3: Extract reg1 (bits 0-256) and reg0 (bits 256-512)
+        // reg1 corresponds to packet 1 (bytes 0-31 after reversal)
+        // reg0 corresponds to packet 0 (bytes 32-63 after reversal)
+        char reg1_bits[257], reg0_bits[257];
+        memcpy(reg1_bits, &rev_bit_str[0], 256);
+        reg1_bits[256] = '\\0';
+        memcpy(reg0_bits, &rev_bit_str[256], 256);
+        reg0_bits[256] = '\\0';
+        
+        // Step 4: Convert bit strings to int16 packets
+        // Each packet has 16 int16 values
+        int16_t* packet_0 = (int16_t*)&scan_data[(imce_idx * 2 + 0) * 8];  // 32 bytes = 8 uint32_t = 16 int16
+        int16_t* packet_1 = (int16_t*)&scan_data[(imce_idx * 2 + 1) * 8];
+        
+        // Convert reg0_bits to packet_0
+        for (int i = 0; i < 16; i++) {{
+            // Extract 16 bits for this int16
+            char bits_16[17];
+            memcpy(bits_16, &reg0_bits[i * 16], 16);
+            bits_16[16] = '\\0';
+            
+            // Reverse bits for little-endian int16 interpretation
+            char bits_16_rev[17];
+            for (int b = 0; b < 16; b++) {{
+                bits_16_rev[b] = bits_16[15 - b];
+            }}
+            bits_16_rev[16] = '\\0';
+            
+            // Convert binary string to int16 (treat leftmost char as MSB)
+            int32_t val = 0;
+            for (int b = 0; b < 16; b++) {{
+                if (bits_16_rev[b] == '1') {{
+                    val |= (1 << (15 - b));  // Leftmost char is MSB (bit 15)
+                }}
+            }}
+            
+            // Handle signed conversion (2's complement)
+            if (val >= 32768) {{
+                val -= 65536;
+            }}
+            packet_0[i] = (int16_t)val;
+        }}
+        
+        // Convert reg1_bits to packet_1
+        for (int i = 0; i < 16; i++) {{
+            // Extract 16 bits for this int16
+            char bits_16[17];
+            memcpy(bits_16, &reg1_bits[i * 16], 16);
+            bits_16[16] = '\\0';
+            
+            // Reverse bits for little-endian int16 interpretation
+            char bits_16_rev[17];
+            for (int b = 0; b < 16; b++) {{
+                bits_16_rev[b] = bits_16[15 - b];
+            }}
+            bits_16_rev[16] = '\\0';
+            
+            // Convert binary string to int16 (treat leftmost char as MSB)
+            int32_t val = 0;
+            for (int b = 0; b < 16; b++) {{
+                if (bits_16_rev[b] == '1') {{
+                    val |= (1 << (15 - b));  // Leftmost char is MSB (bit 15)
+                }}
+            }}
+            
+            // Handle signed conversion (2's complement)
+            if (val >= 32768) {{
+                val -= 65536;
+            }}
+            packet_1[i] = (int16_t)val;
+        }}
+    }}
+    
+    fprintf(stderr, "Loaded and converted %d scan packets from NPZ file\\n", num_packets);
 
     // Open devices
     int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
     if (npu_fd < 0) {{
         perror("Cannot open NPU device");
-        return;
+        free(scan_data);
+        return -1;
     }}
 
     int int_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
     if (int_fd < 0) {{
         perror("Cannot open interrupt device");
         close(npu_fd);
-        return;
+        free(scan_data);
+        return -1;
     }}
 
     // Map NPU memory
@@ -680,7 +833,8 @@ void {self.func_name}_kernel(void) {{
         perror("mmap failed");
         close(npu_fd);
         close(int_fd);
-        return;
+        free(scan_data);
+        return -1;
     }}
 
     uint32_t* int_ack_ptr = (uint32_t*)mmap(NULL, 4096,
@@ -691,7 +845,7 @@ void {self.func_name}_kernel(void) {{
 
     // Transfer scan data to each INode's memory region
     fprintf(stderr, "Transferring scan data to NPU:\\n");
-    uint32_t* scan_data_ptr = (uint32_t*)&{self.func_name}_scan_data[0];
+    uint32_t* scan_data_ptr = scan_data;
     uint32_t* npu_scan_base;{transfer_code_str}
 
     // Set PC and execute policy update phase
@@ -717,16 +871,13 @@ void {self.func_name}_kernel(void) {{
     npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Cleanup
+    free(scan_data);
     munmap(npu_ptr, IMCFLOW_LEN);
     munmap(int_ack_ptr, 4096);
     close(npu_fd);
     close(int_fd);
 
-    fprintf(stderr, "{self.func_name} kernel completed\\n");
-}}
-
-int main(void) {{
-    {self.func_name}_kernel();
+    fprintf(stderr, "program_scan_reg completed successfully\\n");
     return 0;
 }}
 """
@@ -742,7 +893,7 @@ int main(void) {{
             self.generate_base_addr_macros(),
             self.generate_extern_declarations(),
             self.generate_utilities(),
-            self.generate_scan_data_array(scan_values),
+            # self.generate_scan_data_array(scan_values),
             self.generate_kernel_function()
         ]
         return "\n".join(code_parts)
@@ -1191,8 +1342,8 @@ def main():
     )
     parser.add_argument(
         "--func-name",
-        default="scan_reg",
-        help="Function name (default: scan_reg)"
+        default="program_scan_reg",
+        help="Function name (default: program_scan_reg)"
     )
     parser.add_argument(
         "--build-dir",

@@ -76,7 +76,7 @@ class ScanRegPolicyGenerator:
         self.NoCPaths = noc_paths
         print(f"\nTotal paths created: {len(noc_paths)}")
 
-        ImcflowDeviceConfig().NoCPaths["scan_reg"] = noc_paths
+        ImcflowDeviceConfig().NoCPaths["program_scan_reg"] = noc_paths
 
         return noc_paths
     
@@ -269,11 +269,11 @@ class ScanRegPolicyGenerator:
                 print(f"{node_id.name:12s}: {entry_count:3d} entries "
                       f"({entry_count}/{self.table_capacity} capacity)")
         
-        ImcflowDeviceConfig().PolicyTableDict["scan_reg"] = policy_tables
+        ImcflowDeviceConfig().PolicyTableDict["program_scan_reg"] = policy_tables
 
         return policy_tables
 
-    def add_edge_info(self, func_name: str = "scan_reg") -> None:
+    def add_edge_info(self, func_name: str = "program_scan_reg") -> None:
         """
         Create InstEdgeInfo objects from generated policy tables and register them.
         """
@@ -350,7 +350,7 @@ class ScanRegPolicyGenerator:
         
         print(f"NoC paths exported to: {output_path}")
     
-    def allocate(self, func_name: str = "scan_reg") -> None:
+    def allocate(self, func_name: str = "program_scan_reg") -> None:
         """
         Allocate memory for scan register policy tables.
         
@@ -403,16 +403,16 @@ def run_scan_reg_policy_generation(output_dir: str = "./scan_reg_policy") -> Non
     generator = ScanRegPolicyGenerator()
     
     # Step 1: Construct NoC paths
-    noc_paths = generator.construct_noc_path(func_name="scan_reg")
+    noc_paths = generator.construct_noc_path(func_name="program_scan_reg")
 
     # Step 2: Generate policy table
-    policy_table = generator.gen_policy_table(func_name="scan_reg")
+    policy_table = generator.gen_policy_table(func_name="program_scan_reg")
 
     # Step 3: Register InstEdgeInfo for each IMCE
-    generator.add_edge_info(func_name="scan_reg")
+    generator.add_edge_info(func_name="program_scan_reg")
 
     # Step 4: Allocate memory for policy tables
-    generator.allocate(func_name="scan_reg")
+    generator.allocate(func_name="program_scan_reg")
         
     
     

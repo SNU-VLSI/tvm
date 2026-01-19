@@ -54,7 +54,7 @@ class ImcFlowRunner(ABC):
         """Perform any necessary setup before running (e.g., VCS compilation)"""
         pass
 
-    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str) -> None:
+    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str, npz_file: str = "") -> None:
         """Run the simulation
 
         Args:
@@ -62,6 +62,7 @@ class ImcFlowRunner(ABC):
             gdb_mode: "yes" or "no" to enable/disable GDB
             test_name: Name of the test for output directory
             eval_dir: Evaluation directory containing the model
+            npz_file: Optional NPZ file path to pass to the binary
 
         Raises:
             subprocess.CalledProcessError: If simulation fails
@@ -79,8 +80,10 @@ class ImcFlowRunner(ABC):
         # Convert to absolute path since run.sh executes from runner directory
         abs_runner_log_dir = os.path.abspath(runner_log_dir)
 
-        # Pass absolute log directory as 4th argument to run.sh
+        # Pass absolute log directory as 4th argument, NPZ file as 5th (if provided)
         sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name, abs_runner_log_dir]
+        if npz_file:
+            sim_command.append(npz_file)
 
         try:
             self._stream_command_output(

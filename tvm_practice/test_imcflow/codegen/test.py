@@ -33,6 +33,10 @@ from models import models_for_test
 # Import shared input generator
 from input_generator import InputGenerator
 
+# Module-level variable to store NPZ file path from command line
+_NPZ_FILE_PATH = ""
+
+
 # Import ImcFlow runner abstraction
 from imcflow_runner import get_runner
 
@@ -598,12 +602,43 @@ def run_imcflow_codegen(mod, dir):
   imcflow_transform.constructDataBlockDict(mod)
   print(f"data_blocks: {config.DataBlocks}")
 
+  # Generate scan register programming code
+  print("\n--- Generating Scan Register Programming Code ---")
+  try:
+    # Import scan register modules
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "utils"))
+    from scan_reg_policy_gen import ScanRegPolicyGenerator
+    from scan_codegen import generate_scan_code_from_policy_gen, generate_default_scan_values
+    
+    # Generate policy and allocate memory
+    policy_gen = ScanRegPolicyGenerator()
+    policy_gen.construct_noc_path()
+    policy_gen.gen_policy_table()
+    policy_gen.add_edge_info()
+    policy_gen.allocate()
+    
+    # Generate scan values (32 packets for 16 IMCEs × 2 packets each)
+    scan_values = generate_default_scan_values(32)
+    
+    # Generate scan register code
+    files = generate_scan_code_from_policy_gen(
+      scan_values=scan_values,
+      func_name="program_scan_reg",
+      build_dir=os.path.join(dir, "build")
+    )
+    print(f"Generated scan register code: {list(files.keys())}")
+  except Exception as e:
+    print(f"Warning: Failed to generate scan register code: {e}")
+    print("Continuing without scan register support...")
 
-def run_simulation(eval_dir, HOST_ISA):
+
+
+def run_simulation(eval_dir, HOST_ISA, npz_file=""):
   """Run simulation by building and executing the graph with proper output streaming
 
   Args:
     eval_dir: Evaluation directory containing the model
+    npz_file: Optional NPZ file path to pass to the binary
 
   Returns:
     imcflow_output: The IMCFLOW simulation output as numpy array, or None if output file doesn't exist.
@@ -622,6 +657,15 @@ def run_simulation(eval_dir, HOST_ISA):
   test_host_binary_dir = f"{eval_dir}/host_binary_make"
   print(f"Copying host_binary_make template to {test_host_binary_dir}")
   shutil.copytree("./host_binary_make.template", test_host_binary_dir, dirs_exist_ok=True)
+
+  # Copy generated program_scan_reg_kernel.cc if it exists
+  scan_kernel_src = f"{eval_dir}/build/program_scan_reg/program_scan_reg_kernel.cc"
+  if os.path.exists(scan_kernel_src):
+    scan_kernel_dst = f"{test_host_binary_dir}/tests/program_scan_reg_kernel.cc"
+    print(f"Copying {scan_kernel_src} to {scan_kernel_dst}")
+    shutil.copy2(scan_kernel_src, scan_kernel_dst)
+  else:
+    print(f"Warning: {scan_kernel_src} not found, scan register programming may not work")
 
   host_build_dir = f"{test_host_binary_dir}/build"
   os.makedirs(host_build_dir, exist_ok=True)
@@ -687,7 +731,8 @@ def run_simulation(eval_dir, HOST_ISA):
         binary_name="tvm_host_runner",
         gdb_mode="no",
         test_name=eval_dir,
-        eval_dir=eval_dir
+        eval_dir=eval_dir,
+        npz_file=npz_file
       )
     except KeyboardInterrupt:
       simul_err   = True
@@ -838,7 +883,7 @@ def compare_outputs(cpu_output, imcflow_output):
   else:
     print("\n✅ Test completed successfully")
 
-def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False):
+def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False, npz_file=""):
   """Generate IMCFLOW evaluation results with optional CPU validation
 
   Args:
@@ -883,7 +928,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 
   # Run simulation (build + gem5 execution)
   try:
-    imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
+    imcflow_output = run_simulation(eval_dir, config.HOST_ISA, npz_file=npz_file)
   except KeyboardInterrupt:
     print("\n⚠️  Simulation interrupted - skipping output comparison")
     raise  # Re-raise to let pytest handle the interruption
@@ -902,7 +947,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 # ============================================================================
 # Test Pipeline
 # ============================================================================
-def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
+def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, npz_file=""):
   """
   Test pipeline that:
   1. Gets the model from registry
@@ -917,6 +962,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
     skip_setup: If True, skip codegen, and graph generation steps.
                 Useful for testing different inputs on an already-compiled model.
                 NOTE: When True, assumes directory already exists from previous run.
+    npz_file: Path to NPZ file for scan register programming (optional)
   """
   if test_name not in MODEL_REGISTRY:
     raise ValueError(f"Unknown test: {test_name}. Available tests: {list(MODEL_REGISTRY.keys())}")
@@ -977,7 +1023,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
 
     # Run with CPU validation enabled
     # Note: When skip_setup=True, run_test will load the transformed model from file
-    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup)
+    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup, npz_file=npz_file)
 
 
 # ============================================================================
@@ -1031,6 +1077,8 @@ def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_
   The default pattern for each model is marked with (default) in the test ID,
   allowing both 'pytest -k default' and 'pytest -k <pattern>' to work correctly.
   """
+  global _NPZ_FILE_PATH
+  
   # Check if this model has already been set up in this test session
   skip_setup = test_name in setup_cache
 
@@ -1040,8 +1088,30 @@ def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_
   else:
     print(f"\n⚡ Reusing compiled model for {test_name}")
 
-  run_test_pipeline(test_name, input_pattern, skip_setup=skip_setup)
+  # Get npz_file from module-level variable
+  npz_file = _NPZ_FILE_PATH
+
+  run_test_pipeline(test_name, input_pattern, skip_setup=skip_setup, npz_file=npz_file)
 
 
 if __name__ == "__main__":
+  # Parse --npz-file argument manually before pytest processes args
+  npz_file = ""
+  args_to_keep = []
+  i = 0
+  while i < len(sys.argv):
+    if sys.argv[i] == "--npz-file" and i + 1 < len(sys.argv):
+      npz_file = sys.argv[i + 1]
+      i += 2  # Skip both --npz-file and its value
+    elif sys.argv[i].startswith("--npz-file="):
+      npz_file = sys.argv[i].split("=", 1)[1]
+      i += 1
+    else:
+      args_to_keep.append(sys.argv[i])
+      i += 1
+  
+  # Update module-level variable and sys.argv
+  _NPZ_FILE_PATH = npz_file
+  sys.argv = args_to_keep
+  
   tvm.testing.main()
