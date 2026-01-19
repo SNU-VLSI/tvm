@@ -41,7 +41,7 @@ class SendRecvPairManager:
     are grouped into one pair with UUID assigned to all three nodes.
     """
 
-    def __init__(self, edges: List[TensorEdge], exclude_const: bool = True):
+    def __init__(self, edges: List[TensorEdge], exclude_const: bool = True, filter_contention: bool = True):
         """Initialize pair manager and assign UUIDs
 
         Args:
@@ -51,12 +51,62 @@ class SendRecvPairManager:
         self.pairs: Dict[int, SendRecvPair] = {}  # {uuid: SendRecvPair}
         self.edge_to_pair: Dict[TensorEdge, SendRecvPair] = {}  # {edge: SendRecvPair}
         self.exclude_const = exclude_const
+        self.filter_contention = filter_contention
         self._assign_uuids(edges)
+        if self.filter_contention:
+            self._filter_pairs_with_contention()
 
         # Log assignment results
         print(f"[SendRecvPairManager] Assigned {len(self.pairs)} UUIDs for {len(edges)} edges")
         for pair in sorted(self.pairs.values(), key=lambda p: p.uuid):
             print(f"  {pair}")
+
+    def _filter_pairs_with_contention(self):
+      """
+      Filter send-recv pairs for nodes that have multiple recvs or multiple sends
+      """
+      participation_count: Dict[NodeID, Tuple[int, int]] = {}
+      # Count participation
+      for pair in self.pairs.values(): 
+          # Count sender
+          if pair.sender_node not in participation_count:
+              participation_count[pair.sender_node] = (0,0)
+          send_count, recv_count = participation_count[pair.sender_node]
+          participation_count[pair.sender_node] = (send_count + 1, recv_count)
+
+          # Count receivers
+          for rnode in pair.receiver_nodes:
+              if rnode not in participation_count:
+                  participation_count[rnode] = (0,0)
+              send_count, recv_count = participation_count[rnode]
+              participation_count[rnode] = (send_count, recv_count + 1)
+
+      # Identify nodes with contention by role
+      nodes_with_send_contention: Set[NodeID] = set()  # send_count > 1
+      nodes_with_recv_contention: Set[NodeID] = set()  # recv_count > 1
+      for node, (send_count, recv_count) in participation_count.items():
+          if send_count > 1:
+              nodes_with_send_contention.add(node)
+          if recv_count > 1:
+              nodes_with_recv_contention.add(node)
+
+      # Filter pairs - only keep if contention matches the role
+      filtered_pairs: Dict[int, SendRecvPair] = {}
+      filtered_edge_to_pair: Dict[TensorEdge, SendRecvPair] = {}
+      for pair in self.pairs.values():
+          # Keep if sender has send contention
+          sender_has_contention = pair.sender_node in nodes_with_send_contention
+          # Keep if any receiver has recv contention
+          receiver_has_contention = any(rnode in nodes_with_recv_contention for rnode in pair.receiver_nodes)
+
+          if sender_has_contention or receiver_has_contention:
+              filtered_pairs[pair.uuid] = pair
+              for edge in pair.edges:
+                  filtered_edge_to_pair[edge] = pair
+      # Update
+      self.pairs = filtered_pairs
+      self.edge_to_pair = filtered_edge_to_pair
+
 
     def _assign_uuids(self, edges: List[TensorEdge]):
         """Assign UUIDs to send-recv pairs
@@ -155,11 +205,14 @@ class SendRecvPairManager:
         hw_node = DevConfig().get_hw_node(gid)
         return hw_node
 
-    def get_pair(self, edge: TensorEdge) -> SendRecvPair:
+    def get_pair(self, edge: TensorEdge, needs_sync=True) -> SendRecvPair:
         """Get the send-recv pair for a given edge
 
         If edge's dst is a split node, recursively find edges starting from
         that split node and return the pair from those edges.
+        Args:
+            edge: The tensor edge to look up
+            needs_sync: If True, only return pair if it needs sync (using needs_sync method)
         """
         # Direct lookup first
         pair = self.edge_to_pair.get(edge, None)
