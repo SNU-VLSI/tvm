@@ -83,7 +83,9 @@ class ImcFlowRunner(ABC):
         # Pass absolute log directory as 4th argument, NPZ file as 5th (if provided)
         sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name, abs_runner_log_dir]
         if npz_file:
-            sim_command.append(npz_file)
+            # Convert NPZ file path to absolute path since run.sh executes from runner directory
+            abs_npz_file = os.path.abspath(npz_file)
+            sim_command.append(abs_npz_file)
 
         try:
             self._stream_command_output(

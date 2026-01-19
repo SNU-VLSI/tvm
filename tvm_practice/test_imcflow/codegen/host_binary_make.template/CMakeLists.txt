@@ -240,6 +240,24 @@ if(TVM_BUILD_HOST_RUNNER)
   if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc")
     target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc)
     message(STATUS "Adding program_scan_reg_kernel.cc to host runner")
+    
+    # Link the host object files that contain the binary data for program_scan_reg
+    # These files provide the _binary_program_scan_reg_*_bin_start/end symbols
+    if(HOST_OBJ_FILES)
+      # Filter HOST_OBJ_FILES to only include program_scan_reg related files
+      set(SCAN_REG_OBJ_FILES "")
+      foreach(obj_file ${HOST_OBJ_FILES})
+        if(obj_file MATCHES "program_scan_reg")
+          list(APPEND SCAN_REG_OBJ_FILES ${obj_file})
+        endif()
+      endforeach()
+      
+      if(SCAN_REG_OBJ_FILES)
+        target_sources(tvm_host_runner PRIVATE ${SCAN_REG_OBJ_FILES})
+        list(LENGTH SCAN_REG_OBJ_FILES SCAN_OBJ_COUNT)
+        message(STATUS "Linking ${SCAN_OBJ_COUNT} program_scan_reg object files to host runner")
+      endif()
+    endif()
   endif()
   
   # Common settings

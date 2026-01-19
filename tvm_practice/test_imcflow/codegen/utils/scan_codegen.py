@@ -134,7 +134,7 @@ def get_policy_block_address(func_name: str, node_id: NodeID) -> Optional[int]:
     # Look for policy table block - MemoryRegion.blocks returns dict {block_id: DataBlock}
     for block in inode_data.blocks.values():
         # DataBlock.id returns the block identifier (string or TensorEdge)
-        if isinstance(block.id, str) and f"{node_id.name}_scan_reg_policy" == block.id:
+        if isinstance(block.id, str) and f"{node_id.name}_scan_policy" == block.id:
             return block.base_address
 
     return None
@@ -424,7 +424,12 @@ class ScanPolicyTableCodegen:
                 continue
 
             # Generate binary file
-            bin_filename = f"{node_id.name}_scan_policy.bin"
+            # Note: When ld -r -b binary converts the file, it creates symbols based on:
+            # _binary_<dir_name>_<file_name>_bin_<start|end|size>
+            # Since we're in the {func_name} directory and want symbols like:
+            # _binary_{func_name}_{node_id}_scan_reg_policy_bin_start
+            # The filename should be: {node_id}_scan_reg_policy.bin
+            bin_filename = f"{node_id.name}_scan_reg_policy.bin"
             bin_path = os.path.join(self.func_dir, bin_filename)
 
             with open(bin_path, "wb") as f:
@@ -435,7 +440,7 @@ class ScanPolicyTableCodegen:
             generated_files.append(Path(bin_path))
 
             # Generate host object file
-            host_obj_filename = f"{node_id.name}_scan_policy.host.o"
+            host_obj_filename = f"{node_id.name}_scan_reg_policy.host.o"
             dev_codegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
             dev_codegen.func_dir = self.func_dir
             dev_codegen.create_host_object(bin_filename, host_obj_filename)
