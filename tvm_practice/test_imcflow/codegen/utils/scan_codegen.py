@@ -492,6 +492,7 @@ class ScanKernelCodegen:
         return """
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -673,13 +674,20 @@ int32_t program_scan_reg(const char* file_name) {{
         return -1;
     }}
 
-    fprintf(stderr, "Starting program_scan_reg from file: %s\\n", file_name);
+    // Strip surrounding quotes from file_name if present
+    std::string file_name_str(file_name);
+    if (file_name_str.size() >= 2 && file_name_str.front() == '"' && file_name_str.back() == '"') {{
+        file_name_str = file_name_str.substr(1, file_name_str.size() - 2);
+    }}
+    const char* actual_file_name = file_name_str.c_str();
+
+    fprintf(stderr, "Starting program_scan_reg from file: %s\\n", actual_file_name);
 
     // Load NPZ file using cnpy
     fprintf(stderr, "Loading scan data from NPZ file...\\n");
     cnpy::npz_t npz_data;
     try {{
-        npz_data = cnpy::npz_load(file_name);
+        npz_data = cnpy::npz_load(actual_file_name);
     }} catch (const std::exception& e) {{
         fprintf(stderr, "Error loading NPZ file: %s\\n", e.what());
         return -1;

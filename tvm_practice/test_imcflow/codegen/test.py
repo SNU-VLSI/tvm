@@ -33,8 +33,9 @@ from models import models_for_test
 # Import shared input generator
 from input_generator import InputGenerator
 
-# Module-level variable to store NPZ file path from command line
-_NPZ_FILE_PATH = ""
+# Import NPZ file path from environment variable
+import os
+npz_file_path = os.environ.get('NPZ_FILE', 'utils/09_08_05_07_05_08_06_07_0e_0d_0e_0c_0f_0f_0f_0c_0f_0f_0e_0e_0d_0d_0f_0c_0f_0d_0f_0f_0f_0f_0e_0f_08_09_08_04_08_08_08_05_09_0e_0e_0d_0e_05_01_0f_01_01_0a_07_01_0f_01_03_0b_0d_0f_09_09_07_01_05.npz')
 
 
 # Import ImcFlow runner abstraction
@@ -650,6 +651,10 @@ def run_simulation(eval_dir, HOST_ISA, npz_file=""):
   print("RUNNING SIMULATION")
   print("="*60)
 
+  # Make npz_file absolute path if provided
+  if npz_file:
+    npz_file = os.path.abspath(npz_file)
+
   # Build the host binary
   print("\n--- Building Host Binary ---")
 
@@ -1077,7 +1082,6 @@ def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_
   The default pattern for each model is marked with (default) in the test ID,
   allowing both 'pytest -k default' and 'pytest -k <pattern>' to work correctly.
   """
-  global _NPZ_FILE_PATH
   
   # Check if this model has already been set up in this test session
   skip_setup = test_name in setup_cache
@@ -1088,30 +1092,17 @@ def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_
   else:
     print(f"\n⚡ Reusing compiled model for {test_name}")
 
-  # Get npz_file from module-level variable
-  npz_file = _NPZ_FILE_PATH
+  # Get npz_file from environment variable
+  npz_file = npz_file_path
+  
+  # Debug: Print what we got from the environment variable
+  if npz_file:
+    print(f"[DEBUG TEST] Using NPZ file: {npz_file}")
+  else:
+    print(f"[DEBUG TEST] No NPZ file provided (empty string)")
 
   run_test_pipeline(test_name, input_pattern, skip_setup=skip_setup, npz_file=npz_file)
 
 
 if __name__ == "__main__":
-  # Parse --npz-file argument manually before pytest processes args
-  npz_file = ""
-  args_to_keep = []
-  i = 0
-  while i < len(sys.argv):
-    if sys.argv[i] == "--npz-file" and i + 1 < len(sys.argv):
-      npz_file = sys.argv[i + 1]
-      i += 2  # Skip both --npz-file and its value
-    elif sys.argv[i].startswith("--npz-file="):
-      npz_file = sys.argv[i].split("=", 1)[1]
-      i += 1
-    else:
-      args_to_keep.append(sys.argv[i])
-      i += 1
-  
-  # Update module-level variable and sys.argv
-  _NPZ_FILE_PATH = npz_file
-  sys.argv = args_to_keep
-  
   tvm.testing.main()
