@@ -35,7 +35,8 @@ from input_generator import InputGenerator
 
 # Import NPZ file path from environment variable
 import os
-npz_file_path = os.environ.get('NPZ_FILE', 'utils/09_08_05_07_05_08_06_07_0e_0d_0e_0c_0f_0f_0f_0c_0f_0f_0e_0e_0d_0d_0f_0c_0f_0d_0f_0f_0f_0f_0e_0f_08_09_08_04_08_08_08_05_09_0e_0e_0d_0e_05_01_0f_01_01_0a_07_01_0f_01_03_0b_0d_0f_09_09_07_01_05.npz')
+# npz_file_path = os.environ.get('NPZ_FILE', 'utils/09_08_05_07_05_08_06_07_0e_0d_0e_0c_0f_0f_0f_0c_0f_0f_0e_0e_0d_0d_0f_0c_0f_0d_0f_0f_0f_0f_0e_0f_08_09_08_04_08_08_08_05_09_0e_0e_0d_0e_05_01_0f_01_01_0a_07_01_0f_01_03_0b_0d_0f_09_09_07_01_05.npz')
+npz_file_path = os.environ.get('NPZ_FILE', '/root/project/tvm/tvm_practice/test_imcflow/codegen/utils/scan_reg_files')
 
 
 # Import ImcFlow runner abstraction

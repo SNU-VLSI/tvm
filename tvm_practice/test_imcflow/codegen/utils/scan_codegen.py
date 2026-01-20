@@ -669,8 +669,8 @@ extern "C"
 int32_t program_scan_reg(const char* file_name) {{
     // Check if file_name is provided
     if (file_name == NULL || file_name[0] == '\\0') {{
-        fprintf(stderr, "Error: NPZ file path is required for program_scan_reg\\n");
-        fprintf(stderr, "Usage: program_scan_reg <npz_file_path>\\n");
+        fprintf(stderr, "Error: NPZ directory path is required for program_scan_reg\\n");
+        fprintf(stderr, "Usage: program_scan_reg <npz_directory_path>\\n");
         return -1;
     }}
 
@@ -681,27 +681,7 @@ int32_t program_scan_reg(const char* file_name) {{
     }}
     const char* actual_file_name = file_name_str.c_str();
 
-    fprintf(stderr, "Starting program_scan_reg from file: %s\\n", actual_file_name);
-
-    // Load NPZ file using cnpy
-    fprintf(stderr, "Loading scan data from NPZ file...\\n");
-    cnpy::npz_t npz_data;
-    try {{
-        npz_data = cnpy::npz_load(actual_file_name);
-    }} catch (const std::exception& e) {{
-        fprintf(stderr, "Error loading NPZ file: %s\\n", e.what());
-        return -1;
-    }}
-
-    // Get arr_0 from NPZ file (64 bytes per IMCE, 16 IMCEs = 1024 bytes total)
-    if (npz_data.find("arr_0") == npz_data.end()) {{
-        fprintf(stderr, "Error: 'arr_0' not found in NPZ file\\n");
-        return -1;
-    }}
-
-    cnpy::NpyArray arr = npz_data["arr_0"];
-    uint8_t* scan_bytes = arr.data<uint8_t>();
-    size_t total_bytes = arr.num_bytes();
+    fprintf(stderr, "Starting program_scan_reg from directory: %s\\n", actual_file_name);
 
     // Allocate memory for scan data (32 packets × 32 bytes = 1024 bytes)
     const int num_packets = {self.scan_packet_count};
@@ -712,24 +692,48 @@ int32_t program_scan_reg(const char* file_name) {{
         return -1;
     }}
 
-    // Convert NPZ bytes to scan packets
-    // Each IMCE has 64 bytes → 2 packets (32 bytes each)
+    // Convert NPZ files to scan packets
+    // Each IMCE has its own NPZ file with 64 bytes → 2 packets (32 bytes each)
     // 16 IMCEs × 2 packets = 32 packets total
     const int imce_count = 16;
     const int bytes_per_imce = 64;
-    if (total_bytes != imce_count * bytes_per_imce) {{
-        fprintf(stderr, "Error: Expected %d bytes in NPZ file (16 IMCEs × 64 bytes), got %zu bytes\\n", 
-                imce_count * bytes_per_imce, total_bytes);
-        free(scan_data);
-        return -1;
-    }}
 
     // Convert NPZ bytes to scan packets following the same logic as load_scan_values_from_npz
-    // For each IMCE: 64 bytes → 512 bits → bit-reverse → split into reg0/reg1 → 2 packets
-    fprintf(stderr, "Converting NPZ data with bit reversal...\\n");
+    // For each IMCE: load NPZ file, 64 bytes → 512 bits → bit-reverse → split into reg0/reg1 → 2 packets
+    fprintf(stderr, "Loading and converting NPZ data with bit reversal...\\n");
     
     for (int imce_idx = 0; imce_idx < imce_count; imce_idx++) {{
-        uint8_t* imce_bytes = &scan_bytes[imce_idx * bytes_per_imce];
+        // Calculate IMCE coordinates: h=0-3, w=1-4
+        int h = imce_idx / 4;
+        int w = imce_idx % 4;
+        std::string imce_filename = std::string(actual_file_name) + "/imce_" + std::to_string(h) + "_" + std::to_string(w) + ".npz";
+        
+        // Load IMCE NPZ file
+        cnpy::npz_t imce_npz;
+        try {{
+            imce_npz = cnpy::npz_load(imce_filename);
+        }} catch (const std::exception& e) {{
+            fprintf(stderr, "Error loading NPZ file %s: %s\\n", imce_filename.c_str(), e.what());
+            free(scan_data);
+            return -1;
+        }}
+
+        if (imce_npz.find("arr_0") == imce_npz.end()) {{
+            fprintf(stderr, "Error: 'arr_0' not found in NPZ file %s\\n", imce_filename.c_str());
+            free(scan_data);
+            return -1;
+        }}
+
+        cnpy::NpyArray imce_arr = imce_npz["arr_0"];
+        uint8_t* imce_bytes = imce_arr.data<uint8_t>();
+        size_t imce_bytes_size = imce_arr.num_bytes();
+
+        if (imce_bytes_size != bytes_per_imce) {{
+            fprintf(stderr, "Error: Expected %d bytes in NPZ file %s, got %zu bytes\\n", 
+                    bytes_per_imce, imce_filename.c_str(), imce_bytes_size);
+            free(scan_data);
+            return -1;
+        }}
         
         // Step 1: Convert 64 bytes to 512-bit string
         char bit_str[513];  // 512 bits + null terminator
@@ -820,7 +824,7 @@ int32_t program_scan_reg(const char* file_name) {{
         }}
     }}
     
-    fprintf(stderr, "Loaded and converted %d scan packets from NPZ file\\n", num_packets);
+    fprintf(stderr, "Loaded and converted %d scan packets from NPZ files\\n", num_packets);
 
     // Open devices
     int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
