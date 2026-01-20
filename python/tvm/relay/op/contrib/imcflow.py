@@ -1373,33 +1373,53 @@ class ImcflowAnnotationPass:
                 return i+1
             return 0
         class Annotator(tvm.relay.ExprMutator):
+            def __init__(self):
+                super().__init__()
+                # Cache to reuse compiler_begin nodes for (visited_expr, region) pairs
+                # This ensures branches from the same input stay connected
+                self.compiler_begin_cache = {}
+
+            def _get_or_create_compiler_begin(self, visited_arg, region_tag):
+                """Get cached compiler_begin or create a new one."""
+                # Use (id(visited_arg), region_tag) as cache key
+                cache_key = (id(visited_arg), region_tag)
+                if cache_key not in self.compiler_begin_cache:
+                    self.compiler_begin_cache[cache_key] = compiler_begin(visited_arg, region_tag)
+                return self.compiler_begin_cache[cache_key]
+
             def visit_call(self, call):
                 """Add compiler_begin and compiler_end annotations to the Call expr"""
                 if RegionNum := getRegion(call):
+                  region_tag = f"{prefix}imcflow_region{RegionNum}"
                   # visit the arguments
                   new_args = []
                   for arg in call.args:
-                    ann = compiler_begin(super().visit(arg), f"{prefix}imcflow_region{RegionNum}")
+                    visited_arg = super().visit(arg)
+                    ann = self._get_or_create_compiler_begin(visited_arg, region_tag)
                     new_args.append(ann)
-                  new_call = compiler_end(relay.Call(call.op, new_args, call.attrs, call.type_args), f"{prefix}imcflow_region{RegionNum}")
+                  new_call = compiler_end(relay.Call(call.op, new_args, call.attrs, call.type_args), region_tag)
                   return new_call
                 else:
                   return super().visit_call(call)
 
             def visit_tuple_getitem(self, op):
               if RegionNum := getRegion(op):
-                NewTupleValue = compiler_begin(super().visit(op.tuple_value), f"{prefix}imcflow_region{RegionNum}")
-                NewNode = compiler_end(relay.TupleGetItem(NewTupleValue, op.index), f"{prefix}imcflow_region{RegionNum}")
+                region_tag = f"{prefix}imcflow_region{RegionNum}"
+                visited_tuple = super().visit(op.tuple_value)
+                NewTupleValue = self._get_or_create_compiler_begin(visited_tuple, region_tag)
+                NewNode = compiler_end(relay.TupleGetItem(NewTupleValue, op.index), region_tag)
                 return NewNode
               else:
                 return super().visit_tuple_getitem(op)
 
             def visit_tuple(self, op):
               if RegionNum := getRegion(op):
+                region_tag = f"{prefix}imcflow_region{RegionNum}"
                 NewFields = []
                 for field in op.fields:
-                  NewFields.append(compiler_begin(super().visit(field), f"{prefix}imcflow_region{RegionNum}"))
-                return compiler_end(relay.Tuple(NewFields), f"{prefix}imcflow_region{RegionNum}")
+                  visited_field = super().visit(field)
+                  NewFields.append(self._get_or_create_compiler_begin(visited_field, region_tag))
+                return compiler_end(relay.Tuple(NewFields), region_tag)
               else:
                 return super().visit_tuple(op)
 

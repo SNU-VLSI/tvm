@@ -1,7 +1,6 @@
 import pytest
 import tvm
 import numpy as np
-from tvm.micro import export_model_library_format
 import tvm.testing
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 from tvm.contrib import graph_executor
@@ -10,7 +9,6 @@ from tvm.contrib.debugger import debug_executor
 from tvm.relay import transform
 from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
 from tvm.relay.backend.contrib.imcflow import cpu_run as cpu_run
-from tvm.relay.backend.contrib.imcflow import codegen as imcflow_codegen
 from tvm.relay.op.contrib import imcflow
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.relay.backend import Executor, Runtime
@@ -24,7 +22,9 @@ import pickle
 import sys
 from contextlib import contextmanager
 
-from tvm.relay.op.contrib.imcflow import HashToCustomID
+# Import IMCFlow compiler driver
+from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow
+
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import resnet8_subset_models
@@ -304,21 +304,35 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
 
 def setup_dir(test_name, suffix=""):
   def clean_dir_recursive(path):
-    """Recursively clean all files but keep all directory inodes intact"""
+    """Recursively clean all files but keep directory structure intact."""
     for item in os.listdir(path):
       item_path = os.path.join(path, item)
       if os.path.isfile(item_path) or os.path.islink(item_path):
         os.remove(item_path)
-      elif os.path.isdir(item_path):
-        # Recursively clean subdirectory but keep the directory itself
+      elif os.path.isdir(item_path) and item != "logs":
         clean_dir_recursive(item_path)
+
+  def clean_runner_logs(logs_path, runner_dirs):
+    """Clean specific runner log directories."""
+    for runner_dir in runner_dirs:
+      runner_path = os.path.join(logs_path, runner_dir)
+      if os.path.exists(runner_path):
+        shutil.rmtree(runner_path)
 
   dir_name = f"{test_name}{suffix}"
   if not os.path.exists(dir_name):
     os.makedirs(dir_name)
   else:
-    # clean up all files recursively but keep all directory structures intact
     clean_dir_recursive(dir_name)
+    # Clean runner-specific logs based on IMCFLOW_RUNNER
+    runner_env = os.getenv('IMCFLOW_RUNNER', 'py').lower()
+    logs_path = os.path.join(dir_name, "logs")
+    if runner_env == 'rtl':
+      clean_runner_logs(logs_path, ['rtl_runner'])
+    elif runner_env == 'both':
+      clean_runner_logs(logs_path, ['py_runner', 'rtl_runner'])
+    else:  # 'py' or default
+      clean_runner_logs(logs_path, ['py_runner'])
 
   os.makedirs(os.path.join(dir_name, "logs"), exist_ok=True)
   os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
@@ -418,190 +432,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
   return output
 
 
-def generate_graph_executor(mod, param_dict, dir_name):
-  executor_cfg = Executor("graph")
-  runtime_cfg = Runtime("crt", {"system-lib": True})
-  print("\n" + "="*40)
-  print("GENERATING GRAPH EXECUTOR")
-  print("="*40)
-
-  with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-    module = tvm.relay.build(
-      mod,
-      target="c",
-      params=param_dict,
-      executor=executor_cfg,
-      runtime=runtime_cfg,
-    )
-
-  script_dir = os.path.dirname(os.path.realpath(__file__))
-  tar_name = f"lib_graph_system-lib.tar"
-  tar_path = os.path.join(script_dir, dir_name, tar_name)
-  export_model_library_format(module, tar_path)
-  return module, tar_path
-
-def transform_model_for_imcflow(mod, param_dict, dir):
-  DevConfig().clear()
-
-  # origin
-  printModel(dir, mod, param_dict, "0_origin")
-
-  # bind param
-  mod["main"] = bind_params_by_name(mod["main"], param_dict)
-  mod = transform.InferType()(mod)
-  printModel(dir, mod, param_dict, "1_after_bind")
-
-  # first level imcflow graph partition
-  mod = imcflow_transform.partitionImcflowSubGraph(mod)
-  printModel(dir, mod, param_dict, "2_after_L1_partition")
-
-  # split imcflow function conv to atomic ops
-  mod, param_dict = imcflow_transform.split_conv_to_atomic(mod, param_dict)
-  printModel(dir, mod, param_dict, "2_after_atom_split")
-
-  # merge composite OPs
-  mod = imcflow_transform.merge_composite_ops(mod)
-  printModel(dir, mod, param_dict, "3_after_merge")
-
-  # make split and concat super node
-  mod = imcflow_transform.makeSplitConcatDepsRegions(mod)
-  printModel(dir, mod, param_dict, "4_after_split_concat_partition")
-
-  mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(mod)
-  printModel(dir, mod, param_dict, "4.5_after_concat_distributor")
-
-  mod = imcflow_transform.partitionRound(mod)
-  printModel(dir, mod, param_dict, "5_after_annot")
-
-  mod = imcflow.flattenImcflowTopFuncs(mod)
-  printModel(dir, mod, param_dict, "6_after_flatten")
-
-  mod = imcflow.prune_imcflow_subgraphs(mod)
-  printModel(dir, mod, param_dict, "7_after_prune_model")
-
-  mod = imcflow_transform.annotateCustomId(mod)
-  printModel(dir, mod, param_dict, "7.5_after_annotate_custom_id")
-  imcflow_transform.constructUsefulMappings(mod)
-  print("-------------------- CustomID TO Name --------------------")
-  with open(f"{dir}/custom_id_to_name.txt", "w") as f:
-    pprint.pprint(imcflow.CustomIDToName(), stream=f)
-  print("-------------------- Node TO CustomID --------------------")
-  with open(f"{dir}/node_to_custom_id.txt", "w") as f:
-    pprint.pprint(HashToCustomID(), stream=f)
-  printModel(dir, mod, param_dict, "7.6_with_custom_id")
-
-  # if DEBUG_SUBSET:
-  #   mod, _ = imcflow_transform.extract_outputs_by_custom_ids(mod, [63])
-  #   printModel(dir, mod, param_dict, "7.6.2_debug_subset")
-
-  mod, ttype_map = imcflow_transform.legalizeImcflowLayout(mod)
-  printModel(dir, mod, param_dict, "7.7_after_mark_in_out")
-  print("-------------------- Real Tensor Type Map --------------------")
-  pprint.pprint(ttype_map)
-
-  # -----------------------------------------------------------------
-  # annotate custom ID for debugging
-  # -----------------------------------------------------------------
-  mod = imcflow_transform.annotateCustomId(mod)
-  printModel(dir, mod, param_dict, "8.5_after_annotate_custom_id")
-
-  imcflow_transform.constructUsefulMappings(mod)
-  imcflow_transform.constructCustomIDInFunc(mod)
-  imcflow_transform.constructImcflowFuncMap(mod)
-  print("-------------------- CustomID TO Name --------------------")
-  with open(f"{dir}/custom_id_to_name.txt", "w") as f:
-    pprint.pprint(imcflow.CustomIDToName(), stream=f)
-  print("-------------------- Node TO CustomID --------------------")
-  with open(f"{dir}/node_to_custom_id.txt", "w") as f:
-    pprint.pprint(HashToCustomID(), stream=f)
-  print("-------------------- func map --------------------")
-  with open(f"{dir}/func_map.txt", "w") as f:
-    pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
-  printModel(dir, mod, param_dict, "9_with_custom_id")
-
-  imcflow_transform.NodeMapper().run(mod)
-  print("------------------------------- HW MAP ----------------------------------")
-  with open(f"{dir}/hw_node_map.txt", "w") as f:
-    pprint.pprint(DevConfig().HWNodeMap, stream=f)
-
-  imcflow_transform.constructTensorEdgeList(mod)
-  print("------------------------------- Tensor Edge List --------------------------------------")
-  with open(f"{dir}/tensor_edge_list.txt", "w") as f:
-    for key, paths in DevConfig().TensorEdgeListDict.items():
-      print(key, file=f)
-      for path in paths:
-        print(path, file=f)
-
-  imcflow_transform.constructActiveIMCEDict(mod)
-  print("------------------------------  Active IMCE list ---------------------- ")
-  with open(f"{dir}/active_imce_list.txt", "w") as f:
-    pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
-
-  imcflow_transform.constructTensorIDToTensorEdgeDict()
-  print("Tensor ID to Tensor Edge")
-  with open(f"{dir}/tensor_id_to_edge.txt", "w") as f:
-    for key, paths in DevConfig().TensorIDtoEdge.items():
-      print(f"{key} : {paths}", file=f)
-
-  imcflow_transform.constructNoCPathDict(mod)
-  print("NoC Paths")
-  with open(f"{dir}/noc_paths.txt", "w") as f:
-    for key, paths in DevConfig().NoCPaths.items():
-      print(key, file=f)
-      for k, v in paths.items():
-        print(k, v, file=f)
-
-  imcflow_transform.MemoryAllocator().run(mod, ttype_map)
-  print("------------------------------- Memory Layout ----------------------------------")
-  with open(f"{dir}/mem_layout.txt", "w") as f:
-    pprint.pprint(DevConfig().MemLayout, stream=f)
-
-  imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths).run(mod)
-  with open(f"{dir}/policy_table.txt", "w") as f:
-    f.write(DevConfig().format_policy_table())
-
-  imcflow_transform.generateNoCVisualizations(mod, dir + "/noc_visualizations")
-
-  fifo_monitor = imcflow_transform.FIFOConflictMonitor()
-  fifo_monitor.run(mod)
-  fifo_monitor.print_conflict_summary()
-  fifo_monitor.export_conflict_table(f"{dir}/fifo_conflict_table.txt")
-
-  deadlock_detector = imcflow_transform.NoCDeadlockDetector()
-  deadlock_detector.run(mod)
-  deadlock_detector.print_deadlock_summary()
-  deadlock_detector.export_deadlock_table(f"{dir}/noc_deadlock_table.txt")
-
-  # get the config
-  config = DevConfig()
-
-  def _dump(title, dict):
-    with open(f"{dir}/final_imcflow_config_{title}.txt", "w") as f:
-      print(f"----------------------- {title} ------------------------", file=f)
-      for key, value in dict.items():
-        pprint.pprint(f"{key} : {value}", stream=f)
-
-  _dump("HWNodeMap", config.HWNodeMap)
-  _dump("TensorEdgetoInfo", config.TensorEdgetoInfo)
-  _dump("TensorIDtoEdge", config.TensorIDtoEdge)
-  _dump("PolicyTableDict", config.PolicyTableDict)
-  _dump("memory_layout", config.MemLayout)
-
-  return mod, param_dict
-
-def run_imcflow_codegen(mod, dir):
-  """Run IMCFLOW codegen to generate hardware deployment code"""
-  config = DevConfig()
-
-  CodegenSuite = imcflow_codegen.CodegenSuite(dir, mod, host_isa=DevConfig().HOST_ISA)
-  CodegenSuite(mod)
-  print(f"mem_layout: {config.MemLayout}")
-
-  imcflow_transform.constructDataBlockDict(mod)
-  print(f"data_blocks: {config.DataBlocks}")
-
-
-def run_simulation(eval_dir):
+def run_simulation(eval_dir, HOST_ISA="x86"):
   """Run simulation by building and executing the graph with proper output streaming
 
   Args:
@@ -629,7 +460,7 @@ def run_simulation(eval_dir):
   os.makedirs(host_build_dir, exist_ok=True)
 
   # Build in the test-specific directory (use current directory "." since eval_dir is now relative)
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", "x86"]
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", HOST_ISA]
   build_log_path = os.path.join(log_dir, "build.log")
 
   with open(build_log_path, "w") as log_file:
@@ -651,6 +482,11 @@ def run_simulation(eval_dir):
       raise subprocess.CalledProcessError(process.returncode, build_command)
 
   print(f"✅ Build completed, log saved to: {build_log_path}")
+
+  # Run gem5 simulation
+  if (HOST_ISA == "arm"):
+    print("\n-- Skipping gem5 simulation for ARM architecture --")
+    return None
 
   # Get the appropriate runner(s) based on IMCFLOW_RUNNER env var
   runners = get_runner()  # Returns single runner or list of runners
@@ -692,16 +528,11 @@ def run_simulation(eval_dir):
     except Exception as e:
       simul_err = True
       print(f"❌ Simulation failed for {runner.name}: {e}")
-    finally:
-      # Always collect logs regardless of success/failure/interruption
-      try:
-        print(f"📦 Collecting logs to {runner_log_dir}...")
-        runner.collect_logs(log_dest_dir=runner_log_dir, test_name=eval_dir)
-        print(f"✅ Logs collected successfully")
-      except Exception as e:
-        print(f"⚠️  Failed to collect logs: {e}")
 
-    # Re-raise KeyboardInterrupt after collecting logs
+    # Logs are automatically written to runner_log_dir during run()
+    # No collection needed
+
+    # Re-raise KeyboardInterrupt
     if interrupted:
       raise KeyboardInterrupt("Simulation interrupted by user")
 
@@ -856,18 +687,11 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
   print(f"{'='*60}")
 
   if not skip_setup:
-    # Transform the model for IMCFLOW
-    print("\n--- Transforming Model ---")
-    mod, param_dict = transform_model_for_imcflow(mod, param_dict, eval_dir)
+    # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
+    mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir)
 
     # Save transformed model for future reuse
     save_transformed_model(mod, param_dict, eval_dir)
-
-    # Run IMCFLOW codegen to generate hardware deployment code
-    run_imcflow_codegen(mod, eval_dir)
-
-    # Generate graph executor for hardware deployment
-    generate_graph_executor(mod, param_dict, eval_dir)
   else:
     # Skip setup: load previously transformed model
     print("\n⏭️  Skipping model transformation, codegen, and graph generation (skip_setup=True)")
@@ -880,12 +704,17 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     if cpu_output is not None:
       print("✅ CPU validation completed successfully")
 
+  config = DevConfig()
+
   # Run simulation (build + gem5 execution)
   try:
-    imcflow_output = run_simulation(eval_dir)
+    imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
   except KeyboardInterrupt:
     print("\n⚠️  Simulation interrupted - skipping output comparison")
     raise  # Re-raise to let pytest handle the interruption
+
+  if (config.HOST_ISA == "arm"):
+    return None
 
   # Compare the reference CPU output with IMCFLOW simulated output
   if input_data_dict is not None:

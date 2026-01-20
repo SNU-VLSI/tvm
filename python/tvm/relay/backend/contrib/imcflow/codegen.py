@@ -73,6 +73,7 @@ class CodegenSuite:
     all_edges.update(inode_builder.recv_map.keys())
 
     inconsistencies = []
+    consistencies = []
     for edge in sorted(list(all_edges), key=lambda x: str(x)):
       imce_send  = imce_builder.send_map.get(edge, 0)
       imce_recv  = imce_builder.recv_map.get(edge, 0)
@@ -112,6 +113,17 @@ class CodegenSuite:
           'total_send': total_send,
           'total_recv': total_recv
         })
+      else:
+        consistencies.append({
+          'edge': edge,
+          'imce_send': imce_send,
+          'imce_recv': imce_recv,
+          'inode_send': inode_send,
+          'inode_recv': inode_recv,
+          'total_send': total_send,
+          'total_recv': total_recv
+        })
+
 
     if inconsistencies:
       output_lines.append(f"\nFound {len(inconsistencies)} inconsistencies:")
@@ -126,6 +138,11 @@ class CodegenSuite:
     else:
       output_lines.append(f"✓ All edges have consistent send/recv counts")
       output_lines.append("="*40)
+      for item in consistencies:
+        output_lines.append(f"\n  Edge: {item['edge']}")
+        output_lines.append(f"    IMCE  - Send: {item['imce_send']}, Recv: {item['imce_recv']}")
+        output_lines.append(f"    Inode - Send: {item['inode_send']}, Recv: {item['inode_recv']}")
+        output_lines.append(f"    Total - Send: {item['total_send']}, Recv: {item['total_recv']}")
 
     # Print to console
     for line in output_lines:
@@ -661,6 +678,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for node in NodeID.inodes():
       block = WriteIMCUBlock(node, "imcu write")
       self.codeblocks.append(node, block, CodePhase.INIT)
+
+    # # sync before imce compute
+    for inode in NodeID.inodes():
+      block = SyncAllINodes(inode, "sync before compute enable")
+      self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # imce compute
     active_imces = DevConfig().ActiveIMCEPerFunc[func_name]

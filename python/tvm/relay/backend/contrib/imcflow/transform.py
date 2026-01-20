@@ -84,6 +84,7 @@ import re
 import itertools
 from dataclasses import dataclass
 from enum import Enum
+from typing import Dict, List, Any, Optional
 import json
 import pprint
 import os
@@ -1135,6 +1136,100 @@ def merge_composite_ops(mod):
     transformed = transform.MergeComposite(imcflow.pattern_table())(mod)
     return transformed
 
+
+def merge_composite_for_partition(mod):
+    """
+    Merge composite ops before partitionRound for simpler converge point detection.
+
+    This function merges ops into composites using the imcflow pattern table,
+    making the graph simpler for region partitioning.
+
+    After partitionRound, use unmerge_composite to inline the composites back.
+    """
+    for global_var, func in mod.functions.items():
+        if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
+            attr_record = func.attrs
+            func_no_attr = relay.Function(func.params, func.body)
+            target_mod = tvm.IRModule.from_expr(func_no_attr)
+            transformed = transform.MergeComposite(imcflow.pattern_table())(target_mod)
+            _, transformed_func = transformed.functions.items()[0]
+            transformed_func = relay.Function(transformed_func.params, transformed_func.body,
+                                              ret_type=transformed_func.ret_type, attrs=attr_record)
+            mod[global_var] = transformed_func
+    mod = relay.transform.InferType()(mod)
+    return mod
+
+
+def unmerge_composite(mod):
+    """
+    Unmerge (inline) composites after partitionRound.
+
+    This function inlines all composite functions back to their original ops,
+    so that subsequent transforms (split_conv_to_atomic, etc.) can process them.
+
+    Uses a custom ExprMutator to inline composite function calls by substituting
+    the function body with actual arguments.
+    """
+
+    class CompositeInliner(relay.ExprMutator):
+        """Inline composite function calls by substituting function body with args."""
+
+        def visit_call(self, call):
+            # First visit args recursively
+            new_args = [self.visit(arg) for arg in call.args]
+
+            # Check if this is a composite function call
+            if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs:
+                composite_func = call.op
+                composite_name = composite_func.attrs["Composite"]
+                debug_print(f"[CompositeInliner] Inlining composite: {composite_name}")
+
+                # Create substitution map: param -> arg
+                subst_map = {}
+                for param, arg in zip(composite_func.params, new_args):
+                    subst_map[param] = arg
+
+                # Substitute parameters in the function body
+                class ParamSubstitutor(relay.ExprMutator):
+                    def __init__(self, subst_map):
+                        super().__init__()
+                        self.subst_map = subst_map
+
+                    def visit_var(self, var):
+                        if var in self.subst_map:
+                            return self.subst_map[var]
+                        return var
+
+                substitutor = ParamSubstitutor(subst_map)
+                inlined_body = substitutor.visit(composite_func.body)
+
+                # Recursively inline any nested composites
+                return self.visit(inlined_body)
+
+            # Not a composite, just update args if changed
+            if new_args != list(call.args):
+                return relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+            return call
+
+    for global_var, func in mod.functions.items():
+        # Process round functions (created by partitionRound)
+        if isinstance(func, relay.Function) and "Compiler" in func.attrs:
+            compiler = func.attrs["Compiler"]
+            # Match round functions like "tvmgen_default_imcflow_main_47_round_imcflow_region1"
+            if re.match(r".*_round_imcflow_region\d+", compiler) or re.match(r"imcflow.*", compiler):
+                attr_record = func.attrs
+
+                # Inline composites
+                inliner = CompositeInliner()
+                new_body = inliner.visit(func.body)
+
+                # Create new function with inlined body
+                new_func = relay.Function(func.params, new_body, ret_type=func.ret_type, attrs=attr_record)
+                mod[global_var] = new_func
+
+    mod = relay.transform.InferType()(mod)
+    return mod
+
 @relay.transform.function_pass(opt_level=0)
 class DenseToConv:
     def __init__(self):
@@ -1465,9 +1560,858 @@ def getOutputNodes(expr, recursive=False):
   _Visitor().visit(expr)
   return OutNodes
 
+
+# ==========================================
+# Converge Point Detection & Branch Analysis
+# ==========================================
+
+class LatencyThroughputCalculator:
+    """
+    Calculate latency and throughput for operations.
+
+    Latency: Total cycles from input arrival to output ready
+    Throughput: Operations per cycle (inverse of initiation interval)
+
+    These values depend on operation type and attributes (kernel size, channels, etc.)
+    """
+
+    def __init__(self, module=None):
+        """
+        Args:
+            module: The TVM IRModule containing the functions being analyzed.
+                    Used to resolve types and access function definitions.
+        """
+        self.module = module
+
+    def get_op_latency(self, op_call) -> int:
+        """
+        Get latency for a single operation.
+
+        Args:
+            op_call: relay.Call node (can be inside composite or standalone)
+
+        Returns:
+            Latency in cycles
+
+        Test values for development:
+        - Conv ops: high latency (10-20 cycles) - represents MAC operations
+        - Element-wise ops: low latency (1 cycle)
+        - Quantize ops: medium latency (2-3 cycles)
+
+        TODO: Replace with actual hardware-based formulas
+        """
+        if not isinstance(op_call, relay.Call):
+            return 0
+
+        if isinstance(op_call.op, tvm.ir.Op):
+            op_name = op_call.op.name
+            attrs = op_call.attrs
+
+            if op_name in ["nn.imcflow_qdwconv", "nn.imcflow_qconv", "nn.conv2d"]:
+                # Conv2D: high latency due to linebuffer fill delay
+                input_tensor_type = transform_utils.get_type(self.module, op_call.args[0])
+                input_shape = input_tensor_type.shape
+                N, IC, IH, IW = list(input_shape)
+                kernel_h = int(attrs.kernel_size[0]) if attrs.kernel_size else 3
+                kernel_w = int(attrs.kernel_size[1]) if attrs.kernel_size else 3
+                padding, strides = attrs.padding, attrs.strides
+
+                latency = IW * max(0, (kernel_h - padding[0])) + max(0, (kernel_w - padding[1]))
+                return latency
+
+            elif op_name in ["nn.relu", "nn.bias_add"]:
+                # Element-wise ops: very fast
+                return 1
+
+            elif op_name == "add":
+                # Add operation: fast element-wise
+                return 1
+
+            elif op_name == "qnn.imcflow_min_max_quantize":
+                # Quantization: medium latency (comparison + shift)
+                return 1
+
+            elif op_name == "qnn.imcflow_nu_quantize":
+                # Non-uniform quantization: slightly higher (LUT lookup)
+                return 1
+
+            elif op_name == "imcflow.fused_batch_norm":
+                # Fused batch norm: multiply + add
+                return 1
+
+            elif op_name in ["split", "concatenate"]:
+                # Data movement ops: depends on data size, use small value
+                return 1
+
+            elif op_name in ["multiply", "divide"]:
+                # Arithmetic ops
+                return 1
+
+            else:
+                debug_print(f"[LatencyThroughputCalculator] Unknown op: {op_name}")
+                return 1
+
+        return 0
+
+    def get_op_throughput(self, op_call) -> int:
+        """
+        Get throughput for a single operation.
+
+        Args:
+            op_call: relay.Call node
+
+        Returns:
+            Throughput (higher is better, represents data elements per cycle)
+            Lower value = bottleneck
+
+        Test values for development:
+        - Conv ops: low throughput (limited by MAC units)
+        - Element-wise ops: high throughput (fully pipelined)
+        - Quantize ops: medium throughput
+
+        TODO: Replace with actual hardware-based formulas
+        """
+        if not isinstance(op_call, relay.Call):
+            return 100  # Non-ops don't limit throughput
+
+        if isinstance(op_call.op, tvm.ir.Op):
+            op_name = op_call.op.name
+            attrs = op_call.attrs
+
+            if op_name in ["nn.imcflow_qdwconv", "nn.imcflow_qconv", "nn.conv2d"]:
+                # Conv2D: throughput limited by MAC array
+                # Lower output channels = lower throughput
+                strides = attrs.strides
+                stride_val = int(strides[1]) if strides else 1
+                return 1.0 / stride_val
+
+            elif op_name in ["nn.relu", "nn.bias_add", "add", "multiply", "divide"]:
+                # Element-wise: very high throughput (pipelined)
+                return 1
+
+            elif op_name == "qnn.imcflow_min_max_quantize":
+                # Quantization: medium-high throughput
+                return 1
+
+            elif op_name == "qnn.imcflow_nu_quantize":
+                # Non-uniform quantization: medium (LUT access)
+                return 1
+
+            elif op_name == "imcflow.fused_batch_norm":
+                # Fused batch norm: high throughput
+                return 1
+
+            elif op_name in ["split", "concatenate"]:
+                # Data movement: high throughput
+                return 1
+
+            else:
+                return 1
+
+        return 1
+
+    def calculate_branch_latency(self, ops: list) -> int:
+        """
+        Calculate total latency for a branch (sum of all op latencies).
+
+        Args:
+            ops: List of relay.Call nodes in the branch
+
+        Returns:
+            Total latency in cycles
+        """
+        return sum(self.get_op_latency(op) for op in ops)
+
+    def calculate_branch_throughput(self, ops: list) -> int:
+        """
+        Calculate effective throughput for a branch (bottleneck).
+
+        Args:
+            ops: List of relay.Call nodes in the branch
+
+        Returns:
+            Minimum throughput (bottleneck determines overall throughput)
+        """
+        if not ops:
+            return 1
+        throughputs = [self.get_op_throughput(op) for op in ops]
+        return min(throughputs) if throughputs else 1
+
+
+class BranchAnalyzer:
+    """
+    Analyze diverge-converge patterns in the computation graph.
+
+    Detects converge points where multiple branches merge, extracts branch
+    operations (including inside composites), and provides branch metrics.
+    """
+
+    def __init__(self, edges, rev_edges):
+        """
+        Args:
+            edges: dict mapping node -> list of successor nodes
+            rev_edges: dict mapping node -> list of predecessor nodes
+        """
+        self.edges = edges
+        self.rev_edges = rev_edges
+
+    def is_converge_point(self, node) -> bool:
+        """
+        Check if a node is a converge point.
+
+        A converge point is where 2+ branches from a common diverge point merge.
+        This includes cases where one predecessor IS the diverge point (skip connection).
+
+        Args:
+            node: The node to check
+
+        Returns:
+            True if this is a converge point
+        """
+        debug_print(f"\n{'='*60}")
+        debug_print(f"[BranchAnalyzer.is_converge_point] Checking node:")
+        debug_print(f"  ID: {getNodeDebugID(node)}")
+        debug_print(f"  Expr:\n{node}")
+        debug_print(f"{'='*60}")
+
+        # Get predecessors
+        preds = self.rev_edges.get(node, [])
+        debug_print(f"  Number of predecessors: {len(preds)}")
+        for i, p in enumerate(preds):
+            debug_print(f"    Pred {i}: {getNodeDebugID(p)}")
+
+        if len(preds) < 2:
+            debug_print(f"  Result: False (< 2 preds)")
+            return False
+
+        # Find ancestors for each predecessor (including the predecessor itself)
+        pred_ancestor_sets = []
+        for i, pred in enumerate(preds):
+            ancestors = self._get_all_ancestors(pred)
+            ancestors.add(pred)  # Include the predecessor itself
+            pred_ancestor_sets.append(ancestors)
+            debug_print(f"  Pred {i} ancestors count: {len(ancestors)}")
+            for anc in list(ancestors)[:5]:  # Show first 5
+                debug_print(f"    - {getNodeDebugID(anc)}")
+            if len(ancestors) > 5:
+                debug_print(f"    ... and {len(ancestors) - 5} more")
+
+        # Check if there's a common ancestor (diverge point)
+        # Also check if one predecessor is ancestor of another (skip connection case)
+        if len(pred_ancestor_sets) >= 2:
+            common = pred_ancestor_sets[0]
+            for ancestors in pred_ancestor_sets[1:]:
+                common = common & ancestors
+
+            debug_print(f"  Common ancestors count: {len(common)}")
+            for anc in list(common)[:5]:
+                debug_print(f"    - {getNodeDebugID(anc)}")
+
+            # If there's a common ancestor, it's a converge point
+            if common:
+                debug_print(f"  Result: True (has common ancestor)")
+                return True
+
+        debug_print(f"  Result: False (no common ancestor)")
+        return False
+
+    def _get_all_ancestors(self, node, max_depth=50) -> set:
+        """Get all ancestor nodes up to max_depth."""
+        ancestors = set()
+        queue = [(node, 0)]
+        visited = {node}
+
+        while queue:
+            curr, depth = queue.pop(0)
+            if depth >= max_depth:
+                continue
+
+            for pred in self.rev_edges.get(curr, []):
+                if pred not in visited:
+                    visited.add(pred)
+                    ancestors.add(pred)
+                    queue.append((pred, depth + 1))
+
+        return ancestors
+
+    def find_diverge_point(self, converge_node):
+        """
+        Find the diverge point (common ancestor) for a converge node.
+
+        Args:
+            converge_node: The converge point node
+
+        Returns:
+            The diverge point node, or None if not found
+        """
+        debug_print(f"\n{'='*60}")
+        debug_print(f"[BranchAnalyzer.find_diverge_point] Finding diverge for:")
+        debug_print(f"  Converge node: {getNodeDebugID(converge_node)}")
+        debug_print(f"{'='*60}")
+
+        preds = self.rev_edges.get(converge_node, [])
+        debug_print(f"  Predecessors: {len(preds)}")
+        for i, p in enumerate(preds):
+            debug_print(f"    Pred {i}: {getNodeDebugID(p)}")
+
+        if len(preds) < 2:
+            debug_print(f"  Result: None (< 2 preds)")
+            return None
+
+        # Get ancestors for each predecessor with path tracking
+        # Include the predecessor itself in case it IS the diverge point (skip connection)
+        pred_ancestors = []
+        for i, pred in enumerate(preds):
+            ancestors = self._get_all_ancestors(pred)
+            ancestors.add(pred)  # Include pred itself for skip connection detection
+            pred_ancestors.append(ancestors)
+            debug_print(f"  Pred {i} ({getNodeDebugID(pred)}) ancestors: {len(ancestors)}")
+
+        # Find common ancestors
+        if len(pred_ancestors) < 2:
+            debug_print(f"  Result: None (< 2 ancestor sets)")
+            return None
+
+        common = pred_ancestors[0]
+        for ancestors in pred_ancestors[1:]:
+            common = common & ancestors
+
+        debug_print(f"  Common ancestors: {len(common)}")
+        if not common:
+            debug_print(f"  Result: None (no common ancestors)")
+            return None
+
+        # Find the closest common ancestor (diverge point)
+        # by finding the one with shortest max distance from all preds
+        min_dist = float('inf')
+        diverge_point = None
+
+        for ancestor in common:
+            max_dist = 0
+            for pred in preds:
+                dist = self._distance_to_ancestor(pred, ancestor)
+                if dist is not None:
+                    max_dist = max(max_dist, dist)
+
+            debug_print(f"    Candidate: {getNodeDebugID(ancestor)}, max_dist={max_dist}")
+            if max_dist < min_dist:
+                min_dist = max_dist
+                diverge_point = ancestor
+
+        debug_print(f"  Selected diverge point: {getNodeDebugID(diverge_point)}")
+        debug_print(f"  Diverge point expr:\n{diverge_point}")
+        debug_print(f"{'='*60}\n")
+
+        return diverge_point
+
+    def _distance_to_ancestor(self, node, ancestor, max_depth=50) -> int:
+        """Calculate distance from node to ancestor."""
+        if node == ancestor:
+            return 0
+
+        queue = [(node, 0)]
+        visited = {node}
+
+        while queue:
+            curr, dist = queue.pop(0)
+            if dist >= max_depth:
+                continue
+
+            for pred in self.rev_edges.get(curr, []):
+                if pred == ancestor:
+                    return dist + 1
+                if pred not in visited:
+                    visited.add(pred)
+                    queue.append((pred, dist + 1))
+
+        return None
+
+    def extract_branches(self, diverge_node, converge_node) -> list:
+        """
+        Extract operations in each branch from diverge to converge point.
+
+        Args:
+            diverge_node: The common ancestor where branches split
+            converge_node: The node where branches merge
+
+        Returns:
+            List of lists, where each inner list contains ops in one branch
+            Operations are extracted at the operation level (inside composites)
+        """
+        debug_print(f"\n{'='*60}")
+        debug_print(f"[BranchAnalyzer.extract_branches]")
+        debug_print(f"  Diverge: {getNodeDebugID(diverge_node)}")
+        debug_print(f"  Converge: {getNodeDebugID(converge_node)}")
+        debug_print(f"{'='*60}")
+
+        preds = self.rev_edges.get(converge_node, [])
+        branches = []
+
+        for i, pred in enumerate(preds):
+            branch_ops = []
+            self._collect_branch_ops(pred, diverge_node, branch_ops, set())
+            branches.append(branch_ops)
+            debug_print(f"  Branch {i} (from {getNodeDebugID(pred)}): {len(branch_ops)} ops")
+            for j, op in enumerate(branch_ops):
+                if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op):
+                    debug_print(f"    Op {j}: {op.op.name}")
+                else:
+                    debug_print(f"    Op {j}: {getNodeDebugID(op)}")
+
+        debug_print(f"{'='*60}\n")
+        return branches
+
+    def _collect_branch_ops(self, node, stop_node, ops_list, visited):
+        """
+        Recursively collect operations from node back to stop_node.
+        Flattens composite functions to get individual operations.
+        """
+        if node == stop_node or node in visited:
+            return
+
+        visited.add(node)
+
+        if isinstance(node, relay.Call):
+            # Flatten composite to get individual ops
+            flattened = self.flatten_composite_ops(node)
+            ops_list.extend(flattened)
+
+        # Continue to predecessors
+        for pred in self.rev_edges.get(node, []):
+            self._collect_branch_ops(pred, stop_node, ops_list, visited)
+
+    def flatten_composite_ops(self, call) -> list:
+        """
+        Extract individual operations from a composite function call.
+
+        Args:
+            call: relay.Call node (may be composite or regular op)
+
+        Returns:
+            List of relay.Call nodes representing individual operations
+        """
+        if not isinstance(call, relay.Call):
+            return []
+
+        # Check if this is a composite function
+        if isinstance(call.op, relay.Function) and hasattr(call.op.attrs, "Composite"):
+            # Traverse the composite body to extract ops
+            ops = []
+            self._extract_ops_from_expr(call.op.body, ops)
+            return ops
+        elif isinstance(call.op, tvm.ir.Op):
+            # Regular operation
+            return [call]
+
+        return []
+
+    def _extract_ops_from_expr(self, expr, ops_list):
+        """Recursively extract Call nodes from an expression."""
+        if isinstance(expr, relay.Call):
+            if isinstance(expr.op, tvm.ir.Op):
+                ops_list.append(expr)
+            # Continue into args
+            for arg in expr.args:
+                self._extract_ops_from_expr(arg, ops_list)
+        elif isinstance(expr, relay.Tuple):
+            for field in expr.fields:
+                self._extract_ops_from_expr(field, ops_list)
+        elif isinstance(expr, relay.TupleGetItem):
+            self._extract_ops_from_expr(expr.tuple_value, ops_list)
+
+
+class CompositeSplitter:
+    """
+    Split composite functions at converge points.
+
+    Uses pattern.partition() to create new composite functions with
+    different boundaries.
+    """
+
+    @staticmethod
+    def find_converge_op_in_composite(composite_call) -> relay.Call:
+        """
+        Find the converge operation (typically 'add') inside a composite.
+
+        Args:
+            composite_call: The composite function call
+
+        Returns:
+            The converge operation (add node) or None
+        """
+        if not isinstance(composite_call.op, relay.Function):
+            return None
+
+        body = composite_call.op.body
+
+        # Look for 'add' operation that has multiple input branches
+        class ConvergeOpFinder(relay.ExprVisitor):
+            def __init__(self):
+                super().__init__()
+                self.converge_op = None
+                self.param_set = set()
+
+            def visit_call(self, call):
+                if isinstance(call.op, tvm.ir.Op) and call.op.name == "add":
+                    # Check if args come from different sources
+                    # Valid converge point: one arg is Call (from internal op) and
+                    # other arg is either Call or Var (function parameter for external input)
+                    arg0_is_call = isinstance(call.args[0], relay.Call)
+                    arg1_is_call = isinstance(call.args[1], relay.Call)
+                    arg0_is_param = isinstance(call.args[0], relay.Var) and call.args[0] in self.param_set
+                    arg1_is_param = isinstance(call.args[1], relay.Var) and call.args[1] in self.param_set
+
+                    # Converge point if: (Call, Call) or (Call, Param) or (Param, Call)
+                    has_call = arg0_is_call or arg1_is_call
+                    has_param_or_call = (arg0_is_call or arg0_is_param) and (arg1_is_call or arg1_is_param)
+                    if has_call and has_param_or_call:
+                        self.converge_op = call
+                super().visit_call(call)
+
+        finder = ConvergeOpFinder()
+        finder.param_set = set(composite_call.op.params)
+        finder.visit(body)
+
+        return finder.converge_op
+
+    @staticmethod
+    def _collect_ops_before_converge(body, converge_op):
+        """
+        Collect the chain of operations from output back to converge_op (exclusive).
+        Returns list of op names in output-to-input order.
+        """
+        post_ops = []
+        if isinstance(body, relay.Call):
+            curr = body
+            while isinstance(curr, relay.Call) and isinstance(curr.op, tvm.ir.Op):
+                op_name = curr.op.name
+                if curr == converge_op or op_name == converge_op.op.name:
+                    break
+                post_ops.append(op_name)
+                if curr.args:
+                    curr = curr.args[0]
+                else:
+                    break
+        return post_ops
+
+    @staticmethod
+    def _collect_ops_in_branch(start_expr, stop_at_param=True):
+        """
+        Collect ops in a branch from start_expr back to inputs.
+        Returns list of (op_name, has_const_args) tuples.
+        """
+        ops = []
+        visited = set()
+
+        def traverse(expr):
+            if expr in visited:
+                return
+            visited.add(expr)
+
+            if isinstance(expr, relay.Call) and isinstance(expr.op, tvm.ir.Op):
+                op_name = expr.op.name
+                has_const = any(isinstance(arg, relay.Constant) for arg in expr.args)
+                ops.append((op_name, has_const))
+                for arg in expr.args:
+                    traverse(arg)
+            elif isinstance(expr, relay.Var):
+                return  # Stop at function params
+            elif isinstance(expr, relay.Constant):
+                return  # Stop at constants
+
+        traverse(start_expr)
+        return ops
+
+    @staticmethod
+    def split_composite_at_converge(composite_call, converge_op, composite_name_prefix="imcflow"):
+        """
+        Split a composite function at the converge point into two composites.
+
+        Strategy:
+        1. Inline the composite function body
+        2. Post-BFS traverse the graph to build patterns dynamically
+        3. Build pre-converge pattern (input → converge_op inputs)
+        4. Build post-converge pattern (converge_op → output)
+        5. Apply partition with generated patterns
+
+        Args:
+            composite_call: The original composite function call
+            converge_op: The converge operation inside the composite (add node)
+            composite_name_prefix: Prefix for new composite names
+
+        Returns:
+            Dict with split info or None if split not possible:
+            {
+                "result_expr": The transformed expression,
+                "pre_composite_name": Name of pre-converge composite,
+                "post_composite_name": Name of post-converge composite,
+            }
+        """
+        from tvm.relay.dataflow_pattern import wildcard, is_op, is_constant
+
+        if not isinstance(composite_call.op, relay.Function):
+            return None
+
+        func = composite_call.op
+        body = func.body
+        param_set = set(func.params)
+
+        # Step 1: Inline the composite - create var_map and bind
+        var_map = {}
+        for param, arg in zip(func.params, composite_call.args):
+            var_map[param] = arg
+
+        inlined_body = relay.bind(body, var_map)
+
+        # Step 2: Post-BFS traverse to collect nodes and their order
+        # We need to identify: pre-converge nodes, converge node, post-converge nodes
+        class GraphAnalyzer(relay.ExprVisitor):
+            def __init__(self, converge_op, param_set):
+                super().__init__()
+                self.converge_op = converge_op
+                self.param_set = param_set
+                self.node_order = []  # Post-order traversal result
+                self.converge_idx = -1
+                self.visited = set()
+
+            def visit(self, expr):
+                if expr in self.visited:
+                    return
+                self.visited.add(expr)
+                super().visit(expr)
+                # Post-order: add after visiting children
+                if isinstance(expr, relay.Call):
+                    self.node_order.append(expr)
+                    # Check if this is the converge op
+                    if self._is_same_op(expr, self.converge_op):
+                        self.converge_idx = len(self.node_order) - 1
+
+            def _is_same_op(self, expr, target):
+                """Check if expr matches target converge op structure."""
+                if not isinstance(expr, relay.Call) or not isinstance(target, relay.Call):
+                    return False
+                if not isinstance(expr.op, tvm.ir.Op) or not isinstance(target.op, tvm.ir.Op):
+                    return False
+                return expr.op.name == target.op.name == "add"
+
+        analyzer = GraphAnalyzer(converge_op, param_set)
+        analyzer.visit(body)
+
+        debug_print(f"[CompositeSplitter] Graph analysis:")
+        debug_print(f"  Total nodes: {len(analyzer.node_order)}")
+        debug_print(f"  Converge idx: {analyzer.converge_idx}")
+        for i, node in enumerate(analyzer.node_order):
+            op_name = node.op.name if isinstance(node.op, tvm.ir.Op) else "fn"
+            marker = " <-- CONVERGE" if i == analyzer.converge_idx else ""
+            debug_print(f"    [{i}] {op_name}{marker}")
+
+        if analyzer.converge_idx < 0:
+            debug_print(f"[CompositeSplitter] Converge op not found in traversal")
+            return None
+
+        # Step 3: Build patterns dynamically by traversing the graph
+        def build_pattern_for_expr(expr, stop_at=None, pattern_cache=None):
+            """
+            Build dataflow pattern by traversing expression.
+            Args:
+                expr: Expression to build pattern for
+                stop_at: If not None, stop traversal and return wildcard() when reaching this expr
+                pattern_cache: Cache for already built patterns
+            Returns:
+                DFPattern for the expression
+            """
+            if pattern_cache is None:
+                pattern_cache = {}
+
+            if expr in pattern_cache:
+                return pattern_cache[expr]
+
+            # Stop condition
+            if stop_at is not None and expr is stop_at:
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
+
+            if isinstance(expr, relay.Var):
+                # Var -> wildcard
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
+
+            elif isinstance(expr, relay.Constant):
+                # Constant -> is_constant
+                pattern = is_constant()
+                pattern_cache[expr] = pattern
+                return pattern
+
+            elif isinstance(expr, relay.Call):
+                if isinstance(expr.op, tvm.ir.Op):
+                    op_name = expr.op.name
+
+                    # Build arg patterns recursively
+                    arg_patterns = []
+                    for arg in expr.args:
+                        arg_pattern = build_pattern_for_expr(arg, stop_at, pattern_cache)
+                        arg_patterns.append(arg_pattern)
+
+                    pattern = is_op(op_name)(*arg_patterns)
+                    pattern_cache[expr] = pattern
+                    return pattern
+                else:
+                    # Function call - treat as wildcard
+                    pattern = wildcard()
+                    pattern_cache[expr] = pattern
+                    return pattern
+
+            elif isinstance(expr, relay.TupleGetItem):
+                # TupleGetItem - build pattern for tuple and get item
+                tuple_pattern = build_pattern_for_expr(expr.tuple_value, stop_at, pattern_cache)
+                # For TupleGetItem, we need to match the whole thing
+                # This is tricky with dataflow patterns, use wildcard for now
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
+
+            else:
+                pattern = wildcard()
+                pattern_cache[expr] = pattern
+                return pattern
+
+        # Step 4: Build post-converge pattern (from converge_op to output)
+        # Post pattern: everything from converge_op to body output
+        debug_print(f"[CompositeSplitter] Building post-converge pattern...")
+        post_pattern = build_pattern_for_expr(body, stop_at=None)
+
+        # Find where converge_op is in the pattern and replace everything before it with wildcard
+        # Actually, we want: converge_op and everything after it
+        # So we build pattern from body, but stop at converge_op's inputs (replace with wildcard)
+        post_pattern_cache = {}
+        for arg in converge_op.args:
+            post_pattern_cache[arg] = wildcard()
+
+        post_pattern = build_pattern_for_expr(body, stop_at=None, pattern_cache=post_pattern_cache)
+        debug_print(f"[CompositeSplitter] Post-converge pattern built")
+
+        # Step 5: Apply partition for post-converge
+        post_composite_name = f"{composite_name_prefix}.post_converge"
+        try:
+            result_expr = post_pattern.partition(
+                inlined_body,
+                {"Composite": post_composite_name}
+            )
+            debug_print(f"[CompositeSplitter] Post-converge partition successful")
+        except Exception as e:
+            debug_print(f"[CompositeSplitter] Post-converge partition failed: {e}")
+            return None
+
+        # Step 6: Build pre-converge pattern for each branch that is a Call (not Var/Constant)
+        pre_composite_name = f"{composite_name_prefix}.pre_converge"
+
+        # Find the main branch (the one that has Call nodes, not just Var)
+        for i, arg in enumerate(converge_op.args):
+            if isinstance(arg, relay.Call):
+                # This is a branch with computations - build pattern for it
+                debug_print(f"[CompositeSplitter] Building pre-converge pattern for arg[{i}]...")
+
+                # Build pattern for this branch (stop at function params)
+                pre_pattern_cache = {}
+                for param in param_set:
+                    pre_pattern_cache[param] = wildcard()
+
+                pre_pattern = build_pattern_for_expr(arg, stop_at=None, pattern_cache=pre_pattern_cache)
+
+                try:
+                    result_expr = pre_pattern.partition(
+                        result_expr,
+                        {"Composite": pre_composite_name}
+                    )
+                    debug_print(f"[CompositeSplitter] Pre-converge partition successful for arg[{i}]")
+                except Exception as e:
+                    debug_print(f"[CompositeSplitter] Pre-converge partition failed for arg[{i}]: {e}")
+                    # Continue without pre-converge composite for this branch
+
+        return {
+            "result_expr": result_expr,
+            "pre_composite_name": pre_composite_name,
+            "post_composite_name": post_composite_name,
+        }
+
+    @staticmethod
+    def create_pre_converge_composite(expr, branch_ops, composite_name_prefix="imcflow"):
+        """
+        Create a composite function for pre-converge operations using pattern matching.
+
+        Args:
+            expr: The expression to transform
+            branch_ops: List of operations to include in the composite
+            composite_name_prefix: Prefix for composite name
+
+        Returns:
+            Transformed expression with pre-converge composite
+        """
+        from tvm.relay.dataflow_pattern import wildcard, is_op, is_constant
+
+        if not branch_ops:
+            return expr
+
+        # Build pattern based on the operations in the branch
+        # Start with the first op and chain subsequent ops
+        pattern = None
+
+        for op_call in reversed(branch_ops):
+            if not isinstance(op_call, relay.Call) or not isinstance(op_call.op, tvm.ir.Op):
+                continue
+
+            op_name = op_call.op.name
+
+            if pattern is None:
+                # First op - use wildcards for inputs
+                if op_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+                    pattern = is_op(op_name)(wildcard(), is_constant(), is_constant())
+                elif op_name == "nn.bias_add":
+                    pattern = is_op(op_name)(wildcard(), is_constant())
+                elif op_name == "nn.relu":
+                    pattern = is_op(op_name)(wildcard())
+                elif op_name == "add":
+                    pattern = is_op(op_name)(wildcard(), wildcard())
+                else:
+                    pattern = is_op(op_name)(wildcard())
+            else:
+                # Chain with previous pattern
+                if op_name == "nn.relu":
+                    pattern = is_op(op_name)(pattern)
+                elif op_name == "nn.bias_add":
+                    pattern = is_op(op_name)(pattern, is_constant())
+                elif op_name in ["qnn.imcflow_min_max_quantize"]:
+                    pattern = is_op(op_name)(pattern, is_constant(), is_constant())
+
+        if pattern is None:
+            return expr
+
+        pre_composite_name = f"{composite_name_prefix}.pre_converge"
+        try:
+            result_expr = pattern.partition(
+                expr,
+                {"Composite": pre_composite_name}
+            )
+            return result_expr
+        except Exception as e:
+            debug_print(f"[CompositeSplitter] Failed to create pre-converge composite: {e}")
+            return expr
+
+
 class AnnotGenerator:
-    def __init__(self):
+    def __init__(self, handle_branch_from_var_converge=True):
+      """
+      Args:
+          handle_branch_from_var_converge: If True, treat branch_from_var cases (converge points
+              where diverge_node is None because one branch originates from Var inputs outside
+              the function) as unbalanced branches and force new region creation.
+              If False, these converge points are handled with normal selection policy.
+              Default is True.
+      """
       self.RegionList = []
+      self.handle_branch_from_var_converge = handle_branch_from_var_converge
 
     def createRegion(self, mod):
       assert len(mod.functions.items()) == 1, "only one function is allowed in the module"
@@ -1668,11 +2612,19 @@ class AnnotGenerator:
       RegionList = []
 
       class _AnnotatorBFS:
-        def __init__(self, outer_self):
+        def __init__(self, outer_self, target_mod, handle_branch_from_var_converge=True):
           self.RegionList = RegionList
           self.outer = outer_self
+          self.target_mod = target_mod  # Store module for latency/throughput calculations
+          self.handle_branch_from_var_converge = handle_branch_from_var_converge
           # Track most recently assigned region to attach nodes with no input regions
           self.last_assigned_region = None
+          # Track composites that need to be split (deferred until after region assignment)
+          # Format: {original_composite: {"converge_op": op, "pre_region": region, "post_region": region}}
+          self.split_pending = {}
+          # Track converge point summary for debugging
+          # Format: [{"node": node, "diverge_node": diverge_node, "branches": [...], "is_unbalanced": bool, "action": str}]
+          self.converge_point_summary = []
 
         def createRegion(self):
           Region = []
@@ -1721,6 +2673,15 @@ class AnnotGenerator:
           return isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.NO_COST_OPS
 
         def getCost(self, call):
+          """
+          Calculate cost for a call node based on conv IC/OC dimensions.
+
+          Cost calculation:
+          - conv or conv-starting composite: ceil(IC/atom_IC) * ceil(OC/64)
+            where atom_IC = floor(256/(KH*KW)) for regular conv, 32 for depthwise
+          - composite without conv: cost = 1
+          - other supported ops: cost = 1
+          """
           if not isinstance(call, Call):
             return 0
           IsComposite = self.isComposite(call)
@@ -1747,14 +2708,97 @@ class AnnotGenerator:
               for a in call.args:
                 self.visit(a)
 
+          def _get_conv_cost(conv_call):
+            """Calculate cost for a conv op based on IC/OC dimensions."""
+            try:
+              # Get kernel shape for KH, KW
+              weight = conv_call.args[1]
+              if hasattr(weight, 'checked_type') and weight.checked_type is not None:
+                weight_shape = [int(d) for d in weight.checked_type.shape]
+              elif isinstance(weight, relay.Constant):
+                weight_shape = list(weight.data.shape)
+              else:
+                return 1  # Fallback to cost 1 if shape unknown
+
+              # Get input shape for IC
+              input_arg = conv_call.args[0]
+              if hasattr(input_arg, 'checked_type') and input_arg.checked_type is not None:
+                input_shape = [int(d) for d in input_arg.checked_type.shape]
+                IC = input_shape[1]  # NCHW format
+              else:
+                return 1  # Fallback
+
+              # Extract dimensions based on conv type
+              if conv_call.op.name in ["nn.conv2d", "nn.imcflow_qconv"]:
+                OC, _, KH, KW = weight_shape  # OIHW format
+              elif conv_call.op.name in ["nn.imcflow_qdwconv"]:
+                # Depthwise: weight shape is (IC, 1, KH, KW)
+                _, _, KH, KW = weight_shape
+                OC = IC  # Depthwise: OC == IC
+              else:
+                return 1
+
+              # Check if depthwise
+              groups = conv_call.attrs.groups if hasattr(conv_call.attrs, 'groups') else 1
+              is_depthwise = (groups == IC) if groups > 1 else False
+
+              # Calculate atom_IC
+              if is_depthwise:
+                atom_IC = 32
+                atom_OC = 32
+              else:
+                atom_IC = math.floor(256 / (KH * KW)) if (KH * KW) > 0 else 32
+                atom_OC = 64
+
+              # Calculate cost
+              cost = math.ceil(IC / atom_IC) * math.ceil(OC / atom_OC)
+              return max(1, cost)
+            except Exception as e:
+              debug_print(f"[getCost] Error calculating conv cost: {e}")
+              return 1
+
+          def _find_conv_in_composite(composite_func):
+            """Find conv call in composite function body."""
+            class ConvFinder(tvm.relay.ExprVisitor):
+              def __init__(self):
+                super().__init__()
+                self.conv_call = None
+
+              def visit_call(self, call):
+                if isinstance(call.op, tvm.ir.Op):
+                  if call.op.name in ["nn.conv2d", "nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+                    self.conv_call = call
+                super().visit_call(call)
+
+            finder = ConvFinder()
+            finder.visit(composite_func.body)
+            return finder.conv_call
+
           if IsNoCostCall:
             return 0
-          if IsComposite or IsSupportedOp:
-            return 1
+
+          # Handle composite functions
+          if IsComposite:
+            composite_func = call.op
+            conv_call = _find_conv_in_composite(composite_func)
+            if conv_call is not None:
+              return _get_conv_cost(conv_call)
+            else:
+              # Composite without conv
+              return 1
+
+          # Handle supported ops directly
+          if IsSupportedOp:
+            if call.op.name in ["nn.conv2d", "nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
+              return _get_conv_cost(call)
+            else:
+              return 1
+
           if IsSuperNode:
             obj = _CostVisitor(self.getCost)
             obj.visit(call.op.body)
             return obj.Cost
+
           # Unsupported node: cost 0 so it doesn't affect capacity, but it's not placed anyway
           return 0
 
@@ -1819,13 +2863,371 @@ class AnnotGenerator:
                 q.append(v)
           return order, gb.edges, gb.rev_edges
 
+        def _is_converge_point(self, node, rev_edges):
+          """Check if node is a converge point (2+ inputs from common diverge point)."""
+          preds = rev_edges.get(node, [])
+          call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
+
+          debug_print(f"\n{'='*60}")
+          debug_print(f"[_is_converge_point] Checking node:")
+          debug_print(f"  ID: {getNodeDebugID(node)}")
+          debug_print(f"  Expr: {node}")
+          debug_print(f"  Total preds: {len(preds)}")
+          debug_print(f"  Call/TupleGetItem preds: {len(call_preds)}")
+          for i, pred in enumerate(call_preds):
+            debug_print(f"    Pred {i}: {getNodeDebugID(pred)}")
+            debug_print(f"      Expr: {pred}")
+          debug_print(f"  Result: {len(call_preds) >= 2}")
+          debug_print(f"{'='*60}\n")
+
+          return len(call_preds) >= 2
+
+        def _branches_unbalanced(self, branch_metrics):
+          """Check if branches have different latency or throughput (threshold=0)."""
+          if len(branch_metrics) < 2:
+            return False
+          lats = [m[0] for m in branch_metrics]
+          thrs = [m[1] for m in branch_metrics]
+          return len(set(lats)) > 1 or len(set(thrs)) > 1
+
+        def _get_branch_last_nodes_regions(self, node, rev_edges):
+          """Get the regions of the last nodes in each branch before converge point."""
+          preds = rev_edges.get(node, [])
+          call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
+          regions = []
+          for pred in call_preds:
+            region = self.getRegion(pred)
+            if region is not None:
+              regions.append(region)
+          return regions
+
+        def _record_composite_split(self, node, candidate_regions):
+          """
+          Record split_pending info for a composite at a converge point.
+
+          Returns:
+            needs_split: True if composite was recorded for split, False otherwise
+          """
+          converge_op = CompositeSplitter.find_converge_op_in_composite(node)
+          if converge_op is None:
+            debug_print(f"[ConvergeCheck] No converge op found in composite")
+            return False
+
+          # Determine pre_region: use candidate_region if available, else create new
+          if len(candidate_regions) > 0:
+            pre_region = candidate_regions[0]
+          else:
+            pre_region = self.createRegion()
+          # post_region: always create new region for the converge part
+          post_region = self.createRegion()
+
+          # Record split info for deferred processing
+          self.split_pending[node] = {
+            "converge_op": converge_op,
+            "pre_region": pre_region,
+            "post_region": post_region,
+            "pre_composite": None,   # Will be filled after mutation
+            "post_composite": None,  # Will be filled after mutation
+          }
+          debug_print(f"[ConvergeCheck] Recorded split_pending for {getNodeDebugID(node)}")
+          return True
+
+        def _record_converge_summary(self, node, diverge_node, converge_type, branch_info_list, is_unbalanced, action):
+          """Record converge point info to summary for debugging."""
+          self.converge_point_summary.append({
+            "node": getNodeDebugID(node),
+            "diverge_node": getNodeDebugID(diverge_node) if diverge_node else None,
+            "type": converge_type,
+            "branches": branch_info_list,
+            "is_unbalanced": is_unbalanced,
+            "action": action
+          })
+
+        def _handle_unbalanced_converge(self, node, rev_edges, IsComposite, candidate_regions,
+                                        converge_type, diverge_node, branch_info_list):
+          """
+          Handle unbalanced converge point - check for deadlock risk and record split if needed.
+
+          Args:
+            node: The converge point node
+            rev_edges: Reverse edges from graph
+            IsComposite: Whether node is a composite
+            candidate_regions: Available regions for assignment
+            converge_type: "diverge-converge" or "branch_from_var"
+            diverge_node: The diverge point node (None for branch_from_var)
+            branch_info_list: List of branch info dicts for summary
+
+          Returns:
+            (force_new_region, needs_split): Tuple of booleans
+          """
+          force_new_region = False
+          needs_split = False
+
+          debug_print(f"[ConvergeCheck] Branches are UNBALANCED - checking region assignment")
+
+          # Check if input branches are in the same region (deadlock risk)
+          branch_regions = self._get_branch_last_nodes_regions(node, rev_edges)
+          debug_print(f"[ConvergeCheck] Branch regions count: {len(branch_regions)}")
+          for i, reg in enumerate(branch_regions):
+            region_idx = self.RegionList.index(reg) if reg in self.RegionList else -1
+            debug_print(f"    Branch {i} region idx: {region_idx}, size: {len(reg)}")
+          unique_regions = list({id(r): r for r in branch_regions}.values())
+          debug_print(f"[ConvergeCheck] Unique regions: {len(unique_regions)}")
+
+          if len(unique_regions) == 1:
+            # All branches in same region -> deadlock risk
+            debug_print(f"[ConvergeCheck] All branches in same region - DEADLOCK RISK")
+
+            if IsComposite:
+              debug_print(f"[ConvergeCheck] Recording composite for deferred split")
+              needs_split = self._record_composite_split(node, candidate_regions)
+              if needs_split:
+                action = "split_composite (deadlock risk)"
+              else:
+                force_new_region = True
+                action = "force_new_region (deadlock risk, no internal converge op)"
+            else:
+              force_new_region = True
+              action = "force_new_region (deadlock risk)"
+
+            self._record_converge_summary(node, diverge_node, converge_type,
+                                          branch_info_list, True, action)
+          else:
+            debug_print(f"[ConvergeCheck] Branches in different regions - no deadlock risk")
+            debug_print(f"{'#'*70}\n")
+            self._record_converge_summary(node, diverge_node, converge_type,
+                                          branch_info_list, True, "no_action (different regions)")
+
+          return force_new_region, needs_split
+
+        def _extract_branches_for_converge(self, node, rev_edges, branch_analyzer, diverge_node=None):
+          """
+          Extract branches leading to a converge point.
+
+          Args:
+            node: The converge point node
+            rev_edges: Reverse edges from graph
+            branch_analyzer: BranchAnalyzer instance
+            diverge_node: If provided, extract branches between diverge and converge.
+                          If None, extract all ancestor ops for each predecessor.
+
+          Returns:
+            branches: List of branch ops lists
+            from_var_flags: List of booleans indicating if each branch originates from Var/Const
+          """
+          preds = rev_edges.get(node, [])
+          call_preds = [p for p in preds if isinstance(p, (Call, TupleGetItem))]
+
+          if diverge_node is not None:
+            # Use existing extract_branches for diverge-converge case
+            branches = branch_analyzer.extract_branches(diverge_node, node)
+            from_var_flags = [False] * len(branches)
+          else:
+            # Trace back from each predecessor to collect all ancestor ops
+            branches = []
+            from_var_flags = []
+            for pred in call_preds:
+              branch_ops, is_from_var = self._trace_branch_to_input(pred, branch_analyzer)
+              branches.append(branch_ops)
+              from_var_flags.append(is_from_var)
+
+          return branches, from_var_flags
+
+        def _trace_branch_to_input(self, pred, branch_analyzer, max_depth=50):
+          """
+          Trace back from pred to collect all ancestor ops until hitting Var/Const.
+
+          Returns:
+            (branch_ops, is_from_var): List of ops and whether branch has no conv
+          """
+          visited = set()
+          queue = [pred]
+          branch_ops = []
+          has_conv = False
+          depth = 0
+
+          while queue and depth < max_depth:
+            curr = queue.pop(0)
+            if curr in visited:
+              continue
+            visited.add(curr)
+            depth += 1
+
+            if isinstance(curr, Call):
+              # Flatten composite ops
+              flattened = branch_analyzer.flatten_composite_ops(curr)
+              branch_ops.extend(flattened)
+
+              # Check for conv
+              if isinstance(curr.op, tvm.ir.Op):
+                if curr.op.name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.conv2d"]:
+                  has_conv = True
+
+              # Continue to predecessors
+              for arg in curr.args:
+                if isinstance(arg, (Call, TupleGetItem)):
+                  queue.append(arg)
+
+          return branch_ops, not has_conv  # is_from_var = not has_conv
+
+        def _calculate_branch_metrics(self, branches, lat_calc):
+          """
+          Calculate latency and throughput for each branch.
+
+          Args:
+            branches: List of branch ops lists
+            lat_calc: LatencyThroughputCalculator instance
+
+          Returns:
+            List of (latency, throughput) tuples
+          """
+          branch_metrics = []
+          for i, branch_ops in enumerate(branches):
+            debug_print(f"\n  --- Branch {i} details ---")
+            for j, op in enumerate(branch_ops):
+              op_lat = lat_calc.get_op_latency(op)
+              op_thr = lat_calc.get_op_throughput(op)
+              op_name = op.op.name if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op) else getNodeDebugID(op)
+              debug_print(f"    Op {j}: {op_name}, lat={op_lat}, thr={op_thr}")
+            lat = lat_calc.calculate_branch_latency(branch_ops)
+            thr = lat_calc.calculate_branch_throughput(branch_ops)
+            branch_metrics.append((lat, thr))
+            debug_print(f"  Branch {i} TOTAL: latency={lat}, throughput={thr}, ops_count={len(branch_ops)}")
+          return branch_metrics
+
+        def _build_branch_info_list(self, branches, branch_metrics, from_var_flags=None):
+          """
+          Build branch info list for converge point summary.
+
+          Args:
+            branches: List of branch ops lists
+            branch_metrics: List of (latency, throughput) tuples
+            from_var_flags: Optional list of from_var flags (None = all False)
+
+          Returns:
+            List of branch info dicts
+          """
+          branch_info_list = []
+          for i, branch_ops in enumerate(branches):
+            ops_info = []
+            for op in branch_ops:
+              op_name = op.op.name if isinstance(op, relay.Call) and isinstance(op.op, tvm.ir.Op) else getNodeDebugID(op)
+              ops_info.append(op_name)
+            lat, thr = branch_metrics[i]
+            info = {
+              "ops": ops_info,
+              "latency": lat,
+              "throughput": thr,
+              "ops_count": len(branch_ops),
+              "is_branch_from_var": from_var_flags[i] if from_var_flags else False
+            }
+            branch_info_list.append(info)
+          return branch_info_list
+
+        def _handle_converge_point(self, node, rev_edges, branch_analyzer, lat_calc,
+                                   IsComposite, candidate_regions):
+          """
+          Handle converge point detection and processing.
+
+          Returns:
+            (force_new_region, needs_split): Tuple of booleans
+          """
+          force_new_region = False
+          needs_split = False
+
+          debug_print(f"\n{'#'*70}")
+          debug_print(f"[ConvergeCheck] CONVERGE POINT DETECTED")
+          debug_print(f"{'#'*70}")
+          debug_print(f"  Node ID: {getNodeDebugID(node)}")
+          debug_print(f"  Node Expr:\n{node}")
+          debug_print(f"{'#'*70}")
+
+          # Find diverge point
+          diverge_node = branch_analyzer.find_diverge_point(node)
+
+          if diverge_node is not None:
+            debug_print(f"\n[ConvergeCheck] Diverge point found: {getNodeDebugID(diverge_node)}")
+            debug_print(f"  Diverge Expr:\n{diverge_node}")
+            converge_type = "diverge-converge"
+          else:
+            debug_print(f"[ConvergeCheck] No diverge point found for this converge point")
+            debug_print(f"[ConvergeCheck] handle_branch_from_var_converge={self.handle_branch_from_var_converge}")
+
+            if not self.handle_branch_from_var_converge:
+              debug_print(f"[ConvergeCheck] Branch from var handling DISABLED - using normal selection")
+              debug_print(f"{'#'*70}\n")
+              return force_new_region, needs_split
+            converge_type = "branch_from_var"
+
+          # Extract branches (unified for both cases)
+          branches, from_var_flags = self._extract_branches_for_converge(
+            node, rev_edges, branch_analyzer, diverge_node
+          )
+          debug_print(f"\n[ConvergeCheck] Extracted {len(branches)} branches")
+
+          # For branch_from_var, check if at least one branch actually originates from Var
+          if diverge_node is None:
+            has_branch_from_var = any(from_var_flags)
+            debug_print(f"[ConvergeCheck] Has at least one branch_from_var: {has_branch_from_var}")
+            for i, flag in enumerate(from_var_flags):
+              debug_print(f"  Branch {i}: is_branch_from_var={flag}")
+
+            if not has_branch_from_var:
+              debug_print(f"[ConvergeCheck] No branch_from_var found - skipping special handling")
+              debug_print(f"{'#'*70}\n")
+              return force_new_region, needs_split
+
+          # Calculate branch metrics (unified)
+          branch_metrics = self._calculate_branch_metrics(branches, lat_calc)
+
+          debug_print(f"\n[ConvergeCheck] Branch metrics summary:")
+          for i, (lat, thr) in enumerate(branch_metrics):
+            debug_print(f"    Branch {i}: latency={lat}, throughput={thr}")
+
+          # Check if branches are unbalanced
+          is_unbalanced = self._branches_unbalanced(branch_metrics)
+          debug_print(f"\n[ConvergeCheck] Branches unbalanced? {is_unbalanced}")
+
+          # Build branch info list (unified with from_var field)
+          branch_info_list = self._build_branch_info_list(branches, branch_metrics, from_var_flags)
+
+          if not is_unbalanced:
+            debug_print(f"[ConvergeCheck] Branches are BALANCED - no special handling needed")
+            debug_print(f"{'#'*70}\n")
+            self._record_converge_summary(node, diverge_node, converge_type,
+                                          branch_info_list, False, "no_action (balanced)")
+          else:
+            force_new_region, needs_split = self._handle_unbalanced_converge(
+              node, rev_edges, IsComposite, candidate_regions,
+              converge_type, diverge_node, branch_info_list
+            )
+
+          return force_new_region, needs_split
+
         def run(self, fn):
           order, edges, rev_edges = self._topo_bfs_order(fn)
-          for node in order:
+
+          # Initialize branch analyzer for converge point detection
+          branch_analyzer = BranchAnalyzer(edges, rev_edges)
+          lat_calc = LatencyThroughputCalculator(self.target_mod)
+
+          debug_print(f"\n{'='*70}")
+          debug_print(f"[AnnotatorBFS] Starting BFS traversal with {len(order)} nodes")
+          debug_print(f"{'='*70}\n")
+
+          for node_idx, node in enumerate(order):
             if isinstance(node, Call):
               IsComposite = self.isComposite(node)
               IsSupportedOp = self.isSupportedOp(node)
               IsSuperNode = self.isSuperNode(node)
+
+              debug_print(f"\n{'~'*50}")
+              debug_print(f"[AnnotatorBFS] Processing node {node_idx}/{len(order)}:")
+              debug_print(f"  ID: {getNodeDebugID(node)}")
+              debug_print(f"  IsComposite: {IsComposite}")
+              debug_print(f"  IsSupportedOp: {IsSupportedOp}")
+              debug_print(f"  IsSuperNode: {IsSuperNode}")
+
               if IsComposite or IsSupportedOp or IsSuperNode:
                 if self.getCost(node) > ImcflowDeviceConfig.IMCE_NUM:
                   raise ValueError("Cost of node is too high")
@@ -1855,26 +3257,63 @@ class AnnotGenerator:
                   if d in candidate_regions:
                     candidate_regions.remove(d)
 
-                # Selection policy: if multiple distinct input regions, just use first one
-                uniq = list({id(r): r for r in candidate_regions}.values())
-                if len(uniq) == 1:
-                  Region = uniq[0]
+                # ====================================================
+                # Converge point check: detect branch latency mismatch
+                # ====================================================
+                force_new_region = False
+                needs_split = False
+
+                if self._is_converge_point(node, rev_edges):
+                  force_new_region, needs_split = self._handle_converge_point(
+                    node, rev_edges, branch_analyzer, lat_calc,
+                    IsComposite, candidate_regions
+                  )
+
+                # ====================================================
+                # Selection policy with converge point handling
+                # ====================================================
+                if needs_split:
+                  # Composite will be split - add original to post_region for now
+                  # After mutation, this will be replaced with pre_composite
+                  # post_composite will be added to post_region
+                  post_region = self.split_pending[node]["post_region"]
+                  self.addToRegion(post_region, node)
+                  debug_print(f"[ConvergeCheck] Added original composite to post_region (will be split later)")
+                elif force_new_region:
+                  # Non-composite converge point with unbalanced branches -> new region
+                  Region = self.createRegion()
                   self.addToRegion(Region, node)
-                elif len(uniq) > 1:
-                  Region = uniq[0]
-                  # Region = self.createRegion()
-                  self.addToRegion(Region, node)
+                  debug_print(f"[ConvergeCheck] Created new region for converge point (region {self.RegionList.index(Region)})")
                 else:
-                  # No input region (inputs likely Var/Const). Prefer previous node's region if available.
-                  #TODO: just traverse call node..(?) no need to consider Var and Const node..
-                  Region = None
-                  if self.last_assigned_region is not None:
-                    # Capacity gate when attaching to previous region
-                    if self.getRegionSize(self.last_assigned_region) + self.getCost(node) <= ImcflowDeviceConfig.IMCE_NUM:
-                      Region = self.last_assigned_region
-                  if Region is None:
-                    Region = self.createRegion()
-                  self.addToRegion(Region, node)
+                  # Normal selection policy
+                  uniq = list({id(r): r for r in candidate_regions}.values())
+                  debug_print(f"  [Selection] candidate_regions: {len(candidate_regions)}, unique: {len(uniq)}")
+                  if len(uniq) == 1:
+                    Region = uniq[0]
+                    region_idx = self.RegionList.index(Region) if Region in self.RegionList else -1
+                    self.addToRegion(Region, node)
+                    debug_print(f"  [Selection] Assigned to existing region {region_idx}")
+                  elif len(uniq) > 1:
+                    Region = uniq[0]
+                    region_idx = self.RegionList.index(Region) if Region in self.RegionList else -1
+                    # Region = self.createRegion()
+                    self.addToRegion(Region, node)
+                    debug_print(f"  [Selection] Multiple regions, assigned to region {region_idx}")
+                  else:
+                    # No input region (inputs likely Var/Const). Prefer previous node's region if available.
+                    #TODO: just traverse call node..(?) no need to consider Var and Const node..
+                    Region = None
+                    if self.last_assigned_region is not None:
+                      # Capacity gate when attaching to previous region
+                      if self.getRegionSize(self.last_assigned_region) + self.getCost(node) <= ImcflowDeviceConfig.IMCE_NUM:
+                        Region = self.last_assigned_region
+                    if Region is None:
+                      Region = self.createRegion()
+                      debug_print(f"  [Selection] Created new region (no input regions)")
+                    else:
+                      region_idx = self.RegionList.index(Region) if Region in self.RegionList else -1
+                      debug_print(f"  [Selection] Using last assigned region {region_idx}")
+                    self.addToRegion(Region, node)
 
             elif isinstance(node, TupleGetItem):
               # Attach to tuple region; create one if absent
@@ -1902,25 +3341,371 @@ class AnnotGenerator:
 
           # No second pass needed; nodes with no inputs were attached to previous region when possible
 
-      annot = _AnnotatorBFS(self)
+      annot = _AnnotatorBFS(self, mod, self.handle_branch_from_var_converge)
       annot.run(func)
       self.RegionList = RegionList
-      return self.RegionList
+      self.split_pending = annot.split_pending
 
-def partitionRound(mod):
+      # Print final region summary
+      debug_print(f"\n{'='*70}")
+      debug_print(f"[AnnotGenerator.createRegionBFS] FINAL REGION SUMMARY")
+      debug_print(f"{'='*70}")
+      debug_print(f"Total regions: {len(self.RegionList)}")
+      for region_idx, region in enumerate(self.RegionList):
+        debug_print(f"\n  Region {region_idx} ({len(region)} nodes):")
+        for node in region:
+          debug_print(f"    - {getNodeDebugID(node)}")
+
+      # Print converge point summary
+      debug_print(f"\n{'-'*70}")
+      debug_print(f"CONVERGE POINT SUMMARY")
+      debug_print(f"{'-'*70}")
+      debug_print(f"Total converge points detected: {len(annot.converge_point_summary)}")
+      for cp_idx, cp_info in enumerate(annot.converge_point_summary):
+        debug_print(f"\n  Converge Point {cp_idx}:")
+        debug_print(f"    Node: {cp_info['node']}")
+        debug_print(f"    Type: {cp_info['type']}")
+        if cp_info['diverge_node']:
+          debug_print(f"    Diverge Node: {cp_info['diverge_node']}")
+        debug_print(f"    Is Unbalanced: {cp_info['is_unbalanced']}")
+        debug_print(f"    Action: {cp_info['action']}")
+        debug_print(f"    Branches ({len(cp_info['branches'])}):")
+        for br_idx, br_info in enumerate(cp_info['branches']):
+          if cp_info['type'] == 'branch_from_var':
+            from_var = br_info.get('is_branch_from_var', 'N/A')
+            debug_print(f"      Branch {br_idx}: latency={br_info['latency']}, throughput={br_info['throughput']}, from_var={from_var}")
+            debug_print(f"        Ops: {br_info['ops']}")
+          else:
+            debug_print(f"      Branch {br_idx}: latency={br_info['latency']}, throughput={br_info['throughput']}, ops_count={br_info.get('ops_count', len(br_info['ops']))}")
+            debug_print(f"        Ops: {br_info['ops']}")
+
+      debug_print(f"\nSplit pending: {len(self.split_pending)} composites")
+      debug_print(f"{'='*70}\n")
+
+      # Return func as well to ensure the same Python object is used in _apply_composite_splits
+      return self.RegionList, self.split_pending, func
+
+
+class CompositeGraphMutator(relay.ExprMutator):
+    """
+    Mutator that replaces original composites with split composites.
+
+    After region assignment, this mutator is used to:
+    1. Split composites at converge points
+    2. Update the graph with new composite calls
+    """
+
+    def __init__(self, split_pending):
+        super().__init__()
+        self.split_pending = split_pending
+        # Maps original composite -> split info
+        self.split_results = {}
+        # Maps old_node -> new_node for nodes whose args changed during mutation
+        self.node_replacements = {}
+
+    def visit_call(self, call):
+        # First visit args
+        new_args = [self.visit(arg) for arg in call.args]
+
+        if call in self.split_pending:
+          split_info = self.split_pending[call]
+          debug_print(f"[CompositeGraphMutator] Splitting composite: {getNodeDebugID(call)}")
+
+          # Create call with updated args before splitting
+          # This ensures that if any args were mutated (e.g., another composite was split),
+          # we split the correct version with updated dependencies
+          call_to_split = call
+          if new_args != list(call.args):
+            call_to_split = relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+
+          # Perform actual split using CompositeSplitter
+          converge_op = split_info["converge_op"]
+          result = CompositeSplitter.split_composite_at_converge(
+            call_to_split, converge_op, "imcflow"
+          )
+
+          if result is not None:
+            # Result is now a dict with result_expr, pre_composite_name, post_composite_name
+            new_expr = result["result_expr"]
+            pre_composite_name = result["pre_composite_name"]
+            post_composite_name = result["post_composite_name"]
+
+            debug_print(f"[CompositeGraphMutator] Split successful: pre={pre_composite_name}, post={post_composite_name}")
+
+            # Extract the IMMEDIATE pre and post composite calls from this split's result
+            # The structure of new_expr is: Let(bindings, post_call(pre_call(...), other_branch))
+            # We only want the composites created by THIS split, not nested ones from previous splits
+            pre_calls_from_split = []
+            post_calls_from_split = []
+
+            def get_composite_info(call_node, let_bindings):
+                """Get composite name if call_node is a composite call."""
+                func = call_node.op
+                if isinstance(func, relay.Var) and func in let_bindings:
+                    func = let_bindings[func]
+                if isinstance(func, relay.Function) and func.attrs and "Composite" in func.attrs:
+                    return str(func.attrs["Composite"])
+                return None
+
+            def extract_immediate_composites(expr, let_bindings=None):
+                """Extract only the immediate pre and post composites, not nested ones."""
+                if let_bindings is None:
+                    let_bindings = {}
+
+                # Handle Let expressions - collect bindings
+                if isinstance(expr, relay.Let):
+                    if isinstance(expr.value, relay.Function):
+                        let_bindings[expr.var] = expr.value
+                    return extract_immediate_composites(expr.body, let_bindings)
+
+                # Handle Call expressions - this should be the post_converge call
+                if isinstance(expr, relay.Call):
+                    comp_name = get_composite_info(expr, let_bindings)
+                    if comp_name == post_composite_name:
+                        post_calls_from_split.append(expr)
+                        # Now look for pre_converge in the IMMEDIATE args (not recursively)
+                        for arg in expr.args:
+                            # Traverse through Lets to find the Call
+                            inner_expr = arg
+                            inner_bindings = dict(let_bindings)
+                            while isinstance(inner_expr, relay.Let):
+                                if isinstance(inner_expr.value, relay.Function):
+                                    inner_bindings[inner_expr.var] = inner_expr.value
+                                inner_expr = inner_expr.body
+                            if isinstance(inner_expr, relay.Call):
+                                arg_comp = get_composite_info(inner_expr, inner_bindings)
+                                if arg_comp == pre_composite_name:
+                                    pre_calls_from_split.append(inner_expr)
+
+            extract_immediate_composites(new_expr)
+            debug_print(f"[CompositeGraphMutator] Extracted from split: {len(pre_calls_from_split)} pre, {len(post_calls_from_split)} post")
+
+            # Store split result for region update
+            self.split_results[call] = {
+              "new_expr": new_expr,
+              "split_info": split_info,
+              "pre_composite_name": pre_composite_name,
+              "post_composite_name": post_composite_name,
+              "pre_calls": pre_calls_from_split,
+              "post_calls": post_calls_from_split,
+            }
+            return new_expr
+          else:
+            debug_print(f"[CompositeGraphMutator] Split failed, keeping original")
+            # Fall through to normal processing
+
+        # Normal call - just update args if changed
+        if new_args != list(call.args):
+          new_call = relay.Call(call.op, new_args, call.attrs, call.type_args, call.span)
+          # Track the replacement so RegionList can be updated
+          self.node_replacements[call] = new_call
+          return new_call
+        return call
+
+
+def _find_composites_by_name(expr, target_names):
+    """
+    Find composite function calls in an expression by their Composite attribute name.
+    Handles both direct function calls and let-bound function calls.
+
+    Args:
+        expr: The expression to search
+        target_names: Set of composite names to find
+
+    Returns:
+        Dict mapping composite name to list of Call nodes
+    """
+    found = {name: [] for name in target_names}
+
+    class CompositeFinder(relay.ExprVisitor):
+        def __init__(self):
+            super().__init__()
+            # Track let-bound functions: Var -> Function
+            self.let_bindings = {}
+
+        def visit_let(self, let):
+            # Track let bindings where value is a Function
+            if isinstance(let.value, relay.Function):
+                self.let_bindings[let.var] = let.value
+            self.visit(let.value)
+            self.visit(let.body)
+
+        def visit_call(self, call):
+            # Get the actual function (either direct or let-bound)
+            func = call.op
+            if isinstance(func, relay.Var) and func in self.let_bindings:
+                func = self.let_bindings[func]
+
+            if isinstance(func, relay.Function):
+                attrs = func.attrs
+                if attrs and "Composite" in attrs:
+                    comp_name = str(attrs["Composite"])
+                    if comp_name in target_names:
+                        found[comp_name].append(call)
+                        debug_print(f"[_find_composites_by_name] Found composite '{comp_name}': {getNodeDebugID(call)}")
+            super().visit_call(call)
+
+    CompositeFinder().visit(expr)
+
+    # Debug: report what was found
+    for name in target_names:
+        debug_print(f"[_find_composites_by_name] Target '{name}': found {len(found[name])} calls")
+
+    return found
+
+
+def _apply_composite_splits(target_mod, split_pending, RegionList, main_func):
+    """
+    Apply composite splits and update region list.
+
+    Args:
+        target_mod: The module to transform
+        split_pending: Dict of composites to split
+        RegionList: List of regions to update
+        main_func: The function object from createRegionBFS (must be the same Python object)
+
+    Returns:
+        (transformed_mod, updated_RegionList)
+    """
+    if not split_pending:
+        return target_mod, RegionList
+
+    debug_print(f"[_apply_composite_splits] Applying {len(split_pending)} composite splits")
+
+    # Apply mutation
+    mutator = CompositeGraphMutator(split_pending)
+    new_body = mutator.visit(main_func.body)
+
+    # Create new function with mutated body
+    new_func = relay.Function(
+        main_func.params,
+        new_body,
+        main_func.ret_type,
+        main_func.type_params,
+        main_func.attrs
+    )
+
+    # Update module
+    new_mod = tvm.IRModule.from_expr(new_func)
+
+    # Update RegionList: replace original composites with split results
+    # Use the pre_calls and post_calls extracted during mutation (specific to each split)
+    for original_composite, result_info in mutator.split_results.items():
+        split_info = result_info["split_info"]
+        pre_region = split_info["pre_region"]
+        post_region = split_info["post_region"]
+
+        pre_region_idx = RegionList.index(pre_region) if pre_region in RegionList else -1
+        post_region_idx = RegionList.index(post_region) if post_region in RegionList else -1
+        debug_print(f"[_apply_composite_splits] Processing split for {getNodeDebugID(original_composite)}")
+        debug_print(f"  pre_region_idx={pre_region_idx}, post_region_idx={post_region_idx}")
+
+        # Remove original composite from its region
+        removed_from_region = -1
+        for region_idx, region in enumerate(RegionList):
+            if original_composite in region:
+                region.remove(original_composite)
+                removed_from_region = region_idx
+                break
+        debug_print(f"  Removed original from region {removed_from_region}")
+
+        # Add new composites to their respective regions using the extracted calls
+        # These are specific to THIS split, not all composites with the same name
+        pre_calls = result_info.get("pre_calls", [])
+        post_calls = result_info.get("post_calls", [])
+
+        debug_print(f"  pre_composite: {len(pre_calls)} calls from this split")
+        for pre_call in pre_calls:
+            if pre_call not in pre_region:
+                pre_region.append(pre_call)
+                debug_print(f"    Added pre_call {getNodeDebugID(pre_call)} to pre_region")
+
+        debug_print(f"  post_composite: {len(post_calls)} calls from this split")
+        for post_call in post_calls:
+            if post_call not in post_region:
+                post_region.append(post_call)
+                debug_print(f"    Added post_call {getNodeDebugID(post_call)} to post_region")
+
+    # Update RegionList to use NEW nodes from the mutated graph
+    # The mutation may have created new Python objects for nodes whose args changed
+    # We need to map OLD nodes to NEW nodes using structural equality
+    def _collect_all_calls(expr):
+        """Collect all Call nodes from an expression"""
+        calls = []
+        class CallCollector(relay.ExprVisitor):
+            def visit_call(self, call):
+                calls.append(call)
+                super().visit_call(call)
+        CallCollector().visit(expr)
+        return calls
+
+    # Build updated RegionList using the node_replacements mapping from mutation
+    # This is safe because we track exactly which old node maps to which new node
+    updated_RegionList = []
+    for region in RegionList:
+        updated_region = []
+        for old_node in region:
+            # Check if this node was replaced during mutation
+            if old_node in mutator.node_replacements:
+                new_node = mutator.node_replacements[old_node]
+                if new_node not in updated_region:
+                    updated_region.append(new_node)
+                debug_print(f"[_apply_composite_splits] Replaced: {getNodeDebugID(old_node)} -> {getNodeDebugID(new_node)}")
+            else:
+                # Node was not mutated, keep as is
+                if old_node not in updated_region:
+                    updated_region.append(old_node)
+        updated_RegionList.append(updated_region)
+
+    # Debug: print updated region summary
+    debug_print(f"\n[_apply_composite_splits] UPDATED REGION SUMMARY")
+    debug_print(f"Total regions: {len(updated_RegionList)}")
+    for region_idx, region in enumerate(updated_RegionList):
+        debug_print(f"  Region {region_idx} ({len(region)} nodes):")
+        for node in region:
+            debug_print(f"    - {getNodeDebugID(node)}")
+
+    return new_mod, updated_RegionList
+
+
+def partitionRound(mod, handle_branch_from_var_converge=True):
+  """
+  Partition IMCFlow functions into regions for hardware mapping.
+
+  Args:
+      mod: The TVM IRModule to partition
+      handle_branch_from_var_converge: If True, treat branch_from_var cases (converge points
+          where diverge_node is None because one branch originates from Var inputs outside
+          the function) as unbalanced branches and force new region creation.
+          If False, these converge points are handled with normal selection policy.
+          Default is True.
+
+  Returns:
+      Partitioned IRModule
+  """
   for global_var, func in mod.functions.items():
     if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
       name = global_var.name_hint
       func_attr = func.attrs
-      annotator = AnnotGenerator()
+      annotator = AnnotGenerator(handle_branch_from_var_converge=handle_branch_from_var_converge)
       target_mod = tvm.IRModule.from_expr(relay.Function(func.params, func.body, ret_type=func.ret_type))
-      # RegionList = annotator.createRegion(target_mod)
-      RegionList = annotator.createRegionBFS(target_mod)
+
+      # Step 1: Create regions (with split_pending for deferred splits)
+      RegionList, split_pending, region_func = annotator.createRegionBFS(target_mod)
+
+      # Step 2: Apply composite splits if any
+      if split_pending:
+        debug_print(f"[partitionRound] Applying {len(split_pending)} composite splits")
+        target_mod, RegionList = _apply_composite_splits(target_mod, split_pending, RegionList, region_func)
+
+      # Step 3: Annotate and partition with updated graph and regions
       target_mod = imcflow.ImcflowAnnotationPass(RegionList, f"{name}_round_")(target_mod)
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_annotated")
       target_mod = transform.MergeCompilerRegions()(target_mod)
       target_mod = imcflow.ImcflowCleanRegionTag()(target_mod)
-      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_merged")
       target_mod = transform.PartitionGraph()(target_mod)
+      # printModel("resnet8_evl", target_mod, {}, f"{name}_round_partitioned")
 
       for new_gv, new_func in target_mod.functions.items():
         if new_gv.name_hint == "main":
@@ -1930,6 +3715,7 @@ def partitionRound(mod):
           mod[new_gv] = new_func
 
   return mod
+
 
 @relay.transform.function_pass(opt_level=0)
 class NodeMapper:
@@ -3753,384 +5539,78 @@ class MemoryAllocator:
           func_info = imcflow_func_map[gv.name_hint]
           self.run_(mod, func_info.func_node, gv.name_hint, ttype_map[gv.name_hint])
 
-class PolicyTableGenerator:
-    def __init__(self, NoCPaths):
-      self.NoCPaths = NoCPaths
-      self.PolicyTable_2D = {}
+# PolicyTableGenerator is now in separate modules:
+# - routing_pipeline.py: 3-phase pipeline with pluggable routers (PolicyTableGenerator)
+# - mcf_router.py: MCF (ILP-based) router
+# - xy_router.py: XY/YX dimension-ordered router
+#
+# Import for use:
+from tvm.relay.backend.contrib.imcflow.routing_pipeline import (
+    PolicyTableGenerator,
+    RoutingPipeline,
+    BaseRouter,
+    create_mcf_router,
+    create_xy_router,
+    create_policy_table_generator,
+)
 
-    def run(self, mod):
-      class _PolicyTableGenerator(tvm.relay.ExprVisitor):
-        def __init__(self, NoCPaths):
-            super().__init__()
-            self.NoCPaths = NoCPaths
-            self.router_entry_list_temp = {}
-            self.Policytable = []
-            self.explored_router_list = {}
-
-            # Dictionary to store initial addresses for each source-index pair
-            self.start_addr_dict = {}  # {(source, data type): start_address}
-
-            self.table_capacity = 32
-            self.InSubFunction = False
-            self.SubFunctionMapping = None
-            self.SubFunctionNodeID = None
-            self.VarProperties = {}
-
-        def generate_policy_table(self, func_name):
-            # Initialize policy tables for all nodes using NodeID as keys
-            # Each policy table starts with an all-zeros entry at address 0
-            zero_entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0, "ksel": 0}, \
-                          "North": {"enable": False, "addr": 0}, \
-                          "East": {"enable": False, "addr": 0},  \
-                          "South": {"enable": False, "addr": 0}, \
-                          "West": {"enable": False, "addr": 0}}
-            policy_tables = {node_id: [zero_entry.copy()] for node_id in NodeID}
-
-            def get_direction(source_coord, dest_coord):
-                if source_coord[1] < dest_coord[1]:
-                    return "East"
-                elif source_coord[1] > dest_coord[1]:
-                    return "West"
-                elif source_coord[0] < dest_coord[0]:
-                    return "South"
-                elif source_coord[0] > dest_coord[0]:
-                    return "North"
-                return None
-
-            def check_path_capacity(path_coords, explored_router_list):
-                """Check if all nodes in the path have available capacity"""
-                for coord in path_coords:
-                    node = NodeID.from_coord(coord[0],coord[1])
-                    if len(policy_tables[node]) >= self.table_capacity:
-                        if explored_router_list is not None and coord in explored_router_list:
-                            # This is only for multicast case, allow reusing existing path
-                            # For single path case, this won't be triggered as the explored_router_list is None
-                            continue
-                        else:
-                            return False
-                return True
-
-            def get_path_coords(source_coord, dest_coord, is_xy_routing=True, explored_router_list=None):
-                """Get list of coordinates for the path"""
-                path_coords = []
-                current_coord = source_coord
-
-                if is_xy_routing:
-                    # Move horizontally first (X)
-                    while current_coord[1] != dest_coord[1]:
-                        next_coord = (current_coord[0],
-                                    current_coord[1] + (1 if current_coord[1] < dest_coord[1] else -1))
-                        path_coords.append(next_coord)
-                        current_coord = next_coord
-
-                    # Then vertically (Y)
-                    while current_coord[0] != dest_coord[0]:
-                        next_coord = (current_coord[0] + (1 if current_coord[0] < dest_coord[0] else -1),
-                                    current_coord[1])
-                        path_coords.append(next_coord)
-                        current_coord = next_coord
-                else:
-                    # Move vertically first (Y)
-                    while current_coord[0] != dest_coord[0]:
-                        next_coord = (current_coord[0] + (1 if current_coord[0] < dest_coord[0] else -1),
-                                    current_coord[1])
-                        path_coords.append(next_coord)
-                        current_coord = next_coord
-
-                    # Then horizontally (X)
-                    while current_coord[1] != dest_coord[1]:
-                        next_coord = (current_coord[0],
-                                    current_coord[1] + (1 if current_coord[1] < dest_coord[1] else -1))
-                        path_coords.append(next_coord)
-                        current_coord = next_coord
-
-                # check policy table's capacity along the designated routing path
-                if not check_path_capacity(path_coords, explored_router_list):
-                    # If X-Y fails, try Y-X routing
-                    path_coords = get_path_coords(source_coord, dest_coord, False, explored_router_list)
-                    if not check_path_capacity(path_coords, explored_router_list):
-                        raise ValueError("Routing failed for both X-Y and Y-X!")
-
-                #TODO: there may be cases that X-Y and Y-X both fails!!!!!
-
-                return path_coords
-
-            def handle_single_path(edge, mapping_info, init_addr_save=True, router_entry_list=None):
-                """Append new entries to policy tables for a single destination"""
-                source_node = mapping_info[0]
-                dest_node = mapping_info[1]
-                dest_index = mapping_info[2] or 0 # split index for destination node
-                if mapping_info[2] is not None:
-                  dst_graph_node = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
-                  kernel_size = dst_graph_node.attrs['kernel_size'][0].value
-                  ksel = kernel_size
-                  if ksel not in [1, 2, 3, 5, 7]: raise ValueError("Unsupported kernel size for split index calculation.")
-                else:
-                  ksel = 0
-
-                if isinstance(edge, NodeID):
-                  src_node_data = f"instruction_{edge.name}"
-                else:
-                  src_node_data = edge.src_id.graph_node_id
-
-                source_coord = NodeID.to_coord(source_node)
-                dest_coord = NodeID.to_coord(dest_node)
-                entry_addr = len(policy_tables[source_node])
-
-                if router_entry_list is None: # initial handling
-                    router_entry_list= []
-                    if source_coord == dest_coord: # if same node, return
-                        return
-                    # check if there's previous path with same source and same source tensor id, which means multicast(i.e. split operation)
-                    elif any(k[0] == source_node and k[2] == src_node_data for k in self.start_addr_dict.keys()):
-                        handle_multicast(edge, mapping_info)
-                        return
-                    else:
-                        self.start_addr_dict[(source_node, dest_node, src_node_data)] = entry_addr # each source can have several tensor type
-
-                # Try X-Y routing first
-                path_coords = get_path_coords(source_coord, dest_coord, True)
-                if (source_node, dest_node, src_node_data) not in self.explored_router_list:
-                    self.explored_router_list[(source_node, dest_node, src_node_data)] = path_coords
-                else:
-                    self.explored_router_list[(source_node, dest_node, src_node_data)].extend(path_coords)
-
-                current_coord = source_coord
-                current_node = source_node
-                # Apply the successful path to tables
-                for next_coord in path_coords:
-                    direction = get_direction(current_coord, next_coord)
-                    next_node = NodeID.from_coord(next_coord[0], next_coord[1])
-
-                    #append entry to router's policy table
-                    entry = {"Local": {"enable": False, "chunk_index": 0, "addr": 0, "ksel":ksel}, \
-                      "North": {"enable": False, "addr": 0}, \
-                      "East": {"enable": False, "addr": 0},  \
-                      "South": {"enable": False, "addr": 0}, \
-                      "West": {"enable": False, "addr": 0}}
-
-                    target_addr = len(policy_tables[next_node])
-                    entry[direction]["addr"] = target_addr
-                    entry[direction]["enable"] = True
-                    policy_tables[current_node].append(entry)
-
-                    #create RouterEntry and append to router_entry_list
-                    router_entry_list.append((current_node, len(policy_tables[current_node])-1))
-
-                    #switch to next node
-                    current_coord = next_coord
-                    current_node = NodeID.from_coord(current_coord[0], current_coord[1])
-
-                # insert entry for destination node
-                entry = {"Local": {"enable": True, "chunk_index": dest_index, "addr": 0, "ksel":ksel}, \
-                  "North": {"enable": False, "addr": 0}, \
-                  "East": {"enable": False, "addr": 0},  \
-                  "South": {"enable": False, "addr": 0}, \
-                  "West": {"enable": False, "addr": 0}}
-
-                policy_tables[dest_node].append(entry)
-
-                #create RouterEntry and append to RouterEntry_list
-                router_entry_list.append((dest_node, len(policy_tables[dest_node])-1))
-
-                # temporary saving. Final saving is done after whole paths finish.
-                self.router_entry_list_temp[edge] = router_entry_list
-
-            def handle_multicast(edge, mapping_info):
-                """Handle multiple destinations with potential path sharing"""
-                source_node = mapping_info[0]
-                dest_node = mapping_info[1]
-                dest_index = mapping_info[2] or 0 # split index for destination node
-                if mapping_info[2] is not None:
-                  dst_graph_node = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
-                  kernel_size = dst_graph_node.attrs['kernel_size'][0].value
-                  ksel = kernel_size
-                  if ksel not in [1, 2, 3, 5, 7]: raise ValueError("Unsupported kernel size for split index calculation.")
-                else:
-                  ksel = 0
-
-                if isinstance(edge, NodeID):
-                  src_node_data = f"instruction_{edge.name}"
-                else:
-                  src_node_data = edge.src_id.graph_node_id
-                router_entry_list= []
-
-                if source_node == dest_node: # if same node, return
-                    return
-
-                # Follow existing path and modify at divergence point
-                previous_path_key = None
-                for k in self.start_addr_dict.keys():
-                  if k[0] == source_node and k[2] == src_node_data:
-                    previous_path_key = k
-                    break
-                if previous_path_key is None:
-                  raise ValueError("No previous path found for multicast handling.")
-
-                entry_addr = self.start_addr_dict[previous_path_key]
-                current_node = source_node
-                current_coord = NodeID.to_coord(current_node)
-                dest_coord = NodeID.to_coord(dest_node)
-                next_coord = None
-
-                while current_coord != dest_coord:
-                    entry = policy_tables[current_node][entry_addr] # current policy table entry
-
-                    # Find which direction to go next.
-                    path_coords = get_path_coords(current_coord, dest_coord, self.explored_router_list[previous_path_key])
-                    next_coord = path_coords[0]
-                    next_node = NodeID.from_coord(next_coord[0],next_coord[1])
-                    direction = get_direction(current_coord, next_coord)
-
-                    # If direction is different from previous path, diverge!
-                    if entry[direction]["enable"] is False:
-                        # modify entry
-                        target_addr = len(policy_tables[next_node])
-                        policy_tables[current_node][entry_addr][direction]["addr"] = target_addr
-                        policy_tables[current_node][entry_addr][direction]["enable"] = True
-
-                        #create RouterEntry and append to router_entry_list
-                        router_entry_list.append((current_node, entry_addr))
-
-                        # diverge into new path
-                        new_mapping = (next_node, mapping_info[1], mapping_info[2])
-                        handle_single_path(edge, new_mapping, init_addr_save=False, router_entry_list=router_entry_list)
-                        break
-                    else:
-                        # create RouterEntry and append to router_entry_list
-                        router_entry_list.append((current_node, entry_addr))
-
-                        # keep following the previous path
-                        current_coord = next_coord
-                        current_node = next_node
-                        entry_addr = entry[direction]["addr"]
-
-                        if current_node == dest_node: # if same node, return
-                            policy_tables[dest_node][entry_addr]["Local"]["enable"] = True
-                            policy_tables[dest_node][entry_addr]["Local"]["chunk_index"] = dest_index
-                            policy_tables[dest_node][entry_addr]["Local"]["ksel"] = ksel
-                            # create RouterEntry and append to router_entry_list
-                            router_entry_list.append((current_node, entry_addr))
-                            # temporary saving. Final saving is done after whole paths finish.
-                            self.router_entry_list_temp[edge] = router_entry_list
-                            break
-
-            # Main logic
-            for edge, mapping_info in self.NoCPaths.items():
-                handle_single_path(edge, mapping_info)
-
-            self.Policytable = policy_tables
-            ImcflowDeviceConfig().PolicyTableDict[func_name] = policy_tables
-
-        def add_EdgeInfo(self, func_name):
-            # def get_meminfo(edge):
-            #     if isinstance(edge.src_id, tuple):
-            #         id = edge.src_id[1]
-            #     else:
-            #         id = edge.src_id
-
-            #     size = self.DataBlockDict[id]["size"]
-            #     offset = self.DataBlockDict[id]["offset"]
-            #     base_address = self.DataBlockDict[id]["base_address"]
-            #     meminfo = DataBlock(id, size)
-
-            #     meminfo.set_offset(offset)
-            #     meminfo.set_base_address(base_address)
-
-            #     return meminfo
-
-            # after policy table entry generation finished, add to TensorEdgeToInfo
-            fifo_id_cnt = {node_id: 2 for node_id in NodeID}
-            ID_dict = CustomIDToName()
-            for edge, mapping_info in self.NoCPaths.items():
-              # if tensoredge, save to TensorEdgetoInfo
-              dest_node = mapping_info[1]
-              router_entry_list=[]
-              if edge in self.router_entry_list_temp:
-                  for entry_tuple in self.router_entry_list_temp[edge]:
-                      router_entry_list.append(RouterEntry(entry_tuple[0], entry_tuple[1], self.Policytable[entry_tuple[0]][entry_tuple[1]]))
-
-                  if isinstance(edge, TensorEdge): # TensorEdge
-                      # find mem_info
-                      # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
-
-                      # FIFO ID assign
-                      # 0: conv input
-                      # 1: const (including weight)
-                      # 2~6: rest
-                      # edgeinfo = ImcflowDeviceConfig().get_tensor_edge_info(edge)
-                      # edgeinfo.set_policy_info(router_entry_list)
-
-                      if edge.src_id.tensor_type in ["odata", "var"]:
-                        # get src node name from CustomIDToName
-                        dst_node_name = ID_dict[getInnerNodeID(edge.dst_id.graph_node_id)]
-
-                        if dst_node_name == "nn.imcflow_qconv":
-                          # if src is input of qconv, FIFO ID = 0
-                          # edgeinfo.set_fifo_id(0)
-                          edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
-                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
-                        else:
-                          # if not, FIFO ID = 2~6
-                          # edgeinfo.set_fifo_id(fifo_id_cnt[dest_node])
-                          edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
-                          ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
-
-                          fifo_id_cnt[dest_node] = fifo_id_cnt[dest_node] + 1
-                          if fifo_id_cnt[dest_node] >= 8:
-                            raise ValueError("FIFO ID cannot be over 7!")
-
-                      elif edge.src_id.tensor_type in ["weight", "bias", "fused_scale", "fused_bias", "min", "max", "threshold", "scale", "config"]:
-                        # if const, FIFO ID = 1
-                        edgeinfo = TensorEdgeInfo(router_entry_list, None, 1)
-                        ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
-                      else:
-                        raise ValueError("Wrong tensor type!")
-
-                  else: # Instruction edge
-                      # meminfo = get_meminfo(edge) # decided to erase MemoryBlock in EdgeInfo
-                      edgeinfo = InstEdgeInfo(router_entry_list, None)
-                      ImcflowDeviceConfig().add_inst_edge_info(func_name, edge, edgeinfo)
-              else: # src hw node and dst hw node is equal. it is local edge
-                edgeinfo = TensorEdgeInfo([], None, TensorEdgeInfo.LOCAL_FIFO)
-                ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
-
-        def allocate(self, func_name):
-          # Allocate memory for policy tables
-          for node_id, policy_table in self.Policytable.items():
-            if len(policy_table) == 0:
-                continue
-            mem_size = len(policy_table) * 32
-            mem_block = DataBlock(f"{node_id.name}_policy", mem_size)
-            inode_id = node_id.master() if node_id.is_imce() else node_id
-            ImcflowDeviceConfig().MemLayout[func_name][f"{inode_id.name}_data"].allocate(mem_block, phase="init")
-
-        def update_device_config(self, func_name):
-            # traverse input function by visit() to make PathDict and generate policy table for it
-            self.generate_policy_table(func_name)
-            self.add_EdgeInfo(func_name)
-            self.allocate(func_name)
-            return self.Policytable
-
-      # Returns list of (GlobalVar, Function) pairs sorted alphabetically by function name
-      for gv, func in mod.functions.items():
-        if isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow":
-          self.PolicyTable_2D[gv.name_hint] = _PolicyTableGenerator(self.NoCPaths[gv.name_hint]).update_device_config(gv.name_hint)
-          for x in self.PolicyTable_2D[gv.name_hint]:
-            print(x)
-
-      return mod
 
 class TensorPathVisualizer:
     """
     Visualizes tensor routing paths in the 2D mesh NoC topology.
-    
+
     For each imcflow function, generates an image showing:
     - 2D mesh grid with inodes and imces as labeled squares
     - Tensor paths as colored lines between nodes
     - Each tensor gets a unique color
+
+    Paths are classified into three groups:
+    - inst: Instruction paths (edges that are NodeID, not TensorEdge)
+    - const: Constant tensor paths (weight, config, min, max, fused_scale, fused_bias, bias, scale, threshold)
+    - data: Runtime data tensor paths (odata, data, lhs, rhs, func_out*, var)
     """
-    
+
+    # Tensor type classification constants (aligned with mcf_router.py)
+    CONST_TENSOR_TYPES = frozenset([
+        'weight', 'config', 'min', 'max', 'fused_scale', 'fused_bias',
+        'bias', 'scale', 'threshold'
+    ])
+    DATA_TENSOR_TYPES = frozenset([
+        'odata', 'data', 'lhs', 'rhs', 'var',
+        *[f"func_out{i}" for i in range(30)]
+    ])
+
+    # Group display configuration
+    GROUP_CONFIG = {
+        'inst': {'name': 'Instructions', 'color_scheme': 'Purples', 'base_color': 'purple'},
+        'const': {'name': 'Constants', 'color_scheme': 'Blues', 'base_color': 'blue'},
+        'data': {'name': 'Data', 'color_scheme': 'Oranges', 'base_color': 'orange'},
+    }
+
+    # Visualization style configuration (easy to customize)
+    # Marker styles: 'o'=circle, 's'=square, '^'=triangle up, 'v'=triangle down,
+    #                '>'=triangle right, 'D'=diamond, '*'=star, 'p'=pentagon
+    START_MARKER = 's'        # Start point marker (square)
+    START_MARKER_SIZE = 10    # Start point marker size
+    MID_MARKER = 'o'          # Intermediate point marker (circle)
+    MID_MARKER_SIZE = 6       # Intermediate point marker size
+    END_MARKER = '*'          # End point marker (triangle down)
+    END_MARKER_SIZE = 15      # End point marker size
+
+    # Plotly marker styles: circle, square, diamond, cross, x, triangle-up, triangle-down, etc.
+    START_MARKER_PLOTLY = 'square'
+    START_MARKER_SIZE_PLOTLY = 12
+    MID_MARKER_PLOTLY = 'circle'
+    MID_MARKER_SIZE_PLOTLY = 8
+    END_MARKER_PLOTLY = 'star'
+    END_MARKER_SIZE_PLOTLY = 12
+
+    LINE_WIDTH = 2.5          # Width of path lines
+    ARROW_HEAD_WIDTH = 0.08   # Width of arrow head
+    ARROW_HEAD_LENGTH = 0.06  # Length of arrow head
+    ARROW_LINE_WIDTH = 1.0    # Width of arrow line
+    OFFSET_UNIT = 0.06        # Base offset unit for parallel paths
+
     def __init__(self, output_dir="noc_visualizations"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -4147,7 +5627,66 @@ class TensorPathVisualizer:
             self.LineCollection = LineCollection
         except ImportError:
             raise ImportError("matplotlib is required for visualization. Install with: pip install matplotlib")
-    
+
+        # Check for plotly (optional, for interactive visualization)
+        self.plotly_available = False
+        try:
+            import plotly.graph_objects as go
+            self.go = go
+            self.plotly_available = True
+        except ImportError:
+            pass  # Plotly is optional
+
+    def _classify_edge(self, edge):
+        """
+        Classify an edge into one of the three groups: inst, const, data.
+
+        Parameters
+        ----------
+        edge : TensorEdge or NodeID
+            The edge to classify
+
+        Returns
+        -------
+        str
+            One of 'inst', 'const', or 'data'
+        """
+        # Instruction edges are NodeID, not TensorEdge
+        if not isinstance(edge, TensorEdge):
+            return 'inst'
+
+        # Get tensor type from TensorEdge
+        tensor_type = edge.src_id.tensor_type if hasattr(edge.src_id, 'tensor_type') else None
+
+        if tensor_type in self.CONST_TENSOR_TYPES:
+            return 'const'
+        elif tensor_type in self.DATA_TENSOR_TYPES:
+            return 'data'
+        else:
+            # Unknown type - default to data (more conservative)
+            debug_print(f"[TensorPathVisualizer] Unknown tensor_type '{tensor_type}', defaulting to 'data' group")
+            return 'data'
+
+    def _group_paths_by_category(self, noc_paths):
+        """
+        Group NoC paths by their category (inst, const, data).
+
+        Parameters
+        ----------
+        noc_paths : dict
+            Dictionary mapping edges to mapping_info
+
+        Returns
+        -------
+        dict
+            Dictionary mapping group name to dict of {edge: mapping_info}
+        """
+        groups = {'inst': {}, 'const': {}, 'data': {}}
+        for edge, mapping_info in noc_paths.items():
+            group = self._classify_edge(edge)
+            groups[group][edge] = mapping_info
+        return groups
+
     def visualize_all_functions(self, mod):
         """
         Generate visualizations for all imcflow functions in the module.
@@ -4166,8 +5705,12 @@ class TensorPathVisualizer:
     def visualize_function(self, func_name):
         """
         Generate visualization for a single imcflow function.
-        Creates separate images for each tensor type (odata, weight, bias, etc.)
-        
+        Creates separate images for:
+        - Each tensor type (odata, weight, bias, etc.)
+        - Each group category (inst, const, data)
+        - Overview of all paths
+        - Interactive HTML visualization (if plotly available)
+
         Parameters
         ----------
         func_name : str
@@ -4177,15 +5720,15 @@ class TensorPathVisualizer:
         if func_name not in ImcflowDeviceConfig().NoCPaths:
             debug_print(f"No NoC paths found for function {func_name}")
             return
-        
+
         noc_paths = ImcflowDeviceConfig().NoCPaths[func_name]
         tensor_edge_list = ImcflowDeviceConfig().TensorEdgeListDict.get(func_name, [])
-        
+
         # Create subdirectory for this function
         func_output_dir = os.path.join(self.output_dir, func_name)
         os.makedirs(func_output_dir, exist_ok=True)
-        
-        # Group NoC paths by tensor type
+
+        # Group NoC paths by tensor type (for individual tensor type images)
         paths_by_type = {}
         for edge, mapping_info in noc_paths.items():
             if isinstance(edge, TensorEdge):
@@ -4193,46 +5736,81 @@ class TensorPathVisualizer:
                 if tensor_type not in paths_by_type:
                     paths_by_type[tensor_type] = {}
                 paths_by_type[tensor_type][edge] = mapping_info
-        
-        # Create a visualization for each tensor type
-        if not paths_by_type:
-            debug_print(f"No tensor edges found for function {func_name}")
-            return
-        
-        # Create individual visualizations for each tensor type
-        for tensor_type, type_paths in sorted(paths_by_type.items()):
-            debug_print(f"  Creating visualization for {tensor_type}: {len(type_paths)} paths")
-            
-            # Create the visualization
-            fig, ax = self._create_mesh_grid(title=f"{func_name} - {tensor_type} Paths")
-            
-            # Draw tensor paths for this type only
-            self._draw_tensor_paths(ax, type_paths, tensor_edge_list)
-            
+
+        # Group NoC paths by category (inst, const, data)
+        paths_by_group = self._group_paths_by_category(noc_paths)
+
+        # Log group statistics
+        debug_print(f"  Path groups: inst={len(paths_by_group['inst'])}, "
+                   f"const={len(paths_by_group['const'])}, data={len(paths_by_group['data'])}")
+
+        # ============================================================
+        # 1. Create visualizations for each GROUP (inst, const, data)
+        # ============================================================
+        debug_print(f"  Creating group-based visualizations...")
+        for group_name, group_paths in paths_by_group.items():
+            if not group_paths:
+                continue
+
+            group_config = self.GROUP_CONFIG[group_name]
+            debug_print(f"    Creating {group_name} ({group_config['name']}): {len(group_paths)} paths")
+
+            fig, ax = self._create_mesh_grid(
+                title=f"{func_name} - {group_config['name']} Paths ({len(group_paths)} paths)"
+            )
+
+            # Draw paths for this group
+            self._draw_tensor_paths(ax, group_paths, tensor_edge_list)
+
             # Save the figure
-            output_path = os.path.join(func_output_dir, f"{tensor_type}.png")
+            output_path = os.path.join(func_output_dir, f"group_{group_name}.png")
             self.plt.savefig(output_path, dpi=300, bbox_inches='tight')
             self.plt.close(fig)
-            
-            debug_print(f"    Saved: {output_path}")
+            debug_print(f"      Saved: {output_path}")
+
+        # ============================================================
+        # 2. Create visualizations for each TENSOR TYPE
+        # ============================================================
+        if not paths_by_type:
+            debug_print(f"No tensor edges found for function {func_name}")
+        else:
+            # Create individual visualizations for each tensor type
+            for tensor_type, type_paths in sorted(paths_by_type.items()):
+                debug_print(f"  Creating visualization for {tensor_type}: {len(type_paths)} paths")
+
+                fig, ax = self._create_mesh_grid(title=f"{func_name} - {tensor_type} Paths")
+                self._draw_tensor_paths(ax, type_paths, tensor_edge_list)
+
+                output_path = os.path.join(func_output_dir, f"{tensor_type}.png")
+                self.plt.savefig(output_path, dpi=300, bbox_inches='tight')
+                self.plt.close(fig)
+                debug_print(f"    Saved: {output_path}")
+
+        # ============================================================
+        # 3. Create overview image with ALL paths
+        # ============================================================
+        debug_print(f"  Creating overview with all paths")
+        fig, ax = self._create_mesh_grid(title=f"{func_name} - All Paths (Overview)")
+
+        self._draw_tensor_paths(ax, noc_paths, tensor_edge_list)
         
-        # Also create an overview image with all tensor types
-        debug_print(f"  Creating overview with all {len(paths_by_type)} tensor types")
-        fig, ax = self._create_mesh_grid(title=f"{func_name} - All Tensor Paths (Overview)")
-        
-        # Collect all tensor edges
-        all_type_paths = {}
-        for type_paths in paths_by_type.values():
-            all_type_paths.update(type_paths)
-        
-        self._draw_tensor_paths(ax, all_type_paths, tensor_edge_list)
-        
-        overview_path = os.path.join(func_output_dir, "00_overview_all_types.png")
+        overview_path = os.path.join(func_output_dir, "00_overview_all_paths.png")
         self.plt.savefig(overview_path, dpi=300, bbox_inches='tight')
         self.plt.close(fig)
-        
         debug_print(f"    Saved: {overview_path}")
-        debug_print(f"Completed visualization for {func_name}: {len(paths_by_type)} tensor types")
+
+        # ============================================================
+        # 4. Create INTERACTIVE visualization (HTML with Plotly)
+        # ============================================================
+        if self.plotly_available:
+            debug_print(f"  Creating interactive HTML visualization...")
+            self._create_interactive_visualization(func_name, noc_paths, paths_by_group, func_output_dir)
+        else:
+            debug_print(f"  Skipping interactive visualization (plotly not installed)")
+
+        debug_print(f"Completed visualization for {func_name}: "
+                   f"groups=(inst={len(paths_by_group['inst'])}, const={len(paths_by_group['const'])}, "
+                   f"data={len(paths_by_group['data'])}), types={len(paths_by_type)}")
     
     def _create_mesh_grid(self, title="NoC Tensor Routing Paths"):
         """
@@ -4297,10 +5875,57 @@ class TensorPathVisualizer:
         
         return fig, ax
     
+    def _normalize_segment(self, p1, p2):
+        """
+        Normalize a segment so that both directions map to the same key.
+        Returns tuple of (smaller_point, larger_point) based on lexicographic order.
+        """
+        if (p1[0], p1[1]) <= (p2[0], p2[1]):
+            return (p1, p2)
+        return (p2, p1)
+
+    def _get_path_coords(self, edge, mapping_info, node_size, spacing, rows):
+        """
+        Extract path coordinates for an edge.
+
+        Returns:
+            List of (x, y) coordinates, or None if no valid path
+        """
+        source_node = mapping_info[0]
+        dest_node = mapping_info[1]
+
+        # Try to get full path from router entries
+        if isinstance(edge, TensorEdge) and edge in ImcflowDeviceConfig().TensorEdgetoInfo:
+            edge_info = ImcflowDeviceConfig().TensorEdgetoInfo[edge]
+            if edge_info.policy_info:
+                path_nodes = [entry.router_id for entry in edge_info.policy_info]
+                path_coords = []
+                for node_id in path_nodes:
+                    coord = NodeID.to_coord(node_id)
+                    row, col = coord
+                    x = col * (node_size + spacing) + spacing + node_size / 2
+                    y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size / 2
+                    path_coords.append((x, y))
+                return path_coords
+
+        # Fallback: direct line from source to dest
+        src_coord = NodeID.to_coord(source_node)
+        dst_coord = NodeID.to_coord(dest_node)
+
+        src_x = src_coord[1] * (node_size + spacing) + spacing + node_size / 2
+        src_y = (rows - 1 - src_coord[0]) * (node_size + spacing) + spacing + node_size / 2
+        dst_x = dst_coord[1] * (node_size + spacing) + spacing + node_size / 2
+        dst_y = (rows - 1 - dst_coord[0]) * (node_size + spacing) + spacing + node_size / 2
+
+        return [(src_x, src_y), (dst_x, dst_y)]
+
     def _draw_tensor_paths(self, ax, noc_paths, tensor_edge_list):
         """
-        Draw tensor paths on the mesh grid.
-        
+        Draw tensor paths on the mesh grid using 2-pass algorithm for parallel offset.
+
+        The algorithm ensures that overlapping paths are drawn as parallel lines
+        (strictly horizontal/vertical) instead of tilted lines.
+
         Parameters
         ----------
         ax : matplotlib axis
@@ -4310,167 +5935,330 @@ class TensorPathVisualizer:
         tensor_edge_list : list
             List of TensorEdge objects for this function
         """
-        # Get unique colors for each tensor edge
-        num_tensor_edges = len([e for e in noc_paths.keys() if isinstance(e, TensorEdge)])
-        colors = self._generate_colors(num_tensor_edges)
-        
-        # Node size and spacing (must match _create_mesh_grid)
+        # Constants
         node_size = 1.0
         spacing = 0.5
         rows = ImcflowDeviceConfig.INODE_NUM
-        
-        # Track which tensor edges we've drawn
-        tensor_edge_idx = 0
-        legend_entries = []
-        
-        # Track edge segments to add offsets for overlapping paths
-        segment_usage = {}  # ((x1,y1), (x2,y2)) -> count
-        
+
+        # Get colors
+        num_edges = len(noc_paths)
+        colors = self._generate_colors(num_edges)
+
+        # ============================================================
+        # PASS 1: Extract all paths and collect segment usage
+        # ============================================================
+        path_data = []  # List of (edge, mapping_info, path_coords, color)
+        segment_paths = {}  # normalized_segment -> [path_index, ...]
+
+        edge_idx = 0
         for edge, mapping_info in noc_paths.items():
-            # Only visualize TensorEdge (not instruction edges)
-            if not isinstance(edge, TensorEdge):
-                continue
-            
+            path_coords = self._get_path_coords(edge, mapping_info, node_size, spacing, rows)
+
+            if path_coords and len(path_coords) >= 2:
+                color = colors[edge_idx % len(colors)]
+                path_index = len(path_data)
+                path_data.append((edge, mapping_info, path_coords, color))
+
+                # Collect segments for this path
+                for i in range(len(path_coords) - 1):
+                    p1 = path_coords[i]
+                    p2 = path_coords[i + 1]
+                    seg = self._normalize_segment(p1, p2)
+
+                    if seg not in segment_paths:
+                        segment_paths[seg] = []
+                    segment_paths[seg].append(path_index)
+
+            edge_idx += 1
+
+        # ============================================================
+        # PASS 2 & 3: Greedy path-by-path drawing with consistent offset
+        # Each path gets ONE consistent offset slot across all its segments
+        # ============================================================
+        legend_entries = []
+
+        # Track which slots are claimed on each segment
+        segment_claimed_slots = {seg: set() for seg in segment_paths.keys()}
+
+        # ============================================================
+        # Track markers per node to avoid star/square overlap
+        # ============================================================
+        # Collect all markers (start=square, end=star) per node
+        node_start_markers = {}  # node_id -> list of path_idx
+        node_end_markers = {}    # node_id -> list of path_idx
+
+        for path_idx, (edge, mapping_info, path_coords, color) in enumerate(path_data):
             source_node = mapping_info[0]
             dest_node = mapping_info[1]
-            
-            # Get color for this edge
-            color = colors[tensor_edge_idx % len(colors)]
-            tensor_edge_idx += 1
-            
-            # Get the full path by looking up router entries
-            if edge in ImcflowDeviceConfig().TensorEdgetoInfo:
-                edge_info = ImcflowDeviceConfig().TensorEdgetoInfo[edge]
-                if edge_info.policy_info:
-                    # Extract path from router entries
-                    path_nodes = [entry.router_id for entry in edge_info.policy_info]
-                    
-                    # Convert path to coordinates and draw
-                    path_coords = []
-                    for node_id in path_nodes:
-                        coord = NodeID.to_coord(node_id)
-                        row, col = coord
-                        x = col * (node_size + spacing) + spacing + node_size/2
-                        y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size/2
-                        path_coords.append((x, y))
-                    
-                    # Draw the path with offsets to avoid overlap
-                    if len(path_coords) > 1:
-                        offset_coords = []
-                        for i, (x, y) in enumerate(path_coords):
-                            if i > 0:
-                                # Calculate offset based on segment usage
-                                prev_pt = path_coords[i-1]
-                                curr_pt = (x, y)
-                                segment = (prev_pt, curr_pt)
-                                segment_rev = (curr_pt, prev_pt)
-                                
-                                # Count usage (consider both directions as same segment)
-                                if segment in segment_usage:
-                                    offset_idx = segment_usage[segment]
-                                    segment_usage[segment] += 1
-                                elif segment_rev in segment_usage:
-                                    offset_idx = segment_usage[segment_rev]
-                                    segment_usage[segment_rev] += 1
-                                else:
-                                    offset_idx = 0
-                                    segment_usage[segment] = 1
-                                
-                                # Apply perpendicular offset
-                                dx = curr_pt[0] - prev_pt[0]
-                                dy = curr_pt[1] - prev_pt[1]
-                                length = (dx**2 + dy**2)**0.5
-                                if length > 0:
-                                    # Perpendicular direction
-                                    perp_x = -dy / length
-                                    perp_y = dx / length
-                                    # Offset amount (alternate positive/negative)
-                                    offset_amount = 0.08 * (offset_idx + 1) * (1 if offset_idx % 2 == 0 else -1)
-                                    x_offset = x + perp_x * offset_amount
-                                    y_offset = y + perp_y * offset_amount
-                                    offset_coords.append((x_offset, y_offset))
-                                else:
-                                    offset_coords.append((x, y))
-                            else:
-                                offset_coords.append((x, y))
-                        
-                        xs, ys = zip(*offset_coords)
-                        line = ax.plot(xs, ys, color=color, linewidth=2.5, alpha=0.8, 
-                                      marker='o', markersize=5, markeredgecolor='white', 
-                                      markeredgewidth=0.5, zorder=10)
-                        
-                        # Add arrow at the end
-                        if len(offset_coords) >= 2:
-                            dx = offset_coords[-1][0] - offset_coords[-2][0]
-                            dy = offset_coords[-1][1] - offset_coords[-2][1]
-                            length = (dx**2 + dy**2)**0.5
-                            if length > 0:
-                                ax.arrow(offset_coords[-2][0], offset_coords[-2][1], dx*0.6, dy*0.6,
-                                       head_width=0.2, head_length=0.15, fc=color, ec=color, 
-                                       alpha=0.9, linewidth=1.5, zorder=11)
-                        
-                        # Create legend entry with NodeID and CustomID information
-                        src_node_name = source_node.name
-                        dst_node_name = dest_node.name
-                        tensor_type = edge.src_id.tensor_type
-                        
-                        # Get custom IDs from the tensor edge
-                        src_custom_id = edge.src_id.graph_node_id
-                        dst_custom_id = edge.dst_id.graph_node_id
-                        
-                        # Format custom IDs (handle tuples for composite functions)
-                        src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
-                        dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
-                        
-                        tensor_label = f"{src_node_name} → {dst_node_name} | ID:{src_id_str}→{dst_id_str} ({tensor_type})"
-                        if edge.split_idx is not None:
-                            tensor_label += f"[{edge.split_idx}]"
-                        legend_entries.append((line[0], tensor_label))
+
+            # Track start marker at source node
+            src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+            if src_key not in node_start_markers:
+                node_start_markers[src_key] = []
+            node_start_markers[src_key].append(path_idx)
+
+            # Track end marker at dest node
+            dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+            if dst_key not in node_end_markers:
+                node_end_markers[dst_key] = []
+            node_end_markers[dst_key].append(path_idx)
+
+        # Assign marker slots per node (combining start and end markers)
+        # This ensures stars and squares at the same node don't overlap
+        node_marker_slots = {}  # (node_key, marker_type, path_idx) -> slot_index
+        MARKER_OFFSET_UNIT = 0.08  # Offset unit for separating markers
+
+        for node_key in set(node_start_markers.keys()) | set(node_end_markers.keys()):
+            # Collect all markers at this node
+            markers_at_node = []
+            for path_idx in node_start_markers.get(node_key, []):
+                markers_at_node.append(('start', path_idx))
+            for path_idx in node_end_markers.get(node_key, []):
+                markers_at_node.append(('end', path_idx))
+
+            # Assign slots in a grid pattern around the node center
+            for slot_idx, (marker_type, path_idx) in enumerate(markers_at_node):
+                node_marker_slots[(node_key, marker_type, path_idx)] = slot_idx
+
+        def get_marker_offset(node_key, marker_type, path_idx, base_offset):
+            """Calculate additional marker offset to avoid overlap."""
+            key = (node_key, marker_type, path_idx)
+            if key not in node_marker_slots:
+                return (0, 0)
+
+            slot_idx = node_marker_slots[key]
+            if slot_idx == 0:
+                return (0, 0)
+
+            # Spread markers in a grid pattern
+            # slot 1: (+x, 0), slot 2: (-x, 0), slot 3: (0, +y), slot 4: (0, -y)
+            # slot 5: (+x, +y), slot 6: (-x, +y), slot 7: (+x, -y), slot 8: (-x, -y)
+            patterns = [
+                (0, 0),
+                (MARKER_OFFSET_UNIT, 0),
+                (-MARKER_OFFSET_UNIT, 0),
+                (0, MARKER_OFFSET_UNIT),
+                (0, -MARKER_OFFSET_UNIT),
+                (MARKER_OFFSET_UNIT, MARKER_OFFSET_UNIT),
+                (-MARKER_OFFSET_UNIT, MARKER_OFFSET_UNIT),
+                (MARKER_OFFSET_UNIT, -MARKER_OFFSET_UNIT),
+                (-MARKER_OFFSET_UNIT, -MARKER_OFFSET_UNIT),
+            ]
+
+            if slot_idx < len(patterns):
+                return patterns[slot_idx]
             else:
-                # Fallback: draw direct line from source to dest
-                src_coord = NodeID.to_coord(source_node)
-                dst_coord = NodeID.to_coord(dest_node)
-                
-                src_x = src_coord[1] * (node_size + spacing) + spacing + node_size/2
-                src_y = (rows - 1 - src_coord[0]) * (node_size + spacing) + spacing + node_size/2
-                dst_x = dst_coord[1] * (node_size + spacing) + spacing + node_size/2
-                dst_y = (rows - 1 - dst_coord[0]) * (node_size + spacing) + spacing + node_size/2
-                
-                line = ax.plot([src_x, dst_x], [src_y, dst_y], 
-                             color=color, linewidth=2.5, alpha=0.8, marker='o', 
-                             markersize=5, markeredgecolor='white', markeredgewidth=0.5, zorder=10)
-                
-                # Add arrow
-                dx = dst_x - src_x
-                dy = dst_y - src_y
-                length = (dx**2 + dy**2)**0.5
+                # For more markers, use a circular pattern
+                import math
+                angle = (slot_idx - len(patterns)) * (2 * math.pi / 8)
+                radius = MARKER_OFFSET_UNIT * (1 + (slot_idx - len(patterns)) // 8)
+                return (radius * math.cos(angle), radius * math.sin(angle))
+
+        # Get the path's segments helper
+        def get_path_segments(path_coords):
+            segments = []
+            for i in range(len(path_coords) - 1):
+                seg = self._normalize_segment(path_coords[i], path_coords[i + 1])
+                segments.append(seg)
+            return segments
+
+        for path_idx, (edge, mapping_info, path_coords, color) in enumerate(path_data):
+            source_node = mapping_info[0]
+            dest_node = mapping_info[1]
+
+            # Get all segments for this path
+            path_segments = get_path_segments(path_coords)
+
+            # Find a slot that's available on ALL segments of this path
+            # Try slot 0, 1, 2, ... until we find one that works
+            chosen_slot = 0
+            max_possible_slot = max(len(segment_paths.get(seg, [])) for seg in path_segments) + len(path_data)
+
+            for candidate_slot in range(max_possible_slot):
+                # Check if this slot is available on all segments of this path
+                available = True
+                for seg in path_segments:
+                    if candidate_slot in segment_claimed_slots.get(seg, set()):
+                        available = False
+                        break
+                if available:
+                    chosen_slot = candidate_slot
+                    break
+
+            # Claim this slot on all segments of this path
+            for seg in path_segments:
+                if seg not in segment_claimed_slots:
+                    segment_claimed_slots[seg] = set()
+                segment_claimed_slots[seg].add(chosen_slot)
+
+            # Calculate the offset for this path (consistent across all segments)
+            # We use a simple linear offset based on chosen_slot
+            # Centered around 0: slot 0 -> 0, slot 1 -> +offset, slot 2 -> -offset, etc.
+            if chosen_slot == 0:
+                path_offset = 0
+            elif chosen_slot % 2 == 1:
+                path_offset = ((chosen_slot + 1) // 2) * self.OFFSET_UNIT
+            else:
+                path_offset = -(chosen_slot // 2) * self.OFFSET_UNIT
+
+            # Build offset path with CONSISTENT offset for entire path
+            # At corner points, apply BOTH X and Y offsets so lines meet orthogonally
+            all_segments_coords = []
+
+            # First, determine direction (horizontal/vertical) for each segment
+            segment_directions = []  # True = horizontal, False = vertical
+            for i in range(len(path_coords) - 1):
+                p1 = path_coords[i]
+                p2 = path_coords[i + 1]
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+                is_horizontal = abs(dx) > abs(dy)
+                segment_directions.append(is_horizontal)
+
+            # Build offset coordinates for each segment
+            for i in range(len(path_coords) - 1):
+                p1 = path_coords[i]
+                p2 = path_coords[i + 1]
+                is_horizontal = segment_directions[i]
+
+                # Determine if there's a direction change at p1 (start of this segment)
+                # and at p2 (end of this segment)
+                prev_is_horizontal = segment_directions[i - 1] if i > 0 else is_horizontal
+                next_is_horizontal = segment_directions[i + 1] if i < len(segment_directions) - 1 else is_horizontal
+
+                # Apply offset at p1
+                if i == 0:
+                    # First point: only apply this segment's perpendicular offset
+                    if is_horizontal:
+                        offset_p1 = (p1[0], p1[1] + path_offset)
+                    else:
+                        offset_p1 = (p1[0] + path_offset, p1[1])
+                elif prev_is_horizontal != is_horizontal:
+                    # Corner at p1: apply BOTH X and Y offsets for orthogonal meeting
+                    offset_p1 = (p1[0] + path_offset, p1[1] + path_offset)
+                else:
+                    # Same direction continues: apply only this segment's offset
+                    if is_horizontal:
+                        offset_p1 = (p1[0], p1[1] + path_offset)
+                    else:
+                        offset_p1 = (p1[0] + path_offset, p1[1])
+
+                # Apply offset at p2
+                if i == len(segment_directions) - 1:
+                    # Last point: only apply this segment's perpendicular offset
+                    if is_horizontal:
+                        offset_p2 = (p2[0], p2[1] + path_offset)
+                    else:
+                        offset_p2 = (p2[0] + path_offset, p2[1])
+                elif is_horizontal != next_is_horizontal:
+                    # Corner at p2: apply BOTH X and Y offsets for orthogonal meeting
+                    offset_p2 = (p2[0] + path_offset, p2[1] + path_offset)
+                else:
+                    # Same direction continues: apply only this segment's offset
+                    if is_horizontal:
+                        offset_p2 = (p2[0], p2[1] + path_offset)
+                    else:
+                        offset_p2 = (p2[0] + path_offset, p2[1])
+
+                all_segments_coords.append([offset_p1, offset_p2, is_horizontal])
+
+            # Draw segments (no connectors needed - corners meet at single point)
+            first_line = None
+            corner_points = []  # Points where direction changes (for intermediate markers)
+
+            for seg_idx, seg_data in enumerate(all_segments_coords):
+                offset_p1, offset_p2, is_horizontal = seg_data
+                xs = [offset_p1[0], offset_p2[0]]
+                ys = [offset_p1[1], offset_p2[1]]
+
+                line = ax.plot(xs, ys, color=color, linewidth=self.LINE_WIDTH, alpha=0.8,
+                              zorder=10)
+
+                if first_line is None:
+                    first_line = line[0]
+
+                # Record corner point for intermediate marker if direction changes
+                if seg_idx < len(all_segments_coords) - 1:
+                    next_seg = all_segments_coords[seg_idx + 1]
+                    next_is_horizontal = next_seg[2]
+
+                    # If direction changes, the corner point is where segments meet
+                    if is_horizontal != next_is_horizontal:
+                        # offset_p2 and next_seg[0] should be the same point now
+                        corner_points.append(offset_p2)
+
+            # Draw markers with slot-based offsets to avoid overlap
+            if all_segments_coords:
+                # Get node keys for marker slot lookup
+                src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+                dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+
+                # Start marker (first point of first segment) with slot offset
+                start_pt = all_segments_coords[0][0]
+                start_marker_offset = get_marker_offset(src_key, 'start', path_idx, path_offset)
+                start_x = start_pt[0] + start_marker_offset[0]
+                start_y = start_pt[1] + start_marker_offset[1]
+                ax.plot(start_x, start_y, color=color,
+                       marker=self.START_MARKER, markersize=self.START_MARKER_SIZE,
+                       markeredgecolor='white', markeredgewidth=0.5, zorder=12)
+
+                # Intermediate markers at corner points
+                for pt in corner_points:
+                    ax.plot(pt[0], pt[1], color=color,
+                           marker=self.MID_MARKER, markersize=self.MID_MARKER_SIZE,
+                           markeredgecolor='white', markeredgewidth=0.5, zorder=11)
+
+                # End marker (last point of last segment) with slot offset
+                end_pt = all_segments_coords[-1][1]
+                end_marker_offset = get_marker_offset(dst_key, 'end', path_idx, path_offset)
+                end_x = end_pt[0] + end_marker_offset[0]
+                end_y = end_pt[1] + end_marker_offset[1]
+                ax.plot(end_x, end_y, color=color,
+                       marker=self.END_MARKER, markersize=self.END_MARKER_SIZE,
+                       markeredgecolor='white', markeredgewidth=0.5, zorder=12)
+
+            # Add arrow at the last segment
+            if all_segments_coords:
+                last_seg = all_segments_coords[-1]
+                p1, p2 = last_seg[0], last_seg[1]
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+                length = (dx ** 2 + dy ** 2) ** 0.5
+
                 if length > 0:
-                    ax.arrow(src_x, src_y, dx*0.6, dy*0.6,
-                           head_width=0.2, head_length=0.15, fc=color, ec=color, 
-                           alpha=0.9, linewidth=1.5, zorder=11)
-                
-                # Create legend entry with NodeID and CustomID information
-                src_node_name = source_node.name
-                dst_node_name = dest_node.name
-                tensor_type = edge.src_id.tensor_type
-                
-                # Get custom IDs from the tensor edge
-                src_custom_id = edge.src_id.graph_node_id
-                dst_custom_id = edge.dst_id.graph_node_id
-                
-                # Format custom IDs (handle tuples for composite functions)
-                src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
-                dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
-                
-                tensor_label = f"{src_node_name} → {dst_node_name} | ID:{src_id_str}→{dst_id_str} ({tensor_type})"
-                if edge.split_idx is not None:
-                    tensor_label += f"[{edge.split_idx}]"
-                legend_entries.append((line[0], tensor_label))
-        
+                    # Draw arrow from 50% to 90% of the segment (not reaching end marker)
+                    arrow_start_x = p1[0] + dx * 0.5
+                    arrow_start_y = p1[1] + dy * 0.5
+                    ax.arrow(arrow_start_x, arrow_start_y, dx * 0.3, dy * 0.3,
+                            head_width=self.ARROW_HEAD_WIDTH, head_length=self.ARROW_HEAD_LENGTH,
+                            fc=color, ec=color, alpha=0.9, linewidth=self.ARROW_LINE_WIDTH, zorder=11)
+
+            # Create legend entry
+            if first_line is not None:
+                if isinstance(edge, TensorEdge):
+                    src_node_name = source_node.name
+                    dst_node_name = dest_node.name
+                    tensor_type = edge.src_id.tensor_type
+
+                    src_custom_id = edge.src_id.graph_node_id
+                    dst_custom_id = edge.dst_id.graph_node_id
+
+                    src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
+                    dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
+
+                    tensor_label = f"{src_node_name} → {dst_node_name} | ID:{src_id_str}→{dst_id_str} ({tensor_type})"
+                    if edge.split_idx is not None:
+                        tensor_label += f"[{edge.split_idx}]"
+                else:
+                    # Instruction edge
+                    tensor_label = f"{source_node.name} → {dest_node.name} (inst)"
+
+                legend_entries.append((first_line, tensor_label))
+
         # Add legend if there are paths
         if legend_entries:
             lines, labels = zip(*legend_entries)
-            ax.legend(lines, labels, loc='upper left', bbox_to_anchor=(1.02, 1), 
+            ax.legend(lines, labels, loc='upper left', bbox_to_anchor=(1.02, 1),
                      fontsize=7, framealpha=0.95, edgecolor='gray', fancybox=True)
     
     def _generate_colors(self, n):
@@ -4506,37 +6294,473 @@ class TensorPathVisualizer:
             cmap = cm.get_cmap('hsv')
             return [cmap(i/n) for i in range(n)]
 
+    def _create_interactive_visualization(self, func_name, noc_paths, paths_by_group, output_dir):
+        """
+        Create an interactive HTML visualization using Plotly.
+
+        Features:
+        - Click on a path to highlight it and see detailed information
+        - Hover tooltips showing edge info
+        - Filter by group (inst, const, data)
+        - Pan and zoom
+
+        Parameters
+        ----------
+        func_name : str
+            Name of the function being visualized
+        noc_paths : dict
+            Dictionary mapping edges to mapping_info
+        paths_by_group : dict
+            Dictionary mapping group names to their paths
+        output_dir : str
+            Output directory for the HTML file
+        """
+        if not self.plotly_available:
+            return
+
+        import plotly.graph_objects as go
+
+        # Grid dimensions
+        rows = ImcflowDeviceConfig.INODE_NUM
+        cols = ImcflowDeviceConfig.NODE_COL_NUM
+        node_size = 1.0
+        spacing = 0.5
+
+        fig = go.Figure()
+
+        # ============================================================
+        # Draw mesh nodes
+        # ============================================================
+        node_x = []
+        node_y = []
+        node_text = []
+        node_colors = []
+
+        for node_id in NodeID:
+            coord = NodeID.to_coord(node_id)
+            row, col = coord
+            x = col * (node_size + spacing) + spacing + node_size / 2
+            y = (rows - 1 - row) * (node_size + spacing) + spacing + node_size / 2
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(node_id.name)
+            node_colors.append('lightblue' if node_id.is_inode() else 'lightgreen')
+
+        fig.add_trace(go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers+text',
+            marker=dict(size=40, color=node_colors, line=dict(width=2, color='darkgray')),
+            text=node_text,
+            textposition='middle center',
+            textfont=dict(size=10, color='black'),
+            hoverinfo='text',
+            hovertext=[f"Node: {t}" for t in node_text],
+            name='Nodes',
+            showlegend=False
+        ))
+
+        # ============================================================
+        # Draw paths using 2-pass algorithm for parallel offsets
+        # ============================================================
+        group_colors = {
+            'inst': 'purple',
+            'const': 'blue',
+            'data': 'orange'
+        }
+
+        # PASS 1: Collect all paths and their segments
+        path_data = []  # List of (edge, mapping_info, path_coords, group_name, edge_info)
+        segment_paths = {}  # normalized_segment -> [path_index, ...]
+
+        for group_name, group_paths in paths_by_group.items():
+            if not group_paths:
+                continue
+
+            group_config = self.GROUP_CONFIG[group_name]
+
+            for edge, mapping_info in group_paths.items():
+                source_node = mapping_info[0]
+                dest_node = mapping_info[1]
+
+                # Build edge info string
+                if isinstance(edge, TensorEdge):
+                    tensor_type = edge.src_id.tensor_type
+                    src_custom_id = edge.src_id.graph_node_id
+                    dst_custom_id = edge.dst_id.graph_node_id
+                    src_id_str = f"{src_custom_id[1]}" if isinstance(src_custom_id, tuple) else f"{src_custom_id}"
+                    dst_id_str = f"{dst_custom_id[1]}" if isinstance(dst_custom_id, tuple) else f"{dst_custom_id}"
+                    edge_info = (f"Group: {group_config['name']}<br>"
+                                f"Type: {tensor_type}<br>"
+                                f"HW: {source_node.name} → {dest_node.name}<br>"
+                                f"Graph ID: {src_id_str} → {dst_id_str}")
+                    if edge.split_idx is not None:
+                        edge_info += f"<br>Split: [{edge.split_idx}]"
+                else:
+                    edge_info = (f"Group: {group_config['name']}<br>"
+                                f"Type: Instruction<br>"
+                                f"HW: {source_node.name} → {dest_node.name}")
+
+                # Get path coordinates
+                path_coords = self._get_path_coords(edge, mapping_info, node_size, spacing, rows)
+
+                if path_coords and len(path_coords) >= 2:
+                    path_index = len(path_data)
+                    path_data.append((edge, mapping_info, path_coords, group_name, edge_info))
+
+                    # Collect segments
+                    for i in range(len(path_coords) - 1):
+                        p1 = path_coords[i]
+                        p2 = path_coords[i + 1]
+                        seg = self._normalize_segment(p1, p2)
+                        if seg not in segment_paths:
+                            segment_paths[seg] = []
+                        segment_paths[seg].append(path_index)
+
+        # PASS 2 & 3: Greedy path-by-path drawing with consistent offset
+        all_path_data = []
+        group_first_drawn = {'inst': False, 'const': False, 'data': False}
+
+        # Track which slots are claimed on each segment
+        segment_claimed_slots = {seg: set() for seg in segment_paths.keys()}
+
+        # ============================================================
+        # Track markers per node to avoid star/square overlap (Plotly)
+        # ============================================================
+        node_start_markers_plotly = {}  # node_id -> list of path_idx
+        node_end_markers_plotly = {}    # node_id -> list of path_idx
+
+        for path_idx, (edge, mapping_info, path_coords, group_name, edge_info) in enumerate(path_data):
+            source_node = mapping_info[0]
+            dest_node = mapping_info[1]
+
+            src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+            if src_key not in node_start_markers_plotly:
+                node_start_markers_plotly[src_key] = []
+            node_start_markers_plotly[src_key].append(path_idx)
+
+            dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+            if dst_key not in node_end_markers_plotly:
+                node_end_markers_plotly[dst_key] = []
+            node_end_markers_plotly[dst_key].append(path_idx)
+
+        node_marker_slots_plotly = {}
+        MARKER_OFFSET_UNIT_PLOTLY = 0.08
+
+        for node_key in set(node_start_markers_plotly.keys()) | set(node_end_markers_plotly.keys()):
+            markers_at_node = []
+            for path_idx in node_start_markers_plotly.get(node_key, []):
+                markers_at_node.append(('start', path_idx))
+            for path_idx in node_end_markers_plotly.get(node_key, []):
+                markers_at_node.append(('end', path_idx))
+
+            for slot_idx, (marker_type, path_idx) in enumerate(markers_at_node):
+                node_marker_slots_plotly[(node_key, marker_type, path_idx)] = slot_idx
+
+        def get_marker_offset_plotly(node_key, marker_type, path_idx):
+            key = (node_key, marker_type, path_idx)
+            if key not in node_marker_slots_plotly:
+                return (0, 0)
+
+            slot_idx = node_marker_slots_plotly[key]
+            if slot_idx == 0:
+                return (0, 0)
+
+            patterns = [
+                (0, 0),
+                (MARKER_OFFSET_UNIT_PLOTLY, 0),
+                (-MARKER_OFFSET_UNIT_PLOTLY, 0),
+                (0, MARKER_OFFSET_UNIT_PLOTLY),
+                (0, -MARKER_OFFSET_UNIT_PLOTLY),
+                (MARKER_OFFSET_UNIT_PLOTLY, MARKER_OFFSET_UNIT_PLOTLY),
+                (-MARKER_OFFSET_UNIT_PLOTLY, MARKER_OFFSET_UNIT_PLOTLY),
+                (MARKER_OFFSET_UNIT_PLOTLY, -MARKER_OFFSET_UNIT_PLOTLY),
+                (-MARKER_OFFSET_UNIT_PLOTLY, -MARKER_OFFSET_UNIT_PLOTLY),
+            ]
+
+            if slot_idx < len(patterns):
+                return patterns[slot_idx]
+            else:
+                import math
+                angle = (slot_idx - len(patterns)) * (2 * math.pi / 8)
+                radius = MARKER_OFFSET_UNIT_PLOTLY * (1 + (slot_idx - len(patterns)) // 8)
+                return (radius * math.cos(angle), radius * math.sin(angle))
+
+        def get_path_segments(path_coords):
+            segments = []
+            for i in range(len(path_coords) - 1):
+                seg = self._normalize_segment(path_coords[i], path_coords[i + 1])
+                segments.append(seg)
+            return segments
+
+        for path_idx, (edge, mapping_info, path_coords, group_name, edge_info) in enumerate(path_data):
+            source_node = mapping_info[0]
+            dest_node = mapping_info[1]
+            base_color = group_colors.get(group_name, 'gray')
+            group_config = self.GROUP_CONFIG[group_name]
+
+            # Get all segments for this path
+            path_segments = get_path_segments(path_coords)
+
+            # Find a slot that's available on ALL segments of this path
+            chosen_slot = 0
+            max_possible_slot = max(len(segment_paths.get(seg, [])) for seg in path_segments) + len(path_data)
+
+            for candidate_slot in range(max_possible_slot):
+                available = True
+                for seg in path_segments:
+                    if candidate_slot in segment_claimed_slots.get(seg, set()):
+                        available = False
+                        break
+                if available:
+                    chosen_slot = candidate_slot
+                    break
+
+            # Claim this slot on all segments
+            for seg in path_segments:
+                if seg not in segment_claimed_slots:
+                    segment_claimed_slots[seg] = set()
+                segment_claimed_slots[seg].add(chosen_slot)
+
+            # Calculate consistent offset for this path
+            if chosen_slot == 0:
+                path_offset = 0
+            elif chosen_slot % 2 == 1:
+                path_offset = ((chosen_slot + 1) // 2) * self.OFFSET_UNIT
+            else:
+                path_offset = -(chosen_slot // 2) * self.OFFSET_UNIT
+
+            # Build offset coordinates with CONSISTENT offset and corner handling
+            all_segments = []  # List of (offset_p1, offset_p2, is_horizontal)
+
+            for i in range(len(path_coords) - 1):
+                p1 = path_coords[i]
+                p2 = path_coords[i + 1]
+
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+
+                # Apply perpendicular offset (same for entire path)
+                if abs(dx) > abs(dy):
+                    offset_p1 = (p1[0], p1[1] + path_offset)
+                    offset_p2 = (p2[0], p2[1] + path_offset)
+                    is_horizontal = True
+                else:
+                    offset_p1 = (p1[0] + path_offset, p1[1])
+                    offset_p2 = (p2[0] + path_offset, p2[1])
+                    is_horizontal = False
+
+                all_segments.append((offset_p1, offset_p2, is_horizontal))
+
+            # Build continuous path with corner connectors
+            offset_xs = []
+            offset_ys = []
+            corner_points = []
+
+            for seg_idx, (offset_p1, offset_p2, is_horizontal) in enumerate(all_segments):
+                if seg_idx == 0:
+                    offset_xs.append(offset_p1[0])
+                    offset_ys.append(offset_p1[1])
+
+                offset_xs.append(offset_p2[0])
+                offset_ys.append(offset_p2[1])
+
+                # Add corner connector if direction changes
+                if seg_idx < len(all_segments) - 1:
+                    next_seg = all_segments[seg_idx + 1]
+                    next_is_horizontal = next_seg[2]
+
+                    if is_horizontal != next_is_horizontal:
+                        # Add corner point (start of next segment)
+                        offset_xs.append(next_seg[0][0])
+                        offset_ys.append(next_seg[0][1])
+                        # Track corner midpoint for marker
+                        corner_pt = ((offset_p2[0] + next_seg[0][0]) / 2,
+                                    (offset_p2[1] + next_seg[0][1]) / 2)
+                        corner_points.append(corner_pt)
+
+            # Determine if this is the first path in this group
+            is_first = not group_first_drawn[group_name]
+            if is_first:
+                group_first_drawn[group_name] = True
+
+            # Draw line (no markers)
+            fig.add_trace(go.Scatter(
+                x=offset_xs,
+                y=offset_ys,
+                mode='lines',
+                line=dict(color=base_color, width=2),
+                opacity=0.6,
+                hoverinfo='text',
+                hovertext=edge_info,
+                name=f"{group_config['name']}: {source_node.name}→{dest_node.name}",
+                legendgroup=group_name,
+                showlegend=is_first,
+                legendgrouptitle_text=group_config['name'] if is_first else None
+            ))
+
+            # Draw start marker with slot-based offset
+            if offset_xs:
+                src_key = source_node.noc_placement if hasattr(source_node, 'noc_placement') else id(source_node)
+                start_marker_off = get_marker_offset_plotly(src_key, 'start', path_idx)
+                start_x = offset_xs[0] + start_marker_off[0]
+                start_y = offset_ys[0] + start_marker_off[1]
+                fig.add_trace(go.Scatter(
+                    x=[start_x],
+                    y=[start_y],
+                    mode='markers',
+                    marker=dict(symbol=self.START_MARKER_PLOTLY, size=self.START_MARKER_SIZE_PLOTLY,
+                               color=base_color, line=dict(width=1, color='white')),
+                    opacity=0.8,
+                    hoverinfo='text',
+                    hovertext=f"START<br>{edge_info}",
+                    legendgroup=group_name,
+                    showlegend=False
+                ))
+
+            # Draw intermediate markers at corner points
+            if corner_points:
+                corner_xs = [pt[0] for pt in corner_points]
+                corner_ys = [pt[1] for pt in corner_points]
+                fig.add_trace(go.Scatter(
+                    x=corner_xs,
+                    y=corner_ys,
+                    mode='markers',
+                    marker=dict(symbol=self.MID_MARKER_PLOTLY, size=self.MID_MARKER_SIZE_PLOTLY,
+                               color=base_color, line=dict(width=1, color='white')),
+                    opacity=0.6,
+                    hoverinfo='text',
+                    hovertext=edge_info,
+                    legendgroup=group_name,
+                    showlegend=False
+                ))
+
+            # Draw end marker with slot-based offset
+            if len(offset_xs) > 1:
+                dst_key = dest_node.noc_placement if hasattr(dest_node, 'noc_placement') else id(dest_node)
+                end_marker_off = get_marker_offset_plotly(dst_key, 'end', path_idx)
+                end_x = offset_xs[-1] + end_marker_off[0]
+                end_y = offset_ys[-1] + end_marker_off[1]
+                fig.add_trace(go.Scatter(
+                    x=[end_x],
+                    y=[end_y],
+                    mode='markers',
+                    marker=dict(symbol=self.END_MARKER_PLOTLY, size=self.END_MARKER_SIZE_PLOTLY,
+                               color=base_color, line=dict(width=1, color='white')),
+                    opacity=0.8,
+                    hoverinfo='text',
+                    hovertext=f"END<br>{edge_info}",
+                    legendgroup=group_name,
+                    showlegend=False
+                ))
+
+            all_path_data.append({
+                'group': group_name,
+                'edge': str(edge),
+                'src': source_node.name,
+                'dst': dest_node.name,
+                'info': edge_info
+            })
+
+        # ============================================================
+        # Layout configuration
+        # ============================================================
+        fig_width = cols * (node_size + spacing) + spacing
+        fig_height = rows * (node_size + spacing) + spacing
+
+        fig.update_layout(
+            title=dict(
+                text=f"{func_name} - Interactive NoC Path Visualization<br>"
+                     f"<sup>Groups: inst={len(paths_by_group['inst'])}, "
+                     f"const={len(paths_by_group['const'])}, data={len(paths_by_group['data'])}</sup>",
+                x=0.5,
+                font=dict(size=16)
+            ),
+            xaxis=dict(
+                range=[0, fig_width + 0.5],
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                scaleanchor='y',
+                scaleratio=1
+            ),
+            yaxis=dict(
+                range=[0, fig_height + 0.5],
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False
+            ),
+            hovermode='closest',
+            showlegend=True,
+            legend=dict(
+                title="Path Groups (click to toggle)",
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=1.02,
+                bgcolor="rgba(255,255,255,0.9)",
+                bordercolor="gray",
+                borderwidth=1
+            ),
+            width=900,
+            height=700,
+            margin=dict(r=200)
+        )
+
+        # Add instructions annotation
+        fig.add_annotation(
+            x=0.5, y=-0.1,
+            xref='paper', yref='paper',
+            text="Hover over paths for details. Click legend items to filter groups.",
+            showarrow=False,
+            font=dict(size=11, color='gray')
+        )
+
+        # Save as HTML
+        output_path = os.path.join(output_dir, "interactive.html")
+        fig.write_html(output_path, include_plotlyjs=True, full_html=True)
+        debug_print(f"    Saved interactive visualization: {output_path}")
+
+
 def generateNoCVisualizations(mod, output_dir="noc_visualizations"):
     """
     Generate NoC path visualizations for all imcflow functions in the module.
-    
+
     This function should be called after PolicyTableGenerator has run and
     populated ImcflowDeviceConfig with NoC paths and tensor edge information.
-    
+
     For each imcflow function, creates:
     - A subdirectory named after the function
-    - Separate images for each tensor type (odata.png, weight.png, bias.png, etc.)
-    - An overview image showing all tensor types together (00_overview_all_types.png)
-    
+    - Group-based images (group_inst.png, group_const.png, group_data.png)
+    - Tensor type images (odata.png, weight.png, bias.png, etc.)
+    - An overview image showing all paths (00_overview_all_paths.png)
+    - Interactive HTML visualization (interactive.html) - requires plotly
+
+    Groups:
+    - inst: Instruction paths (non-TensorEdge)
+    - const: Constant tensors (weight, config, min, max, fused_scale, fused_bias, bias, scale, threshold)
+    - data: Runtime data tensors (odata, data, lhs, rhs, func_out*, var)
+
     Parameters
     ----------
     mod : tvm.IRModule
         The module containing imcflow functions
     output_dir : str, optional
         Base directory to save visualization images (default: "noc_visualizations")
-    
+
     Output Structure
     ----------------
     noc_visualizations/
         function_name_1/
-            00_overview_all_types.png
-            odata.png
+            00_overview_all_paths.png    # All paths overview
+            group_inst.png               # Instruction paths only
+            group_const.png              # Constant tensor paths only
+            group_data.png               # Data tensor paths only
+            interactive.html             # Interactive visualization (plotly)
+            odata.png                    # Individual tensor type
             weight.png
             bias.png
             ...
         function_name_2/
-            00_overview_all_types.png
-            odata.png
             ...
     
     Example

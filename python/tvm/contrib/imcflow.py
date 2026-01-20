@@ -531,11 +531,12 @@ class InstEdgeInfo(EdgeInfo):
 
 class TensorEdgeInfo(EdgeInfo):
   LOCAL_FIFO = -2
-  def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1, block_tiling_info: BlockTileInfo = None):
+  def __init__(self, policy_info: List[RouterEntry] = None, data_block: Union[DataBlock, None] = None, fifo_id: int = -1, block_tiling_info: BlockTileInfo = None, producer_sync_granularity: int = None):
     super().__init__(policy_info, data_block)
     self.fifo_id = fifo_id
     self.owner = None
     self.block_tiling_info = block_tiling_info
+    self.producer_sync_granularity = producer_sync_granularity  # Number of SENDs per STANDBY from producer IMCE
 
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id
@@ -650,8 +651,8 @@ class ImcflowDeviceConfig:
     IMCE_INST_MEM_SIZE = 2048
 
   IMCFLOW_ADDR_SIZE = 266368 # 128 + 4*(65536+1024) == 260.125KB
-  HOST_OS = "baremetal"
-  HOST_ISA = "x86"
+  HOST_OS = os.getenv("IMCFLOW_HOST_OS", "linux")
+  HOST_ISA = os.getenv("IMCFLOW_HOST_ISA", "arm")
 
   INODE0_IMEM_BASE_ADDR = 128
   INODE0_DMEM_BASE_ADDR = INODE0_IMEM_BASE_ADDR + INODE_INST_MEM_SIZE

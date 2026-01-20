@@ -49,6 +49,10 @@ class ConvUtil:
     return read_count
 
   def calculate_input_read_counts(self):
+    # Reset cursor position to ensure consistent results across multiple calls
+    self.current_row = 0
+    self.current_col = 0
+
     read_counts = np.zeros((self.oH, self.oW), dtype=np.int32)
 
     for out_row in range(self.oH):
