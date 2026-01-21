@@ -143,6 +143,10 @@ class TensorID:
   def __repr__(self):
     return self.__str__()
 
+  def __reduce__(self):
+    """Support for pickling singleton instances"""
+    return (self.__class__, (self.graph_node_id, self.tensor_type))
+
 
 class TensorEdge:
   _instances = {}
@@ -181,6 +185,10 @@ class TensorEdge:
 
   def __repr__(self):
     return self.__str__()
+
+  def __reduce__(self):
+    """Support for pickling singleton instances"""
+    return (self.__class__, (self.src_id, self.dst_id, self.split_idx))
 
 
 class FunctionInfo:
@@ -837,9 +845,10 @@ class ImcflowDeviceConfig:
 
     return "\n".join(lines)
 
-  def get_data_block_dict(self, func, func_name, input_node_ids=None, output_node_id=None, const_node_ids=None):
+
+  def update_compiled_blocks(self, func_name):
     from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
-    compiled_blocks, compiled_per_tile_blocks, input_data_blocks, output_data_blocks, const_data_blocks = [], [], [], [], []
+    compiled_blocks, compiled_per_tile_blocks = [], []
 
     for memory_region in ImcflowDeviceConfig().MemLayout[func_name].values():
       for block_name, block in memory_region.blocks.items():
@@ -850,6 +859,19 @@ class ImcflowDeviceConfig:
             compiled_per_tile_blocks.append(block)
           else:
             compiled_blocks.append(block)
+
+    if func_name not in self.DataBlocks:
+      self.DataBlocks[func_name] = {}
+
+    self.DataBlocks[func_name]["compiled"] = compiled_blocks
+    self.DataBlocks[func_name]["compiled_per_tile"] = compiled_per_tile_blocks
+
+  def update_data_blocks(self, func_name, input_node_ids=None, output_node_id=None, const_node_ids=None):
+    from tvm.relay.backend.contrib.imcflow import transform as imcflow_transform
+    input_data_blocks, output_data_blocks, const_data_blocks = [], [], []
+
+    for memory_region in ImcflowDeviceConfig().MemLayout[func_name].values():
+      for block_name, block in memory_region.blocks.items():
         # get input & output data blocks
         if isinstance(block_name, TensorEdge):
           if isinstance(block_name.src_id.graph_node_id, Tuple):
@@ -887,11 +909,131 @@ class ImcflowDeviceConfig:
             print(f"Warning: DataBlock {block} is multiple types of blocks for function {func_name}")
             raise ValueError("DataBlock type identification error")
 
+    if func_name not in self.DataBlocks:
+      self.DataBlocks[func_name] = {}
 
-    self.DataBlocks[func_name] = {
-        "compiled": compiled_blocks,
-        "compiled_per_tile": compiled_per_tile_blocks,
-        "input": input_data_blocks,
-        "output": output_data_blocks,
-        "const" : const_data_blocks
+    self.DataBlocks[func_name]["input"] = input_data_blocks
+    self.DataBlocks[func_name]["output"] = output_data_blocks
+    self.DataBlocks[func_name]["const"] = const_data_blocks
+
+  def save_state(self, filepath: str):
+    """
+    Save the DevConfig state to a file for later restoration.
+    This allows rebuild_modified_cpp to work without re-running transform passes.
+
+    Args:
+        filepath: Path to save the serialized state
+    """
+    import pickle
+    from tvm.relay.op.contrib.imcflow import (
+        HashToCustomID, CustomIDToName, CustomIDToNode, CustomIDInFunc
+    )
+
+    state = {
+        'HWNodeMap': self.HWNodeMap,
+        'TensorIDtoEdge': self.TensorIDtoEdge,
+        'TensorEdgetoInfo': self.TensorEdgetoInfo,
+        'TensorEdgeList': self.TensorEdgeList,
+        'TensorEdgeListDict': self.TensorEdgeListDict,
+        'PolicyTableDict': self.PolicyTableDict,
+        'InstEdgeInfoDict': self.InstEdgeInfoDict,
+        'MemLayout': self.MemLayout,
+        'ActiveIMCEPerFunc': self.ActiveIMCEPerFunc,
+        'NoCPaths': self.NoCPaths,
+        'DataBlocks': self.DataBlocks,
+        'ImcflowFuncMap': self.ImcflowFuncMap,
+        'use_def_chain': self.use_def_chain,
+        'LayoutMap': self.LayoutMap,
+        'FIFOConflictTable': self.FIFOConflictTable,
+        'NoCDeadlockTable': self.NoCDeadlockTable,
+        # Save singleton state for rebuild_modified_cpp
+        'HashToCustomID': dict(HashToCustomID()),
+        'CustomIDToName': dict(CustomIDToName()),
+        'CustomIDToNode': dict(CustomIDToNode()),
+        'CustomIDInFunc': dict(CustomIDInFunc()),
     }
+
+    with open(filepath, 'wb') as f:
+      pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    print(f"DevConfig state saved to: {filepath}")
+
+  def load_state(self, filepath: str):
+    """
+    Load the DevConfig state from a file.
+    This restores the state created during transform passes for rebuild_modified_cpp.
+
+    Args:
+        filepath: Path to the serialized state file
+    """
+    import pickle
+    from tvm.relay.op.contrib.imcflow import (
+        HashToCustomID, CustomIDToName, CustomIDToNode, CustomIDInFunc
+    )
+
+    if not os.path.exists(filepath):
+      raise FileNotFoundError(f"DevConfig state file not found: {filepath}")
+
+    with open(filepath, 'rb') as f:
+      state = pickle.load(f)
+
+    # Restore all state
+    self.HWNodeMap = state['HWNodeMap']
+    self.TensorIDtoEdge = state['TensorIDtoEdge']
+    self.TensorEdgetoInfo = state['TensorEdgetoInfo']
+    self.TensorEdgeList = state['TensorEdgeList']
+    self.TensorEdgeListDict = state['TensorEdgeListDict']
+    self.PolicyTableDict = state['PolicyTableDict']
+    self.InstEdgeInfoDict = state['InstEdgeInfoDict']
+    self.MemLayout = state['MemLayout']
+    self.ActiveIMCEPerFunc = state['ActiveIMCEPerFunc']
+    self.NoCPaths = state['NoCPaths']
+    self.DataBlocks = state['DataBlocks']
+    self.ImcflowFuncMap = state['ImcflowFuncMap']
+    self.use_def_chain = state['use_def_chain']
+    self.LayoutMap = state['LayoutMap']
+    self.FIFOConflictTable = state['FIFOConflictTable']
+    self.NoCDeadlockTable = state['NoCDeadlockTable']
+
+    # Restore singleton state
+    # Must use clear() + update() since these are singleton instances
+    HashToCustomID().clear()
+    HashToCustomID().update(state.get('HashToCustomID', {}))
+
+    CustomIDToName().clear()
+    CustomIDToName().update(state.get('CustomIDToName', {}))
+
+    CustomIDToNode().clear()
+    CustomIDToNode().update(state.get('CustomIDToNode', {}))
+
+    CustomIDInFunc().clear()
+    CustomIDInFunc().update(state.get('CustomIDInFunc', {}))
+
+    print(f"DevConfig state loaded from: {filepath}")
+
+  def update_datablocks_state(self, filepath: str):
+    """
+    Update only the DataBlocks field in the saved DevConfig state.
+    This is called after constructDataBlockDict to add DataBlock categorization
+    without saving the allocation information from CodegenSuite.
+
+    Args:
+        filepath: Path to the serialized state file
+    """
+    import pickle
+
+    if not os.path.exists(filepath):
+      raise FileNotFoundError(f"DevConfig state file not found: {filepath}")
+
+    # Load existing state
+    with open(filepath, 'rb') as f:
+      state = pickle.load(f)
+
+    # Update only DataBlocks field
+    state['DataBlocks'] = self.DataBlocks
+
+    # Re-save the updated state
+    with open(filepath, 'wb') as f:
+      pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    print(f"DevConfig DataBlocks updated in: {filepath}")

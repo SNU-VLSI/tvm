@@ -7228,16 +7228,20 @@ def expand_pattern(pattern, num_args):
     return [pattern[0]] * num_args
   return None
 
-def constructDataBlockDict(mod):
+def constructDataBlockDict(mod, update_compiled_blocks_only=False):
   imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow" :
-      target_func = imcflow_func_map[func_name_var.name_hint]
-      input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
-      output_node_id = getNodeID(target_func.func_node)
-      const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
-      ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
+      if update_compiled_blocks_only:
+        ImcflowDeviceConfig().update_compiled_blocks(func_name_var.name_hint)
+      else:
+        target_func = imcflow_func_map[func_name_var.name_hint]
+        input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
+        output_node_id = getNodeID(target_func.func_node)
+        const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
+        ImcflowDeviceConfig().update_compiled_blocks(func_name_var.name_hint)
+        ImcflowDeviceConfig().update_data_blocks(func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
 
 class FIFOConflictMonitor:
     """

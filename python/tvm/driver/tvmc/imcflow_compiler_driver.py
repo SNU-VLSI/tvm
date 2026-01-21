@@ -243,27 +243,36 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
         _dump("PolicyTableDict", config.PolicyTableDict)
         _dump("memory_layout", config.MemLayout)
 
+    # Save DevConfig state for rebuild_modified_cpp support
+    devconfig_state_path = os.path.join(output_dir, "devconfig_state.pkl")
+    config.save_state(devconfig_state_path)
+
     return mod, param_dict
 
 
-def run_imcflow_codegen(mod, output_dir):
+def run_imcflow_codegen(mod, output_dir, rebuild_modified_cpp=False):
     """
     Run IMCFLOW codegen to generate hardware deployment code.
 
     Args:
         mod: Transformed TVM IRModule
         output_dir: Directory to save generated code
+        rebuild_modified_cpp: If True, just rebuild modified C++ files before simulation
     """
     config = DevConfig()
 
     CodegenSuite = imcflow_codegen.CodegenSuite(
-        output_dir, mod, host_isa=DevConfig().HOST_ISA
+        output_dir, mod, host_isa=DevConfig().HOST_ISA, rebuild_modified_cpp=rebuild_modified_cpp
     )
     CodegenSuite(mod)
     print(f"mem_layout: {config.MemLayout}")
 
-    imcflow_transform.constructDataBlockDict(mod)
+    imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=rebuild_modified_cpp)
     print(f"data_blocks: {config.DataBlocks}")
+
+    # Update the DevConfig's DataBlocks state after codegen
+    devconfig_state_path = os.path.join(output_dir, "devconfig_state.pkl")
+    config.update_datablocks_state(devconfig_state_path)
 
 
 def generate_graph_executor(mod, param_dict, output_dir):
@@ -330,6 +339,25 @@ def compile_for_imcflow(mod, param_dict, output_dir, skip_codegen=False):
     run_imcflow_codegen(mod, output_dir)
 
     # Step 3: Generate graph executor
+    print("\n--- Generating Graph Executor ---")
+    _, tar_path = generate_graph_executor(mod, param_dict, output_dir)
+
+    return mod, param_dict, tar_path
+
+def rebuild_imcflow_cpp_only(mod, param_dict, output_dir):
+    """
+    Rebuild modified IMCFlow C++ files only.
+
+    This function is used when only C++ files have been modified and need to be rebuilt
+    without going through the full transformation and codegen pipeline.
+
+    Args:
+        output_dir: Directory where the model and C++ files are located
+    """
+
+    print("\n--- Rebuilding Modified IMCFlow C++ Files Only ---")
+    run_imcflow_codegen(mod, output_dir, rebuild_modified_cpp=True)
+
     print("\n--- Generating Graph Executor ---")
     _, tar_path = generate_graph_executor(mod, param_dict, output_dir)
 

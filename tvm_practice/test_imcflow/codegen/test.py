@@ -23,7 +23,7 @@ import sys
 from contextlib import contextmanager
 
 # Import IMCFlow compiler driver
-from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow
+from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild_imcflow_cpp_only
 
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
@@ -670,7 +670,7 @@ def compare_outputs(cpu_output, imcflow_output):
   else:
     print("\n✅ Test completed successfully")
 
-def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False):
+def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False, rebuild_modified_cpp=False):
   """Generate IMCFLOW evaluation results with optional CPU validation
 
   Args:
@@ -681,12 +681,13 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     input_data_dict: Optional dict of input name -> numpy array for CPU validation
     skip_setup: If True, skip transformations, codegen, and graph generation.
                 Loads previously transformed model from file.
+    rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
   """
   print(f"\n{'='*60}")
   print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
   print(f"{'='*60}")
 
-  if not skip_setup:
+  if not skip_setup and not rebuild_modified_cpp:
     # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
     mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir)
 
@@ -697,6 +698,9 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     print("\n⏭️  Skipping model transformation, codegen, and graph generation (skip_setup=True)")
     print("   Loading previously transformed model from file...")
     mod, param_dict = load_transformed_model(eval_dir)
+
+  if rebuild_modified_cpp:
+    mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir)
 
   # Run CPU validation if input data is provided
   if input_data_dict is not None:
@@ -727,7 +731,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 # ============================================================================
 # Test Pipeline
 # ============================================================================
-def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
+def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebuild_modified_cpp=False):
   """
   Test pipeline that:
   1. Gets the model from registry
@@ -742,6 +746,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
     skip_setup: If True, skip codegen, and graph generation steps.
                 Useful for testing different inputs on an already-compiled model.
                 NOTE: When True, assumes directory already exists from previous run.
+    rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
   """
   if test_name not in MODEL_REGISTRY:
     raise ValueError(f"Unknown test: {test_name}. Available tests: {list(MODEL_REGISTRY.keys())}")
@@ -757,7 +762,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   dir_name = f"{test_name}_evl"
 
   # Setup directory: only clean/create if NOT skipping setup
-  if not skip_setup:
+  if not skip_setup and not rebuild_modified_cpp:
     # Full setup: clean and recreate directory
     setup_dir(dir_name)
   else:
@@ -765,8 +770,8 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
     if not os.path.exists(dir_name):
       raise FileNotFoundError(
         f"Directory '{dir_name}' does not exist. "
-        f"Cannot use skip_setup=True without a previous run. "
-        f"Run without --skip-setup first to compile the model."
+        f"Cannot use skip_setup=True or rebuild_modified_cpp=True without a previous run. "
+        f"Run without --skip-setup and --rebuild_modified_cpp first to compile the model."
       )
     # Ensure test_inputs directory exists for new input files
     os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
@@ -780,7 +785,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   # Wrap the entire test execution in the tee logger
   with tee_output_to_log(log_file_path):
     print(f"Logging test output to: {log_file_path}")
-    print(f"Test: {test_name}, Input pattern: {input_pattern}, Skip setup: {skip_setup}")
+    print(f"Test: {test_name}, Input pattern: {input_pattern}, Skip setup: {skip_setup}, Rebuild modified C++: {rebuild_modified_cpp}")
 
     # Get original model (needed for input generation)
     # This is lightweight compared to transformation/codegen
@@ -802,7 +807,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
 
     # Run with CPU validation enabled
     # Note: When skip_setup=True, run_test will load the transformed model from file
-    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup)
+    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup, rebuild_modified_cpp=rebuild_modified_cpp)
 
 
 # ============================================================================

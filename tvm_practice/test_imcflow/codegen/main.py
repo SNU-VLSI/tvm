@@ -60,12 +60,24 @@ Examples:
   )
 
   parser.add_argument(
+    "--rebuild_modified_cpp", "-r",
+    action="store_true",
+    help="Assume C++ files have been modified and skips tvm, and rebuild them before running the test"
+  )
+
+  parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
   )
 
   args = parser.parse_args()
+
+  # only one of --skip-setup and --rebuild_modified_cpp can be set
+  if args.skip_setup and args.rebuild_modified_cpp:
+    parser.print_help()
+    print("\n❌ Error: --skip-setup and --rebuild_modified_cpp cannot be used together")
+    return 1
 
   # Handle list models
   if args.list_models:
@@ -94,7 +106,8 @@ Examples:
   run_test_pipeline(
     test_name=args.model,
     input_pattern=args.pattern,
-    skip_setup=args.skip_setup
+    skip_setup=args.skip_setup,
+    rebuild_modified_cpp=args.rebuild_modified_cpp
   )
   return 0
 

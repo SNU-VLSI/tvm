@@ -43,11 +43,12 @@ ConstPat = is_constant()
 class CodegenSuite:
   """A pass that generates/compiles code for IMCFlow functions"""
 
-  def __init__(self, model_dir, module, host_isa="arm"):
+  def __init__(self, model_dir, module, host_isa="arm", rebuild_modified_cpp=False):
     self.model_dir = model_dir
     self.build_dir = f"{model_dir}/build"
     self.host_isa = host_isa
     self.module = module
+    self.rebuild_modified_cpp = rebuild_modified_cpp
     os.makedirs(self.build_dir, exist_ok=True)
 
     common_decl = f"""
@@ -161,6 +162,35 @@ class CodegenSuite:
 
     # Set the codegen context for this function
     CodegenContext().set_func_name(func_name)
+
+    # Handle rebuild_modified_cpp case
+    if self.rebuild_modified_cpp:
+      print(f"\n--- Skipping codegen for function {func_name} (rebuild_modified_cpp=True) ---")
+
+      # Load DevConfig state if it hasn't been loaded yet
+      # We only need to load once since DevConfig is a singleton
+      if not hasattr(DevConfig(), '_state_loaded_for_rebuild'):
+        devconfig_state_path = os.path.join(self.model_dir, "devconfig_state.pkl")
+        if os.path.exists(devconfig_state_path):
+          print(f"Loading DevConfig state from: {devconfig_state_path}")
+          DevConfig().load_state(devconfig_state_path)
+          DevConfig()._state_loaded_for_rebuild = True
+        else:
+          raise FileNotFoundError(
+            f"DevConfig state file not found: {devconfig_state_path}\n"
+            f"Please run full compilation (rebuild_modified_cpp=False) first to generate the state file."
+          )
+
+      for file in ["imce.cpp", "inode.cpp"]:
+        target = "inode" if file == "inode.cpp" else "imce"
+        device_codegen = DeviceCodegen(target=target, build_dir=".", host_isa=self.host_isa)
+        device_codegen.func_dir = os.path.join(self.build_dir, func_name)
+        obj_map = device_codegen.compile_target_code(file)
+        device_codegen.update_device_config_with_obj_info(func_name, obj_map)
+
+      CodegenContext().clear()
+
+      return func
 
     # annotate edges between (non-composite) calls,
     # while translating vars into corresponding calls
