@@ -48,7 +48,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
 
 # TVM imports
-from tvm.contrib.imcflow import NodeID, ImcflowDeviceConfig as DevConfig, DataBlock, CodegenContext
+from tvm.contrib.imcflow import NodeID, InstEdgeInfo, ImcflowDeviceConfig as DevConfig, DataBlock, CodegenContext
 from tvm.relay.backend.contrib.imcflow.codeblock import (
     CodePhase, TextBlock, SequentialBlock, CodeBlock, SimpleFor, UniqueVar
 )
@@ -60,6 +60,7 @@ from tvm.relay.backend.contrib.imcflow.inode_codeblock import (
     SyncAllINodes,
     DoneAndIntrtBlock,
     ClearFlag,
+    IMCEComputeBlock,
 )
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 
@@ -82,6 +83,24 @@ else:
 # ============================================================================
 # Helper Functions for Memory Layout Access
 # ============================================================================
+class WriteSCANIMEMBlock(InodeCodeBlock):
+  """ Code block for writing IMEM given InstEdgeInfo """
+
+  def __init__(self, edge_info: InstEdgeInfo, annotation: str = ""):
+    super().__init__(annotation)
+    self.edge_info = edge_info
+    self._build()
+
+  def _build(self):
+    db = self.edge_info.data_block
+    policy_addr = self.edge_info.policy_info[0].address
+
+    var = UniqueVar("imem_start_address", dtype="int")
+    self.body.add(TextBlock(f"{var} = {db.offset};"))
+    self.body.add(TextBlock(f"__builtin_INODE_SET_ADDR_CNT(0);"))
+
+    self.body.add(SimpleFor(math.ceil(db.size / 32),
+                      lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr});"))
 
 def get_scan_data_block(func_name: str) -> Optional[DataBlock]:
     """Get scan data block from DevConfig memory layout.
@@ -134,8 +153,8 @@ def get_policy_block_address(func_name: str, node_id: NodeID) -> Optional[int]:
     # Look for policy table block - MemoryRegion.blocks returns dict {block_id: DataBlock}
     for block in inode_data.blocks.values():
         # DataBlock.id returns the block identifier (string or TensorEdge)
-        if isinstance(block.id, str) and f"{node_id.name}_scan_policy" == block.id:
-            return block.base_address
+        if isinstance(block.id, str) and f"{node_id.name}_scan_reg_policy" == block.id:
+            return block.offset
 
     return None
 
@@ -169,15 +188,15 @@ class ScanPolicyUpdateBlock(InodeCodeBlock):
             if len(policy_entries) <= 1:  # Skip nodes with only zero entry
                 continue
 
-            # Get base address from DevConfig memory layout
-            base_addr = get_policy_block_address(self.func_name, id)
-            if base_addr is None:
+            # Get offset from DevConfig memory layout
+            offset = get_policy_block_address(self.func_name, id)
+            if offset is None:
                 continue
 
             var = UniqueVar("policy_table_start_address", dtype="int")
             loop_count = len(policy_entries)
 
-            self.body.add(TextBlock(f"{var} = {base_addr};"))
+            self.body.add(TextBlock(f"{var} = {offset};"))
 
             if loop_count > 5:
                 # Using lambda for SimpleFor body to inject 'iter' variable
@@ -232,7 +251,7 @@ class ScanImceCodeBlockBuilder:
         # Add STOP blocks for all active IMCE nodes
         for imce_node in self.noc_paths.keys():
             self.codeblocks.blocks[imce_node][CodePhase.END].append(
-                TextBlock("__builtin_IMCE_STEP(); // STOP")
+                TextBlock("__builtin_IMCE_STOP(); // STOP")
             )
 
     def generate(self) -> str:
@@ -272,8 +291,23 @@ class ScanInodeCodeBlockBuilder:
         # Sync and interrupt
         self.sync_and_halt(CodePhase.INIT)
 
-        # Note: We don't need WriteIMEMBlock for scan register programming
-        # because we're sending data packets, not writing IMCE instructions
+        # IMEM write (same pattern as codegen.py)
+        # This writes the IMCE instruction binaries (e.g., {imce}_imem.bin) into IMCE IMEM,
+        # using InstEdgeInfoDict populated by scan_reg_policy_gen.add_edge_info().
+        inst_edges = DevConfig().InstEdgeInfoDict.get(self.func_name, {})
+        if not inst_edges:
+            raise RuntimeError(
+                f"InstEdgeInfoDict['{self.func_name}'] is empty. "
+                "Run scan_reg_policy_gen.add_edge_info(func_name=...) before codegen."
+            )
+
+        for imce, inst_edge in sorted(inst_edges.items(), key=lambda x: x[0].name):
+            block = WriteSCANIMEMBlock(inst_edge, f"imem write: {imce.name}")
+            self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+
+        self.build_imce_compute()
+
+        self.sync_and_halt(CodePhase.INIT)
 
     def build_scan_send(self, scan_packet_count: int, fifo_id: int = 0, per_imce_packets: int = 2) -> None:
         """Build scan register send operations.
@@ -317,8 +351,8 @@ class ScanInodeCodeBlockBuilder:
                 raise RuntimeError(f"Scan data block not found for {master_inode.name}")
 
             # Get policy address for broadcast (all IMCEs in group)
-            policy_entries = self.policy_table.get(master_inode, [])
-            policy_addr = 1 if len(policy_entries) > 1 else 0  # Skip zero entry at index 0
+            # policy_entries = self.policy_table.get(master_inode, [])
+            # policy_addr = 1 if len(policy_entries) > 1 else 0  # Skip zero entry at index 0
 
             # Send packets for each IMCE in this group
             # Use local packet index within this INode's data block
@@ -328,7 +362,10 @@ class ScanInodeCodeBlockBuilder:
                 for pkt_idx in range(per_imce_packets):
                     # Local packet offset within this INode's scan_data block
                     packet_offset = local_pkt_idx * 32  # 32 bytes per packet
-                    packet_addr = scan_data_block.base_address + packet_offset
+                    packet_addr = scan_data_block.offset + packet_offset
+
+                    # policy address setting
+                    policy_addr = imce_node.to_coord(1)
 
                     # INODE_SEND(addr, imm, policy, fifo_id)
                     self.codeblocks.blocks[master_inode][CodePhase.EXEC].append(
@@ -342,6 +379,13 @@ class ScanInodeCodeBlockBuilder:
     def build_finalization(self) -> None:
         """Build finalization phase: sync, done, halt."""
         self.sync_and_halt(CodePhase.END)
+    
+    def build_imce_compute(self) -> None:
+        """Build IMCE compute phase."""
+        for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[self.func_name].items(), key=lambda x: x[0].name):
+            policy_addr = inst_edge.policy_info[0].address # get first policy address
+            block = IMCEComputeBlock(policy_addr, f"{imce.name} compute")
+            self.codeblocks.append(imce.master(), block, CodePhase.INIT)
 
     def sync_and_halt(self, phase: CodePhase) -> None:
         """Sync all inodes and halt."""
@@ -812,7 +856,7 @@ int32_t program_scan_reg(const char* file_name) {{
     for (int imce_idx = 0; imce_idx < imce_count; imce_idx++) {{
         // Calculate IMCE coordinates: h=0-3, w=1-4
         int h = imce_idx / 4;
-        int w = imce_idx % 4;
+        int w = imce_idx % 4 + 1;
         std::string imce_filename = std::string(actual_file_name) + "/imce_" + std::to_string(h) + "_" + std::to_string(w) + ".npz";
         
         // Load IMCE NPZ file
@@ -943,11 +987,16 @@ int32_t program_scan_reg(const char* file_name) {{
     uint32_t* npu_scan_base;{transfer_code_str}
 
     // Set PC and execute policy update phase
-    fprintf(stderr, "Executing policy update phase\\n");
+    fprintf(stderr, "Set the inode pc to 0 and run.\\n");
     for (int i = 0; i < INODE_NUM; i++) {{
         npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_EXTERN_ENUM_VAL << 30);
     }}
     {enable_intr}    npu_ptr[STATE_REG_IDX] = SET_PROGRAM_CODE;
+    {wait_done}    npu_ptr[INTR_DONE_REG_IDX] = 1;
+    for (int i = 0; i < INODE_NUM; i++) {{
+        npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_P0_ENUM_VAL << 30);
+    }}
+    {enable_intr}    npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
     {wait_done}    npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Execute scan register programming phase
@@ -1179,6 +1228,10 @@ __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
             generated_files["imce.cpp"] = imce_path
             print(f"   Written: {imce_path}")
 
+            DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
+                self.func_name, imce_builder.codeblocks
+            )
+
             # 2. Generate INode code
             print("\n[2/5] Generating INode code...")
             inode_builder = ScanInodeCodeBlockBuilder(self.func_name)
@@ -1194,9 +1247,6 @@ __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
 
             # 3. Compile device code
             print("\n[3/5] Compiling device code...")
-            DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
-                self.func_name, imce_builder.codeblocks
-            )
             DeviceCodegen("inode", self.build_dir, self.host_isa).handle_code_generation(
                 self.func_name, inode_builder.codeblocks
             )
