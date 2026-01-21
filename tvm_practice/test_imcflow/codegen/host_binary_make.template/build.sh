@@ -27,6 +27,7 @@ cmake .. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DMAIN_SCRIPT="$MAIN_SCRIPT" \
     -DMAIN_TEST_FOLDER="$MAIN_TEST_FOLDER" \
+    -DISA=${ISA^^} \
     -C ../cmake/config_imcflow.cmake
 
 # Build

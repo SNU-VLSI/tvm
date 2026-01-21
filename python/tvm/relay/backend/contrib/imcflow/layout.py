@@ -1945,6 +1945,18 @@ class ImcflowLayoutLegalizer:
             return int(ttype.shape[1]) * 256
         return None
 
+      def _get_blocked_channels(self, expr, layout):
+        """Get total channel count from a blocked layout tensor."""
+        ttype = get_type(self.module, expr)
+        if isinstance(ttype, TensorType) and len(ttype.shape) == 5:
+          if layout in (LayoutType.NCHW16C, LayoutType.NCHW64C):
+            # Shape: (N, CG, H, W, block) -> CG * block
+            return int(ttype.shape[1]) * int(ttype.shape[4])
+          elif layout in (LayoutType.NHWC16C, LayoutType.NHWC64C):
+            # Shape: (N, H, W, CG, block) -> CG * block
+            return int(ttype.shape[3]) * int(ttype.shape[4])
+        return None
+
       def _convert_layout(self, expr, curr_layout, target_layout, channel_hint=None):
         if target_layout is None or curr_layout is None or self._layout_equal(curr_layout, target_layout):
           return expr, curr_layout if curr_layout is not None else target_layout
@@ -1962,6 +1974,16 @@ class ImcflowLayoutLegalizer:
           return expr, target_layout
         
         if curr_layout in block_layouts and target_layout in block_layouts:
+          # Check if channel slicing is needed when converting between blocked layouts
+          if channel_hint is not None:
+            curr_channels = self._get_blocked_channels(expr, curr_layout)
+            if curr_channels is not None and curr_channels > channel_hint:
+              # Need to go through NCHW with slice to reduce channels
+              expr, _ = self._convert_layout(expr, curr_layout, LayoutType.NCHW, channel_hint)
+              expr = relay.op.layout_transform(expr, "NCHW", self._layout_to_str(target_layout))
+              self.layout_map[expr] = target_layout
+              return expr, target_layout
+          # Direct conversion (channels match or no hint)
           layout_str_from = self._layout_to_str(curr_layout)
           layout_str_to = self._layout_to_str(target_layout)
           expr = relay.op.layout_transform(expr, layout_str_from, layout_str_to)
@@ -2052,6 +2074,32 @@ class ImcflowLayoutLegalizer:
         debug_print("[insert_packing_unpacking] TupleGetItem: index", tgi.index, " | In layout:", val_layout, " | Out layout:", layout)
         return new_tgi
 
+      def _select_target_rule(self, rules, arg_layouts):
+        """Select target rule based on first tensor layout in arg_layouts.
+
+        For binary ops like add, we need all inputs to have the same layout.
+        This method finds a rule that matches the first non-scalar layout.
+        """
+        # Find first non-scalar layout as base
+        base_layout = None
+        for layout in arg_layouts:
+          if layout not in [LayoutType.SCALAR, LayoutType.C]:
+            base_layout = layout
+            break
+
+        # Find a rule that contains base_layout
+        if base_layout is not None:
+          for rule in rules:
+            inputs_options, _ = rule
+            for option in inputs_options:
+              if len(option) == len(arg_layouts) and base_layout in option:
+                return option
+
+        # Fallback: return first rule's first option
+        if rules and rules[0][0]:
+          return rules[0][0][0]
+        return None
+
       def visit_call(self, call):
         new_args = [self.visit(arg) for arg in call.args]
         arg_layouts = [self.layout_map[arg] for arg in new_args]
@@ -2062,26 +2110,50 @@ class ImcflowLayoutLegalizer:
           target_func = self.module[call.op.name_hint]
           expected_layouts = self.imcflow_func_layout_map[call.op.name_hint][0]
           for idx, (arg, curr_layout, tgt_layout) in enumerate(zip(new_args, arg_layouts, expected_layouts)):
-            new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout)
+            # Get original channel count for proper slicing during layout conversion
+            channel_hint = self._channels_from_expr(arg)
+            new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout, channel_hint)
             transformed_args.append(new_arg)
             target_arg_layouts[idx] = new_layout
         elif isinstance(call.op, tvm.ir.Op):
-          for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
-            req_layouts = get_required_layout_from_op(call, "inputs", i, True)
-            tgt_layout = None
-            for r in req_layouts:
-              if self._layout_equal(curr_layout, r):
-                tgt_layout = r
+          # Get all layout rules for this op
+          rules = get_required_layout_rules(call, cpu_node=True)
+
+          if rules:
+            # Step 1: Find a rule that matches current input layouts as a whole
+            matched_option = None
+            for rule in rules:
+              inputs_options, _ = rule
+              for option in inputs_options:
+                if len(option) == len(arg_layouts):
+                  if all(self._layout_equal(curr, req) for curr, req in zip(arg_layouts, option)):
+                    matched_option = option
+                    break
+              if matched_option:
                 break
-            if tgt_layout is None and req_layouts:
-              #TODO: if multiple required layouts, choose the best one
-              if LayoutType.MK in req_layouts and LayoutType.NCHW in req_layouts:
-                tgt_layout = req_layouts[req_layouts.index(LayoutType.NCHW)]
-              else:
-                tgt_layout = req_layouts[0]
-            new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout)
-            transformed_args.append(new_arg)
-            target_arg_layouts[i] = new_layout
+
+            # Step 2: If no match, select a target rule based on first input's layout
+            if matched_option is None:
+              matched_option = self._select_target_rule(rules, arg_layouts)
+
+            # Step 3: Transform all inputs to match the target rule
+            if matched_option:
+              for i, (arg, curr_layout, tgt_layout) in enumerate(zip(new_args, arg_layouts, matched_option)):
+                # Get original channel count for proper slicing during layout conversion
+                channel_hint = self._channels_from_expr(arg)
+                new_arg, new_layout = self._convert_layout(arg, curr_layout, tgt_layout, channel_hint)
+                transformed_args.append(new_arg)
+                target_arg_layouts[i] = new_layout
+            else:
+              # Fallback to original per-argument logic if no rule found
+              for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
+                transformed_args.append(arg)
+                target_arg_layouts[i] = curr_layout
+          else:
+            # No rules defined, keep original layouts
+            for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
+              transformed_args.append(arg)
+              target_arg_layouts[i] = curr_layout
         else:
           for i, (arg, curr_layout) in enumerate(zip(new_args, arg_layouts)):
             tgt_layout = LayoutType.NCHW if isinstance(curr_layout, LayoutType) else curr_layout
@@ -2105,17 +2177,34 @@ class ImcflowLayoutLegalizer:
       def visit_function(self, fn):
         new_body = self.visit(fn.body)
         ret_layout = self.layout_map[new_body]
-        if not self._layout_equal(ret_layout, LayoutType.NCHW) and ret_layout in [LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT, LayoutType.NHWC16C, LayoutType.NHWC64C]: 
+
+        # Helper to get original channel count from fn.ret_type
+        def get_original_channels(ret_type, index=None):
+          if isinstance(ret_type, TensorType):
+            if len(ret_type.shape) >= 2:
+              return int(ret_type.shape[1])
+          elif isinstance(ret_type, TupleType):
+            if index is not None and index < len(ret_type.fields):
+              field_type = ret_type.fields[index]
+              if isinstance(field_type, TensorType) and len(field_type.shape) >= 2:
+                return int(field_type.shape[1])
+          return None
+
+        if not self._layout_equal(ret_layout, LayoutType.NCHW) and ret_layout in [LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.QCONV_INPUT, LayoutType.NHWC16C, LayoutType.NHWC64C]:
           if isinstance(ret_layout, (tuple, list)):
             # best-effort: transform tuple fields individually
             new_fields = []
             for idx, field in enumerate(new_body.fields if isinstance(new_body, relay.Tuple) else [new_body]):
               layout = ret_layout[idx] if isinstance(ret_layout, (tuple, list)) else ret_layout
-              converted, _ = self._convert_layout(field, layout, LayoutType.NCHW, self._channels_from_expr(field, idx))
+              # Use original fn.ret_type to get correct channel count
+              channel_hint = get_original_channels(fn.ret_type, idx)
+              converted, _ = self._convert_layout(field, layout, LayoutType.NCHW, channel_hint)
               new_fields.append(converted)
             new_body = relay.Tuple(new_fields) if isinstance(new_body, relay.Tuple) else new_fields[0]
           else:
-            new_body, _ = self._convert_layout(new_body, ret_layout, LayoutType.NCHW, self._channels_from_expr(new_body))
+            # Use original fn.ret_type to get correct channel count
+            channel_hint = get_original_channels(fn.ret_type)
+            new_body, _ = self._convert_layout(new_body, ret_layout, LayoutType.NCHW, channel_hint)
         self.layout_map[fn] = ret_layout
         return relay.Function(fn.params, new_body, None, fn.type_params, fn.attrs)
 

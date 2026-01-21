@@ -10,9 +10,16 @@ Includes packet tracking capabilities for NoC analysis.
 import argparse
 import fnmatch
 import os
+import random
 import re
+import select
+import subprocess
 import sys
+import tempfile
+import termios
+import threading
 import time
+import tty
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -82,6 +89,132 @@ class PacketTrace:
         return [e.node for e in sorted(self.events, key=lambda x: x.timestamp)]
 
 
+class KeyboardHandler:
+    """Handles non-blocking keyboard input for interactive selection."""
+
+    debug_file = None
+    _original_settings = None
+
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+
+    @staticmethod
+    def enable_debug(log_file: str):
+        """Enable debug logging to a file."""
+        KeyboardHandler.debug_file = open(log_file, 'w')
+
+    @staticmethod
+    def _debug(msg: str):
+        """Write debug message to log file."""
+        if KeyboardHandler.debug_file:
+            KeyboardHandler.debug_file.write(f"[{time.time():.3f}] {msg}\n")
+            KeyboardHandler.debug_file.flush()
+
+    @staticmethod
+    def enable_cbreak_mode():
+        """Enable cbreak mode: no echo, no line buffering, but ANSI codes work."""
+        fd = sys.stdin.fileno()
+        try:
+            KeyboardHandler._original_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            KeyboardHandler._debug("Enabled cbreak mode")
+        except Exception as e:
+            KeyboardHandler._debug(f"ERROR enabling cbreak mode: {e}")
+
+    @staticmethod
+    def restore_terminal():
+        """Restore original terminal settings."""
+        if KeyboardHandler._original_settings:
+            fd = sys.stdin.fileno()
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, KeyboardHandler._original_settings)
+                KeyboardHandler._debug("Restored terminal settings")
+            except Exception as e:
+                KeyboardHandler._debug(f"ERROR restoring terminal: {e}")
+
+    @staticmethod
+    def get_key(timeout: float = 0.0) -> Optional[str]:
+        """
+        Get a key press without blocking.
+        Assumes terminal is already in cbreak mode.
+
+        Args:
+            timeout: Time to wait for input (0 = non-blocking)
+
+        Returns:
+            Key string or None if no input available.
+            Special keys: 'UP', 'DOWN', 'ENTER', 'SPACE', etc.
+        """
+        try:
+            KeyboardHandler._debug(f"get_key called with timeout={timeout}")
+
+            # Check if input is available
+            KeyboardHandler._debug("Calling select.select...")
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
+            KeyboardHandler._debug(f"select returned: ready={len(ready)}")
+
+            if not ready:
+                return None
+
+            KeyboardHandler._debug("Input available, reading...")
+
+            # Read the key (terminal already in cbreak mode)
+            ch = sys.stdin.read(1)
+            KeyboardHandler._debug(f"Read character: {repr(ch)} (ord={ord(ch) if ch else 'None'})")
+
+            # Handle escape sequences (arrow keys, etc.)
+            if ch == '\x1b':  # ESC
+                KeyboardHandler._debug("ESC sequence detected")
+                # Try to read the rest of the escape sequence
+                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if ready:
+                    ch2 = sys.stdin.read(1)
+                    KeyboardHandler._debug(f"ESC+{repr(ch2)}")
+                    if ch2 == '[':
+                        ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        if ready:
+                            ch3 = sys.stdin.read(1)
+                            KeyboardHandler._debug(f"ESC+[+{repr(ch3)}")
+                            if ch3 == 'A':
+                                KeyboardHandler._debug("Returning UP")
+                                return 'UP'
+                            elif ch3 == 'B':
+                                KeyboardHandler._debug("Returning DOWN")
+                                return 'DOWN'
+                            elif ch3 == 'C':
+                                KeyboardHandler._debug("Returning RIGHT")
+                                return 'RIGHT'
+                            elif ch3 == 'D':
+                                KeyboardHandler._debug("Returning LEFT")
+                                return 'LEFT'
+                KeyboardHandler._debug("Returning ESC")
+                return 'ESC'
+            elif ch == '\r' or ch == '\n':
+                KeyboardHandler._debug("Returning ENTER")
+                return 'ENTER'
+            elif ch == ' ':
+                KeyboardHandler._debug("Returning SPACE")
+                return 'SPACE'
+            elif ch == '\x03':  # Ctrl+C
+                KeyboardHandler._debug("Returning CTRL_C")
+                return 'CTRL_C'
+            elif ch == 'q' or ch == 'Q':
+                KeyboardHandler._debug("Returning q")
+                return 'q'
+            elif ch == 'j':
+                KeyboardHandler._debug("Returning j")
+                return 'j'
+            elif ch == 'k':
+                KeyboardHandler._debug("Returning k")
+                return 'k'
+            else:
+                KeyboardHandler._debug(f"Returning character: {repr(ch)}")
+                return ch
+        except Exception as e:
+            KeyboardHandler._debug(f"ERROR in get_key: {type(e).__name__}: {e}")
+            return None
+
+
 class LogMonitor:
     """Monitors log files for changes to detect simulation deadlock."""
 
@@ -98,6 +231,7 @@ class LogMonitor:
         include_patterns: Optional[list[str]] = None,
         exclude_patterns: Optional[list[str]] = None,
         verbose: bool = False,
+        debug: bool = False,
     ):
         """
         Initialize the log monitor.
@@ -110,6 +244,7 @@ class LogMonitor:
             include_patterns: Glob patterns to include (if set, only matching files are monitored)
             exclude_patterns: Glob patterns to exclude
             verbose: Print detailed information
+            debug: Enable debug logging to /tmp/fsim_log_analyzer_debug.log
         """
         self.log_dir = Path(log_dir) if log_dir else self.DEFAULT_LOG_DIR
         self.check_interval = check_interval
@@ -118,10 +253,21 @@ class LogMonitor:
         self.include_patterns = include_patterns or []
         self.exclude_patterns = exclude_patterns or []
         self.verbose = verbose
+        self.debug = debug
+
+        if self.debug:
+            debug_log = "/tmp/fsim_log_analyzer_debug.log"
+            KeyboardHandler.enable_debug(debug_log)
+            KeyboardHandler._debug(f"Debug logging enabled to {debug_log}")
 
         self.file_statuses: dict[str, FileStatus] = {}
         self.last_any_change: float = time.time()
         self.monitoring_start: float = 0
+
+        # Selection state for keyboard navigation
+        self.selection_mode: bool = False
+        self.selected_index: int = 0
+        self.selectable_files: list[Path] = []
 
     def _matches_pattern(self, filename: str, patterns: list[str]) -> bool:
         """Check if filename matches any of the given glob patterns."""
@@ -164,6 +310,73 @@ class LogMonitor:
             return stat.st_size, stat.st_mtime
         except OSError:
             return 0, 0
+
+    def _open_file_in_vscode(self, file_path: Path):
+        """Open a file in VS Code."""
+        try:
+            subprocess.Popen(
+                ['code', str(file_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except Exception as e:
+            # Silently fail - we don't want to crash the monitor
+            pass
+
+    def _handle_keyboard_input(self, key: Optional[str]) -> bool:
+        """
+        Handle keyboard input for file selection.
+
+        Args:
+            key: Key pressed by user
+
+        Returns:
+            True if should continue monitoring, False if should exit
+        """
+        if key is None:
+            return True
+
+        KeyboardHandler._debug(f"_handle_keyboard_input: key={repr(key)}, selection_mode={self.selection_mode}, selected_index={self.selected_index}")
+
+        # Handle Ctrl+C
+        if key == 'CTRL_C':
+            KeyboardHandler._debug("Handling CTRL_C - exiting")
+            return False
+
+        # If not in selection mode, any navigation key enters selection mode
+        if not self.selection_mode:
+            KeyboardHandler._debug(f"Not in selection mode, checking if key enters selection mode")
+            if key in ['UP', 'DOWN', 'j', 'k'] and self.selectable_files:
+                self.selection_mode = True
+                self.selected_index = 0
+                KeyboardHandler._debug(f"Entered selection mode! selectable_files count={len(self.selectable_files)}")
+            return True
+
+        # In selection mode - handle navigation and selection
+        KeyboardHandler._debug("In selection mode, handling navigation")
+        if key in ['UP', 'k']:
+            if self.selectable_files:
+                old_index = self.selected_index
+                self.selected_index = (self.selected_index - 1) % len(self.selectable_files)
+                KeyboardHandler._debug(f"UP/k: moved from {old_index} to {self.selected_index}")
+        elif key in ['DOWN', 'j']:
+            if self.selectable_files:
+                old_index = self.selected_index
+                self.selected_index = (self.selected_index + 1) % len(self.selectable_files)
+                KeyboardHandler._debug(f"DOWN/j: moved from {old_index} to {self.selected_index}")
+        elif key in ['ENTER', 'SPACE']:
+            if self.selectable_files and 0 <= self.selected_index < len(self.selectable_files):
+                selected_file = self.selectable_files[self.selected_index]
+                KeyboardHandler._debug(f"Opening file: {selected_file}")
+                self._open_file_in_vscode(selected_file)
+        elif key == 'q':
+            # Exit selection mode
+            KeyboardHandler._debug("Exiting selection mode")
+            self.selection_mode = False
+            self.selected_index = 0
+
+        return True
 
     def _update_file_status(self, path: Path, current_time: float) -> bool:
         """
@@ -281,18 +494,34 @@ class LogMonitor:
             )
             print(f"  Deadlock timer: [{bar}] {progress*100:.0f}%")
 
-        if result["changed_files"] and self.verbose:
+        # Update selectable files list
+        self.selectable_files = result["changed_files"][:10]  # Limit to 10 files
+
+        if result["changed_files"]:
             print(
                 f"\n  Recently changed files ({len(result['changed_files'])}):"
             )
-            for f in result["changed_files"][:5]:
-                print(f"    - {f.name}")
-            if len(result["changed_files"]) > 5:
-                print(f"    ... and {len(result['changed_files']) - 5} more")
+            # Show up to 10 files with numbers for selection
+            display_count = min(len(result["changed_files"]), 10)
+            for i in range(display_count):
+                f = result["changed_files"][i]
+                # Show selection indicator if in selection mode
+                if self.selection_mode and i == self.selected_index:
+                    indicator = "→"
+                else:
+                    indicator = " "
+                print(f"    {indicator} [{i+1}] {f.name}")
+
+            if len(result["changed_files"]) > 10:
+                print(f"    ... and {len(result['changed_files']) - 10} more")
 
         print("\n" + "-" * 70)
-        print("  Press Ctrl+C to stop monitoring")
+        if self.selection_mode:
+            print("  ↑↓/jk: navigate | Enter/Space: open in VS Code | q: exit selection")
+        else:
+            print("  ↑↓/jk: enter selection mode | Ctrl+C: stop monitoring")
         print("=" * 70)
+        sys.stdout.flush()  # Ensure output is displayed immediately
 
     def monitor(self, duration: Optional[float] = None) -> bool:
         """
@@ -314,13 +543,38 @@ class LogMonitor:
         self.last_any_change = time.time()
         deadlock_detected = False
 
-        try:
-            while True:
-                result = self.check_once()
-                self._print_status(result)
+        # Enable cbreak mode for responsive keyboard input
+        KeyboardHandler.enable_cbreak_mode()
 
-                if result["potential_deadlock"]:
-                    deadlock_detected = True
+        try:
+            # Do initial file check so result is never None
+            result = self.check_once()
+            self._print_status(result)
+            last_check_time = time.time()
+
+            while True:
+                current_time = time.time()
+
+                # Check files at regular intervals
+                if current_time - last_check_time >= self.check_interval:
+                    result = self.check_once()
+                    self._print_status(result)
+                    last_check_time = current_time
+
+                    if result and result["potential_deadlock"]:
+                        deadlock_detected = True
+
+                # Check for keyboard input frequently (every 100ms)
+                key = KeyboardHandler.get_key(timeout=0.1)
+                if not self._handle_keyboard_input(key):
+                    # User pressed Ctrl+C
+                    break
+
+                # If navigation key was pressed, redraw immediately
+                # Always redraw on navigation keys (don't check result)
+                if key in ['UP', 'DOWN', 'j', 'k', 'q', 'ENTER', 'SPACE']:
+                    KeyboardHandler._debug(f"Navigation key {key} pressed, redrawing...")
+                    self._print_status(result)
 
                 if (
                     duration
@@ -329,10 +583,13 @@ class LogMonitor:
                     print("\nMonitoring duration reached.")
                     break
 
-                time.sleep(self.check_interval)
-
         except KeyboardInterrupt:
+            pass
+        finally:
+            # Always restore terminal settings
+            KeyboardHandler.restore_terminal()
             print("\n\nMonitoring stopped by user.")
+            sys.stdout.flush()
 
         return deadlock_detected
 
@@ -643,20 +900,133 @@ def _parse_patterns(pattern_str: Optional[str]) -> list[str]:
     return [p.strip() for p in pattern_str.split(",") if p.strip()]
 
 
+class DebugTestDirectory:
+    """Creates and manages a test directory with simulated file activity for debugging."""
+
+    def __init__(self):
+        self.test_dir = Path(tempfile.mkdtemp(prefix="fsim_debug_"))
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.files = []
+
+    def create_test_files(self, count: int = 10):
+        """Create test log files."""
+        print(f"Creating {count} test files in {self.test_dir}")
+
+        # Create various test files with realistic names
+        test_names = [
+            "testbench.u_core.u_stage1.log",
+            "testbench.u_core.u_stage2.log",
+            "testbench.u_core.u_mem.log",
+            "testbench.u_noc.u_router[0].log",
+            "testbench.u_noc.u_router[1].log",
+            "testbench.u_imce.u_ctrl.log",
+            "testbench.u_imce.u_datapath.log",
+            "testbench.u_bridge.u_axi.log",
+            "testbench.u_bridge.u_demux.log",
+            "run.log",
+        ]
+
+        for i, name in enumerate(test_names[:count]):
+            file_path = self.test_dir / name
+            # Create file with some initial content
+            with open(file_path, 'w') as f:
+                f.write(f"[0] Test log file: {name}\n")
+                f.write(f"[100] Initialized at {time.time()}\n")
+            self.files.append(file_path)
+
+        print(f"Created {len(self.files)} test files")
+
+    def _update_files_loop(self):
+        """Background thread that periodically updates random files."""
+        cycle = 0
+        while not self.stop_event.is_set():
+            # Update 1-3 random files each cycle
+            num_updates = random.randint(1, min(3, len(self.files)))
+            files_to_update = random.sample(self.files, num_updates)
+
+            for file_path in files_to_update:
+                try:
+                    with open(file_path, 'a') as f:
+                        timestamp = int(time.time() * 1000)
+                        f.write(f"[{timestamp}] Cycle {cycle}: Random activity\n")
+                except Exception:
+                    pass
+
+            cycle += 1
+            # Update every 0.5-2 seconds
+            time.sleep(random.uniform(0.5, 2.0))
+
+    def start_activity(self):
+        """Start background thread to simulate file activity."""
+        if self.thread is None or not self.thread.is_alive():
+            self.stop_event.clear()
+            self.thread = threading.Thread(target=self._update_files_loop, daemon=True)
+            self.thread.start()
+            print("Started simulated file activity (updates every 0.5-2s)")
+
+    def stop_activity(self):
+        """Stop background activity thread."""
+        if self.thread and self.thread.is_alive():
+            self.stop_event.set()
+            self.thread.join(timeout=2.0)
+
+    def cleanup(self):
+        """Clean up test directory."""
+        self.stop_activity()
+        # Note: We don't delete the directory automatically so user can inspect it
+        # User can manually delete /tmp/fsim_debug_* directories later
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+
+
 def cmd_monitor(args):
     """Handle the monitor command."""
-    monitor = LogMonitor(
-        log_dir=args.log_dir,
-        check_interval=args.interval,
-        deadlock_threshold=args.threshold,
-        extensions=tuple(args.extensions.split(",")),
-        include_patterns=_parse_patterns(args.include),
-        exclude_patterns=_parse_patterns(args.exclude),
-        verbose=args.verbose,
-    )
+    test_dir = None
+    log_dir = args.log_dir
 
-    deadlock = monitor.monitor(duration=args.duration)
-    sys.exit(1 if deadlock else 0)
+    # If debug mode and no log_dir specified, create test directory
+    if args.debug and log_dir is None:
+        print("=" * 70)
+        print("  DEBUG MODE - Creating test environment")
+        print("=" * 70)
+        test_dir = DebugTestDirectory()
+        test_dir.create_test_files(count=10)
+        test_dir.start_activity()
+        log_dir = test_dir.test_dir
+        print(f"Test directory: {log_dir}")
+        print("Debug logging: /tmp/fsim_log_analyzer_debug.log")
+        print("=" * 70)
+        print()
+
+    try:
+        monitor = LogMonitor(
+            log_dir=log_dir,
+            check_interval=args.interval,
+            deadlock_threshold=args.threshold,
+            extensions=tuple(args.extensions.split(",")),
+            include_patterns=_parse_patterns(args.include),
+            exclude_patterns=_parse_patterns(args.exclude),
+            verbose=args.verbose,
+            debug=args.debug,
+        )
+
+        if args.debug and test_dir is None:
+            print("Debug mode enabled - logging to /tmp/fsim_log_analyzer_debug.log")
+            print()
+
+        deadlock = monitor.monitor(duration=args.duration)
+        sys.exit(1 if deadlock else 0)
+    finally:
+        if test_dir:
+            print("\n\nCleaning up test environment...")
+            test_dir.cleanup()
+            print(f"Test directory preserved at: {test_dir.test_dir}")
+            print("You can inspect it or delete with: rm -rf /tmp/fsim_debug_*")
 
 
 def cmd_summary(args):
@@ -958,6 +1328,393 @@ def cmd_packet_cmd_stats(args):
     print("=" * 70)
 
 
+def count_recv_before_step(log_file: Path, imce_name: str, rd_filter: Optional[int] = None) -> list[dict]:
+    """
+    Parse log file and count successful OP_RECV before each OP_STEP success.
+
+    Args:
+        log_file: Path to the log file (e.g., now.debug.log)
+        imce_name: IMCE identifier (e.g., "IMCE.2.1")
+        rd_filter: If set, only count OP_RECV with this rd value (e.g., 0 for load_lb)
+
+    Returns:
+        List of dicts with step_index, recv_count, pc, uid info
+    """
+    # Pattern to match successful instruction lines for the specific IMCE
+    # Example: IMCE.3.1 | SUC INST | PC : 0 | NEXT_PC : 1 | OP_RECV({...})
+    pattern = re.compile(
+        rf'{re.escape(imce_name)}\s*\|\s*SUC INST\s*\|.*\|\s*(OP_RECV|OP_STEP)'
+    )
+    # Pattern to extract PC value
+    pc_pattern = re.compile(r'PC\s*:\s*(\d+)')
+    # Pattern to extract uid value
+    uid_pattern = re.compile(r'uid:(\d+)')
+    # Pattern to extract rd value from OP_RECV
+    rd_pattern = re.compile(r"'rd':\s*(\d+)")
+
+    results = []
+    recv_count = 0
+
+    with open(log_file, 'r') as f:
+        for line in f:
+            match = pattern.search(line)
+            if match:
+                op_type = match.group(1)
+                if op_type == 'OP_RECV':
+                    if rd_filter is not None:
+                        rd_match = rd_pattern.search(line)
+                        if rd_match and int(rd_match.group(1)) == rd_filter:
+                            recv_count += 1
+                    else:
+                        recv_count += 1
+                elif op_type == 'OP_STEP':
+                    # Extract PC and uid from line
+                    pc_match = pc_pattern.search(line)
+                    uid_match = uid_pattern.search(line)
+                    pc = int(pc_match.group(1)) if pc_match else -1
+                    uid = int(uid_match.group(1)) if uid_match else -1
+
+                    results.append({
+                        'step_index': len(results),
+                        'recv_count': recv_count,
+                        'pc': pc,
+                        'uid': uid,
+                    })
+                    recv_count = 0  # Reset for next STEP
+
+    return results
+
+
+def expand_row_pattern(pattern: list) -> list[int]:
+    """
+    Expand a nested row pattern into a flat list of load_lb counts before each STEP.
+
+    Args:
+        pattern: Nested pattern like [{'count': 1, 'pattern': [{'count': 1, 'pattern': 10}, ...]}, ...]
+
+    Returns:
+        Flat list of expected load_lb counts, one per STEP
+    """
+    result = []
+
+    def expand_inner(inner_pattern):
+        """Expand inner pattern recursively."""
+        expanded = []
+        for item in inner_pattern:
+            count = item['count']
+            pat = item['pattern']
+            if isinstance(pat, int):
+                # Base case: pat is the load_lb count
+                expanded.extend([pat] * count)
+            elif isinstance(pat, list):
+                # Recursive case: pat is another nested pattern
+                inner_expanded = expand_inner(pat)
+                expanded.extend(inner_expanded * count)
+        return expanded
+
+    return expand_inner(pattern)
+
+
+def parse_expected_patterns_from_log(log_file: Path) -> dict[int, list[int]]:
+    """
+    Parse expected row patterns for each node from test_random.log.
+
+    Args:
+        log_file: Path to test_random.log
+
+    Returns:
+        Dict mapping node_id to expanded flat list of expected load_lb counts
+    """
+    import ast
+
+    node_patterns = {}
+    # Pattern to find node header (handles quoted or unquoted lines)
+    pattern_regex = re.compile(r"row pattern for node (\d+):")
+
+    with open(log_file, 'r') as f:
+        lines = f.readlines()
+
+    i = 0
+    while i < len(lines):
+        # Strip quotes from line if present (log file may have quoted lines)
+        line = lines[i].strip()
+        if line.startswith("'") and line.endswith("'"):
+            line = line[1:-1]
+
+        match = pattern_regex.search(line)
+        if match:
+            node_id = int(match.group(1))
+            # Collect pattern lines until we hit a non-pattern line
+            pattern_str = ""
+            i += 1
+            while i < len(lines):
+                stripped = lines[i].strip()
+
+                # Check if this line is part of the pattern
+                # Pattern lines contain 'count' and/or 'pattern' dict keys
+                if "'count'" in stripped or "'pattern'" in stripped:
+                    pattern_str += stripped
+                    i += 1
+                else:
+                    break
+
+            # Try to parse the pattern
+            if pattern_str:
+                try:
+                    pattern = ast.literal_eval(pattern_str)
+                    expanded = expand_row_pattern(pattern)
+                    node_patterns[node_id] = expanded
+                except (SyntaxError, ValueError) as e:
+                    pass  # Skip patterns that can't be parsed
+        else:
+            i += 1
+
+    return node_patterns
+
+
+def compare_recv_patterns(
+    actual: list[dict],
+    expected: list[int],
+) -> dict:
+    """
+    Compare actual RECV counts with expected pattern.
+
+    Args:
+        actual: List of dicts from count_recv_before_step
+        expected: Flat list of expected load_lb counts from expand_row_pattern
+
+    Returns:
+        Dict with comparison results
+    """
+    actual_counts = [r['recv_count'] for r in actual]
+
+    matches = 0
+    mismatches = []
+
+    min_len = min(len(actual_counts), len(expected))
+    for i in range(min_len):
+        if actual_counts[i] == expected[i]:
+            matches += 1
+        else:
+            mismatches.append({
+                'index': i,
+                'actual': actual_counts[i],
+                'expected': expected[i],
+                'pc': actual[i]['pc'] if i < len(actual) else -1,
+            })
+
+    return {
+        'actual_count': len(actual_counts),
+        'expected_count': len(expected),
+        'matches': matches,
+        'mismatches': mismatches,
+        'actual_counts': actual_counts,
+        'expected_counts': expected,
+    }
+
+
+def cmd_recv_before_step(args):
+    """Handle the recv-before-step command."""
+    log_file = Path(args.file)
+
+    if not log_file.exists():
+        print(f"Error: Log file not found: {log_file}", file=sys.stderr)
+        sys.exit(1)
+
+    rd_filter = args.rd if hasattr(args, 'rd') else None
+    results = count_recv_before_step(log_file, args.imce, rd_filter=rd_filter)
+
+    print("=" * 70)
+    print(f"  RECV Count Before STEP - {args.imce}")
+    if rd_filter is not None:
+        print(f"  (Filtering OP_RECV with rd={rd_filter})")
+    print("=" * 70)
+    print(f"  Log file: {log_file}")
+    print(f"  Total STEPs: {len(results)}")
+    print("-" * 70)
+
+    if not results:
+        print(f"  No OP_STEP found for {args.imce}")
+    else:
+        print(f"  {'STEP#':>6} {'RECV Count':>12} {'PC':>8} {'UID':>10}")
+        print("  " + "-" * 40)
+
+        total_recv = 0
+        for r in results:
+            print(f"  {r['step_index']:>6} {r['recv_count']:>12} {r['pc']:>8} {r['uid']:>10}")
+            total_recv += r['recv_count']
+
+        print("  " + "-" * 40)
+        print(f"  {'TOTAL':>6} {total_recv:>12}")
+
+        if results:
+            avg_recv = total_recv / len(results)
+            print(f"  {'AVG':>6} {avg_recv:>12.1f}")
+
+    print("=" * 70)
+
+
+def cmd_compare_recv_pattern(args):
+    """Handle the compare-recv-pattern command."""
+    log_file = Path(args.file)
+    pattern_file = Path(args.pattern_file)
+
+    if not log_file.exists():
+        print(f"Error: Log file not found: {log_file}", file=sys.stderr)
+        sys.exit(1)
+
+    if not pattern_file.exists():
+        print(f"Error: Pattern file not found: {pattern_file}", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse expected patterns from test_random.log
+    expected_patterns = parse_expected_patterns_from_log(pattern_file)
+
+    if args.node not in expected_patterns:
+        print(f"Error: Node {args.node} not found in pattern file", file=sys.stderr)
+        print(f"Available nodes: {sorted(expected_patterns.keys())}", file=sys.stderr)
+        sys.exit(1)
+
+    expected = expected_patterns[args.node]
+
+    # Apply scale factor to expected values (ConvBlock.num_blocks = 4)
+    scale = args.scale if hasattr(args, 'scale') else 1
+    if scale != 1:
+        expected = [e * scale for e in expected]
+
+    # Parse actual RECV counts from debug log
+    rd_filter = args.rd if hasattr(args, 'rd') and args.rd is not None else 0
+    actual = count_recv_before_step(log_file, args.imce, rd_filter=rd_filter)
+
+    # Compare
+    result = compare_recv_patterns(actual, expected)
+
+    print("=" * 70)
+    print(f"  Pattern Comparison - Node {args.node} / {args.imce}")
+    print("=" * 70)
+    print(f"  Debug log: {log_file}")
+    print(f"  Pattern file: {pattern_file}")
+    print(f"  OP_RECV filter: rd={rd_filter}")
+    print(f"  Scale factor: {scale}x (expected values multiplied)")
+    print("-" * 70)
+    print(f"  Expected STEPs: {result['expected_count']}")
+    print(f"  Actual STEPs:   {result['actual_count']}")
+    print(f"  Matches:        {result['matches']}")
+    print(f"  Mismatches:     {len(result['mismatches'])}")
+    print("-" * 70)
+
+    if result['mismatches']:
+        print("\n  Mismatches (first 20):")
+        print(f"  {'Index':>6} {'Expected':>10} {'Actual':>10} {'PC':>8}")
+        print("  " + "-" * 38)
+        for m in result['mismatches'][:20]:
+            print(f"  {m['index']:>6} {m['expected']:>10} {m['actual']:>10} {m['pc']:>8}")
+        if len(result['mismatches']) > 20:
+            print(f"  ... and {len(result['mismatches']) - 20} more")
+
+    # Show side-by-side comparison if verbose
+    if args.verbose:
+        print("\n  Full comparison:")
+        print(f"  {'Index':>6} {'Expected':>10} {'Actual':>10} {'Match':>8}")
+        print("  " + "-" * 38)
+        max_len = max(len(expected), len(result['actual_counts']))
+        for i in range(max_len):
+            exp = expected[i] if i < len(expected) else '-'
+            act = result['actual_counts'][i] if i < len(result['actual_counts']) else '-'
+            match_str = "OK" if exp == act else "MISMATCH"
+            print(f"  {i:>6} {str(exp):>10} {str(act):>10} {match_str:>8}")
+
+    print("=" * 70)
+
+
+def split_log_by_simulation(log_file: Path, output_dir: Path = None) -> list[Path]:
+    """
+    Split a log file into multiple files based on "Simulation finished." markers.
+
+    Args:
+        log_file: Path to the log file to split
+        output_dir: Directory to write output files (default: same as input file)
+
+    Returns:
+        List of paths to the created output files
+    """
+    if output_dir is None:
+        output_dir = log_file.parent
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get base name without extension
+    stem = log_file.stem
+    suffix = log_file.suffix
+
+    output_files = []
+    current_lines = []
+    segment_index = 0
+
+    with open(log_file, "r") as f:
+        for line in f:
+            current_lines.append(line)
+
+            if "Simulation finished." in line:
+                # Write current segment
+                output_path = output_dir / f"{stem}_{segment_index}{suffix}"
+                with open(output_path, "w") as out:
+                    out.writelines(current_lines)
+                output_files.append(output_path)
+
+                # Reset for next segment
+                current_lines = []
+                segment_index += 1
+
+    # Write remaining lines if any (after last "Simulation finished." or if no marker found)
+    if current_lines:
+        output_path = output_dir / f"{stem}_{segment_index}{suffix}"
+        with open(output_path, "w") as out:
+            out.writelines(current_lines)
+        output_files.append(output_path)
+
+    return output_files
+
+
+def cmd_split_log(args):
+    """Handle the split-log command."""
+    log_file = Path(args.file)
+
+    if not log_file.exists():
+        print(f"Error: Log file not found: {log_file}", file=sys.stderr)
+        sys.exit(1)
+
+    output_dir = Path(args.output_dir) if args.output_dir else None
+
+    print("=" * 70)
+    print("  Split Log by Simulation")
+    print("=" * 70)
+    print(f"  Input file: {log_file}")
+    print(f"  Output dir: {output_dir or log_file.parent}")
+    print("-" * 70)
+
+    output_files = split_log_by_simulation(log_file, output_dir)
+
+    print(f"\n  Created {len(output_files)} file(s):")
+    for i, f in enumerate(output_files):
+        # Get file size
+        size = f.stat().st_size
+        if size < 1024:
+            size_str = f"{size} B"
+        elif size < 1024 * 1024:
+            size_str = f"{size / 1024:.1f} KB"
+        else:
+            size_str = f"{size / (1024 * 1024):.1f} MB"
+
+        # Count lines
+        with open(f, "r") as fp:
+            line_count = sum(1 for _ in fp)
+
+        print(f"    [{i}] {f.name:40} {size_str:>10}  ({line_count:,} lines)")
+
+    print("=" * 70)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="FSIM Log Analyzer Tool",
@@ -996,6 +1753,9 @@ Examples:
   %(prog)s packet-node-stats -d <log_dir>  # Node traffic statistics
   %(prog)s packet-hotspots -d <log_dir>  # Find traffic hotspots
   %(prog)s packet-cmd-stats -d <log_dir>  # Command type statistics
+
+  # IMCE instruction analysis
+  %(prog)s recv-before-step --imce IMCE.2.1 -f <log_file>  # Count RECV before STEP
 """,
     )
 
@@ -1058,6 +1818,12 @@ Examples:
         "-v",
         action="store_true",
         help="Show detailed information",
+    )
+    monitor_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging to /tmp/fsim_log_analyzer_debug.log. "
+             "If --log-dir is not specified, creates a test directory with simulated file activity.",
     )
     monitor_parser.set_defaults(func=cmd_monitor)
 
@@ -1206,6 +1972,98 @@ Examples:
         help="Show detailed information",
     )
     packet_cmd_stats_parser.set_defaults(func=cmd_packet_cmd_stats)
+
+    # Recv before step command
+    recv_before_step_parser = subparsers.add_parser(
+        "recv-before-step",
+        help="Count successful OP_RECV before each OP_STEP for an IMCE",
+    )
+    recv_before_step_parser.add_argument(
+        "--imce",
+        required=True,
+        help="IMCE identifier (e.g., 'IMCE.2.1')",
+    )
+    recv_before_step_parser.add_argument(
+        "--file",
+        "-f",
+        required=True,
+        help="Path to the log file (e.g., now.debug.log)",
+    )
+    recv_before_step_parser.add_argument(
+        "--rd",
+        type=int,
+        default=None,
+        help="Filter OP_RECV by rd value (e.g., 0 for load_lb)",
+    )
+    recv_before_step_parser.set_defaults(func=cmd_recv_before_step)
+
+    # Compare recv pattern command
+    compare_recv_pattern_parser = subparsers.add_parser(
+        "compare-recv-pattern",
+        help="Compare actual RECV counts with expected pattern from test log",
+    )
+    compare_recv_pattern_parser.add_argument(
+        "--imce",
+        required=True,
+        help="IMCE identifier (e.g., 'IMCE.3.1')",
+    )
+    compare_recv_pattern_parser.add_argument(
+        "--node",
+        type=int,
+        required=True,
+        help="Node ID from hw_node_map (e.g., 21 for node that maps to IMCE)",
+    )
+    compare_recv_pattern_parser.add_argument(
+        "--file",
+        "-f",
+        required=True,
+        help="Path to the debug log file (e.g., now.debug.log)",
+    )
+    compare_recv_pattern_parser.add_argument(
+        "--pattern-file",
+        "-p",
+        required=True,
+        help="Path to the pattern file (e.g., test_random.log)",
+    )
+    compare_recv_pattern_parser.add_argument(
+        "--rd",
+        type=int,
+        default=0,
+        help="Filter OP_RECV by rd value (default: 0 for load_lb)",
+    )
+    compare_recv_pattern_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show full side-by-side comparison",
+    )
+    compare_recv_pattern_parser.add_argument(
+        "--scale",
+        "-s",
+        type=int,
+        default=1,
+        help="Scale factor for expected values (default: 1, use 4 for ConvBlock.num_blocks)",
+    )
+    compare_recv_pattern_parser.set_defaults(func=cmd_compare_recv_pattern)
+
+    # Split log command
+    split_log_parser = subparsers.add_parser(
+        "split-log",
+        help="Split log file by 'Simulation finished.' markers",
+    )
+    split_log_parser.add_argument(
+        "--file",
+        "-f",
+        required=True,
+        help="Path to the log file to split (e.g., now.debug.log)",
+    )
+    split_log_parser.add_argument(
+        "--output-dir",
+        "-o",
+        default=None,
+        help="Output directory for split files (default: same as input file)",
+    )
+    split_log_parser.set_defaults(func=cmd_split_log)
 
     args = parser.parse_args()
 

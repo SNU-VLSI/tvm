@@ -152,25 +152,27 @@ class AddHandler(OperationHandler):
     return call.op == op.get("add")
 
   def handle(self, call: 'BuilderContext') -> None:
-    assert call.curr_composite_id, "Add must be inside a composite function"
+    # assert call.curr_composite_id, "Add must be inside a composite function"
     hid = call.get_hid()
 
     to_process_in_edges = []
     for in_edge in call.get_input_edges():
       arg_gid = in_edge.src_id.graph_node_id
-      try:
-        if ConstPat.match(CustomIDToNode()[arg_gid]):
-          block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"add const")
-          call.codeblocks.append(hid, block, CodePhase.INIT)
-          # add constedge info to codeblock info
-          IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
-      except KeyError:
-        # If the node is not found in CustomIDToNode, treat it as non-constant
+      arg_node = CustomIDToNode()[arg_gid]
+      if ConstPat.match(arg_node):
+        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"add const")
+        call.codeblocks.append(hid, block, CodePhase.INIT)
+        # add constedge info to codeblock info
+        IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
+      else:
         to_process_in_edges.append(in_edge)
-        pass
-
+      
     block = AddBlock(call, "add")
-    call.post_op_stack.append(block)
+    if call.curr_composite_id is not None:
+      call.post_op_stack.append(block)
+    else:
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "add standalone").create_loop_from_call(call, to_process_in_edges)
+      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
 @register_operation_handler
@@ -194,16 +196,13 @@ class MultHandler(OperationHandler):
     to_process_in_edges = []
     for in_edge in call.get_input_edges():
       arg_gid = in_edge.src_id.graph_node_id
-      try:
-        if ConstPat.match(CustomIDToNode()[arg_gid]):
-          block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"mult const")
-          call.codeblocks.append(hid, block, CodePhase.INIT)
-          # add constedge info to codeblock info
-          IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
-      except KeyError:
-        # If the node is not found in CustomIDToNode, treat it as non-constant
+      if ConstPat.match(CustomIDToNode()[arg_gid]):
+        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"mult const")
+        call.codeblocks.append(hid, block, CodePhase.INIT)
+        # add constedge info to codeblock info
+        IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
+      else:
         to_process_in_edges.append(in_edge)
-        pass
 
     block = MultlBlock(call, "multl")
     if call.curr_composite_id is not None:
@@ -229,10 +228,26 @@ class DivideHandler(OperationHandler):
 
   def handle(self, call: 'BuilderContext') -> None:
     # TODO: divide block should be replaced later
-    assert call.curr_composite_id, "Divide must be inside a composite function"
-    block = DivBlock(call, "div")
-    call.post_op_stack.append(block)
+    # assert call.curr_composite_id, "Divide must be inside a composite function"
+    hid= call.get_hid()
 
+    to_process_in_edges = []
+    for in_edge in call.get_input_edges():
+      arg_gid = in_edge.src_id.graph_node_id
+      if ConstPat.match(CustomIDToNode()[arg_gid]):
+        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"div const")
+        call.codeblocks.append(hid, block, CodePhase.INIT)
+        # add constedge info to codeblock info
+        IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
+      else:
+        to_process_in_edges.append(in_edge)
+    block = DivBlock(call, "div")
+
+    if call.curr_composite_id is not None:
+      call.post_op_stack.append(block)
+    else:
+      wrapped_block = RecvSendWrapper.from_codeblock(block, "divide standalone").create_loop_from_call(call, to_process_in_edges)
+      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 @register_operation_handler
 class ConcatHandler(OperationHandler):
