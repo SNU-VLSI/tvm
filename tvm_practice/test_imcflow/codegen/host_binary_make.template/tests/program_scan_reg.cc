@@ -1,13 +1,16 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <stdio.h>
 #include <stdint.h>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
 #include <cnpy.h>
 #include <vector>
 
@@ -114,56 +117,57 @@ extern "C" {
 }
 
 
-static inline void enable_interrupt(int fd) {
-    uint32_t info = 1;
-    write(fd, &info, sizeof(info));
+static inline void enable_imcflow_interrupt(int fd)
+{
+  uint32_t info = 1;
+  ssize_t nb = write(fd, &info, sizeof(info));
+  if (nb != (ssize_t)sizeof(info)) {
+    perror("write failed");
+    close(fd);
+    exit(1);
+  }
 }
 
-static inline void wait_interrupt(int fd) {
-    uint32_t info;
-    read(fd, &info, sizeof(info));
+static inline void wait_imcflow_interrupt(int fd)
+{
+  uint32_t info;
+  ssize_t nb = read(fd, &info, sizeof(info));
+  (void)nb;
 }
 
-static inline void generate_ack(uint32_t* int_ack_gen) {
-    int_ack_gen[0] = 0b1;
+static inline void generate_ack(uint32_t* int_ack_gen)
+{
+  int_ack_gen[0] = 0b1;
 }
 
-static void wait_for_idle(volatile uint32_t* npu_pointer) {
-    while (npu_pointer[STATE_REG_IDX] != SET_IDLE_CODE) {
-        // Busy wait
-    }
+// Poll until ImcFlow returns to IDLE state
+static void wait_for_idle(volatile uint32_t* npu_pointer)
+{
+  while (npu_pointer[STATE_REG_IDX] != SET_IDLE_CODE) {
+    // Busy wait
+  }
 }
 
 
-int32_t program_scan_reg(char* file_name) {
+#ifdef __cplusplus
+extern "C"
+#endif
+int32_t program_scan_reg(const char* file_name) {
     // Check if file_name is provided
     if (file_name == NULL || file_name[0] == '\0') {
-        fprintf(stderr, "Error: NPZ file path is required for program_scan_reg\n");
-        fprintf(stderr, "Usage: program_scan_reg <npz_file_path>\n");
+        fprintf(stderr, "Error: NPZ directory path is required for program_scan_reg\n");
+        fprintf(stderr, "Usage: program_scan_reg <npz_directory_path>\n");
         return -1;
     }
 
-    fprintf(stderr, "Starting program_scan_reg from file: %s\n", file_name);
-
-    // Load NPZ file using cnpy
-    fprintf(stderr, "Loading scan data from NPZ file...\n");
-    cnpy::npz_t npz_data;
-    try {
-        npz_data = cnpy::npz_load(file_name);
-    } catch (const std::exception& e) {
-        fprintf(stderr, "Error loading NPZ file: %s\n", e.what());
-        return -1;
+    // Strip surrounding quotes from file_name if present
+    std::string file_name_str(file_name);
+    if (file_name_str.size() >= 2 && file_name_str.front() == '"' && file_name_str.back() == '"') {
+        file_name_str = file_name_str.substr(1, file_name_str.size() - 2);
     }
+    const char* actual_file_name = file_name_str.c_str();
 
-    // Get arr_0 from NPZ file (64 bytes per IMCE, 16 IMCEs = 1024 bytes total)
-    if (npz_data.find("arr_0") == npz_data.end()) {
-        fprintf(stderr, "Error: 'arr_0' not found in NPZ file\n");
-        return -1;
-    }
-
-    cnpy::NpyArray arr = npz_data["arr_0"];
-    uint8_t* scan_bytes = arr.data<uint8_t>();
-    size_t total_bytes = arr.num_bytes();
+    fprintf(stderr, "Starting program_scan_reg from directory: %s\n", actual_file_name);
 
     // Allocate memory for scan data (32 packets × 32 bytes = 1024 bytes)
     const int num_packets = 32;
@@ -174,24 +178,48 @@ int32_t program_scan_reg(char* file_name) {
         return -1;
     }
 
-    // Convert NPZ bytes to scan packets
-    // Each IMCE has 64 bytes → 2 packets (32 bytes each)
+    // Convert NPZ files to scan packets
+    // Each IMCE has its own NPZ file with 64 bytes → 2 packets (32 bytes each)
     // 16 IMCEs × 2 packets = 32 packets total
     const int imce_count = 16;
     const int bytes_per_imce = 64;
-    if (total_bytes != imce_count * bytes_per_imce) {
-        fprintf(stderr, "Error: Expected %d bytes in NPZ file (16 IMCEs × 64 bytes), got %zu bytes\n", 
-                imce_count * bytes_per_imce, total_bytes);
-        free(scan_data);
-        return -1;
-    }
 
     // Convert NPZ bytes to scan packets following the same logic as load_scan_values_from_npz
-    // For each IMCE: 64 bytes → 512 bits → bit-reverse → split into reg0/reg1 → 2 packets
-    fprintf(stderr, "Converting NPZ data with bit reversal...\n");
+    // For each IMCE: load NPZ file, 64 bytes → 512 bits → bit-reverse → split into reg0/reg1 → 2 packets
+    fprintf(stderr, "Loading and converting NPZ data with bit reversal...\n");
     
     for (int imce_idx = 0; imce_idx < imce_count; imce_idx++) {
-        uint8_t* imce_bytes = &scan_bytes[imce_idx * bytes_per_imce];
+        // Calculate IMCE coordinates: h=0-3, w=1-4
+        int h = imce_idx / 4;
+        int w = imce_idx % 4;
+        std::string imce_filename = std::string(actual_file_name) + "/imce_" + std::to_string(h) + "_" + std::to_string(w) + ".npz";
+        
+        // Load IMCE NPZ file
+        cnpy::npz_t imce_npz;
+        try {
+            imce_npz = cnpy::npz_load(imce_filename);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "Error loading NPZ file %s: %s\n", imce_filename.c_str(), e.what());
+            free(scan_data);
+            return -1;
+        }
+
+        if (imce_npz.find("arr_0") == imce_npz.end()) {
+            fprintf(stderr, "Error: 'arr_0' not found in NPZ file %s\n", imce_filename.c_str());
+            free(scan_data);
+            return -1;
+        }
+
+        cnpy::NpyArray imce_arr = imce_npz["arr_0"];
+        uint8_t* imce_bytes = imce_arr.data<uint8_t>();
+        size_t imce_bytes_size = imce_arr.num_bytes();
+
+        if (imce_bytes_size != bytes_per_imce) {
+            fprintf(stderr, "Error: Expected %d bytes in NPZ file %s, got %zu bytes\n", 
+                    bytes_per_imce, imce_filename.c_str(), imce_bytes_size);
+            free(scan_data);
+            return -1;
+        }
         
         // Step 1: Convert 64 bytes to 512-bit string
         char bit_str[513];  // 512 bits + null terminator
@@ -282,43 +310,16 @@ int32_t program_scan_reg(char* file_name) {
         }
     }
     
-    fprintf(stderr, "Loaded and converted %d scan packets from NPZ file\n", num_packets);
+    fprintf(stderr, "Loaded and converted %d scan packets from NPZ files\n", num_packets);
 
-    // Open devices
-    int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
-    if (npu_fd < 0) {
-        perror("Cannot open NPU device");
-        free(scan_data);
-        return -1;
-    }
 
-    int int_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
-    if (int_fd < 0) {
-        perror("Cannot open interrupt device");
-        close(npu_fd);
-        free(scan_data);
-        return -1;
-    }
+    uint32_t* npu_ptr = (uint32_t*)IMCFLOW_ADDR;
+    uint32_t* int_ack_ptr = (uint32_t*)INT_ACK_GEN_ADDR;
 
-    // Map NPU memory
-    uint32_t* npu_ptr = (uint32_t*)mmap(NULL, IMCFLOW_LEN,
-                                         PROT_READ | PROT_WRITE,
-                                         MAP_SHARED, npu_fd, 0);
-    if (npu_ptr == MAP_FAILED) {
-        perror("mmap failed");
-        close(npu_fd);
-        close(int_fd);
-        free(scan_data);
-        return -1;
-    }
-
-    uint32_t* int_ack_ptr = (uint32_t*)mmap(NULL, 4096,
-                                             PROT_READ | PROT_WRITE,
-                                             MAP_SHARED, int_fd, 0);
 
     // Transfer policy tables and instruction memory from binary files
     fprintf(stderr, "Transferring policy tables and instruction memory to NPU:\n");
-    // Transfer inode_0_0_imem (288 bytes at 0x80)
+    // Transfer inode_0_0_imem (160 bytes at 0x80)
     {
         const uint32_t* src = (const uint32_t*)_binary_program_scan_reg_inode_0_0_imem_bin_start;
         size_t len = (size_t)(_binary_program_scan_reg_inode_0_0_imem_bin_end - _binary_program_scan_reg_inode_0_0_imem_bin_start);
@@ -408,7 +409,7 @@ int32_t program_scan_reg(char* file_name) {
         }
         fprintf(stderr, "  imce_0_4_imem: 0x%x (%zu bytes)\n", 2592, len * 4);
     }
-    // Transfer inode_1_0_imem (288 bytes at 0x10480)
+    // Transfer inode_1_0_imem (160 bytes at 0x10480)
     {
         const uint32_t* src = (const uint32_t*)_binary_program_scan_reg_inode_1_0_imem_bin_start;
         size_t len = (size_t)(_binary_program_scan_reg_inode_1_0_imem_bin_end - _binary_program_scan_reg_inode_1_0_imem_bin_start);
@@ -498,7 +499,7 @@ int32_t program_scan_reg(char* file_name) {
         }
         fprintf(stderr, "  imce_1_4_imem: 0x%x (%zu bytes)\n", 69152, len * 4);
     }
-    // Transfer inode_2_0_imem (288 bytes at 0x20880)
+    // Transfer inode_2_0_imem (160 bytes at 0x20880)
     {
         const uint32_t* src = (const uint32_t*)_binary_program_scan_reg_inode_2_0_imem_bin_start;
         size_t len = (size_t)(_binary_program_scan_reg_inode_2_0_imem_bin_end - _binary_program_scan_reg_inode_2_0_imem_bin_start);
@@ -588,7 +589,7 @@ int32_t program_scan_reg(char* file_name) {
         }
         fprintf(stderr, "  imce_2_4_imem: 0x%x (%zu bytes)\n", 135712, len * 4);
     }
-    // Transfer inode_3_0_imem (288 bytes at 0x30c80)
+    // Transfer inode_3_0_imem (192 bytes at 0x30c80)
     {
         const uint32_t* src = (const uint32_t*)_binary_program_scan_reg_inode_3_0_imem_bin_start;
         size_t len = (size_t)(_binary_program_scan_reg_inode_3_0_imem_bin_end - _binary_program_scan_reg_inode_3_0_imem_bin_start);
@@ -726,10 +727,8 @@ int32_t program_scan_reg(char* file_name) {
     for (int i = 0; i < INODE_NUM; i++) {
         npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_EXTERN_ENUM_VAL << 30);
     }
-    enable_interrupt(npu_fd);
-    npu_ptr[STATE_REG_IDX] = SET_PROGRAM_CODE;
-    wait_interrupt(npu_fd);
-    generate_ack(int_ack_ptr);
+        npu_ptr[STATE_REG_IDX] = SET_PROGRAM_CODE;
+    wait_for_idle(npu_ptr);
     npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Execute scan register programming phase
@@ -737,23 +736,16 @@ int32_t program_scan_reg(char* file_name) {
     for (int i = 0; i < INODE_NUM; i++) {
         npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_P0_ENUM_VAL << 30);
     }
-    enable_interrupt(npu_fd);
-    npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
-    wait_interrupt(npu_fd);
-    generate_ack(int_ack_ptr);
+        npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
+    wait_for_idle(npu_ptr);
     npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Cleanup
     free(scan_data);
-    munmap(npu_ptr, IMCFLOW_LEN);
-    munmap(int_ack_ptr, 4096);
-    close(npu_fd);
-    close(int_fd);
 
-    fprintf(stderr, "program_scan_reg kernel completed successfully\n");
-}
+    // baremetal: no cleanup
 
-int main(void) {
-    program_scan_reg_kernel();
+
+    fprintf(stderr, "program_scan_reg completed successfully\n");
     return 0;
 }

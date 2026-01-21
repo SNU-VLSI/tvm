@@ -463,10 +463,14 @@ class ScanKernelCodegen:
     def __init__(
         self,
         func_name: str,
-        scan_packet_count: int
+        scan_packet_count: int,
+        host_os: str = "linux",
+        use_polling: bool = True,
     ):
         self.func_name = func_name
         self.scan_packet_count = scan_packet_count
+        self.host_os = host_os
+        self.use_polling = use_polling
 
         # Initialize base address macros (similar to ext_codegen.py)
         self.base_address_macros = {
@@ -489,17 +493,22 @@ class ScanKernelCodegen:
 
     def generate_header(self) -> str:
         """Generate C header includes."""
+        # Note: we keep Linux-only headers unconditionally for now since
+        # this generator primarily targets the existing Linux host runner.
+        # The OS-specific behavior is handled in generated C code blocks.
         return """
 #include <stdlib.h>
 #include <string.h>
 #include <string>
 #include <stdio.h>
 #include <stdint.h>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
 #include <cnpy.h>
 #include <vector>
 """
@@ -586,26 +595,115 @@ class ScanKernelCodegen:
     def generate_utilities(self) -> str:
         """Generate utility functions."""
         return """
-static inline void enable_interrupt(int fd) {
-    uint32_t info = 1;
-    write(fd, &info, sizeof(info));
+static inline void enable_imcflow_interrupt(int fd)
+{
+  uint32_t info = 1;
+  ssize_t nb = write(fd, &info, sizeof(info));
+  if (nb != (ssize_t)sizeof(info)) {
+    perror("write failed");
+    close(fd);
+    exit(1);
+  }
 }
 
-static inline void wait_interrupt(int fd) {
-    uint32_t info;
-    read(fd, &info, sizeof(info));
+static inline void wait_imcflow_interrupt(int fd)
+{
+  uint32_t info;
+  ssize_t nb = read(fd, &info, sizeof(info));
 }
 
-static inline void generate_ack(uint32_t* int_ack_gen) {
-    int_ack_gen[0] = 0b1;
+static inline void generate_ack(uint32_t* int_ack_gen)
+{
+  int_ack_gen[0] = 0b1;
 }
 
-static void wait_for_idle(volatile uint32_t* npu_pointer) {
-    while (npu_pointer[STATE_REG_IDX] != SET_IDLE_CODE) {
-        // Busy wait
-    }
+// Poll until ImcFlow returns to IDLE state
+static void wait_for_idle(volatile uint32_t* npu_pointer)
+{
+  while (npu_pointer[STATE_REG_IDX] != SET_IDLE_CODE) {
+    // Busy wait
+  }
 }
 """
+
+    def _generate_device_pointer_setup(self) -> str:
+        """Generate OS-specific device open + mmap setup (ext_codegen.py style)."""
+        if self.host_os == "linux":
+            # Match ext_codegen.py behavior: open both UIO devices and mmap.
+            return """
+    int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
+    if (npu_fd < 0) {
+        perror("npu UIO cannot be opened");
+        free(scan_data);
+        return -1;
+    }
+
+    int int_ack_gen_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
+    if (int_ack_gen_fd < 0) {
+        perror("interrupt ack gen UIO cannot be opened");
+        close(npu_fd);
+        free(scan_data);
+        return -1;
+    }
+
+    size_t npu_len = (size_t)IMCFLOW_LEN;
+    uint32_t* npu_ptr = (uint32_t*)mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);
+    if (npu_ptr == MAP_FAILED) {
+        perror("npu_ptr mmap error");
+        close(npu_fd);
+        close(int_ack_gen_fd);
+        free(scan_data);
+        return -1;
+    }
+
+    size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;
+    uint32_t* int_ack_ptr = (uint32_t*)mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);
+    if (int_ack_ptr == MAP_FAILED) {
+        perror("int_ack_ptr mmap error");
+        munmap(npu_ptr, npu_len);
+        close(npu_fd);
+        close(int_ack_gen_fd);
+        free(scan_data);
+        return -1;
+    }
+"""
+        if self.host_os == "baremetal":
+            return """
+    uint32_t* npu_ptr = (uint32_t*)IMCFLOW_ADDR;
+    uint32_t* int_ack_ptr = (uint32_t*)INT_ACK_GEN_ADDR;
+"""
+        raise ValueError(f"Unsupported host_os: {self.host_os}")
+
+    def _generate_device_pointer_cleanup(self) -> str:
+        """Generate OS-specific device cleanup (ext_codegen.py style)."""
+        if self.host_os == "linux":
+            return """
+    // Cleanup device pointer
+    munmap(npu_ptr, (size_t)IMCFLOW_LEN);
+    close(npu_fd);
+    munmap(int_ack_ptr, (size_t)INT_ACK_GEN_LEN);
+    close(int_ack_gen_fd);
+"""
+        if self.host_os == "baremetal":
+            return """
+    // baremetal: no cleanup
+"""
+        raise ValueError(f"Unsupported host_os: {self.host_os}")
+
+    def _generate_wait_completion(self) -> str:
+        """Generate wait-for-completion code based on OS and polling config."""
+        if self.host_os == "linux":
+            return "wait_imcflow_interrupt(npu_fd);\n    generate_ack(int_ack_ptr);\n"
+        # baremetal
+        if self.use_polling:
+            return "wait_for_idle(npu_ptr);\n"
+        # If polling disabled on baremetal, there's currently no interrupt path.
+        return "// NOTE: baremetal without polling is not supported; falling back to polling\n    wait_for_idle(npu_ptr);\n"
+
+    def _generate_enable_interrupt(self) -> str:
+        if self.host_os == "linux":
+            return "enable_imcflow_interrupt(npu_fd);\n"
+        return ""
 
     def generate_scan_data_array(self, scan_values: List[List[int]]) -> str:
         """Generate C array containing scan register values.
@@ -642,14 +740,17 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
                     break
 
         if len(scan_data_blocks) != 4:
-            raise RuntimeError(f"Expected 4 scan_data blocks (one per INode), found {len(scan_data_blocks)}")
+            raise RuntimeError(
+                f"Expected 4 scan_data blocks (one per INode), found {len(scan_data_blocks)}"
+            )
 
         # Generate transfer code for each INode's scan_data block
         transfer_code = []
         packets_per_inode = 8  # 4 IMCEs × 2 packets each
         for inode_idx, (inode, block) in enumerate(scan_data_blocks):
             packet_start = inode_idx * packets_per_inode
-            transfer_code.append(f"""
+            transfer_code.append(
+                f"""
     // Transfer scan data for {inode.name} (packets {packet_start}-{packet_start + packets_per_inode - 1})
     fprintf(stderr, "  {inode.name}: 0x%x ({packets_per_inode} packets)\\n", {block.base_address});
     npu_scan_base = &npu_ptr[{block.base_address} / 4];
@@ -658,9 +759,15 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
         for (int j = 0; j < 8; j++) {{
             npu_scan_base[(i - {packet_start}) * 8 + j] = scan_data_ptr[i * 8 + j];
         }}
-    }}""")
+    }}"""
+            )
 
         transfer_code_str = "".join(transfer_code)
+
+        device_setup = self._generate_device_pointer_setup()
+        device_cleanup = self._generate_device_pointer_cleanup()
+        enable_intr = self._generate_enable_interrupt()
+        wait_done = self._generate_wait_completion()
 
         return f"""
 #ifdef __cplusplus
@@ -826,37 +933,7 @@ int32_t program_scan_reg(const char* file_name) {{
     
     fprintf(stderr, "Loaded and converted %d scan packets from NPZ files\\n", num_packets);
 
-    // Open devices
-    int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
-    if (npu_fd < 0) {{
-        perror("Cannot open NPU device");
-        free(scan_data);
-        return -1;
-    }}
-
-    int int_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
-    if (int_fd < 0) {{
-        perror("Cannot open interrupt device");
-        close(npu_fd);
-        free(scan_data);
-        return -1;
-    }}
-
-    // Map NPU memory
-    uint32_t* npu_ptr = (uint32_t*)mmap(NULL, IMCFLOW_LEN,
-                                         PROT_READ | PROT_WRITE,
-                                         MAP_SHARED, npu_fd, 0);
-    if (npu_ptr == MAP_FAILED) {{
-        perror("mmap failed");
-        close(npu_fd);
-        close(int_fd);
-        free(scan_data);
-        return -1;
-    }}
-
-    uint32_t* int_ack_ptr = (uint32_t*)mmap(NULL, 4096,
-                                             PROT_READ | PROT_WRITE,
-                                             MAP_SHARED, int_fd, 0);
+{device_setup}
 
 {self.generate_policy_and_imem_transfers()}
 
@@ -870,29 +947,20 @@ int32_t program_scan_reg(const char* file_name) {{
     for (int i = 0; i < INODE_NUM; i++) {{
         npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_EXTERN_ENUM_VAL << 30);
     }}
-    enable_interrupt(npu_fd);
-    npu_ptr[STATE_REG_IDX] = SET_PROGRAM_CODE;
-    wait_interrupt(npu_fd);
-    generate_ack(int_ack_ptr);
-    npu_ptr[INTR_DONE_REG_IDX] = 1;
+    {enable_intr}    npu_ptr[STATE_REG_IDX] = SET_PROGRAM_CODE;
+    {wait_done}    npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Execute scan register programming phase
     fprintf(stderr, "Executing scan register programming phase\\n");
     for (int i = 0; i < INODE_NUM; i++) {{
         npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_P0_ENUM_VAL << 30);
     }}
-    enable_interrupt(npu_fd);
-    npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
-    wait_interrupt(npu_fd);
-    generate_ack(int_ack_ptr);
-    npu_ptr[INTR_DONE_REG_IDX] = 1;
+    {enable_intr}    npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
+    {wait_done}    npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Cleanup
     free(scan_data);
-    munmap(npu_ptr, IMCFLOW_LEN);
-    munmap(int_ack_ptr, 4096);
-    close(npu_fd);
-    close(int_fd);
+{device_cleanup}
 
     fprintf(stderr, "program_scan_reg completed successfully\\n");
     return 0;
@@ -1146,7 +1214,10 @@ __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
             # 5. Generate kernel wrapper
             print("\n[5/5] Generating kernel wrapper...")
             kernel_codegen = ScanKernelCodegen(
-                self.func_name, self.scan_packet_count
+                self.func_name,
+                self.scan_packet_count,
+                host_os=self.host_os,
+                use_polling=True,
             )
             kernel_code = kernel_codegen.generate(scan_values)
 
