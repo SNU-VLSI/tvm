@@ -90,18 +90,29 @@ endif()
 # ============================================================================
 # Find static zlib library for static linking
 set(ZLIB_USE_STATIC_LIBS ON)
-find_package(ZLIB REQUIRED)
+# find_package(ZLIB REQUIRED)
 
 # If dynamic zlib was found, try to find static version manually
-if(ZLIB_LIBRARIES MATCHES "\\.so$")
-  message(STATUS "Dynamic zlib found, searching for static version...")
-  find_library(ZLIB_STATIC_LIB libz.a PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu)
-  if(ZLIB_STATIC_LIB)
+if(ISA STREQUAL "ARM")
+    find_library(ZLIB_STATIC_LIB 
+        NAMES libz.a 
+        PATHS /usr/lib/aarch64-linux-gnu 
+        NO_DEFAULT_PATH
+    )
+else()
+    # X86
+    find_library(ZLIB_STATIC_LIB 
+        NAMES libz.a 
+        PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/lib64
+    )
+endif()
+
+if(ZLIB_STATIC_LIB)
     set(ZLIB_LIBRARIES ${ZLIB_STATIC_LIB})
-    message(STATUS "Using static zlib: ${ZLIB_LIBRARIES}")
-  else()
-    message(WARNING "Static zlib not found, will use dynamic (may cause linking issues with -static)")
-  endif()
+    message(STATUS "Found static zlib: ${ZLIB_LIBRARIES}")
+else()
+    message(WARNING "Static zlib manually not found. Trying find_package...")
+    find_package(ZLIB)
 endif()
 
 set(CNPY_DIR "${TVM_ROOT}/3rdparty/cnpy")
@@ -284,6 +295,7 @@ if(TVM_BUILD_HOST_RUNNER)
   target_compile_options(tvm_host_runner PRIVATE -fno-pie)
   target_link_options(tvm_host_runner PRIVATE
     -no-pie
+    -static
     -static-libgcc
     -static-libstdc++
   )
