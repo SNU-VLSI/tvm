@@ -255,17 +255,36 @@ def parse_rtl_mm_quant(log_path: str, coord: Tuple[int, int]) -> List[MMQuantOut
 
 
 def parse_rtl_pimc_output(log_path: str, coord: Tuple[int, int]) -> List[IMCUOutput]:
-    """Parse RTL post_imcu log for PIMC_OUT results"""
+    """Parse RTL post_imcu log for IMCU_OUT/PIMC_OUT results"""
     outputs = []
 
-    # Pattern: [timestamp] PIMC_OUT | result: [...]
-    pattern = r'\[\s*(\d+)\]\s*PIMC_OUT\s*\|\s*result:\s*\[(.*?)\]'
+    # Pattern: [timestamp] [IMCU_OUT] output_idx=X | result: [...]
+    # or legacy: [timestamp] PIMC_OUT | result: [...]
+    pattern_new = r'\[\s*(\d+)\]\s*\[IMCU_OUT\]\s*output_idx=(\d+)\s*\|\s*result:\s*\[(.*?)\]'
+    pattern_legacy = r'\[\s*(\d+)\]\s*PIMC_OUT\s*\|\s*result:\s*\[(.*?)\]'
 
     try:
         with open(log_path, 'r') as f:
             for line in f:
-                if 'PIMC_OUT' in line:
-                    match = re.search(pattern, line)
+                if 'IMCU_OUT' in line or 'PIMC_OUT' in line:
+                    # Try new format first
+                    match = re.search(pattern_new, line)
+                    if match:
+                        timestamp = int(match.group(1))
+                        output_idx = int(match.group(2))
+                        result_str = match.group(3)
+                        result = [int(x) for x in result_str.split()]
+
+                        outputs.append(IMCUOutput(
+                            imce_coord=coord,
+                            result=result,
+                            source="rtl",
+                            timestamp=timestamp
+                        ))
+                        continue
+
+                    # Try legacy format
+                    match = re.search(pattern_legacy, line)
                     if match:
                         timestamp = int(match.group(1))
                         result_str = match.group(2)
@@ -617,7 +636,7 @@ def main():
             elif not py_out:
                 print(f"  No Python data")
             else:
-                print(f"  No RTL data (need to re-run RTL with PIMC_OUT logging)")
+                print(f"  No RTL data (need to re-run RTL with IMCU_OUT logging)")
 
         print(f"\nTotal: {total_match} match, {total_mismatch} mismatch")
 
