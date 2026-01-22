@@ -79,7 +79,19 @@ def fused_batch_norm(
     fused_scale_rs = topi.reshape(fused_scale, shape)
     fused_bias_rs = topi.reshape(fused_bias, shape)
 
-    out = data * fused_scale_rs + fused_bias_rs
+    if data.dtype == "int16":
+      # mul and add saturating for int16 data
+      data_upcast = topi.cast(data, "int32")
+      scale_upcast = topi.cast(fused_scale_rs, "int32")
+      bias_upcast = topi.cast(fused_bias_rs, "int32")
+
+      mul_result = topi.multiply(data_upcast, scale_upcast)
+      mul_result_clip = topi.clip(mul_result, -32768, 32767)
+      add_result = topi.add(mul_result_clip, bias_upcast)
+      out = topi.clip(add_result, -32768, 32767)
+      out = topi.cast(out, "int16")
+    else:
+      out = data * fused_scale_rs + fused_bias_rs
 
     # placeholder reuse, we multiply by 1 and return them.
     # return [out, fused_scale_fp32, fused_bias_fp32]

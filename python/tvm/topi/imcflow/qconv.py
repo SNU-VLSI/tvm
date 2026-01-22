@@ -168,20 +168,45 @@ def imcflow_qconv2d(
   )
 
   # Combine results
-  rb_in = te.reduce_axis((0, 4), name="rb_in")
+  # To match RTL/Python simulator behavior, we need to accumulate in int16 with wrapping
+  # at each input bitplane iteration. The Python simulator does:
+  #   post_result = np.zeros(64, dtype=np.int16)
+  #   for b in range(4):
+  #       bp_result = sum over weight bits of (pq_bitline * w_scale)
+  #       post_result += bp_result * (2**b)  # wraps to int16 each iteration
+  #
+  # Step 1: Sum over weight bits for each input bit (in int32 to preserve precision)
   rb_w = te.reduce_axis((0, 4), name="rb_w")
 
-  def get_scale(bi, bw):
-      # Weight bit 3 is sign bit (-8)
-      w_scale = (1 << bw) - 16 * (bw // 3)
-      in_scale = 1 << bi
-      return w_scale * in_scale
+  def get_w_scale(bw):
+      # Weight bit 3 is sign bit (-8), others are 1, 2, 4
+      return (1 << bw) - 16 * (bw // 3)
 
+  # Shape: [batch, out_channel, OH, OW, 4 (input_bits)]
+  WeightBitSum = te.compute(
+      (batch, out_channel, OH, OW, 4),
+      lambda nn, ff, hh, ww, bi: te.sum(
+          QuantizedBitConv[nn, ff, hh, ww, bi, rb_w].astype("int32") * get_w_scale(rb_w),
+          axis=[rb_w]
+      ),
+      name="WeightBitSum"
+  )
+
+  # Step 2: Multiply by input scale and cast to int16 (wrapping)
+  # This matches: bp_result * (2**b) then truncate to int16
+  ScaledBitContrib = te.compute(
+      (batch, out_channel, OH, OW, 4),
+      lambda nn, ff, hh, ww, bi: (WeightBitSum[nn, ff, hh, ww, bi] * (1 << bi)).astype("int16"),
+      name="ScaledBitContrib"
+  )
+
+  # Step 3: Sum the 4 int16 contributions (int16 sum with wrapping)
+  rb_in = te.reduce_axis((0, 4), name="rb_in")
   Output = te.compute(
       (batch, out_channel, OH, OW),
       lambda nn, ff, hh, ww: te.sum(
-          QuantizedBitConv[nn, ff, hh, ww, rb_in, rb_w].astype("int32") * get_scale(rb_in, rb_w),
-          axis=[rb_in, rb_w]
+          ScaledBitContrib[nn, ff, hh, ww, rb_in],
+          axis=[rb_in]
       ),
       name="Output"
   )

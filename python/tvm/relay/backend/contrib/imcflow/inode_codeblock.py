@@ -150,20 +150,26 @@ class RecvBlock(InodeCodeBlock):
       self.body.add(TextBlock(f"{expanded_loop_cnt_var} = {loop_cnt_var} * 4;"))
 
       def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
-        return (f"__builtin_INODE_SET_FLAG(0);\n"
-                f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
-                f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
+        # return (f"__builtin_INODE_SET_FLAG(0);\n"
+        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
+        #         f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
+        return f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
+                
 
       self.body.add(SimpleFor(expanded_loop_cnt_var, unrolled_recv_body))
     else:
       # Producer syncs every 4 SENDs (default behavior), INode syncs every 4 RECVs
       def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
-        return (f"__builtin_INODE_SET_FLAG(0);\n"
-                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
+        # return (f"__builtin_INODE_SET_FLAG(0);\n"
+        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
+        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 32, 0, 0, {fid});\n"
+        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 64, 0, 0, {fid});\n"
+        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});\n"
+        #         f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
+        return (f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
                 f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 32, 0, 0, {fid});\n"
                 f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 64, 0, 0, {fid});\n"
-                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});\n"
-                f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
+                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});\n")
       self.body.add(SimpleFor(loop_cnt_var, unrolled_recv_body))
 
 

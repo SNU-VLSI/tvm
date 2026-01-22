@@ -775,14 +775,14 @@ class RecvSendWrapper(ImceCodeBlock):
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
       # Find if the consumer is an inode. If so, get the inode id and place OP_STANDBY
-      SYNC_OUTPUT_FLAG = 2
-      dst_graph_node_id = getInnerNodeID(te_out_info.owner.dst_id.graph_node_id)
-      dst_hw_node = DevConfig().get_hw_node(dst_graph_node_id)
-      if dst_hw_node is not None and isinstance(dst_hw_node, NodeID) and dst_hw_node.is_inode():
-        code += f"__builtin_IMCE_STANDBY({dst_hw_node.value}, {SYNC_OUTPUT_FLAG});"
-        # Store producer sync granularity for INode RECV to use
-        if te_out_info.producer_sync_granularity is None:
-          te_out_info.producer_sync_granularity = self.num_out_blocks
+      # SYNC_OUTPUT_FLAG = 2
+      # dst_graph_node_id = getInnerNodeID(te_out_info.owner.dst_id.graph_node_id)
+      # dst_hw_node = DevConfig().get_hw_node(dst_graph_node_id)
+      # if dst_hw_node is not None and isinstance(dst_hw_node, NodeID) and dst_hw_node.is_inode():
+      #   code += f"__builtin_IMCE_STANDBY({dst_hw_node.value}, {SYNC_OUTPUT_FLAG});"
+      #   # Store producer sync granularity for INode RECV to use
+      #   if te_out_info.producer_sync_granularity is None:
+      #     te_out_info.producer_sync_granularity = self.num_out_blocks
 
     return code.render()
 

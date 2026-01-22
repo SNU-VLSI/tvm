@@ -26,6 +26,7 @@ It includes:
 
 import os
 import pprint
+import numpy as np
 
 import tvm
 from tvm import relay
@@ -51,7 +52,6 @@ def printModel(result_dir, mod, param_dict, mod_name):
   with open(f"{result_dir}/{mod_name}.txt", "w") as f:
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
-
 
 def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=True):
     """
@@ -87,6 +87,17 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     _print("0_origin")
 
     # Step 1: Bind parameters
+    if save_intermediate:
+        # Save param_dict as npz (numpy arrays)
+        param_np = {k: v.numpy() if hasattr(v, 'numpy') else np.array(v)
+                    for k, v in param_dict.items()}
+        np.savez(f"{output_dir}/params_before_bind.npz", **param_np)
+
+        # Also save a summary txt for quick reference
+        with open(f"{output_dir}/params_before_bind_info.txt", "w") as f:
+            for k, v in param_dict.items():
+                f.write(f"{k}: shape={v.shape}, dtype={v.dtype}\n")
+
     mod["main"] = bind_params_by_name(mod["main"], param_dict)
     mod = transform.InferType()(mod)
     _print("1_after_bind")
