@@ -79,6 +79,7 @@ def make_cpu_runnable(mod, use_saturating_arithmetic=True):
   """
   mod = clearCompilerAttr(mod)
   mod = clearPrimitiveTag(mod)
+  mod = relay.transform.InferType()(mod)
   # mod = relay.transform.Inline()(mod)
 
   class WeightReverter(ExprMutator):
@@ -224,76 +225,71 @@ def apply_saturating_arithmetic(mod):
 
   saturation_count = {"add": 0, "subtract": 0, "multiply": 0, "divide": 0}
 
+  def get_dtype(expr):
+    """Safely get dtype from expression's checked_type."""
+    try:
+      if hasattr(expr, 'checked_type') and hasattr(expr.checked_type, 'dtype'):
+        return expr.checked_type.dtype
+    except ValueError:
+      pass
+    return None
+
   class SaturatingArithmeticMutator(ExprMutator):
     def visit_call(self, call):
+      # Check types on ORIGINAL args before super().visit_call() creates new untyped nodes
+      if isinstance(call.op, tvm.ir.Op) and len(call.args) == 2:
+        op_name = call.op.name
+        orig_a, orig_b = call.args
+        a_dtype = get_dtype(orig_a)
+        b_dtype = get_dtype(orig_b)
+        is_int16_op = (a_dtype == "int16" and b_dtype == "int16")
+      else:
+        op_name = None
+        is_int16_op = False
+
+      # Now visit children
       new_call = super().visit_call(call)
 
-      if isinstance(new_call.op, tvm.ir.Op):
-        op_name = new_call.op.name
+      if is_int16_op and isinstance(new_call.op, tvm.ir.Op):
+        a, b = new_call.args
 
-        # Check if this is an add/subtract on int16 tensors
-        if op_name == "add" and len(new_call.args) == 2:
-          a, b = new_call.args
-          # Check if both operands are int16
-          if hasattr(a, 'checked_type') and hasattr(b, 'checked_type'):
-            a_dtype = a.checked_type.dtype if hasattr(a.checked_type, 'dtype') else None
-            b_dtype = b.checked_type.dtype if hasattr(b.checked_type, 'dtype') else None
+        if op_name == "add":
+          # Convert to saturating add:
+          # clip(cast(a, int32) + cast(b, int32), -32768, 32767).cast(int16)
+          saturation_count["add"] += 1
+          a_wide = relay.cast(a, "int32")
+          b_wide = relay.cast(b, "int32")
+          sum_wide = relay.add(a_wide, b_wide)
+          clipped = relay.clip(sum_wide, INT16_MIN, INT16_MAX)
+          return relay.cast(clipped, "int16")
 
-            if a_dtype == "int16" and b_dtype == "int16":
-              # Convert to saturating add:
-              # clip(cast(a, int32) + cast(b, int32), -32768, 32767).cast(int16)
-              saturation_count["add"] += 1
-              a_wide = relay.cast(a, "int32")
-              b_wide = relay.cast(b, "int32")
-              sum_wide = relay.add(a_wide, b_wide)
-              clipped = relay.clip(sum_wide, INT16_MIN, INT16_MAX)
-              return relay.cast(clipped, "int16")
+        elif op_name == "subtract":
+          # Convert to saturating subtract
+          saturation_count["subtract"] += 1
+          a_wide = relay.cast(a, "int32")
+          b_wide = relay.cast(b, "int32")
+          diff_wide = relay.subtract(a_wide, b_wide)
+          clipped = relay.clip(diff_wide, INT16_MIN, INT16_MAX)
+          return relay.cast(clipped, "int16")
 
-        elif op_name == "subtract" and len(new_call.args) == 2:
-          a, b = new_call.args
-          if hasattr(a, 'checked_type') and hasattr(b, 'checked_type'):
-            a_dtype = a.checked_type.dtype if hasattr(a.checked_type, 'dtype') else None
-            b_dtype = b.checked_type.dtype if hasattr(b.checked_type, 'dtype') else None
+        elif op_name == "multiply":
+          # Convert to saturating multiply
+          saturation_count["multiply"] += 1
+          a_wide = relay.cast(a, "int32")
+          b_wide = relay.cast(b, "int32")
+          mul_wide = relay.multiply(a_wide, b_wide)
+          clipped = relay.clip(mul_wide, INT16_MIN, INT16_MAX)
+          return relay.cast(clipped, "int16")
 
-            if a_dtype == "int16" and b_dtype == "int16":
-              # Convert to saturating subtract
-              saturation_count["subtract"] += 1
-              a_wide = relay.cast(a, "int32")
-              b_wide = relay.cast(b, "int32")
-              diff_wide = relay.subtract(a_wide, b_wide)
-              clipped = relay.clip(diff_wide, INT16_MIN, INT16_MAX)
-              return relay.cast(clipped, "int16")
-
-        elif op_name == "multiply" and len(new_call.args) == 2:
-          a, b = new_call.args
-          if hasattr(a, 'checked_type') and hasattr(b, 'checked_type'):
-            a_dtype = a.checked_type.dtype if hasattr(a.checked_type, 'dtype') else None
-            b_dtype = b.checked_type.dtype if hasattr(b.checked_type, 'dtype') else None
-
-            if a_dtype == "int16" and b_dtype == "int16":
-              # Convert to saturating multiply
-              saturation_count["multiply"] += 1
-              a_wide = relay.cast(a, "int32")
-              b_wide = relay.cast(b, "int32")
-              mul_wide = relay.multiply(a_wide, b_wide)
-              clipped = relay.clip(mul_wide, INT16_MIN, INT16_MAX)
-              return relay.cast(clipped, "int16")
-
-        elif op_name == "divide" and len(new_call.args) == 2:
-          a, b = new_call.args
-          if hasattr(a, 'checked_type') and hasattr(b, 'checked_type'):
-            a_dtype = a.checked_type.dtype if hasattr(a.checked_type, 'dtype') else None
-            b_dtype = b.checked_type.dtype if hasattr(b.checked_type, 'dtype') else None
-
-            if a_dtype == "int16" and b_dtype == "int16":
-              # Convert to saturating divide
-              # Overflow case: INT16_MIN / -1 = INT16_MAX + 1
-              saturation_count["divide"] += 1
-              a_wide = relay.cast(a, "int32")
-              b_wide = relay.cast(b, "int32")
-              div_wide = relay.divide(a_wide, b_wide)
-              clipped = relay.clip(div_wide, INT16_MIN, INT16_MAX)
-              return relay.cast(clipped, "int16")
+        elif op_name == "divide":
+          # Convert to saturating divide
+          # Overflow case: INT16_MIN / -1 = INT16_MAX + 1
+          saturation_count["divide"] += 1
+          a_wide = relay.cast(a, "int32")
+          b_wide = relay.cast(b, "int32")
+          div_wide = relay.divide(a_wide, b_wide)
+          clipped = relay.clip(div_wide, INT16_MIN, INT16_MAX)
+          return relay.cast(clipped, "int16")
 
       return new_call
 
