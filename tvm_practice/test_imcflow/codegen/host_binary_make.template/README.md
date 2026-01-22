@@ -29,11 +29,13 @@ This unified CMakeLists.txt supports both ARM and x86 builds with a single confi
 ### For scan register write:
 
 - zlib.so for ARM cross-compiler is needed
-  - dpkg --add-architecture arm64
-  - echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main universe" >> /etc/apt/sources.list
-  - echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main universe" >> /etc/apt/sources.list
-  - apt update
-  - apt install zlib1g-dev:arm64
+```bash
+dpkg --add-architecture arm64
+echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main universe" >> /etc/apt/sources.list
+echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main universe" >> /etc/apt/sources.list
+apt update
+apt install zlib1g-dev:arm64
+```
 
 ## Quick Start
 
