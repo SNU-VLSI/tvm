@@ -289,12 +289,24 @@ class MCFRouter:
         if not valid_commodities:
           raise ValueError("All commodities have same source and destination.")
 
+        # Deduplicate const group commodities with same (src, dst)
+        # They will share the same path
+        deduped_commodities, const_dedup_map = self._deduplicate_const_commodities(valid_commodities)
+        if len(deduped_commodities) < len(valid_commodities):
+            debug_print(f"[MCFRouter] Deduplicated const commodities: {len(valid_commodities)} -> {len(deduped_commodities)}")
+
         # Validate: no multicast group should have same-destination commodities
         if self.enforce_destination_disjoint:
-            self._validate_no_multicast_same_destination(valid_commodities)
+            self._validate_no_multicast_same_destination(deduped_commodities)
 
-        debug_print(f"[MCFRouter] Routing {len(valid_commodities)} valid commodities on {self.topology.rows}x{self.topology.cols} mesh")
-        return self._route_ilp(valid_commodities)
+        debug_print(f"[MCFRouter] Routing {len(deduped_commodities)} commodities on {self.topology.rows}x{self.topology.cols} mesh")
+        result = self._route_ilp(deduped_commodities)
+
+        # Expand results back to deduplicated commodities
+        if const_dedup_map:
+            result = self._expand_const_dedup_results(result, const_dedup_map)
+
+        return result
 
     def _validate_no_multicast_same_destination(self, commodities: List[Commodity]) -> None:
         """
@@ -331,6 +343,119 @@ class MCFRouter:
                         f"Commodities in group: {[(c.id, c.source, c.destination) for c in group]}"
                     )
                 seen_destinations.add(c.destination)
+
+    def _deduplicate_const_commodities(
+        self,
+        commodities: List[Commodity]
+    ) -> Tuple[List[Commodity], Dict[Tuple[Coord, Coord], List[Commodity]]]:
+        """
+        Deduplicate const group commodities that have the same (src, dst).
+
+        For const tensors (weight, config, etc.), multiple commodities with the same
+        (source, destination) should use the same NoC path. This method groups them
+        and keeps only one representative for routing.
+
+        Args:
+            commodities: List of all commodities
+
+        Returns:
+            Tuple of:
+            - deduped_commodities: List with const duplicates removed
+            - const_dedup_map: Dict mapping (src, dst) -> list of duplicate commodities
+                               (only for groups with more than 1 commodity)
+        """
+        # Separate const and non-const commodities
+        const_commodities = []
+        other_commodities = []
+
+        for c in commodities:
+            if self._get_commodity_group(c) == 'const':
+                const_commodities.append(c)
+            else:
+                other_commodities.append(c)
+
+        if not const_commodities:
+            return commodities, {}
+
+        # Group const commodities by (src, dst)
+        const_by_src_dst: Dict[Tuple[Coord, Coord], List[Commodity]] = {}
+        for c in const_commodities:
+            key = (c.source, c.destination)
+            if key not in const_by_src_dst:
+                const_by_src_dst[key] = []
+            const_by_src_dst[key].append(c)
+
+        # Build deduplicated list and map
+        deduped_commodities = list(other_commodities)
+        const_dedup_map: Dict[Tuple[Coord, Coord], List[Commodity]] = {}
+
+        for (src, dst), group in const_by_src_dst.items():
+            # Always add the first commodity (representative)
+            deduped_commodities.append(group[0])
+
+            # If there are duplicates, record them for later expansion
+            if len(group) > 1:
+                const_dedup_map[(src, dst)] = group
+                debug_print(f"[MCFRouter]   Const dedup: ({src}, {dst}) has {len(group)} commodities, keeping id={group[0].id}")
+
+        return deduped_commodities, const_dedup_map
+
+    def _expand_const_dedup_results(
+        self,
+        result: 'MCFRoutingResult',
+        const_dedup_map: Dict[Tuple[Coord, Coord], List[Commodity]]
+    ) -> 'MCFRoutingResult':
+        """
+        Expand routing results to include deduplicated const commodities.
+
+        For each (src, dst) group in const_dedup_map, copy the routing result
+        from the representative commodity to all other commodities in the group.
+
+        Args:
+            result: Routing result with only representative commodities
+            const_dedup_map: Map from (src, dst) to list of all commodities in that group
+
+        Returns:
+            MCFRoutingResult with all commodities included
+        """
+        expanded_routes = dict(result.routes)
+        expanded_edge_usage = {e: list(v) for e, v in result.edge_usage.items()}
+
+        for (src, dst), group in const_dedup_map.items():
+            # Find the representative's route (first in group)
+            rep_id = group[0].id
+            if rep_id not in expanded_routes:
+                debug_print(f"[MCFRouter] WARNING: Representative {rep_id} not found in routes")
+                continue
+
+            rep_route = expanded_routes[rep_id]
+
+            # Copy route to all other commodities in the group
+            for c in group[1:]:
+                # Create a new RoutingResult with the same path but different commodity
+                new_route = RoutingResult(
+                    commodity=c,
+                    path=list(rep_route.path),  # Copy path
+                    edges=list(rep_route.edges)  # Copy edges
+                )
+                expanded_routes[c.id] = new_route
+
+                # Update edge usage
+                for e in rep_route.edges:
+                    if e in expanded_edge_usage:
+                        expanded_edge_usage[e].append(c.id)
+                    else:
+                        expanded_edge_usage[e] = [c.id]
+
+                debug_print(f"[MCFRouter]   Expanded const route: id={c.id} copies path from id={rep_id}")
+
+        return MCFRoutingResult(
+            routes=expanded_routes,
+            edge_usage={e: v for e, v in expanded_edge_usage.items() if v},
+            max_edge_congestion=result.max_edge_congestion,
+            total_edge_usage=result.total_edge_usage,
+            solver_status=result.solver_status + f" (const_dedup={len(const_dedup_map)})"
+        )
 
     def _route_ilp(self, commodities: List[Commodity]) -> MCFRoutingResult:
         """Route using ILP solver (PuLP) with adaptive capacity.
@@ -1164,6 +1289,114 @@ if __name__ == "__main__":
             print("✓ PASS: Correctly split by graph_node_id (1 mcast + 2 ucast)")
         else:
             print(f"✗ FAIL: Should be 1 mcast + 2 ucast, got: {result.solver_status}")
+            all_passed = False
+
+        # ============================================================
+        print("\n" + "=" * 70)
+        print("Test 9: Const commodities with same (src, dst) share path")
+        print("=" * 70)
+
+        # Mock TensorEdge-like object for const metadata
+        class MockConstSrcId:
+            def __init__(self, graph_node_id, tensor_type='weight'):
+                self.graph_node_id = graph_node_id
+                self.tensor_type = tensor_type
+
+        class MockConstEdge:
+            def __init__(self, graph_node_id, tensor_type='weight'):
+                self.src_id = MockConstSrcId(graph_node_id, tensor_type)
+
+        # Three const commodities with same (src, dst) but different graph_node_ids
+        # They should all use the same path
+        commodities = [
+            Commodity(0, Coord(0, 0), Coord(2, 2), metadata=(MockConstEdge(100, 'weight'), None)),
+            Commodity(1, Coord(0, 0), Coord(2, 2), metadata=(MockConstEdge(200, 'weight'), None)),
+            Commodity(2, Coord(0, 0), Coord(2, 2), metadata=(MockConstEdge(300, 'config'), None)),
+            # Different dst - should have different path
+            Commodity(3, Coord(0, 0), Coord(3, 3), metadata=(MockConstEdge(400, 'weight'), None)),
+        ]
+
+        result = router.route(commodities)
+        print(f"Status: {result.solver_status}")
+        print(f"Max congestion: {result.max_edge_congestion}")
+        print("Routes:")
+        for cid in sorted(result.routes.keys()):
+            route = result.routes[cid]
+            path = " -> ".join(str(p) for p in route.path)
+            print(f"  {cid}: {route.commodity.source} -> {route.commodity.destination}: {path}")
+
+        # Check that commodities 0, 1, 2 have the same path
+        path_0 = result.routes[0].path
+        path_1 = result.routes[1].path
+        path_2 = result.routes[2].path
+        path_3 = result.routes[3].path
+
+        if path_0 == path_1 == path_2:
+            print("✓ PASS: Const commodities with same (src, dst) share the same path")
+        else:
+            print(f"✗ FAIL: Paths should be identical but got:")
+            print(f"  path_0: {path_0}")
+            print(f"  path_1: {path_1}")
+            print(f"  path_2: {path_2}")
+            all_passed = False
+
+        if path_0 != path_3:
+            print("✓ PASS: Const commodities with different dst have different paths")
+        else:
+            print(f"✗ FAIL: Commodities 0 and 3 have different destinations but same path")
+            all_passed = False
+
+        # Verify const_dedup is in status
+        if "const_dedup" in result.solver_status:
+            print("✓ PASS: const_dedup reported in solver status")
+        else:
+            print(f"✗ FAIL: const_dedup not in status: {result.solver_status}")
+            all_passed = False
+
+        # ============================================================
+        print("\n" + "=" * 70)
+        print("Test 10: Mixed const (deduped) and data (not deduped)")
+        print("=" * 70)
+
+        class MockDataSrcId:
+            def __init__(self, graph_node_id):
+                self.graph_node_id = graph_node_id
+                self.tensor_type = 'data'
+
+        class MockDataEdge:
+            def __init__(self, graph_node_id):
+                self.src_id = MockDataSrcId(graph_node_id)
+
+        commodities = [
+            # Const: same (src, dst) - should be deduped
+            Commodity(0, Coord(0, 0), Coord(2, 2), metadata=(MockConstEdge(100, 'weight'), None)),
+            Commodity(1, Coord(0, 0), Coord(2, 2), metadata=(MockConstEdge(200, 'weight'), None)),
+            # Data: same (src, dst) - should NOT be deduped (different routing possible)
+            Commodity(2, Coord(1, 1), Coord(3, 3), metadata=(MockDataEdge(300), None)),
+            Commodity(3, Coord(1, 1), Coord(3, 3), metadata=(MockDataEdge(400), None)),
+        ]
+
+        result = router.route(commodities)
+        print(f"Status: {result.solver_status}")
+        print("Routes:")
+        for cid in sorted(result.routes.keys()):
+            route = result.routes[cid]
+            path = " -> ".join(str(p) for p in route.path)
+            print(f"  {cid}: {route.commodity.source} -> {route.commodity.destination}: {path}")
+
+        # Const should share path
+        if result.routes[0].path == result.routes[1].path:
+            print("✓ PASS: Const commodities 0, 1 share path")
+        else:
+            print(f"✗ FAIL: Const commodities should share path")
+            all_passed = False
+
+        # Data commodities are NOT guaranteed to share (they might or might not depending on solver)
+        # Just verify both exist
+        if 2 in result.routes and 3 in result.routes:
+            print("✓ PASS: Data commodities 2, 3 both routed")
+        else:
+            print(f"✗ FAIL: Data commodities not found in routes")
             all_passed = False
 
         # ============================================================

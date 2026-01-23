@@ -104,8 +104,10 @@ class SendRecvPairManager:
               for edge in pair.edges:
                   filtered_edge_to_pair[edge] = pair
       # Update
-      self.pairs = filtered_pairs
-      self.edge_to_pair = filtered_edge_to_pair
+      # self.pairs = filtered_pairs
+      # self.edge_to_pair = filtered_edge_to_pair
+      self.pairs = {}
+      self.edge_to_pair = {}
 
 
     def _assign_uuids(self, edges: List[TensorEdge]):
