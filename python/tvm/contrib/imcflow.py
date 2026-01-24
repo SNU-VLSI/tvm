@@ -240,6 +240,7 @@ class DataBlock:
     self.size = size
     self.offset = -1  # offset in the region
     self.base_address = -1  # base address in the device memory
+    self.region_base_address = -1  # base address of the containing region
     self.tiling_info = None
   
   @property
@@ -259,13 +260,23 @@ class DataBlock:
       assert offset % 1 == 0, "Offset should be an integer"
     self.offset = int(offset)
 
-  def set_base_address(self, address: int):
+  def set_base_address(self, address: int, region_base_address: int = None):
     if isinstance(address, float):
       assert address % 1 == 0, "Address should be an integer"
     self.base_address = int(address)
+    if region_base_address is not None:
+      self.region_base_address = int(region_base_address)
+
+  @property
+  def rel_address(self) -> int:
+    """Relative address within the containing region."""
+    region_base = getattr(self, 'region_base_address', -1)
+    if region_base == -1:
+      return -1
+    return self.base_address - region_base
 
   def __str__(self):
-    return (f"DataBlock({self.id}, {self.size}, {self.base_address})")
+    return f"DataBlock({self.id}, size={self.size}, rel={self.rel_address}, addr={self.base_address})"
 
   def __repr__(self):
     return self.__str__()
@@ -317,7 +328,7 @@ class MemoryRegionEntry:
     aligned_offset = math.ceil((self.base_address + self._last_offset) / 32) * 32 - self.base_address
     if block.size + aligned_offset <= self.size:
       block.set_offset(aligned_offset)
-      block.set_base_address(aligned_offset + self.base_address)
+      block.set_base_address(aligned_offset + self.base_address, region_base_address=self.base_address)
       self._last_offset = aligned_offset + block.size
       self.blocks[block.id] = block
       return True
