@@ -84,6 +84,7 @@ Note:
       print(f"Creating original backup: {handcraft_build_orig_dir}")
       print(f"Copying *.cpp and *.h files from {build_dir}")
       shutil.copytree(build_dir, handcraft_build_orig_dir, ignore=ignore_non_cpp_h)
+      shutil.copytree(build_dir, handcraft_build_dir, ignore=ignore_non_cpp_h)
       print(f"Original backup created successfully")
     else:
       print(f"Original backup already exists: {handcraft_build_orig_dir}")
