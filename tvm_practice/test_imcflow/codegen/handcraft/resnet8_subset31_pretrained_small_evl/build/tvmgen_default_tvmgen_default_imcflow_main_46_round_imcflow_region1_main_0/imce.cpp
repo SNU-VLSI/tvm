@@ -633,7 +633,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0(
     // generate: conv exec0_row_group2_outer_loop(iterate row offset)
     // generate : conv exec0_row_group2_outer_loop(iterate row offset). loop count == 1
     // generate: conv exec0_row_group2_col_group0
-    for (int i1 = 0; i1 < 6; i1++) { // generate : conv exec0_row_group2_col_group0
+    for (int i1 = 0; i1 < 5; i1++) { // generate : conv exec0_row_group2_col_group0
 
       // generate: load_block
       // loop ignored with loop count == 0 : load_block
@@ -661,33 +661,92 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0(
       __builtin_IMCE_SEND(1, var40, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
       __builtin_IMCE_SEND(1, var41, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
     } // endgenerate : conv exec0_row_group2_col_group0
-    for (int i1 = 0; i1 < 2; i1++) { // generate : conv exec0_row_group2_col_group0
 
-      // generate: load_block
-      // loop ignored with loop count == 0 : load_block
-      // endgenerate: load_block
-      __builtin_IMCE_NOP();
+    __builtin_IMCE_STEP();
 
-      var1 = __builtin_IMCE_GET_CREG((short)0);
-      var2 = __builtin_IMCE_GET_CREG((short)1);
-      var3 = __builtin_IMCE_GET_CREG((short)2);
-      var4 = __builtin_IMCE_GET_CREG((short)3);
-      // generate: batch_norm
+    var1 = __builtin_IMCE_GET_CREG((short)0);
+    var2 = __builtin_IMCE_GET_CREG((short)1);
+    var3 = __builtin_IMCE_GET_CREG((short)2);
+    var4 = __builtin_IMCE_GET_CREG((short)3);
+    // generate: batch_norm
 
-      var38 = __builtin_IMCE_MULTL(var1, var36, 15);
-      var38 = __builtin_IMCE_ADD(var38, var37, 15);
-      var39 = __builtin_IMCE_MULTL(var2, var42, 15);
-      var39 = __builtin_IMCE_ADD(var39, var43, 15);
-      var40 = __builtin_IMCE_MULTL(var3, var44, 15);
-      var40 = __builtin_IMCE_ADD(var40, var45, 15);
-      var41 = __builtin_IMCE_MULTL(var4, var46, 15);
-      var41 = __builtin_IMCE_ADD(var41, var47, 15);
-      // endgenerate: batch_norm
-      __builtin_IMCE_SEND(1, var38, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
-      __builtin_IMCE_SEND(1, var39, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
-      __builtin_IMCE_SEND(1, var40, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
-      __builtin_IMCE_SEND(1, var41, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
-    } // endgenerate : conv exec0_row_group2_col_group0
+    var38 = __builtin_IMCE_MULTL(var1, var36, 15);
+    var38 = __builtin_IMCE_ADD(var38, var37, 15);
+    var39 = __builtin_IMCE_MULTL(var2, var42, 15);
+    var39 = __builtin_IMCE_ADD(var39, var43, 15);
+    var40 = __builtin_IMCE_MULTL(var3, var44, 15);
+    var40 = __builtin_IMCE_ADD(var40, var45, 15);
+    var41 = __builtin_IMCE_MULTL(var4, var46, 15);
+    var41 = __builtin_IMCE_ADD(var41, var47, 15);
+
+    short16 var101;
+    short16 var102;
+    short16 var103;
+    short16 var104;
+    short16 var138;
+    short16 var139;
+    short16 var140;
+    short16 var141;
+
+    __builtin_IMCE_STEP();
+
+    var101 = __builtin_IMCE_GET_CREG((short)0);
+    var102 = __builtin_IMCE_GET_CREG((short)1);
+    var103 = __builtin_IMCE_GET_CREG((short)2);
+    var104 = __builtin_IMCE_GET_CREG((short)3);
+    // generate: batch_norm
+
+    var138 = __builtin_IMCE_MULTL(var101, var36, 15);
+    var138 = __builtin_IMCE_ADD(var138, var37, 15);
+    var139 = __builtin_IMCE_MULTL(var102, var42, 15);
+    var139 = __builtin_IMCE_ADD(var139, var43, 15);
+    var140 = __builtin_IMCE_MULTL(var103, var44, 15);
+    var140 = __builtin_IMCE_ADD(var140, var45, 15);
+    var141 = __builtin_IMCE_MULTL(var104, var46, 15);
+    var141 = __builtin_IMCE_ADD(var141, var47, 15);
+
+    short16 var201;
+    short16 var202;
+    short16 var203;
+    short16 var204;
+    short16 var238;
+    short16 var239;
+    short16 var240;
+    short16 var241;
+
+    __builtin_IMCE_STEP();
+
+    var201 = __builtin_IMCE_GET_CREG((short)0);
+    var202 = __builtin_IMCE_GET_CREG((short)1);
+    var203 = __builtin_IMCE_GET_CREG((short)2);
+    var204 = __builtin_IMCE_GET_CREG((short)3);
+    // generate: batch_norm
+
+    var238 = __builtin_IMCE_MULTL(var201, var36, 15);
+    var238 = __builtin_IMCE_ADD(var238, var37, 15);
+    var239 = __builtin_IMCE_MULTL(var202, var42, 15);
+    var239 = __builtin_IMCE_ADD(var239, var43, 15);
+    var240 = __builtin_IMCE_MULTL(var203, var44, 15);
+    var240 = __builtin_IMCE_ADD(var240, var45, 15);
+    var241 = __builtin_IMCE_MULTL(var204, var46, 15);
+    var241 = __builtin_IMCE_ADD(var241, var47, 15);
+
+    // endgenerate: batch_norm
+    __builtin_IMCE_SEND(1, var38, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var39, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var40, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var41, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+
+    __builtin_IMCE_SEND(1, var138, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var139, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var140, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var141, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+
+    __builtin_IMCE_SEND(1, var238, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var239, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var240, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var241, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
+
     // endgenerate: conv exec0_row_group2_col_group0
     // endgenerate : conv exec0_row_group2_outer_loop(iterate row offset)
     // endgenerate: conv exec0_row_group2_outer_loop(iterate row offset)
