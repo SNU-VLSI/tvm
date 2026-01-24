@@ -250,7 +250,7 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     return mod, param_dict
 
 
-def run_imcflow_codegen(mod, output_dir, rebuild_modified_cpp=False):
+def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=False):
     """
     Run IMCFLOW codegen to generate hardware deployment code.
 
@@ -258,6 +258,7 @@ def run_imcflow_codegen(mod, output_dir, rebuild_modified_cpp=False):
         mod: Transformed TVM IRModule
         output_dir: Directory to save generated code
         rebuild_modified_cpp: If True, just rebuild modified C++ files before simulation
+        save_intermediate: If True, save intermediate files during codegen
     """
     config = DevConfig()
 
@@ -266,6 +267,9 @@ def run_imcflow_codegen(mod, output_dir, rebuild_modified_cpp=False):
     )
     CodegenSuite(mod)
     print(f"mem_layout: {config.MemLayout}")
+    if save_intermediate:
+        with open(f"{output_dir}/mem_layout.txt", "w") as f:
+            pprint.pprint(DevConfig().MemLayout, stream=f)
 
     imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=rebuild_modified_cpp)
     print(f"data_blocks: {config.DataBlocks}")
@@ -336,7 +340,7 @@ def compile_for_imcflow(mod, param_dict, output_dir, skip_codegen=False):
 
     # Step 2: Run codegen
     print("\n--- Running IMCFlow Codegen ---")
-    run_imcflow_codegen(mod, output_dir)
+    run_imcflow_codegen(mod, output_dir, save_intermediate=True)
 
     # Step 3: Generate graph executor
     print("\n--- Generating Graph Executor ---")
@@ -356,7 +360,7 @@ def rebuild_imcflow_cpp_only(mod, param_dict, output_dir):
     """
 
     print("\n--- Rebuilding Modified IMCFlow C++ Files Only ---")
-    run_imcflow_codegen(mod, output_dir, rebuild_modified_cpp=True)
+    run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=True)
 
     print("\n--- Generating Graph Executor ---")
     _, tar_path = generate_graph_executor(mod, param_dict, output_dir)

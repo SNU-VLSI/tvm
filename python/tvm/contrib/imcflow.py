@@ -562,7 +562,12 @@ class TensorEdgeInfo(EdgeInfo):
 
   @property
   def node_info_str(self):
-    return f"{self.policy_info[0].router_id.name} -> {self.policy_info[-1].router_id.name}"
+    src_node = self.policy_info[0].router_id.name
+    dst_nodes = []
+    for router_entry in self.policy_info:
+      if router_entry.data["Local"]["enable"]:
+        dst_nodes.append(router_entry.router_id.name)
+    return f"{src_node} -> {', '.join(dst_nodes)}"
 
   def set_tiling_info(self, height_base_coords: List[int], height_sizes: List[int], pkt_cnts: List[int]):
     self.height_base_coords = height_base_coords
