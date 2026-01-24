@@ -5,16 +5,20 @@ import argparse
 
 def main():
   parser = argparse.ArgumentParser(
-    description="Copy C++ code between evl build directory and handcraft directory",
+    description="Preserve/modify/restore build directories between evl and handcraft",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog="""
 Examples:
-  # Copy from evl build directory to handcraft directory
+  # Save evl build directory to handcraft (creates build/ and build.orig/)
   python copy_cpp.py --model one_relu --from_evl
 
-  # Copy from handcraft directory to evl build directory
+  # Restore build directory from handcraft back to evl
   python copy_cpp.py --model one_relu --to_evl
 
+Note:
+  --from_evl creates build.orig/ only once (first run) to preserve the original.
+  Subsequent runs will refresh build/ from build.orig/, never overwriting the original.
+  This ensures the original is always safe, even if you run --from_evl multiple times.
     """
   )
 
@@ -27,13 +31,13 @@ Examples:
   parser.add_argument(
     "--from_evl", "-f",
     action='store_true',
-    help="When specified, copy from the evl build directory to handcraft directory."
+    help="Copy from evl to handcraft. Creates build.orig/ once (preserves original), always refreshes build/"
   )
 
   parser.add_argument(
     "--to_evl", "-t",
     action='store_true',
-    help="When specified, copy the handcraft code to the evl handcraft directory."
+    help="Restore build directory from handcraft/<model>/build/ back to evl"
   )
 
   args = parser.parse_args()
@@ -49,38 +53,78 @@ Examples:
   model_name = args.model
   build_dir = f"../{model_name}/build/"
 
-  # Copy the generated C++ files in the build directory recursively to the handcraft directory
-  # e.g. copy *.cpp from ../big_conv_evl/build/*/*.cpp to ./big_conv_evl/*/*.cpp
-  # If the destination files already exist, abort the copy and print a message
+  # Copy from evl to handcraft with original preservation
   if args.from_evl:
     import os
     import shutil
-    for root, dirs, files in os.walk(build_dir):
-      for file in files:
-        if file.endswith(".cpp") or file.endswith(".h"):
-          src_file = os.path.join(root, file)
-          relative_path = os.path.relpath(root, build_dir)
-          dest_dir = os.path.join(f"./{model_name}/", relative_path)
-          os.makedirs(dest_dir, exist_ok=True)
-          dest_file = os.path.join(dest_dir, file)
-          if os.path.exists(dest_file):
-            print(f"File {dest_file} already exists. Aborting copy.")
-            return
-          shutil.copy2(src_file, dest_file)
-          print(f"Copied {src_file} to {dest_file}")
+
+    handcraft_model_dir = f"./{model_name}/"
+    handcraft_build_dir = os.path.join(handcraft_model_dir, "build")
+    handcraft_build_orig_dir = os.path.join(handcraft_model_dir, "build.orig")
+
+    if not os.path.exists(build_dir):
+      print(f"Error: Build directory {build_dir} does not exist")
+      return
+
+    # Create handcraft model directory if it doesn't exist
+    os.makedirs(handcraft_model_dir, exist_ok=True)
+
+    # Function to ignore all files except .cpp and .h (but keep all directories)
+    def ignore_non_cpp_h(dir, files):
+      ignored = []
+      for f in files:
+        full_path = os.path.join(dir, f)
+        # Keep directories and .cpp/.h files, ignore everything else
+        if os.path.isfile(full_path) and not (f.endswith('.cpp') or f.endswith('.h')):
+          ignored.append(f)
+      return ignored
+
+    # Create build.orig only if it doesn't exist (preserve original)
+    if not os.path.exists(handcraft_build_orig_dir):
+      print(f"Creating original backup: {handcraft_build_orig_dir}")
+      print(f"Copying *.cpp and *.h files from {build_dir}")
+      shutil.copytree(build_dir, handcraft_build_orig_dir, ignore=ignore_non_cpp_h)
+      print(f"Original backup created successfully")
+    else:
+      print(f"Original backup already exists: {handcraft_build_orig_dir}")
+      print(f"Skipping backup creation to preserve the original")
+
   elif args.to_evl:
     import os
     import shutil
-    for root, dirs, files in os.walk(f"./{model_name}/"):
-      for file in files:
-        if file.endswith(".cpp") or file.endswith(".h"):
-          src_file = os.path.join(root, file)
-          relative_path = os.path.relpath(root, f"./{model_name}/")
-          dest_dir = os.path.join(build_dir, relative_path)
-          os.makedirs(dest_dir, exist_ok=True)
-          dest_file = os.path.join(dest_dir, file)
-          shutil.copy2(src_file, dest_file)
-          print(f"Copied {src_file} to {dest_file}")
+
+    # Use the modified build directory from handcraft/<model>/build
+    handcraft_model_dir = f"./{model_name}/"
+    handcraft_build_dir = os.path.join(handcraft_model_dir, "build")
+
+    # Check if the modified build directory exists
+    if not os.path.exists(handcraft_build_dir):
+      print(f"Error: Modified build directory {handcraft_build_dir} does not exist.")
+      print(f"Please run with --from_evl first to save the build directory.")
+      return
+
+    # Check if target build directory exists
+    if not os.path.exists(build_dir):
+      print(f"Error: Target build directory {build_dir} does not exist.")
+      return
+
+    # Function to ignore all files except .cpp and .h (but keep all directories)
+    def ignore_non_cpp_h(dir, files):
+      ignored = []
+      for f in files:
+        full_path = os.path.join(dir, f)
+        # Keep directories and .cpp/.h files, ignore everything else
+        if os.path.isfile(full_path) and not (f.endswith('.cpp') or f.endswith('.h')):
+          ignored.append(f)
+      return ignored
+
+    # Copy only *.cpp and *.h files, preserving other files in the target directory
+    print(f"Copying modified *.cpp and *.h files from {handcraft_build_dir} to {build_dir}")
+    shutil.copytree(handcraft_build_dir, build_dir,
+                    dirs_exist_ok=True,  # Don't remove existing directory
+                    ignore=ignore_non_cpp_h)
+    print(f"Successfully updated *.cpp and *.h files in {build_dir}")
+    print(f"Other files (Makefiles, object files, etc.) were preserved")
     
 if __name__ == "__main__":
     main()
