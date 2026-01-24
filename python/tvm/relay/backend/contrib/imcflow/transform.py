@@ -5313,10 +5313,6 @@ class MemoryAllocator:
               pkt_cnt_per_height = height_offset//32
               pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
 
-              # Assert that all pkt_cnts are multiples of 4 (for 4x unrolling)
-              for pkt_cnt in pkt_cnts:
-                assert pkt_cnt % 4 == 0, f"pkt_cnt {pkt_cnt} must be a multiple of 4 for INODE_RECV 4x unrolling (edge: {edge})"
-
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               # base address = origin_base + height_base * height_offset
               # cnt = height_size * height_offset / sizeof(int)
@@ -5383,10 +5379,6 @@ class MemoryAllocator:
               pkt_cnt_per_height = height_offset//32
               # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
               pkt_cnts = [pkt_cnt_per_height * h for h in output_tile_sizes]
-
-              # Assert that all pkt_cnts are multiples of 4 (for 4x unrolling)
-              for pkt_cnt in pkt_cnts:
-                assert pkt_cnt % 4 == 0, f"pkt_cnt {pkt_cnt} must be a multiple of 4 for INODE_RECV 4x unrolling (edge: {edge})"
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               c_output_var_offsets = [base * height_offset for base in output_tile_bases]
@@ -7236,16 +7228,20 @@ def expand_pattern(pattern, num_args):
     return [pattern[0]] * num_args
   return None
 
-def constructDataBlockDict(mod):
+def constructDataBlockDict(mod, update_compiled_blocks_only=False):
   imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow" :
-      target_func = imcflow_func_map[func_name_var.name_hint]
-      input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
-      output_node_id = getNodeID(target_func.func_node)
-      const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
-      ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
+      if update_compiled_blocks_only:
+        ImcflowDeviceConfig().update_compiled_blocks(func_name_var.name_hint)
+      else:
+        target_func = imcflow_func_map[func_name_var.name_hint]
+        input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
+        output_node_id = getNodeID(target_func.func_node)
+        const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
+        ImcflowDeviceConfig().update_compiled_blocks(func_name_var.name_hint)
+        ImcflowDeviceConfig().update_data_blocks(func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
 
 class FIFOConflictMonitor:
     """

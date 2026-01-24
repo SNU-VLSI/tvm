@@ -1676,6 +1676,515 @@ def split_log_by_simulation(log_file: Path, output_dir: Path = None) -> list[Pat
     return output_files
 
 
+@dataclass
+class SyncEvent:
+    """Represents a synchronization event (flag/standby)."""
+    timestamp: int
+    node: str
+    node_type: str  # "inode" or "imce"
+    event_type: str  # "STANDBY_STALL_START", "STANDBY_STALL_END", "SETFLAG", etc.
+    details: str
+    raw_line: str
+
+
+class SyncTraceAnalyzer:
+    """Analyzes synchronization events (set_flag, standby) between nodes."""
+
+    # Patterns for inode hazard_control log (format: [INODE_STALL] EX_STALL_START: STANDBY_STALL | ...)
+    INODE_STANDBY_START = re.compile(
+        r"\[\s*(\d+)\]\s+\[INODE_STALL\]\s+EX_STALL_START:\s+STANDBY_STALL\s*\|\s*(.+)"
+    )
+    INODE_STANDBY_END = re.compile(
+        r"\[\s*(\d+)\]\s+\[INODE_STALL\]\s+EX_STALL_END:\s+STANDBY_STALL\s*\|\s*(.+)"
+    )
+
+    # Patterns for inode ex_stage log (format: START | OP_XXX | op1 : ... | op2 : ... | ...)
+    INODE_EX_OP_START = re.compile(
+        r"\[\s*(\d+)\]\s+START\s*\|\s*(OP_\w+)\s*\|\s*(.+)"
+    )
+    INODE_EX_OP_END = re.compile(
+        r"\[\s*(\d+)\]\s+END\s*\|\s*(OP_\w+)\s*\|\s*(.+)"
+    )
+
+    # Patterns for imce hazard_detector log
+    IMCE_STANDBY_START = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_STALL\]\s+EX_STALL_START:\s+STANDBY_STALL\s*\|\s*(.+)"
+    )
+    IMCE_STANDBY_END = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_STALL\]\s+EX_STALL_END:\s+STANDBY_STALL\s*\|\s*(.+)"
+    )
+    IMCE_STEP_STALL_START = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_STALL\]\s+EX_STALL_START:\s+STEP_STALL"
+    )
+    IMCE_STEP_STALL_END = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_STALL\]\s+EX_STALL_END:\s+STEP_STALL\s*\|\s*(.+)"
+    )
+    IMCE_RECV_STALL_START = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_STALL\]\s+EX_STALL_START:\s+RECV_FIFO_STALL\s*\|\s*(.+)"
+    )
+    IMCE_RECV_STALL_END = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_STALL\]\s+EX_STALL_END:\s+RECV_FIFO_STALL\s*\|\s*(.+)"
+    )
+
+    # Patterns for wb_stage log (SEND, SETFLAG)
+    WB_SEND = re.compile(
+        r"\[\s*(\d+)\]\s+SEND\s*\|\s*(.+)"
+    )
+    WB_SETFLAG = re.compile(
+        r"\[\s*(\d+)\]\s+SETFLAG\s*\|\s*(.+)"
+    )
+    WB_POLICY_UPDATE = re.compile(
+        r"\[\s*(\d+)\]\s+POLICY_UPDATE\s*\|\s*(.+)"
+    )
+
+    # Patterns for imce_ctrl log
+    IMCE_CTRL_SETFLAG = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_HS\]\s+(SETFLAG_SUCCESS|FLAG_SET)\s*\|\s*(.+)"
+    )
+    IMCE_CTRL_RECV = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_HS\]\s+RECV_SUCCESS\s*\|\s*(.+)"
+    )
+    IMCE_CTRL_SEND = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_HS\]\s+SEND_SUCCESS\s*\|\s*(.+)"
+    )
+    IMCE_CTRL_STEP = re.compile(
+        r"\[\s*(\d+)\]\s+\[IMCE_HS\]\s+STEP_SUCCESS\s*\|\s*(.+)"
+    )
+
+    def __init__(self, log_dir: Path, nodes: list[str], verbose: bool = False):
+        """
+        Initialize sync trace analyzer.
+
+        Args:
+            log_dir: Directory containing fsim log files
+            nodes: List of node identifiers (e.g., ["inode_0_0", "imce_3_4"])
+            verbose: Print detailed parsing information
+        """
+        self.log_dir = Path(log_dir)
+        self.nodes = [n.lower().replace(".", "_") for n in nodes]  # Normalize node names
+        self.verbose = verbose
+        self.events: list[SyncEvent] = []
+
+    def _find_log_files_for_node(self, node: str) -> dict[str, Path]:
+        """Find relevant log files for a node."""
+        files = {}
+        node_lower = node.lower()
+
+        # Determine node type
+        if "inode" in node_lower:
+            node_type = "inode"
+            # Extract coordinates (e.g., inode_0_0 -> core_row[0].core_col[0].inode)
+            match = re.search(r'inode[_.]?(\d+)[_.]?(\d+)', node_lower)
+            if match:
+                row, col = match.groups()
+                pattern_base = f"*core_row[{row}].core_col[{col}].inode*"
+        else:
+            node_type = "imce"
+            # Extract coordinates (e.g., imce_3_4 -> core_row[3].core_col[4].imce_node)
+            match = re.search(r'imce[_.]?(\d+)[_.]?(\d+)', node_lower)
+            if match:
+                row, col = match.groups()
+                pattern_base = f"*core_row[{row}].core_col[{col}].imce_node*"
+
+        if not match:
+            return files
+
+        # Find all matching log files
+        for log_file in self.log_dir.glob("*.log"):
+            fname = log_file.name.lower()
+            if f"core_row[{row}].core_col[{col}]" in fname.lower():
+                if node_type == "inode":
+                    if "hazard_control" in fname:
+                        files["hazard_control"] = log_file
+                    elif "wb_stage.log" in fname and "send_fifo" not in fname:
+                        files["wb_stage"] = log_file
+                    elif "ex_stage.log" in fname and "recv_fifo" not in fname:
+                        files["ex_stage"] = log_file
+                else:  # imce
+                    if "hazard_detector" in fname:
+                        files["hazard_detector"] = log_file
+                    elif "u_imce_ctrl.log" in fname and "hazard" not in fname:
+                        files["imce_ctrl"] = log_file
+
+        return files
+
+    def _parse_inode_hazard_control(self, log_file: Path, node: str):
+        """Parse inode hazard_control log for standby events."""
+        if not log_file.exists():
+            return
+
+        if self.verbose:
+            print(f"  Parsing {log_file.name}...", file=sys.stderr)
+
+        with open(log_file, "r") as f:
+            for line in f:
+                # STANDBY_STALL_START
+                match = self.INODE_STANDBY_START.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="inode",
+                        event_type="STANDBY_START",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # STANDBY_STALL_END
+                match = self.INODE_STANDBY_END.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="inode",
+                        event_type="STANDBY_END",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+
+    def _parse_inode_wb_stage(self, log_file: Path, node: str):
+        """Parse inode wb_stage log for SEND and SETFLAG events."""
+        if not log_file.exists():
+            return
+
+        if self.verbose:
+            print(f"  Parsing {log_file.name}...", file=sys.stderr)
+
+        with open(log_file, "r") as f:
+            for line in f:
+                # SEND
+                match = self.WB_SEND.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="inode",
+                        event_type="SEND",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # SETFLAG
+                match = self.WB_SETFLAG.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="inode",
+                        event_type="SETFLAG",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+
+    def _parse_inode_ex_stage(self, log_file: Path, node: str):
+        """Parse inode ex_stage log for OP_STANDBY, OP_SET_FLAG, OP_RECV events."""
+        if not log_file.exists():
+            return
+
+        if self.verbose:
+            print(f"  Parsing {log_file.name}...", file=sys.stderr)
+
+        # Track operations we're interested in
+        target_ops = {"OP_STANDBY", "OP_SET_FLAG", "OP_RECV", "OP_SEND"}
+
+        with open(log_file, "r") as f:
+            for line in f:
+                # OP START
+                match = self.INODE_EX_OP_START.search(line)
+                if match:
+                    op_name = match.group(2)
+                    if op_name in target_ops:
+                        self.events.append(SyncEvent(
+                            timestamp=int(match.group(1)),
+                            node=node,
+                            node_type="inode",
+                            event_type=f"{op_name}_START",
+                            details=match.group(3).strip(),
+                            raw_line=line.strip(),
+                        ))
+                    continue
+
+                # OP END
+                match = self.INODE_EX_OP_END.search(line)
+                if match:
+                    op_name = match.group(2)
+                    if op_name in target_ops:
+                        self.events.append(SyncEvent(
+                            timestamp=int(match.group(1)),
+                            node=node,
+                            node_type="inode",
+                            event_type=f"{op_name}_END",
+                            details=match.group(3).strip(),
+                            raw_line=line.strip(),
+                        ))
+
+    def _parse_imce_hazard_detector(self, log_file: Path, node: str):
+        """Parse imce hazard_detector log for stall events."""
+        if not log_file.exists():
+            return
+
+        if self.verbose:
+            print(f"  Parsing {log_file.name}...", file=sys.stderr)
+
+        with open(log_file, "r") as f:
+            for line in f:
+                # STANDBY_STALL_START
+                match = self.IMCE_STANDBY_START.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="STANDBY_START",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # STANDBY_STALL_END
+                match = self.IMCE_STANDBY_END.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="STANDBY_END",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # STEP_STALL_START
+                match = self.IMCE_STEP_STALL_START.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="STEP_STALL_START",
+                        details="",
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # STEP_STALL_END
+                match = self.IMCE_STEP_STALL_END.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="STEP_STALL_END",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # RECV_FIFO_STALL_START
+                match = self.IMCE_RECV_STALL_START.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="RECV_STALL_START",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # RECV_FIFO_STALL_END
+                match = self.IMCE_RECV_STALL_END.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="RECV_STALL_END",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+
+    def _parse_imce_ctrl(self, log_file: Path, node: str):
+        """Parse imce_ctrl log for SETFLAG and handshake events."""
+        if not log_file.exists():
+            return
+
+        if self.verbose:
+            print(f"  Parsing {log_file.name}...", file=sys.stderr)
+
+        with open(log_file, "r") as f:
+            for line in f:
+                # SETFLAG
+                match = self.IMCE_CTRL_SETFLAG.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="SETFLAG",
+                        details=match.group(3).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # RECV_SUCCESS
+                match = self.IMCE_CTRL_RECV.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="RECV",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # SEND_SUCCESS
+                match = self.IMCE_CTRL_SEND.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="SEND",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+                    continue
+
+                # STEP_SUCCESS
+                match = self.IMCE_CTRL_STEP.search(line)
+                if match:
+                    self.events.append(SyncEvent(
+                        timestamp=int(match.group(1)),
+                        node=node,
+                        node_type="imce",
+                        event_type="STEP",
+                        details=match.group(2).strip(),
+                        raw_line=line.strip(),
+                    ))
+
+    def parse_all(self):
+        """Parse all relevant log files for the specified nodes."""
+        for node in self.nodes:
+            files = self._find_log_files_for_node(node)
+
+            if self.verbose:
+                print(f"Found files for {node}: {list(files.keys())}", file=sys.stderr)
+
+            if "inode" in node.lower():
+                if "hazard_control" in files:
+                    self._parse_inode_hazard_control(files["hazard_control"], node)
+                if "wb_stage" in files:
+                    self._parse_inode_wb_stage(files["wb_stage"], node)
+                if "ex_stage" in files:
+                    self._parse_inode_ex_stage(files["ex_stage"], node)
+            else:
+                if "hazard_detector" in files:
+                    self._parse_imce_hazard_detector(files["hazard_detector"], node)
+                if "imce_ctrl" in files:
+                    self._parse_imce_ctrl(files["imce_ctrl"], node)
+
+        # Sort events by timestamp
+        self.events.sort(key=lambda e: e.timestamp)
+
+    def get_events_in_range(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list[SyncEvent]:
+        """Get events within a time range."""
+        result = self.events
+        if start_time is not None:
+            result = [e for e in result if e.timestamp >= start_time]
+        if end_time is not None:
+            result = [e for e in result if e.timestamp <= end_time]
+        return result
+
+    def filter_by_event_type(self, event_types: list[str]) -> list[SyncEvent]:
+        """Filter events by type."""
+        return [e for e in self.events if e.event_type in event_types]
+
+
+def cmd_sync_trace(args):
+    """Handle the sync-trace command."""
+    log_dir = args.log_dir or LogMonitor.DEFAULT_LOG_DIR
+
+    if not Path(log_dir).exists():
+        print(f"Error: Log directory not found: {log_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    analyzer = SyncTraceAnalyzer(
+        log_dir=log_dir,
+        nodes=args.nodes,
+        verbose=args.verbose,
+    )
+    analyzer.parse_all()
+
+    # Apply time range filter
+    events = analyzer.get_events_in_range(
+        start_time=args.start_time,
+        end_time=args.end_time,
+    )
+
+    # Apply event type filter
+    if args.event_types:
+        event_types = [t.strip().upper() for t in args.event_types.split(",")]
+        events = [e for e in events if any(t in e.event_type.upper() for t in event_types)]
+
+    print("=" * 90)
+    print(f"  Sync Trace: {', '.join(args.nodes)}")
+    print("=" * 90)
+    print(f"  Log directory: {log_dir}")
+    print(f"  Total events: {len(events)}")
+    if args.start_time:
+        print(f"  Start time: {args.start_time:,}")
+    if args.end_time:
+        print(f"  End time: {args.end_time:,}")
+    if args.event_types:
+        print(f"  Event filter: {args.event_types}")
+    print("-" * 90)
+
+    if not events:
+        print("  No events found!")
+    else:
+        # Apply limit
+        display_events = events
+        if args.limit:
+            display_events = events[:args.limit]
+
+        print(f"\n  {'Time':>15} {'Node':<15} {'Event':<20} {'Details'}")
+        print("  " + "-" * 85)
+
+        for event in display_events:
+            # Color coding for different event types
+            node_short = event.node.replace("_", ".")
+            details_short = event.details[:40] + "..." if len(event.details) > 40 else event.details
+            print(f"  {event.timestamp:>15,} {node_short:<15} {event.event_type:<20} {details_short}")
+
+        if args.limit and len(events) > args.limit:
+            print(f"\n  ... and {len(events) - args.limit} more events")
+
+    print("=" * 90)
+
+    # Output to file if specified
+    if args.output:
+        output_path = Path(args.output)
+        with open(output_path, "w") as f:
+            f.write(f"# Sync Trace: {', '.join(args.nodes)}\n")
+            f.write(f"# Log directory: {log_dir}\n")
+            f.write(f"# Total events: {len(events)}\n")
+            f.write("#" + "=" * 89 + "\n")
+            f.write(f"# {'Time':>14} | {'Node':<15} | {'Event':<20} | Details\n")
+            f.write("#" + "-" * 89 + "\n")
+
+            for event in events:
+                node_short = event.node.replace("_", ".")
+                f.write(f"{event.timestamp:>15} | {node_short:<15} | {event.event_type:<20} | {event.details}\n")
+
+        print(f"\n  Output written to: {output_path}")
+
+
 def cmd_split_log(args):
     """Handle the split-log command."""
     log_file = Path(args.file)
@@ -1756,6 +2265,12 @@ Examples:
 
   # IMCE instruction analysis
   %(prog)s recv-before-step --imce IMCE.2.1 -f <log_file>  # Count RECV before STEP
+
+  # Sync trace between nodes (extract set_flag, standby events)
+  %(prog)s sync-trace -n inode_0_0 imce_3_4  # Trace sync events between nodes
+  %(prog)s sync-trace -n inode.0.0 imce.3.4 -s 430000000 -e 440000000  # With time range
+  %(prog)s sync-trace -n inode_0_0 imce_3_4 -t STANDBY,SETFLAG  # Filter event types
+  %(prog)s sync-trace -n inode_0_0 imce_3_4 -o sync_trace.txt  # Save to file
 """,
     )
 
@@ -2045,6 +2560,59 @@ Examples:
         help="Scale factor for expected values (default: 1, use 4 for ConvBlock.num_blocks)",
     )
     compare_recv_pattern_parser.set_defaults(func=cmd_compare_recv_pattern)
+
+    # Sync trace command
+    sync_trace_parser = subparsers.add_parser(
+        "sync-trace",
+        help="Extract set_flag, standby sync events between nodes",
+    )
+    sync_trace_parser.add_argument(
+        "--nodes",
+        "-n",
+        nargs="+",
+        required=True,
+        help="Node identifiers (e.g., inode_0_0 imce_3_4 or inode.0.0 imce.3.4)",
+    )
+    sync_trace_parser.add_argument(
+        "--start-time",
+        "-s",
+        type=int,
+        default=None,
+        help="Start time (simulation cycles) to filter events",
+    )
+    sync_trace_parser.add_argument(
+        "--end-time",
+        "-e",
+        type=int,
+        default=None,
+        help="End time (simulation cycles) to filter events",
+    )
+    sync_trace_parser.add_argument(
+        "--event-types",
+        "-t",
+        default=None,
+        help="Comma-separated event types to filter (e.g., 'STANDBY,SETFLAG')",
+    )
+    sync_trace_parser.add_argument(
+        "--limit",
+        "-l",
+        type=int,
+        default=None,
+        help="Limit number of events to display",
+    )
+    sync_trace_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Output file path to save the trace",
+    )
+    sync_trace_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show detailed parsing information",
+    )
+    sync_trace_parser.set_defaults(func=cmd_sync_trace)
 
     # Split log command
     split_log_parser = subparsers.add_parser(
