@@ -102,6 +102,24 @@ Examples:
     print("Use --list-models for more details")
     return 1
 
+
+  # if --rebuild_modified_cpp is set, use copy_cpp.py to copy modified C++ files from handcraft to evl
+  if args.rebuild_modified_cpp:
+    import subprocess
+    import os
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    handcraft_dir = os.path.join(script_dir, "handcraft")
+    copy_cpp_cmd = [
+      "python", "copy_cpp.py",
+      "--model", f"{args.model}_evl",
+      "--to_evl"
+    ]
+    print(f"Copying modified C++ files by running: {' '.join(copy_cpp_cmd)} (in {handcraft_dir})")
+    result = subprocess.run(copy_cpp_cmd, cwd=handcraft_dir)
+    if result.returncode != 0:
+      print("❌ Error: Failed to copy modified C++ files from handcraft to evl")
+      return result.returncode
+
   # Run the test
   run_test_pipeline(
     test_name=args.model,
