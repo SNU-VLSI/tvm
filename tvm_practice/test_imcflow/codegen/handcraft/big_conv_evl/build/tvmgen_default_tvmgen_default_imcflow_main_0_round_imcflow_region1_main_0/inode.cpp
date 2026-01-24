@@ -242,26 +242,28 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     // endgenerate: clear flag before policy update
     // generate: policy update
     var1 = 0;
-    for (int i1 = 0; i1 < 9; i1++) { // generate
+    for (int i1 = 0; i1 < 8; i1++) { // generate
       __builtin_INODE_PU(var1 + i1*32, 0, i1, 0);
     } // endgenerate
-    var1 = 288;
-    for (int i1 = 0; i1 < 9; i1++) { // generate
+    var1 = 256;
+    for (int i1 = 0; i1 < 7; i1++) { // generate
       __builtin_INODE_PU(var1 + i1*32, 0, i1, 1);
     } // endgenerate
-    var1 = 576;
-    for (int i1 = 0; i1 < 7; i1++) { // generate
+    var1 = 480;
+    for (int i1 = 0; i1 < 6; i1++) { // generate
       __builtin_INODE_PU(var1 + i1*32, 0, i1, 2);
     } // endgenerate
-    var1 = 800;
+    var1 = 672;
     __builtin_INODE_PU(var1, 0, 0, 3);
     __builtin_INODE_PU(var1, 32, 1, 3);
     __builtin_INODE_PU(var1, 64, 2, 3);
     __builtin_INODE_PU(var1, 96, 3, 3);
-    var1 = 928;
+    __builtin_INODE_PU(var1, 128, 4, 3);
+    var1 = 832;
     __builtin_INODE_PU(var1, 0, 0, 4);
     __builtin_INODE_PU(var1, 32, 1, 4);
     __builtin_INODE_PU(var1, 64, 2, 4);
+    __builtin_INODE_PU(var1, 96, 3, 4);
     // endgenerate: policy update
     // generate: sync all inodes
     __builtin_INODE_SET_FLAG(255);
@@ -275,31 +277,31 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     __builtin_INODE_HALT();
     // endgenerate: halt for slave inodes
     // generate: imem write: imce_2_1
-    var2 = 1024;
+    var2 = 960;
     __builtin_INODE_SET_ADDR_CNT(0);
     // generate. loop count == 1
-    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 5);
+    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 2);
     // endgenerate
     // endgenerate: imem write: imce_2_1
     // generate: imem write: imce_2_2
-    var2 = 1056;
+    var2 = 992;
     __builtin_INODE_SET_ADDR_CNT(0);
     // generate. loop count == 1
-    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 6);
+    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 3);
     // endgenerate
     // endgenerate: imem write: imce_2_2
     // generate: imem write: imce_2_3
-    var2 = 1088;
+    var2 = 1024;
     __builtin_INODE_SET_ADDR_CNT(0);
     // generate. loop count == 1
-    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 7);
+    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 4);
     // endgenerate
     // endgenerate: imem write: imce_2_3
     // generate: imem write: imce_2_4
-    var2 = 1120;
+    var2 = 1056;
     __builtin_INODE_SET_ADDR_CNT(0);
     // generate. loop count == 1
-    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 8);
+    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 5);
     // endgenerate
     // endgenerate: imem write: imce_2_4
 
@@ -348,19 +350,19 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     // endgenerate: clear flag before policy update
     // generate: policy update
     var1 = 24672;
-    for (int i1 = 0; i1 < 12; i1++) { // generate
+    for (int i1 = 0; i1 < 13; i1++) { // generate
       __builtin_INODE_PU(var1 + i1*32, 0, i1, 0);
     } // endgenerate
-    var1 = 25056;
-    for (int i1 = 0; i1 < 10; i1++) { // generate
+    var1 = 25088;
+    for (int i1 = 0; i1 < 11; i1++) { // generate
       __builtin_INODE_PU(var1 + i1*32, 0, i1, 1);
     } // endgenerate
-    var1 = 25376;
-    for (int i1 = 0; i1 < 12; i1++) { // generate
+    var1 = 25440;
+    for (int i1 = 0; i1 < 11; i1++) { // generate
       __builtin_INODE_PU(var1 + i1*32, 0, i1, 2);
     } // endgenerate
-    var1 = 25760;
-    for (int i1 = 0; i1 < 9; i1++) { // generate
+    var1 = 25792;
+    for (int i1 = 0; i1 < 8; i1++) { // generate
       __builtin_INODE_PU(var1 + i1*32, 0, i1, 3);
     } // endgenerate
     var1 = 26048;
@@ -387,45 +389,45 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     var2 = 26240;
     __builtin_INODE_SET_ADDR_CNT(0);
     // generate. loop count == 1
-    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 8);
+    __builtin_INODE_WR_IMEM(var2 + 0*32, 0, 3);
     // endgenerate
     // endgenerate: imem write: imce_3_1
     // generate: imem write: imce_3_2
     var2 = 26272;
     __builtin_INODE_SET_ADDR_CNT(0);
     for (int i1 = 0; i1 < 128; i1++) { // generate
-      __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 9);
+      __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 4);
     } // endgenerate
     // endgenerate: imem write: imce_3_2
     // generate: imem write: imce_3_3
     var2 = 30368;
     __builtin_INODE_SET_ADDR_CNT(0);
     for (int i1 = 0; i1 < 128; i1++) { // generate
-      __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 10);
+      __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 5);
     } // endgenerate
     // endgenerate: imem write: imce_3_3
     // generate: imem write: imce_3_4
     var2 = 34464;
     __builtin_INODE_SET_ADDR_CNT(0);
     for (int i1 = 0; i1 < 81; i1++) { // generate
-      __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 11);
+      __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 6);
     } // endgenerate
     // endgenerate: imem write: imce_3_4
     // generate: imcu write
     var3 = 0;
     __builtin_INODE_SET_ADDR_CNT(0);
     for (int i1 = 0; i1 < 256; i1++) { // generate
-      __builtin_INODE_WR_IMCU(var3 + i1*32, 0, 2);
+      __builtin_INODE_WR_IMCU(var3 + i1*32, 0, 7);
     } // endgenerate
     var3 = 8192;
     __builtin_INODE_SET_ADDR_CNT(0);
     for (int i1 = 0; i1 < 256; i1++) { // generate
-      __builtin_INODE_WR_IMCU(var3 + i1*32, 0, 4);
+      __builtin_INODE_WR_IMCU(var3 + i1*32, 0, 8);
     } // endgenerate
     var3 = 16384;
     __builtin_INODE_SET_ADDR_CNT(0);
     for (int i1 = 0; i1 < 256; i1++) { // generate
-      __builtin_INODE_WR_IMCU(var3 + i1*32, 0, 6);
+      __builtin_INODE_WR_IMCU(var3 + i1*32, 0, 9);
     } // endgenerate
     // endgenerate: imcu write
     // generate: sync before compute enable
@@ -437,13 +439,13 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     __builtin_INODE_SET_FLAG(0);
     // endgenerate: sync before compute enable
     // generate: imce_3_2 compute
-    __builtin_INODE_IMCE_COMPUTE(0, 9);
+    __builtin_INODE_IMCE_COMPUTE(0, 4);
     // endgenerate: imce_3_2 compute
     // generate: imce_3_3 compute
-    __builtin_INODE_IMCE_COMPUTE(0, 10);
+    __builtin_INODE_IMCE_COMPUTE(0, 5);
     // endgenerate: imce_3_3 compute
     // generate: imce_3_4 compute
-    __builtin_INODE_IMCE_COMPUTE(0, 11);
+    __builtin_INODE_IMCE_COMPUTE(0, 6);
     // endgenerate: imce_3_4 compute
     // generate: wait all imce compute enable
     __builtin_INODE_SET_FLAG(255);
@@ -456,21 +458,21 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     // generate: send - TensorEdge(((14, -8), config), ((14, 5), config)), inode_3_0 -> imce_3_2
     var4 = 24576;
     // generate. loop count == 1
-    __builtin_INODE_SEND(var4 + 0*32, 0, 3, 1);
+    __builtin_INODE_SEND(var4 + 0*32, 0, 10, 1);
 
     // endgenerate
     // endgenerate: send - TensorEdge(((14, -8), config), ((14, 5), config)), inode_3_0 -> imce_3_2
     // generate: send - TensorEdge(((13, -12), config), ((13, 9), config)), inode_3_0 -> imce_3_3
     var4 = 24608;
     // generate. loop count == 1
-    __builtin_INODE_SEND(var4 + 0*32, 0, 5, 1);
+    __builtin_INODE_SEND(var4 + 0*32, 0, 11, 1);
 
     // endgenerate
     // endgenerate: send - TensorEdge(((13, -12), config), ((13, 9), config)), inode_3_0 -> imce_3_3
     // generate: send - TensorEdge((-14, config), (12, config)), inode_3_0 -> imce_3_4
     var4 = 24640;
     // generate. loop count == 1
-    __builtin_INODE_SEND(var4 + 0*32, 0, 7, 1);
+    __builtin_INODE_SEND(var4 + 0*32, 0, 12, 1);
 
     // endgenerate
     // endgenerate: send - TensorEdge((-14, config), (12, config)), inode_3_0 -> imce_3_4
