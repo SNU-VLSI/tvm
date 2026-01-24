@@ -633,7 +633,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0(
     // generate: conv exec0_row_group2_outer_loop(iterate row offset)
     // generate : conv exec0_row_group2_outer_loop(iterate row offset). loop count == 1
     // generate: conv exec0_row_group2_col_group0
-    for (int i1 = 0; i1 < 5; i1++) { // generate : conv exec0_row_group2_col_group0
+    for (int i1 = 0; i1 < 3; i1++) { // generate : conv exec0_row_group2_col_group0
 
       // generate: load_block
       // loop ignored with loop count == 0 : load_block
@@ -731,6 +731,58 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0(
     var241 = __builtin_IMCE_MULTL(var204, var46, 15);
     var241 = __builtin_IMCE_ADD(var241, var47, 15);
 
+    short16 var301;
+    short16 var302;
+    short16 var303;
+    short16 var304;
+    short16 var338;
+    short16 var339;
+    short16 var340;
+    short16 var341;
+
+    __builtin_IMCE_STEP();
+
+    var301 = __builtin_IMCE_GET_CREG((short)0);
+    var302 = __builtin_IMCE_GET_CREG((short)1);
+    var303 = __builtin_IMCE_GET_CREG((short)2);
+    var304 = __builtin_IMCE_GET_CREG((short)3);
+    // generate: batch_norm
+
+    var338 = __builtin_IMCE_MULTL(var301, var36, 15);
+    var338 = __builtin_IMCE_ADD(var338, var37, 15);
+    var339 = __builtin_IMCE_MULTL(var302, var42, 15);
+    var339 = __builtin_IMCE_ADD(var339, var43, 15);
+    var340 = __builtin_IMCE_MULTL(var303, var44, 15);
+    var340 = __builtin_IMCE_ADD(var340, var45, 15);
+    var341 = __builtin_IMCE_MULTL(var304, var46, 15);
+    var341 = __builtin_IMCE_ADD(var341, var47, 15);
+
+    short16 var401;
+    short16 var402;
+    short16 var403;
+    short16 var404;
+    short16 var438;
+    short16 var439;
+    short16 var440;
+    short16 var441;
+
+    __builtin_IMCE_STEP();
+
+    var401 = __builtin_IMCE_GET_CREG((short)0);
+    var402 = __builtin_IMCE_GET_CREG((short)1);
+    var403 = __builtin_IMCE_GET_CREG((short)2);
+    var404 = __builtin_IMCE_GET_CREG((short)3);
+    // generate: batch_norm
+
+    var438 = __builtin_IMCE_MULTL(var401, var36, 15);
+    var438 = __builtin_IMCE_ADD(var438, var37, 15);
+    var439 = __builtin_IMCE_MULTL(var402, var42, 15);
+    var439 = __builtin_IMCE_ADD(var439, var43, 15);
+    var440 = __builtin_IMCE_MULTL(var403, var44, 15);
+    var440 = __builtin_IMCE_ADD(var440, var45, 15);
+    var441 = __builtin_IMCE_MULTL(var404, var46, 15);
+    var441 = __builtin_IMCE_ADD(var441, var47, 15);
+
     // endgenerate: batch_norm
     __builtin_IMCE_SEND(1, var38, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
     __builtin_IMCE_SEND(1, var39, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
@@ -747,6 +799,15 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0(
     __builtin_IMCE_SEND(1, var240, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
     __builtin_IMCE_SEND(1, var241, 2, 0); // TensorEdge(((39, 36), odata), (40, data)), imce_3_3 -> imce_3_2
 
+    __builtin_IMCE_SEND(1, var338, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var339, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var340, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var341, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
+
+    __builtin_IMCE_SEND(1, var438, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var439, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var440, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SEND(1, var441, 2, 0); // TensorEdge(((22, 19), odata), (23, data)), imce_3_3 -> imce_3_2
     // endgenerate: conv exec0_row_group2_col_group0
     // endgenerate : conv exec0_row_group2_outer_loop(iterate row offset)
     // endgenerate: conv exec0_row_group2_outer_loop(iterate row offset)
