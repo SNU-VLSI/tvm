@@ -87,9 +87,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     for (int i1 = 0; i1 < 1024; i1++) { // generate : call_created_loop
       // generate: multiply standalone
 
-      __builtin_IMCE_SETFLAG(1); // closer to inode_0_0 than imce_3_4
       var10 = __builtin_IMCE_RECV(2); // TensorEdge((-10, odata), (25, lhs)), inode_0_0 -> imce_2_4
-      __builtin_IMCE_SETFLAG(0);
       // generate: multl
 
       var11 = __builtin_IMCE_MULTL(var10, var9, 15);
@@ -871,9 +869,13 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     for (int i1 = 0; i1 < 1024; i1++) { // generate : call_created_loop
       // generate: min_max_quantize_standalone
 
+      __builtin_IMCE_SETFLAG(1); // sync one of imce_2_4, and imce_3_4
+      __builtin_IMCE_STANDBY(0, 1); 
+      __builtin_IMCE_SETFLAG(0); 
       var50 = __builtin_IMCE_RECV(2); // TensorEdge((-10, odata), (21, data)), inode_0_0 -> imce_2_4, imce_3_4
       // generate: min_max_quantize
 
+      __builtin_IMCE_STANDBY(18, 1); // STANDBY is not inserted before SEND but before MM_QUNAT, because of overwritten QREGs for valid=1
       __builtin_IMCE_MM_QUANT(var50, 0, 15, 0);
       var51 = __builtin_IMCE_GET_QREG(0);
       var52 = __builtin_IMCE_GET_QREG(1);
@@ -881,7 +883,6 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
       var54 = __builtin_IMCE_GET_QREG(3);
       // endgenerate: min_max_quantize
 
-      __builtin_IMCE_STANDBY(18, 1);
       __builtin_IMCE_SEND(1, var51, 0, 0); // TensorEdge((21, odata), ((22, 18), data)), imce_3_4 -> imce_3_3
       __builtin_IMCE_SEND(1, var52, 0, 0); // TensorEdge((21, odata), ((22, 18), data)), imce_3_4 -> imce_3_3
       __builtin_IMCE_SEND(1, var53, 0, 0); // TensorEdge((21, odata), ((22, 18), data)), imce_3_4 -> imce_3_3

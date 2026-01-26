@@ -113,7 +113,10 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
       var6 = var5[0];
       __asm__ volatile("nop");
       for (int i2 = 0; i2 < var6; i2++) { // generate
-        __builtin_INODE_STANDBY(14, 1);
+        __builtin_INODE_STANDBY(19, 1);
+        __builtin_INODE_SET_FLAG(1);
+        __builtin_INODE_STANDBY(19, 0);
+        __builtin_INODE_SET_FLAG(0);
         __builtin_INODE_SEND(var4 + i2*32, 0, 1, 2);
 
       } // endgenerate
@@ -304,7 +307,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     // generate: imem write: imce_2_4
     var2 = 1792;
     __builtin_INODE_SET_ADDR_CNT(0);
-    for (int i1 = 0; i1 < 12; i1++) { // generate
+    for (int i1 = 0; i1 < 9; i1++) { // generate
       __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 6);
     } // endgenerate
     // endgenerate: imem write: imce_2_4
@@ -435,7 +438,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
     // generate: imem write: imce_3_4
     var2 = 31712;
     __builtin_INODE_SET_ADDR_CNT(0);
-    for (int i1 = 0; i1 < 16; i1++) { // generate
+    for (int i1 = 0; i1 < 19; i1++) { // generate
       __builtin_INODE_WR_IMEM(var2 + i1*32, 0, 5);
     } // endgenerate
     // endgenerate: imem write: imce_3_4
