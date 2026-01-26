@@ -299,6 +299,42 @@ def parse_python_vpu_ops(log_path: str) -> Dict[Tuple[int, int], List[VPUOp]]:
     return dict(outputs)
 
 
+def parse_python_linebuffer_input(log_path: str) -> Dict[Tuple[int, int], List[LinebufferInput]]:
+    """Parse Python simulator log for linebuffer input (push to line buffer)"""
+    inputs = defaultdict(list)
+    count_per_imce = defaultdict(int)  # Track count per IMCE
+
+    # Pattern: push to line buffer | IMCE : (X, Y) | data : DECIMAL_VALUE
+    pattern = r'push to line buffer\s*\|\s*IMCE\s*:\s*\((\d+),\s*(\d+)\)\s*\|\s*data\s*:\s*(\d+)'
+
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                if 'push to line buffer' in line and 'IMCE' in line:
+                    match = re.search(pattern, line)
+                    if match:
+                        row = int(match.group(1))
+                        col = int(match.group(2))
+                        data_decimal = int(match.group(3))
+
+                        coord = (row, col)
+                        count_per_imce[coord] += 1
+
+                        # Convert decimal to hex string
+                        data_hex = hex(data_decimal)
+
+                        inputs[coord].append(LinebufferInput(
+                            imce_coord=coord,
+                            count=count_per_imce[coord],
+                            data=data_hex,
+                            source="python"
+                        ))
+    except FileNotFoundError:
+        print(f"Python log not found: {log_path}")
+
+    return dict(inputs)
+
+
 # =============================================================================
 # RTL Log Parsers
 # =============================================================================
@@ -800,6 +836,44 @@ def compare_mm_quant_outputs(py_outputs: List[MMQuantOutput], rtl_outputs: List[
     return match_count, mismatch_count, min_len
 
 
+def compare_linebuffer_inputs(py_inputs: List[LinebufferInput], rtl_inputs: List[LinebufferInput],
+                               coord: Tuple[int, int], verbose: bool = False) -> Tuple[int, int, int]:
+    """Compare Python and RTL linebuffer inputs. Returns (match, mismatch, total)"""
+    match_count = 0
+    mismatch_count = 0
+
+    min_len = min(len(py_inputs), len(rtl_inputs))
+
+    if len(py_inputs) != len(rtl_inputs):
+        print(f"  Warning: Input count mismatch - Python: {len(py_inputs)}, RTL: {len(rtl_inputs)}")
+
+    for i in range(min_len):
+        py_inp = py_inputs[i]
+        rtl_inp = rtl_inputs[i]
+
+        # Convert both hex strings to decimal for comparison
+        try:
+            py_data_dec = int(py_inp.data, 16)
+            rtl_data_dec = int(rtl_inp.data, 16)
+
+            # Compare data values
+            if py_data_dec == rtl_data_dec:
+                match_count += 1
+            else:
+                mismatch_count += 1
+                if verbose or mismatch_count <= 5:
+                    print(f"  MISMATCH at index {i}:")
+                    py_ts = f" [@{py_inp.timestamp}]" if py_inp.timestamp else ""
+                    rtl_ts = f" [@{rtl_inp.timestamp}]" if rtl_inp.timestamp else ""
+                    print(f"    Python: {py_data_dec} ({py_inp.data}){py_ts}")
+                    print(f"    RTL:    {rtl_data_dec} ({rtl_inp.data}){rtl_ts}")
+        except ValueError as e:
+            print(f"  Error converting hex at index {i}: {e}")
+            mismatch_count += 1
+
+    return match_count, mismatch_count, min_len
+
+
 def compare_imcu_outputs(py_outputs: List[IMCUOutput], rtl_outputs: List[IMCUOutput],
                          coord: Tuple[int, int], verbose: bool = False) -> Tuple[int, int, int]:
     """Compare Python and RTL IMCU outputs. Returns (match, mismatch, total)"""
@@ -870,6 +944,7 @@ def main():
     parser.add_argument('--compare-mm-quant', action='store_true', help='Compare MM_QUANT outputs')
     parser.add_argument('--compare-imcu', action='store_true', help='Compare IMCU outputs')
     parser.add_argument('--compare-vpu', action='store_true', help='Compare VPU operations')
+    parser.add_argument('--compare-linebuffer', action='store_true', help='Compare linebuffer inputs (Python vs RTL)')
     parser.add_argument('--compare-all', action='store_true', help='Compare all available data')
     parser.add_argument('--imce', type=str, help='Filter to specific IMCE (e.g., "3,2")')
     parser.add_argument('--verbose', '-v', action='store_true', help='Show all mismatches')
@@ -906,10 +981,12 @@ def main():
     py_mm_quant = parse_python_mm_quant(py_log_path)
     py_imcu = parse_python_imcu_output(py_log_path)
     py_vpu = parse_python_vpu_ops(py_log_path)
+    py_linebuffer_in = parse_python_linebuffer_input(py_log_path)
 
     print(f"  MM_QUANT: {sum(len(v) for v in py_mm_quant.values())} entries from {len(py_mm_quant)} IMCEs")
     print(f"  IMCU: {sum(len(v) for v in py_imcu.values())} entries from {len(py_imcu)} IMCEs")
     print(f"  VPU ops: {sum(len(v) for v in py_vpu.values())} entries from {len(py_vpu)} IMCEs")
+    print(f"  Linebuffer IN: {sum(len(v) for v in py_linebuffer_in.values())} entries from {len(py_linebuffer_in)} IMCEs")
 
     # Parse RTL logs
     print("\nParsing RTL logs...")
@@ -926,6 +1003,8 @@ def main():
     rtl_vpu_in = {}
 
     parse_detailed = args.parse_linebuffer or args.parse_imcu or args.parse_post_imcu or args.parse_vpu or args.parse_all
+    # Enable linebuffer parsing if comparison is requested
+    parse_linebuffer_needed = parse_detailed or args.compare_linebuffer or args.compare_all
 
     for coord, logs in rtl_logs.items():
         if filter_coord and coord != filter_coord:
@@ -959,7 +1038,7 @@ def main():
                 rtl_fifo_pop[coord] = fifo_pops
 
         # Parse linebuffer if requested
-        if 'linebuffer' in logs and (args.parse_linebuffer or args.parse_all):
+        if 'linebuffer' in logs and parse_linebuffer_needed:
             lb_in, lb_out, lb_cfg = parse_rtl_linebuffer(logs['linebuffer'], coord)
             if lb_in:
                 rtl_linebuffer_in[coord] = lb_in
@@ -977,9 +1056,10 @@ def main():
     print(f"  MM_QUANT: {sum(len(v) for v in rtl_mm_quant.values())} entries from {len(rtl_mm_quant)} IMCEs")
     print(f"  IMCU: {sum(len(v) for v in rtl_imcu.values())} entries from {len(rtl_imcu)} IMCEs")
     print(f"  VPU ops: {sum(len(v) for v in rtl_vpu.values())} entries from {len(rtl_vpu)} IMCEs")
-    if parse_detailed:
+    if parse_linebuffer_needed:
         print(f"  Linebuffer IN: {sum(len(v) for v in rtl_linebuffer_in.values())} entries from {len(rtl_linebuffer_in)} IMCEs")
         print(f"  Linebuffer OUT: {sum(len(v) for v in rtl_linebuffer_out.values())} entries from {len(rtl_linebuffer_out)} IMCEs")
+    if parse_detailed:
         print(f"  IMCU IN: {sum(len(v) for v in rtl_imcu_in.values())} entries from {len(rtl_imcu_in)} IMCEs")
         print(f"  Post-IMCU ACC: {sum(len(v) for v in rtl_post_imcu_acc.values())} entries from {len(rtl_post_imcu_acc)} IMCEs")
         print(f"  FIFO PUSH: {sum(len(v) for v in rtl_fifo_push.values())} entries from {len(rtl_fifo_push)} IMCEs")
@@ -1066,6 +1146,41 @@ def main():
                 print(f"  No Python data")
             else:
                 print(f"  No RTL data (need to re-run RTL with IMCU_OUT logging)")
+
+        print(f"\nTotal: {total_match} match, {total_mismatch} mismatch")
+
+    # Compare Linebuffer
+    if args.compare_linebuffer or args.compare_all:
+        print(f"\n{'='*80}")
+        print("Comparing Linebuffer Inputs (Python vs RTL)")
+        print(f"{'='*80}")
+
+        all_coords = set(py_linebuffer_in.keys()) | set(rtl_linebuffer_in.keys())
+        if filter_coord:
+            all_coords = {filter_coord} & all_coords
+
+        total_match = 0
+        total_mismatch = 0
+
+        for coord in sorted(all_coords):
+            py_inp = py_linebuffer_in.get(coord, [])
+            rtl_inp = rtl_linebuffer_in.get(coord, [])
+
+            print(f"\nIMCE ({coord[0]}, {coord[1]}): Python={len(py_inp)}, RTL={len(rtl_inp)}")
+
+            if py_inp and rtl_inp:
+                match, mismatch, total = compare_linebuffer_inputs(py_inp, rtl_inp, coord, args.verbose)
+                total_match += match
+                total_mismatch += mismatch
+
+                if mismatch == 0:
+                    print(f"  ✓ All {total} inputs MATCH")
+                else:
+                    print(f"  ✗ {mismatch}/{total} inputs MISMATCH")
+            elif not py_inp:
+                print(f"  No Python data")
+            else:
+                print(f"  No RTL data")
 
         print(f"\nTotal: {total_match} match, {total_mismatch} mismatch")
 
