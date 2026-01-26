@@ -79,8 +79,12 @@ class ImcFlowRunner(ABC):
         # Convert to absolute path since run.sh executes from runner directory
         abs_runner_log_dir = os.path.abspath(runner_log_dir)
 
-        # Pass absolute log directory as 4th argument to run.sh
-        sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name, abs_runner_log_dir]
+        # Determine imc_size based on IMCFLOW_BIG_IMEM environment variable
+        big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
+        imc_size = "270464" if big_imem else "266368"
+
+        # Pass absolute log directory as 4th argument, imc_size as 5th argument to run.sh
+        sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size]
 
         try:
             self._stream_command_output(

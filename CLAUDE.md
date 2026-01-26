@@ -4,7 +4,7 @@ This is the TVM compiler extended to map high-level neural network operations on
 
 ## Agent Usage
 
-**ALWAYS use the `imcflow-compiler-expert` agent when working in this directory.**
+**ALWAYS use the `imcflow-compiler-expert` agent when working in this directory. Refer to /root/.claude/agents/imcflow-compiler-expert.md**
 
 This agent has deep expertise in:
 - Mapping tvm.relay operations to imcflow hardware primitives
