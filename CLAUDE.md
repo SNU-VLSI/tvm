@@ -36,3 +36,9 @@ Use `imcflow-compiler-expert` for ANY task including:
 - Optimizing hardware mappings
 - Investigating generated LLVM IR or assembly
 - Integration issues with LLVM backend or gem5
+
+## compilation and simulation
+
+- invoke python at `/root/project/tvm/tvm_practice/test_imcflow/codegen`
+- source ~/.zshrc
+- use `.envrc` with `direnv`

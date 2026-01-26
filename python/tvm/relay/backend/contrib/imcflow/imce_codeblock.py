@@ -50,13 +50,11 @@ class RecvSendNum:
 def add_to_map(edge, count, is_send=True):
   outer_loop_count = 1 if len(SimpleFor.count_stack) == 0 else int(math.prod(SimpleFor.count_stack))
   target_map = send_num_map if is_send else recv_num_map
-  old_count = count.total_num
   count.set_iter(outer_loop_count)
   if edge in target_map:
     target_map[edge].total_num += count.total_num
   else:
     target_map[edge] = count
-  print(f"[recv send map] {'send_map' if is_send else 'recv_map'} | {edge} | {target_map[edge].total_num} | {old_count}*{outer_loop_count}={count.total_num}")
 
 
 class ImceCodeBlock(CodeBlock):
@@ -255,6 +253,23 @@ class RecvConstBlock(ImceCodeBlock):
       else:
         raise ValueError(f"Unknown ConstType: {self.type}")
     return code.render()
+
+
+class IMCERecvBlock(ImceCodeBlock):
+  """
+  Code block for receiving data from a fifo.
+  Calls add_to_map during _render() so that count_stack is properly populated.
+  """
+  def __init__(self, var_name: str, fifo_id: int, owner_edge: TensorEdge, annotation: str = ""):
+    super().__init__(annotation)
+    self.var_name = var_name
+    self.fifo_id = fifo_id
+    self.owner_edge = owner_edge
+
+  def _render(self) -> str:
+    # Call add_to_map at render time when count_stack is properly populated
+    add_to_map(self.owner_edge, RecvSendNum("recv", 1), is_send=False)
+    return f"{self.var_name} = __builtin_IMCE_RECV({self.fifo_id}); // {self.annotation}"
 
 
 class VecBlock(ImceCallCodeBlock):
@@ -528,7 +543,6 @@ class ConvBlock(ImceCallCodeBlock):
     return 4
 
   def _build_loop_body(self, recv_count: int) -> CodeBlock:
-
     load_info = []
     for edge in self.in_edges:
       te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
@@ -595,10 +609,10 @@ class ConvBlock(ImceCallCodeBlock):
               if var_i.static:
                 continue
               annotation = f"{edge}, {te_info.node_info_str}"
-              recv_code = TextBlock(f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}")
-              comp.add(recv_code)
               owner_edge = te_info.owner
-              add_to_map(owner_edge, RecvSendNum("recv", 1), is_send=False)
+              # Use IMCERecvBlock so add_to_map is called at render time with correct count_stack
+              recv_code = IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation)
+              comp.add(recv_code)
 
               # Add sync after recv
               if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
