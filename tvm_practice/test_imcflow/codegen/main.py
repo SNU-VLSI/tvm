@@ -71,6 +71,12 @@ Examples:
     help="List available models and their default input patterns"
   )
 
+  parser.add_argument(
+    "--compile-only", "-c",
+    action="store_true",
+    help="Only compile the model (skip CPU validation and simulation)"
+  )
+
   args = parser.parse_args()
 
   # only one of --skip-setup and --rebuild_modified_cpp can be set
@@ -125,7 +131,8 @@ Examples:
     test_name=args.model,
     input_pattern=args.pattern,
     skip_setup=args.skip_setup,
-    rebuild_modified_cpp=args.rebuild_modified_cpp
+    rebuild_modified_cpp=args.rebuild_modified_cpp,
+    compile_only=args.compile_only
   )
   return 0
 
