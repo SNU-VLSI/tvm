@@ -4915,6 +4915,144 @@ class MemoryAllocator:
 
           return results
 
+        def calculate_all_output_tiles_from_input(self, target_func, input_tiles_dict):
+          """
+          Calculate output tile specifications for ALL outputs based on given input tiles.
+
+          This is the forward direction: given input tiles, determine what output tiles
+          will be produced for each output in a multi-output function. This is crucial
+          for multi-output functions where different outputs have different transformations
+          (e.g., one goes through conv, another goes through simple multiply).
+
+          IMPORTANT: The input tiles are already trimmed (padding/halo removed), so they
+          are in the actual tensor coordinate system. When there are no conv operations
+          (conv_params is empty), the output tiles should match the input tiles exactly.
+
+          Args:
+              target_func: relay.Function to analyze
+              input_tiles_dict: dict {var_name: (input_bases, input_sizes)} for each input variable
+
+          Returns:
+              dict: {output_idx: (output_bases, output_sizes)} for each output in the function
+          """
+          body = target_func.body
+
+          # Handle both single output and Tuple output
+          if isinstance(body, relay.Tuple):
+            output_exprs = body.fields
+          else:
+            output_exprs = [body]
+
+          results = {}
+
+          for output_idx, output_expr in enumerate(output_exprs):
+            # Trace paths from this specific output to all inputs
+            paths = self._trace_all_paths_to_inputs(output_expr)
+
+            debug_print(f"  [{self.func_name}] Output[{output_idx}] paths: {list(paths.keys())}")
+            for var_name, conv_params in paths.items():
+              debug_print(f"  [{self.func_name}]   {var_name} -> conv_params: {conv_params}")
+
+            if not paths:
+              # No paths found - this shouldn't happen but handle gracefully
+              # Use first available input tile spec as fallback
+              if input_tiles_dict:
+                first_var = list(input_tiles_dict.keys())[0]
+                input_bases, input_sizes = input_tiles_dict[first_var]
+                results[output_idx] = (list(input_bases), list(input_sizes))
+              continue
+
+            # For each input variable that contributes to this output, calculate output tiles
+            # If multiple inputs contribute, we need to merge the results
+            output_candidates = []
+
+            for var_name, conv_params in paths.items():
+              if var_name not in input_tiles_dict:
+                # This input is not in our input tiles dict - skip
+                continue
+
+              input_bases, input_sizes = input_tiles_dict[var_name]
+
+              # If there are no conv operations, output tiles = input tiles
+              # This is the case for element-wise operations like multiply, add, etc.
+              if not conv_params:
+                debug_print(f"  [{self.func_name}]   No conv params for {var_name}, output tiles = input tiles")
+                output_candidates.append((list(input_bases), list(input_sizes)))
+              else:
+                # If there are conv operations, we cannot reliably recalculate output tiles
+                # from trimmed input tiles because:
+                # 1. Trimmed input tiles have padding/halo removed
+                # 2. They are in post-trim coordinate system
+                # 3. The original output tiles were calculated before trimming
+                #
+                # Therefore, for conv paths, we should keep the original output tiles.
+                # We signal this by returning None, which the caller will interpret as
+                # "keep original tiles unchanged"
+                debug_print(f"  [{self.func_name}]   Conv params exist for {var_name}, cannot recalculate from trimmed input")
+                output_candidates.append(None)
+
+            if output_candidates:
+              # Filter out None values (conv paths that cannot be recalculated)
+              valid_candidates = [c for c in output_candidates if c is not None]
+
+              if not valid_candidates:
+                # All paths have conv operations, cannot recalculate
+                # Return None to signal "keep original tiles"
+                results[output_idx] = None
+              elif len(valid_candidates) == 1:
+                results[output_idx] = valid_candidates[0]
+              else:
+                # Multiple valid candidates, merge them
+                merged_bases, merged_sizes = self.merge_input_tile_boundaries(valid_candidates)
+                results[output_idx] = (merged_bases, merged_sizes)
+
+          return results
+
+        def _compute_output_tile_from_input(self, in_base, in_size, conv_params):
+          """
+          Compute output tile range from input tile range (forward calculation).
+
+          This is the inverse of _compute_input_tile_from_output.
+
+          The backward formula is:
+            input_base = output_base * stride - padding_top
+            input_size = (output_size - 1) * stride + kernel_size
+
+          So the forward formula (solving for output from input) is:
+            output_base = (input_base + padding_top) / stride
+            output_size = (input_size - kernel_size) / stride + 1
+
+          Args:
+              in_base: input tile start position
+              in_size: input tile size
+              conv_params: List of (kernel_size, stride, padding_top, padding_bottom)
+                          in output→input order (we'll process in reverse)
+
+          Returns:
+              (output_base, output_size) tuple
+          """
+          curr_base = in_base
+          curr_size = in_size
+
+          # Process conv params in reverse order (input → output direction)
+          for k, s, p_top, p_bottom in reversed(conv_params):
+            # Forward calculation: input → output
+            # From backward: input_base = output_base * stride - pad_top
+            # Solving: output_base = (input_base + pad_top) / stride
+            new_base = (curr_base + p_top) // s
+
+            # From backward: input_size = (output_size - 1) * stride + kernel_size
+            # Solving: (output_size - 1) * stride = input_size - kernel_size
+            #          output_size - 1 = (input_size - kernel_size) / stride
+            #          output_size = (input_size - kernel_size) / stride + 1
+            new_size = (curr_size - k) // s + 1
+            new_size = max(0, new_size)
+
+            curr_base = new_base
+            curr_size = new_size
+
+          return curr_base, curr_size
+
         def merge_input_tile_boundaries(self, candidates):
           """
           Merge multiple input tile boundary candidates by taking the maximum range for each tile.
@@ -5255,6 +5393,50 @@ class MemoryAllocator:
             debug_print(f"  [{self.func_name}] Final Input[{var_name}] tiles: bases={bases}, sizes={sizes}")
 
           # ================================================
+          # Phase 2.5: Output Tile Verification and Recalculation
+          # ================================================
+          # After input tiles are finalized, recalculate output tiles to detect mismatches.
+          # This is crucial for multi-output functions where different outputs have different
+          # graph paths (e.g., one through conv, another through multiply).
+          debug_print(f"  [{self.func_name}] ===== OUTPUT TILE VERIFICATION =====")
+
+          if final_trimmed_input_tiles and len(final_output_tile_specs) > 0:
+            # Recalculate output tiles from the finalized input tiles
+            recalculated_output_tile_specs = self.calculate_all_output_tiles_from_input(
+              func, final_trimmed_input_tiles
+            )
+
+            # Compare and warn/update if mismatches found
+            for out_idx in sorted(final_output_tile_specs.keys()):
+              original_bases, original_sizes = final_output_tile_specs[out_idx]
+
+              if out_idx in recalculated_output_tile_specs:
+                recalc_result = recalculated_output_tile_specs[out_idx]
+
+                if recalc_result is None:
+                  # Conv path - cannot recalculate from trimmed input, keep original
+                  debug_print(f"  [{self.func_name}] Output[{out_idx}] has conv operations, keeping original tiles: bases={original_bases}, sizes={original_sizes}")
+                else:
+                  recalc_bases, recalc_sizes = recalc_result
+
+                  # Check for mismatch
+                  if (list(recalc_bases) != list(original_bases) or
+                      list(recalc_sizes) != list(original_sizes)):
+                    debug_print(f"  [{self.func_name}] MISMATCH DETECTED for Output[{out_idx}]:")
+                    debug_print(f"    Original: bases={original_bases}, sizes={original_sizes}")
+                    debug_print(f"    Recalculated: bases={recalc_bases}, sizes={recalc_sizes}")
+                    debug_print(f"    Using recalculated values.")
+
+                    # Update with recalculated values
+                    final_output_tile_specs[out_idx] = (recalc_bases, recalc_sizes)
+                  else:
+                    debug_print(f"  [{self.func_name}] Output[{out_idx}] tiles verified: bases={recalc_bases}, sizes={recalc_sizes}")
+              else:
+                debug_print(f"  [{self.func_name}] Warning: Could not recalculate tiles for Output[{out_idx}]")
+
+          debug_print(f"  [{self.func_name}] ===== END VERIFICATION =====")
+
+          # ================================================
           # Phase 3: Perform actual allocation with tiling
           # ================================================
           ImcflowDeviceConfig().ImcflowFuncMap[func_name].tiling_factor = num_iterations_set.pop()
@@ -5312,10 +5494,6 @@ class MemoryAllocator:
               assert height_offset % 32 == 0, "Height offset should be multiple of 32 bytes."
               pkt_cnt_per_height = height_offset//32
               pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
-
-              # Assert that all pkt_cnts are multiples of 4 (for 4x unrolling)
-              for pkt_cnt in pkt_cnts:
-                assert pkt_cnt % 4 == 0, f"pkt_cnt {pkt_cnt} must be a multiple of 4 for INODE_RECV 4x unrolling (edge: {edge})"
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               # base address = origin_base + height_base * height_offset
@@ -5383,10 +5561,6 @@ class MemoryAllocator:
               pkt_cnt_per_height = height_offset//32
               # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
               pkt_cnts = [pkt_cnt_per_height * h for h in output_tile_sizes]
-
-              # Assert that all pkt_cnts are multiples of 4 (for 4x unrolling)
-              for pkt_cnt in pkt_cnts:
-                assert pkt_cnt % 4 == 0, f"pkt_cnt {pkt_cnt} must be a multiple of 4 for INODE_RECV 4x unrolling (edge: {edge})"
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               c_output_var_offsets = [base * height_offset for base in output_tile_bases]
@@ -7236,16 +7410,20 @@ def expand_pattern(pattern, num_args):
     return [pattern[0]] * num_args
   return None
 
-def constructDataBlockDict(mod):
+def constructDataBlockDict(mod, update_compiled_blocks_only=False):
   imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
   for func_name_var, func in mod.functions.items():
     if func_name_var.name_hint == "main": continue
     elif isinstance(func, relay.Function) and hasattr(func.attrs, "Compiler") and func.attrs["Compiler"]=="imcflow" :
-      target_func = imcflow_func_map[func_name_var.name_hint]
-      input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
-      output_node_id = getNodeID(target_func.func_node)
-      const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
-      ImcflowDeviceConfig().get_data_block_dict(target_func, func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
+      if update_compiled_blocks_only:
+        ImcflowDeviceConfig().update_compiled_blocks(func_name_var.name_hint)
+      else:
+        target_func = imcflow_func_map[func_name_var.name_hint]
+        input_node_ids = [getNodeID(n) for n in getInputNodesOfFunc(target_func.func_node)]
+        output_node_id = getNodeID(target_func.func_node)
+        const_node_ids = [getNodeID(n) for n in getConstNodesOfFunc(target_func.func_node)]
+        ImcflowDeviceConfig().update_compiled_blocks(func_name_var.name_hint)
+        ImcflowDeviceConfig().update_data_blocks(func_name_var.name_hint, input_node_ids, output_node_id, const_node_ids)
 
 class FIFOConflictMonitor:
     """

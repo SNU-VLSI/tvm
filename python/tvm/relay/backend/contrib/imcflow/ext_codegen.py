@@ -130,6 +130,8 @@ def makeConstArrayDecl(func, func_name, target_func):
       def visit_constant(self, const):
           # constant 이름 생성 (symbol 기반)
           node_id = getInnerNodeID(imcflow_transform.getNodeID(const))
+          if node_id is None:
+            node_id = hash(const.__repr__()) # use a fallback hash if node_id is not found
           name = f"imcflow_{func_name}_const_{self.cnt}"
           params[String(name)] = const.data
           DevConfig().ImcflowFuncMap[func_name].const_name_map[node_id] = String(name)
@@ -196,6 +198,8 @@ def getCInputVarName(func_name, data_block):
   elif isinstance(node_type, Constant):
     data_type = dtype_to_cpp(node_type.checked_type.dtype)
     node_id = getInnerNodeID(imcflow_transform.getNodeID(node_type))
+    if node_id is None:
+      node_id = hash(node_type.__repr__())  # use a fallback hash if node_id is not found
     const_name = DevConfig().ImcflowFuncMap[func_name].const_name_map[node_id]
     return f"(({data_type}*)({const_name}))"
   else:

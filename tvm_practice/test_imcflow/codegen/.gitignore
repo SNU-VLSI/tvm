@@ -7,3 +7,4 @@ logs/
 test_inputs/*
 test_mem_alloc_*/
 test.sh
+!handcraft/*_evl

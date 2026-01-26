@@ -23,7 +23,7 @@ import sys
 from contextlib import contextmanager
 
 # Import IMCFlow compiler driver
-from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow
+from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild_imcflow_cpp_only
 
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
@@ -56,6 +56,7 @@ MODEL_REGISTRY = {
     "one_relu": (models_for_test.getOneReluModel, "linear"),
     "one_conv_small": (lambda: models_for_test.getOneConvModel(iH=4,iW=4), "random"),
     "one_conv_big": (lambda: models_for_test.getOneConvModel(iH=32,iW=32), "random"),
+    "one_conv_wide": (lambda: models_for_test.getOneConvModel(iH=4,iW=4,IC=56), "random"),
     "conv_quant_conv_big": (lambda: models_for_test.getConvQuantConvModel(iH=32, iW=32), "random"),
     "s2_conv_quant_conv_med": (lambda: models_for_test.getS2ConvQuantConvModel(iH=16, iW=16), "random"),
     "s2_conv_quant_conv_big": (lambda: models_for_test.getS2ConvQuantConvModel(iH=32, iW=64), "random"),
@@ -104,6 +105,21 @@ MODEL_REGISTRY = {
     "resnet8_subset07_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=7), "ones"),
     "resnet8_subset08_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=8), "ones"),
     "resnet8_subset09_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=9), "ones"),
+    "resnet8_subset10_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=10), "ones"),
+    "resnet8_subset11_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=11), "ones"),
+    "resnet8_subset12_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=12), "ones"),
+    "resnet8_subset13_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=13), "ones"),
+    "resnet8_subset14_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=14), "ones"),
+    "resnet8_subset15_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=15), "ones"),
+    "resnet8_subset16_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=16), "ones"),
+    "resnet8_subset17_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=17), "ones"),
+    "resnet8_subset18_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=18), "ones"),
+    "resnet8_subset19_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=19), "ones"),
+    "resnet8_subset20_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=20), "ones"),
+    "resnet8_subset21_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=21), "ones"),
+    "resnet8_subset22_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=22), "ones"),
+    "resnet8_subset23_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=23), "ones"),
+    "resnet8_subset24_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=24), "ones"),
     "resnet8_subset25_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=25), "ones"),
 
     # ResNet8 variants
@@ -507,11 +523,10 @@ def run_simulation(eval_dir, HOST_ISA="x86"):
         eval_dir=eval_dir
       )
     except KeyboardInterrupt:
-      simul_err   = True
       interrupted = True
       print("❌ Simulation interrupted by user")
     except Exception as e:
-      simul_err   = True
+      simul_err = True
       print(f"❌ Simulation failed for {runner.name}: {e}")
 
     # Logs are automatically written to runner_log_dir during run()
@@ -655,7 +670,7 @@ def compare_outputs(cpu_output, imcflow_output):
   else:
     print("\n✅ Test completed successfully")
 
-def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False):
+def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False, rebuild_modified_cpp=False):
   """Generate IMCFLOW evaluation results with optional CPU validation
 
   Args:
@@ -666,12 +681,13 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     input_data_dict: Optional dict of input name -> numpy array for CPU validation
     skip_setup: If True, skip transformations, codegen, and graph generation.
                 Loads previously transformed model from file.
+    rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
   """
   print(f"\n{'='*60}")
   print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
   print(f"{'='*60}")
 
-  if not skip_setup:
+  if not skip_setup and not rebuild_modified_cpp:
     # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
     mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir)
 
@@ -682,6 +698,9 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     print("\n⏭️  Skipping model transformation, codegen, and graph generation (skip_setup=True)")
     print("   Loading previously transformed model from file...")
     mod, param_dict = load_transformed_model(eval_dir)
+
+  if rebuild_modified_cpp:
+    mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir)
 
   # Run CPU validation if input data is provided
   if input_data_dict is not None:
@@ -712,7 +731,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 # ============================================================================
 # Test Pipeline
 # ============================================================================
-def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
+def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebuild_modified_cpp=False):
   """
   Test pipeline that:
   1. Gets the model from registry
@@ -727,6 +746,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
     skip_setup: If True, skip codegen, and graph generation steps.
                 Useful for testing different inputs on an already-compiled model.
                 NOTE: When True, assumes directory already exists from previous run.
+    rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
   """
   if test_name not in MODEL_REGISTRY:
     raise ValueError(f"Unknown test: {test_name}. Available tests: {list(MODEL_REGISTRY.keys())}")
@@ -742,7 +762,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   dir_name = f"{test_name}_evl"
 
   # Setup directory: only clean/create if NOT skipping setup
-  if not skip_setup:
+  if not skip_setup and not rebuild_modified_cpp:
     # Full setup: clean and recreate directory
     setup_dir(dir_name)
   else:
@@ -750,8 +770,8 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
     if not os.path.exists(dir_name):
       raise FileNotFoundError(
         f"Directory '{dir_name}' does not exist. "
-        f"Cannot use skip_setup=True without a previous run. "
-        f"Run without --skip-setup first to compile the model."
+        f"Cannot use skip_setup=True or rebuild_modified_cpp=True without a previous run. "
+        f"Run without --skip-setup and --rebuild_modified_cpp first to compile the model."
       )
     # Ensure test_inputs directory exists for new input files
     os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
@@ -765,7 +785,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
   # Wrap the entire test execution in the tee logger
   with tee_output_to_log(log_file_path):
     print(f"Logging test output to: {log_file_path}")
-    print(f"Test: {test_name}, Input pattern: {input_pattern}, Skip setup: {skip_setup}")
+    print(f"Test: {test_name}, Input pattern: {input_pattern}, Skip setup: {skip_setup}, Rebuild modified C++: {rebuild_modified_cpp}")
 
     # Get original model (needed for input generation)
     # This is lightweight compared to transformation/codegen
@@ -787,7 +807,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False):
 
     # Run with CPU validation enabled
     # Note: When skip_setup=True, run_test will load the transformed model from file
-    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup)
+    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup, rebuild_modified_cpp=rebuild_modified_cpp)
 
 
 # ============================================================================

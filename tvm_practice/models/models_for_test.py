@@ -127,8 +127,8 @@ def getOneReluModel():
 
   return out, param_dict
 
-def getOneConvModel(iH=4, iW=4):
-  N, IC, H, W = 1, 28, iH, iW
+def getOneConvModel(iH=4, iW=4, IC=28):
+  N, IC, H, W = 1, IC, iH, iW
   OC = 64
   KH, KW = 3, 3
   stride, padding = 1, 1

@@ -110,8 +110,16 @@ class RecvBlock(InodeCodeBlock):
     var = UniqueVar("recv_data_base_address", dtype="int")
 
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
-    self.body.add(SimpleFor(recv_count,
-                      lambda iter: f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {self.fifo_id});"))
+
+    # Per-packet sync: Receive one packet, then sync immediately
+    def recv_body_with_sync(iter, var=var, fid=self.fifo_id):
+      code = f"__builtin_INODE_RECV({var} + {iter}*32, 0, 0, {fid});\n"
+      # Add sync after each recv
+      sync_code = self._get_recv_sync_code_str()
+      if sync_code:
+        code += sync_code
+      return code
+    self.body.add(SimpleFor(recv_count, recv_body_with_sync))
 
   def _build_tiled(self):
     fifo_id = self.fifo_id
@@ -132,54 +140,131 @@ class RecvBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
-    self.body.add(TextBlock(f"__asm__ volatile(\"nop\\n nop\");")) # BUGFIX_LOAD_USE_HAZARD
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
 
-    # Consumer INODE sets flag for the Producer to sync.
-    SYNC_OUTPUT_FLAG = 2
+    # Per-packet sync: Receive one packet, then sync immediately
+    def recv_body_with_sync(iter, base_addr_var=base_var, fid=fifo_id):
+      code = f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
+      # Add sync after each recv
+      sync_code = self._get_recv_sync_code_str()
+      if sync_code:
+        code += sync_code
+      return code
+    self.body.add(SimpleFor(loop_cnt_var, recv_body_with_sync))
 
-    # Check producer's sync granularity
-    edge_info = DevConfig().get_tensor_edge_info(target_edge)
-    producer_sync_granularity = edge_info.producer_sync_granularity if edge_info and edge_info.producer_sync_granularity else 4
+    # TEMPORARILY DISABLED: Testing UUID-based sync instead
+    # Consumer INODE waits for producer IMCE to signal completion
+    # Find producer IMCE ID from the tensor edge
+    # SYNC_OUTPUT_FLAG = 2
+    # producer_imce_ids = set()
 
-    # Always unroll 4x (pkt_cnt is always divided by 4 as per requirement)
-    # But sync frequency depends on producer_sync_granularity
-    if producer_sync_granularity == 1:
-      # Producer syncs every SEND, so INode must sync every RECV (but still unroll 4x in batches)
-      # Need to loop 4x more (pkt_cnt * 4) since we're doing 1 RECV per iteration instead of 4
-      expanded_loop_cnt_var = UniqueVar(f"{target_edge.simple_name()}_expanded_loop_count", dtype="int")
-      self.body.add(TextBlock(f"{expanded_loop_cnt_var} = {loop_cnt_var} * 4;"))
+    # Get tensor edge info to find the producer
+    # if target_edge in DevConfig().TensorEdgetoInfo:
+    #   te_info = DevConfig().TensorEdgetoInfo[target_edge]
+    #   if te_info.policy_info:
+    #     # The first router in policy_info is the source (producer)
+    #     producer_router_id = te_info.policy_info[0].router_id
+    #     if producer_router_id.is_imce():
+    #       producer_imce_ids.add(producer_router_id.value)
 
-      def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
-        # return (f"__builtin_INODE_SET_FLAG(0);\n"
-        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
-        #         f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
-        return f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
-                
+    # Add STANDBY calls for each producer IMCE
+    # for producer_imce_id in sorted(producer_imce_ids):
+    #   # Find producer name for annotation
+    #   producer_name = None
+    #   if target_edge in DevConfig().TensorEdgetoInfo:
+    #     te_info = DevConfig().TensorEdgetoInfo[target_edge]
+    #     if te_info.policy_info and te_info.policy_info[0].router_id.value == producer_imce_id:
+    #       producer_name = te_info.policy_info[0].router_id.name
 
-      self.body.add(SimpleFor(expanded_loop_cnt_var, unrolled_recv_body))
-    else:
-      # Producer syncs every 4 SENDs (default behavior), INode syncs every 4 RECVs
-      def unrolled_recv_body(iter, base_addr_var=base_var, fid=fifo_id):
-        # return (f"__builtin_INODE_SET_FLAG(0);\n"
-        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
-        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 32, 0, 0, {fid});\n"
-        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 64, 0, 0, {fid});\n"
-        #         f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});\n"
-        #         f"__builtin_INODE_SET_FLAG({SYNC_OUTPUT_FLAG});")
-        return (f"__builtin_INODE_RECV({base_addr_var} + {iter}*128, 0, 0, {fid});\n"
-                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 32, 0, 0, {fid});\n"
-                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 64, 0, 0, {fid});\n"
-                f"__builtin_INODE_RECV({base_addr_var} + {iter}*128 + 96, 0, 0, {fid});\n")
-      self.body.add(SimpleFor(loop_cnt_var, unrolled_recv_body))
+    #   if producer_name:
+    #     self.body.add(TextBlock(f"__builtin_INODE_STANDBY({producer_imce_id}, {SYNC_OUTPUT_FLAG}); // {producer_name}"))
+    #   else:
+    #     self.body.add(TextBlock(f"__builtin_INODE_STANDBY({producer_imce_id}, {SYNC_OUTPUT_FLAG});"))
 
+    # Sync is already added inside the loop (per-packet sync), no need to add again here
+
+  def _get_recv_sync_code_str(self):
+    """Get sync code as a string (for inline insertion in loops) for recv"""
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return ""  # No pair manager, no sync
+
+    edge = self._get_edge()
+    if edge is None:
+      return ""
+
+    pair = self.builder.pair_manager.get_pair(edge)
+    if pair is None:
+      return ""  # No sync needed for this edge
+
+    # Get current node - receiver node
+    dst_hw_node = self._get_hw_node_from_edge(edge)
+    if dst_hw_node is None:
+      return ""
+
+    # Generate sync code inline - RECEIVER pattern
+    # Receiver only waits for sender (not other receivers in multicast)
+    sync_lines = []
+    sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
+    sync_lines.append(f"__builtin_INODE_STANDBY({pair.sender_node.value}, {pair.uuid});")
+    sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
+
+    return "\n".join(sync_lines) + "\n"
+
+  def _add_sync_after_recv(self):
+    """Add synchronization block after recv operation"""
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return  # No pair manager, skip sync
+
+    # Get the tensor edge for this recv block
+    edge = self._get_edge()
+    if edge is None:
+      return
+
+    pair = self.builder.pair_manager.get_pair(edge)
+    if pair is None:
+      return  # No sync needed for this edge
+
+    # Get current node - receiver node
+    # For recv, we need to determine which node is receiving
+    # The edge.dst_id should give us the tensor ID, and we can get hw node from there
+    dst_hw_node = self._get_hw_node_from_edge(edge)
+    if dst_hw_node is None:
+      return
+
+    # Add sync block
+    sync_annotation = f"sync after recv: uuid={pair.uuid}, edge={edge}"
+    sync_block = SyncPairINode(dst_hw_node, pair.all_nodes, pair.uuid, sync_annotation)
+    self.body.add(sync_block)
+
+  def _get_edge(self):
+    """Get the tensor edge associated with this recv block"""
+    if isinstance(self.block.id, list):
+      return self.block.id[0] if len(self.block.id) > 0 else None
+    return self.block.id if isinstance(self.block.id, TensorEdge) else None
+
+  def _get_hw_node_from_edge(self, edge: TensorEdge):
+    """Get hardware node for receiver from edge"""
+    try:
+      dst_gid = edge.dst_id.graph_node_id
+      if isinstance(dst_gid, tuple):
+        dst_gid = dst_gid[-1]
+      hw_node = DevConfig().get_hw_node(dst_gid)
+      # Handle tuple hw_node (from split operations)
+      if isinstance(hw_node, tuple):
+        # Use the first receiver node for sync
+        return hw_node[0] if len(hw_node) > 0 else None
+      return hw_node
+    except Exception:
+      return None
 
 
 class RecvBlockInterleaved(InodeCodeBlock):
   """ Code block for receiving data from given fifo id interleaved """
 
-  def __init__(self, blocks: List[DataBlock], fifo_ids: List[int], annotation: str = ""):
+  def __init__(self, builder, blocks: List[DataBlock], fifo_ids: List[int], annotation: str = ""):
     super().__init__(annotation)
     assert len(blocks) == len(fifo_ids), "# of blocks and fifo_ids must be equal"
+    self.builder = builder
     self.blocks = blocks
     self.fifo_ids = fifo_ids
     self._build()
@@ -190,6 +275,7 @@ class RecvBlockInterleaved(InodeCodeBlock):
     for block, fifo_id in zip(self.blocks, self.fifo_ids):
       recv_count = math.ceil(block.size / 32)
       info_list.append({
+          'block': block,
           'recv_count': recv_count,
           'offset': block.offset,
           'fid': fifo_id
@@ -197,25 +283,62 @@ class RecvBlockInterleaved(InodeCodeBlock):
 
     # Sort unique recv_counts to define intervals
     counts = sorted(list(set(x['recv_count'] for x in info_list)))
-    
+
     current_base = 0
     for limit in counts:
       duration = limit - current_base
       if duration <= 0:
         continue
-        
+
       # Identify blocks active in this interval
       active_infos = [x for x in info_list if x['recv_count'] > current_base]
-      
+
       # Generate loop for this interval
       for x in active_infos:
         var = UniqueVar("recv_offset_address", dtype="int")
         self.body.add(TextBlock(f"{var} = {x['offset']};"))
         self.body.add(SimpleFor(duration,
-            lambda iter, base=current_base, offset_var=var, fid=x['fid']: 
+            lambda iter, base=current_base, offset_var=var, fid=x['fid']:
               f"__builtin_INODE_RECV({offset_var} + ({f'({base} + {iter})' if base > 0 else iter})*32, 0, 0, {fid});"))
 
+        # Add sync after each recv in interleaved block
+        self._add_sync_for_edge(x['block'])
+
       current_base = limit
+
+  def _add_sync_for_edge(self, block: DataBlock):
+    """Add synchronization for a specific edge in interleaved recv"""
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return
+
+    # Get edge from block
+    if isinstance(block.id, list):
+      edge = block.id[0] if len(block.id) > 0 else None
+    else:
+      edge = block.id if isinstance(block.id, TensorEdge) else None
+
+    if edge is None:
+      return
+
+    pair = self.builder.pair_manager.get_pair(edge)
+    if pair is None:
+      return
+
+    # Get current node (receiver)
+    try:
+      dst_gid = edge.dst_id.graph_node_id
+      if isinstance(dst_gid, tuple):
+        dst_gid = dst_gid[-1]
+      current_node = DevConfig().get_hw_node(dst_gid)
+      if isinstance(current_node, tuple):
+        current_node = current_node[0]
+    except Exception:
+      return
+
+    # Add sync block
+    sync_annotation = f"sync after interleaved recv: uuid={pair.uuid}, edge={edge}"
+    sync_block = SyncPairINode(current_node, pair.all_nodes, pair.uuid, sync_annotation)
+    self.body.add(sync_block)
 
 
 class SendBlock(InodeCodeBlock):
@@ -239,9 +362,16 @@ class SendBlock(InodeCodeBlock):
 
     var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
-    self.body.add(SimpleFor(recv_count,
-                      lambda iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id: 
-                        f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});"))
+
+    # Per-packet sync: Send one packet, then sync immediately
+    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id):
+      code = f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
+      # Add sync after each send
+      sync_code = self._get_sync_code_str()
+      if sync_code:
+        code += sync_code
+      return code
+    self.body.add(SimpleFor(recv_count, send_body_with_sync))
 
   def _build_tiled(self):
     # tiling_info = self.block.tiling_info
@@ -265,21 +395,128 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
-    self.body.add(TextBlock(f"__asm__ volatile(\"nop\\n nop\");")) # BUGFIX_LOAD_USE_HAZARD
-    # Unroll 4x with stride of 128 bytes (4 * 32)
-    def unrolled_send_body(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id):
-      return (f"__builtin_INODE_SEND({base_addr_var} + {iter}*128, 0, {policy_addr}, {fid});\n"
-              f"__builtin_INODE_SEND({base_addr_var} + {iter}*128 + 32, 0, {policy_addr}, {fid});\n"
-              f"__builtin_INODE_SEND({base_addr_var} + {iter}*128 + 64, 0, {policy_addr}, {fid});\n"
-              f"__builtin_INODE_SEND({base_addr_var} + {iter}*128 + 96, 0, {policy_addr}, {fid});")
-    self.body.add(SimpleFor(loop_cnt_var, unrolled_send_body))
+    self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
+
+    # Per-packet sync: Send one packet, then sync immediately
+    def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id):
+      code = f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
+      # Add sync after each send
+      sync_code = self._get_sync_code_str()
+      if sync_code:
+        code += sync_code
+      return code
+    self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
+
+  def _get_sync_code_str(self):
+    """Get sync code as a string (for inline insertion in loops) - SENDER pattern"""
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      print(f"[DEBUG _get_sync_code_str] No pair_manager")
+      return ""  # No pair manager, no sync
+
+    edge_or_edges = self._get_edge()
+    if edge_or_edges is None:
+      print(f"[DEBUG _get_sync_code_str] Edge is None")
+      return ""
+
+    # Handle multicast (list of edges) vs single edge
+    if isinstance(edge_or_edges, list):
+      # Multicast case - find edge with split_idx to get correct pair
+      edge = None
+      for e in edge_or_edges:
+        if e.split_idx is not None:
+          edge = e
+          break
+      if edge is None:
+        edge = edge_or_edges[0] if edge_or_edges else None
+      print(f"[DEBUG _get_sync_code_str] Multicast: selected edge={edge} from {edge_or_edges}")
+    else:
+      edge = edge_or_edges
+
+    if edge is None:
+      print(f"[DEBUG _get_sync_code_str] Edge is None after multicast handling")
+      return ""
+
+    pair = self.builder.pair_manager.get_pair(edge)
+    if pair is None:
+      print(f"[DEBUG _get_sync_code_str] No pair for edge: {edge}")
+      return ""  # No sync needed for this edge
+
+    # Skip sync if sender == all receivers (same node, no real communication)
+    if len(pair.receiver_nodes) == 1 and pair.sender_node in pair.receiver_nodes:
+      print(f"[DEBUG _get_sync_code_str] Skipping sync: sender==receiver for edge={edge}")
+      return ""  # No sync needed for same-node communication
+
+    # Get current node from edge_info
+    current_node = self.edge_info.policy_info[0].router_id
+
+    # DEBUG: Print pair info
+    print(f"[DEBUG _get_sync_code_str] edge={edge}")
+    print(f"[DEBUG _get_sync_code_str] pair.uuid={pair.uuid}, pair.sender_node={pair.sender_node}, pair.receiver_nodes={pair.receiver_nodes}")
+    print(f"[DEBUG _get_sync_code_str] pair.all_nodes={pair.all_nodes}")
+    print(f"[DEBUG _get_sync_code_str] current_node={current_node} (type={type(current_node)})")
+
+    # Generate sync code inline - SENDER pattern
+    # SENDER: STANDBY(receiver, uuid) → SETFLAG(uuid) → STANDBY(receiver, 0) → SETFLAG(0)
+    sync_lines = []
+    # First wait for receiver to be ready (receiver sets its flag first)
+    for node in pair.all_nodes:
+      print(f"[DEBUG _get_sync_code_str] Checking node={node}, node != current_node = {node != current_node}")
+      if node != current_node:
+        sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
+    # Then set sender flag to acknowledge
+    sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
+    # Wait for receiver to clear flag (receiver processed data)
+    for node in pair.all_nodes:
+      if node != current_node:
+        sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, 0);")
+    # Clear sender flag
+    sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
+
+    print(f"[DEBUG _get_sync_code_str] Generated sync_lines: {sync_lines}")
+    return "\n".join(sync_lines) + "\n"
+
+  def _add_sync_after_send(self):
+    """Add synchronization block after send operation"""
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return  # No pair manager, skip sync
+
+    # Get the tensor edge for this send block
+    edge = self._get_edge()
+    if edge is None:
+      return
+
+    pair = self.builder.pair_manager.get_pair(edge)
+    if pair is None:
+      return  # No sync needed for this edge
+
+    # Get current node from edge_info
+    current_node = self.edge_info.policy_info[0].router_id
+
+    # Add sync block
+    sync_annotation = f"sync after send: uuid={pair.uuid}, edge={edge}"
+    sync_block = SyncPairINode(current_node, pair.all_nodes, pair.uuid, sync_annotation)
+    self.body.add(sync_block)
+
+  def _get_edge(self):
+    """Get the tensor edge associated with this send block
+
+    Returns:
+      - List of TensorEdge if multicast (block.id is list)
+      - Single TensorEdge otherwise
+    """
+    if isinstance(self.block.id, list):
+      return self.block.id  # Return list for multicast handling
+    if isinstance(self.block.id, TensorEdge):
+      return self.block.id
+    return None
 
 class SendBlockInterleaved(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
 
-  def __init__(self, blocks: List[DataBlock], edge_infos: List[TensorEdgeInfo], annotation: str = ""):
+  def __init__(self, builder, blocks: List[DataBlock], edge_infos: List[TensorEdgeInfo], annotation: str = ""):
     super().__init__(annotation)
     assert len(blocks) == len(edge_infos), "# of blocks and fifo_ids must be equal"
+    self.builder = builder
     self.blocks = blocks
     self.edge_infos = edge_infos
     self._build()
@@ -296,31 +533,61 @@ class SendBlockInterleaved(InodeCodeBlock):
           'recv_count': recv_count,
           'offset': block.offset,
           'policy': next_policy_addr,
-          'fid': fifo_id
+          'fid': fifo_id,
+          'edge_info': edge_info
       })
 
     # Sort unique recv_counts to define intervals
     counts = sorted(list(set(x['recv_count'] for x in info_list)))
-    
+
     current_base = 0
     for limit in counts:
       duration = limit - current_base
       if duration <= 0:
         continue
-        
+
       # Identify blocks active in this interval
       active_infos = [x for x in info_list if x['recv_count'] > current_base]
-      
+
       # Generate loop for this interval
       for x in active_infos:
         # var = UniqueVar("send_offset_address", dtype="int")
         var = UniqueVar(x['owner'], dtype="int")
         self.body.add(TextBlock(f"{var} = {x['offset']};"))
         self.body.add(SimpleFor(duration,
-            lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid']: 
+            lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid']:
               f"__builtin_INODE_SEND({offset_var} + ({f'{base} + {iter}' if base > 0 else iter})*32, 0, {policy}, {fid});"))
 
+        # Add sync after each send in interleaved block
+        self._add_sync_for_edge(x['owner'], x['edge_info'])
+
       current_base = limit
+
+  def _add_sync_for_edge(self, block: DataBlock, edge_info: TensorEdgeInfo):
+    """Add synchronization for a specific edge in interleaved send"""
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return
+
+    # Get edge from block
+    if isinstance(block.id, list):
+      edge = block.id[0] if len(block.id) > 0 else None
+    else:
+      edge = block.id if isinstance(block.id, TensorEdge) else None
+
+    if edge is None:
+      return
+
+    pair = self.builder.pair_manager.get_pair(edge)
+    if pair is None:
+      return
+
+    # Get current node
+    current_node = edge_info.policy_info[0].router_id
+
+    # Add sync block
+    sync_annotation = f"sync after interleaved send: uuid={pair.uuid}, edge={edge}"
+    sync_block = SyncPairINode(current_node, pair.all_nodes, pair.uuid, sync_annotation)
+    self.body.add(sync_block)
 
 
 class IMCEComputeBlock(InodeCodeBlock):
@@ -368,10 +635,12 @@ class SyncAllINodes(InodeCodeBlock):
     self._build()
 
   def _build(self):
-    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(1);"))
+    # Use UUID=255 for INODE-to-INODE sync to avoid conflict with SendRecvPairManager UUIDs (1-254)
+    INODE_SYNC_UUID = 255
+    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({INODE_SYNC_UUID});"))
     for node in NodeID.inodes():
       if node != self.node_id:
-        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, 1);"))
+        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {INODE_SYNC_UUID});"))
 
     nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
     self.body.add(TextBlock(f"__asm__ volatile({nops});"))
@@ -384,8 +653,10 @@ class Standby(InodeCodeBlock):
     self._build()
 
   def _build(self):
+    # Use UUID=255 for INODE-to-INODE sync to avoid conflict with SendRecvPairManager UUIDs (1-254)
+    INODE_SYNC_UUID = 255
     for node in self.node_ids:
-      self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, 1);"))
+      self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {INODE_SYNC_UUID});"))
 
     nops = " ".join([f"\"nop\\n\"" for _ in range(len(self.node_ids))])
     self.body.add(TextBlock(f"__asm__ volatile({nops});"))
@@ -424,6 +695,33 @@ class ClearFlag(InodeCodeBlock):
     self._build()
 
   def _build(self):
+    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(0);"))
+
+
+class SyncPairINode(InodeCodeBlock):
+  """Synchronize nodes after send/recv using UUID-based barrier"""
+
+  def __init__(self, current_node: NodeID, participating_nodes: List[NodeID], uuid: int, annotation: str = ""):
+    super().__init__(annotation)
+    self.current_node = current_node
+    self.participating_nodes = participating_nodes
+    self.uuid = uuid
+    self._build()
+
+  def _build(self):
+    # Set flag with UUID
+    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({self.uuid});"))
+
+    # Wait for all other participating nodes
+    for node in self.participating_nodes:
+      if node != self.current_node:
+        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {self.uuid});"))
+
+    # Add nops for timing (one per participating node)
+    nops = " ".join([f"\"nop\\n\"" for _ in range(len(self.participating_nodes))])
+    self.body.add(TextBlock(f"__asm__ volatile({nops});"))
+
+    # Clear flag
     self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(0);"))
 
 
