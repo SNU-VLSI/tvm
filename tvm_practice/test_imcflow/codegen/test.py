@@ -38,7 +38,7 @@ from imcflow_runner import get_runner
 
 np.random.seed(1234)
 
-DEBUG_EXECUTOR=1
+DEBUG_EXECUTOR=0
 DEBUG_SUBSET=1
 
 # Print environment configuration at startup
@@ -354,7 +354,7 @@ def printModel(result_dir, mod, param_dict, mod_name):
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
 
-def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=False):
+def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=False, rebuild_modified_cpp=False):
   """Run transformed model on CPU for validation
 
   Args:
@@ -363,6 +363,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
     input_data_dict: Dictionary of input name -> numpy array
     model_dir: Directory to save CPU outputs
     skip_setup: If True, load from previously transformed CPU model
+    rebuild_modified_cpp: If True, rebuild modified C++ code only
 
   Returns:
     output: The CPU execution output as numpy array
@@ -374,7 +375,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
   target = "llvm"
   ctx = tvm.cpu(0)
 
-  if not skip_setup:
+  if not skip_setup and not rebuild_modified_cpp:
     # Transform model to be CPU runnable
     # cpu_mod = copy.deepcopy(mod)
     cpu_mod = copy.copy(mod)
@@ -710,7 +711,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 
   # Run CPU validation if input data is provided
   if input_data_dict is not None:
-    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup)
+    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup, rebuild_modified_cpp)
     if cpu_output is not None:
       print("✅ CPU validation completed successfully")
 

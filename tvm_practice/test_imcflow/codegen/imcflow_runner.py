@@ -194,6 +194,13 @@ class ImcFlowRunner(ABC):
         big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
         imc_size = "270464" if big_imem else "266368"
 
+        # Get SRAM_BACKDOOR setting from environment (default: 1 for performance)
+        sram_backdoor = os.getenv("SRAM_BACKDOOR", "1")
+
+        # Prepare environment variables for subprocess
+        env = os.environ.copy()
+        env["SRAM_BACKDOOR"] = sram_backdoor
+
         # Pass absolute log directory as 4th argument, imc_size as 5th argument to run.sh
         sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size]
 
@@ -202,7 +209,8 @@ class ImcFlowRunner(ABC):
                 command=sim_command,
                 cwd=self.directory_path,
                 log_path=os.path.join(runner_log_dir, self.main_log_filename),
-                timeout=self.timeout
+                timeout=self.timeout,
+                env=env
             )
             print(f"Simulation completed")
             print(f"   Logs saved to: {runner_log_dir}/")
@@ -230,7 +238,7 @@ class ImcFlowRunner(ABC):
         pass
 
     def _stream_command_output(self, command: list, cwd: str, log_path: str,
-                                timeout: Optional[int] = None) -> None:
+                                timeout: Optional[int] = None, env: Optional[dict] = None) -> None:
         """Helper to run a command and stream output to both terminal and log file
 
         Args:
@@ -238,6 +246,7 @@ class ImcFlowRunner(ABC):
             cwd: Working directory for the command
             log_path: Path to log file
             timeout: Optional timeout in seconds
+            env: Optional environment variables to pass to subprocess
 
         Raises:
             subprocess.CalledProcessError: If command fails
@@ -249,7 +258,8 @@ class ImcFlowRunner(ABC):
                 cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True
+                text=True,
+                env=env
             )
 
             # Stream output line by line to both terminal and log file
