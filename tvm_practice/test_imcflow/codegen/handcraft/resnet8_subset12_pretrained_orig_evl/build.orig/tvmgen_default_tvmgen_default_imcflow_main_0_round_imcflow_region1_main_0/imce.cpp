@@ -673,7 +673,6 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region1_main_0()
       var54 = __builtin_IMCE_GET_QREG(3);
       // endgenerate: min_max_quantize
 
-      __builtin_IMCE_STANDBY(18, 1);
       __builtin_IMCE_SEND(1, var51, 0, 0); // TensorEdge((21, odata), ((22, 18), data)), imce_3_4 -> imce_3_3
       __builtin_IMCE_SEND(1, var52, 0, 0); // TensorEdge((21, odata), ((22, 18), data)), imce_3_4 -> imce_3_3
       __builtin_IMCE_SEND(1, var53, 0, 0); // TensorEdge((21, odata), ((22, 18), data)), imce_3_4 -> imce_3_3
