@@ -66,6 +66,12 @@ Examples:
   )
 
   parser.add_argument(
+    "--codegen-only",
+    action="store_true",
+    help="Run until codegen and end program. Used with --rebuild_modified_cpp to observe memlayout"
+  )
+
+  parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
@@ -83,6 +89,12 @@ Examples:
   if args.skip_setup and args.rebuild_modified_cpp:
     parser.print_help()
     print("\n❌ Error: --skip-setup and --rebuild_modified_cpp cannot be used together")
+    return 1
+
+  # assert that if --codegen_only is set, --rebuild_modified_cpp must also be set
+  if args.codegen_only and not args.rebuild_modified_cpp:
+    parser.print_help()
+    print("\n❌ Error: --codegen_only must be used with --rebuild_modified_cpp")
     return 1
 
   # Handle list models
@@ -132,6 +144,7 @@ Examples:
     input_pattern=args.pattern,
     skip_setup=args.skip_setup,
     rebuild_modified_cpp=args.rebuild_modified_cpp,
+    codegen_only=args.codegen_only,
     compile_only=args.compile_only
   )
   return 0

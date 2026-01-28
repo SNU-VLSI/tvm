@@ -671,7 +671,7 @@ def compare_outputs(cpu_output, imcflow_output):
   else:
     print("\n✅ Test completed successfully")
 
-def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False, rebuild_modified_cpp=False, compile_only=False):
+def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False, rebuild_modified_cpp=False, codegen_only=False, compile_only=False):
   """Generate IMCFLOW evaluation results with optional CPU validation
 
   Args:
@@ -683,6 +683,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     skip_setup: If True, skip transformations, codegen, and graph generation.
                 Loads previously transformed model from file.
     rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
+    codegen_only: If True, run until codegen and exit program.
     compile_only: If True, only compile the model (skip CPU validation and simulation).
   """
   print(f"\n{'='*60}")
@@ -702,7 +703,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     mod, param_dict = load_transformed_model(eval_dir)
 
   if rebuild_modified_cpp:
-    mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir)
+    mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, codegen_only)
 
   # If compile_only, skip CPU validation and simulation
   if compile_only:
@@ -738,7 +739,7 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
 # ============================================================================
 # Test Pipeline
 # ============================================================================
-def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebuild_modified_cpp=False, compile_only=False):
+def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebuild_modified_cpp=False, codegen_only=False, compile_only=False):
   """
   Test pipeline that:
   1. Gets the model from registry
@@ -754,6 +755,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebu
                 Useful for testing different inputs on an already-compiled model.
                 NOTE: When True, assumes directory already exists from previous run.
     rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
+    codegen_only: If True, run until codegen and exit program.
     compile_only: If True, only compile the model (skip CPU validation and simulation).
   """
   if test_name not in MODEL_REGISTRY:
@@ -815,7 +817,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebu
 
     # Run with CPU validation enabled
     # Note: When skip_setup=True, run_test will load the transformed model from file
-    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup, rebuild_modified_cpp=rebuild_modified_cpp, compile_only=compile_only)
+    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup, rebuild_modified_cpp=rebuild_modified_cpp, codegen_only=codegen_only, compile_only=compile_only)
 
 
 # ============================================================================

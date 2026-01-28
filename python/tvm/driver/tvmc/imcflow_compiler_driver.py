@@ -261,7 +261,7 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     return mod, param_dict
 
 
-def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=False):
+def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=False, codegen_only=False):
     """
     Run IMCFLOW codegen to generate hardware deployment code.
 
@@ -281,6 +281,13 @@ def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modifie
     if save_intermediate:
         with open(f"{output_dir}/mem_layout.txt", "w") as f:
             pprint.pprint(DevConfig().MemLayout, stream=f)
+    
+    if codegen_only:
+      print("\n⏭️  Codegen only mode: exiting after rebuilding modified C++ files")
+      # Exit the program entirely
+      import sys
+      sys.exit(0)
+      
 
     imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=rebuild_modified_cpp)
     print(f"data_blocks: {config.DataBlocks}")
@@ -351,7 +358,7 @@ def compile_for_imcflow(mod, param_dict, output_dir, skip_codegen=False):
 
     # Step 2: Run codegen
     print("\n--- Running IMCFlow Codegen ---")
-    run_imcflow_codegen(mod, output_dir, save_intermediate=True)
+    run_imcflow_codegen(mod, output_dir, save_intermediate=True, codegen_only=False)
 
     # Step 3: Generate graph executor
     print("\n--- Generating Graph Executor ---")
@@ -359,7 +366,7 @@ def compile_for_imcflow(mod, param_dict, output_dir, skip_codegen=False):
 
     return mod, param_dict, tar_path
 
-def rebuild_imcflow_cpp_only(mod, param_dict, output_dir):
+def rebuild_imcflow_cpp_only(mod, param_dict, output_dir, codegen_only=False):
     """
     Rebuild modified IMCFlow C++ files only.
 
@@ -371,7 +378,7 @@ def rebuild_imcflow_cpp_only(mod, param_dict, output_dir):
     """
 
     print("\n--- Rebuilding Modified IMCFlow C++ Files Only ---")
-    run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=True)
+    run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=True, codegen_only=codegen_only)
 
     print("\n--- Generating Graph Executor ---")
     _, tar_path = generate_graph_executor(mod, param_dict, output_dir)
