@@ -1264,55 +1264,70 @@ def update_hw_node_map(
     """
     Update HWNodeMap with placement results.
 
-    Includes both IMCE mappings (from ILP solver) and INODE mappings
-    (funcin vars and funcout).
-
-    HWNodeMap uses inner_id as key (for composite nodes, inner_id != outer_id).
-    Joint PnR results use outer_id (custom_id), so we need to convert.
+    HWNodeMap key convention:
+    - Composite calls: use inner_id (the inner call's ID)
+    - Constants inside composites: use inner_id -> INODE
+    - Regular calls: use custom_id
+    - Vars/FuncOut: use custom_id
 
     Args:
         results: Results from run_joint_pnr
         hw_node_map: ImcflowDeviceConfig().HWNodeMap to update
-        tensor_edge_list_dict: TensorEdgeListDict to build outer_id -> inner_id mapping
+        tensor_edge_list_dict: TensorEdgeListDict for composite inner_id mapping
     """
+    from tvm.relay.backend.contrib.imcflow import CustomIDToNode
+
+    id_to_node = CustomIDToNode()
+
     for func_name, result in results.items():
         if not result.success:
             raise RuntimeError(f"Joint PnR failed for {func_name}: {result.solver_status}")
 
         # Build outer_id -> inner_id mapping from TensorEdgeList
-        # For composite nodes: graph_node_id = (outer_id, inner_id)
-        # For non-composite nodes: outer_id == inner_id
-        outer_to_inner = {}
+        # Also collect constants inside composites for INODE mapping
+        outer_to_inner_call = {}  # outer_id -> inner_call_id
+        const_inner_ids = {}      # const_inner_id -> outer_id (for INODE mapping)
         tensor_edge_list = tensor_edge_list_dict.get(func_name, [])
         for edge in tensor_edge_list:
             for tensor_id in [edge.src_id, edge.dst_id]:
                 gid = tensor_id.graph_node_id
                 if isinstance(gid, tuple):
                     outer_id, inner_id = gid[0], gid[1]
-                    outer_to_inner[outer_id] = inner_id
+                    # Check if inner_id is a Constant using CustomIDToNode
+                    node = id_to_node.get(inner_id)
+                    if node is not None and isinstance(node, relay.Constant):
+                        const_inner_ids[inner_id] = outer_id
+                    else:
+                        # Inner call inside composite
+                        outer_to_inner_call[outer_id] = inner_id
 
         # IMCE mappings (call/split/concat nodes)
         for graph_node_id, coord in result.mapping.items():
-            # Convert outer_id to inner_id for HWNodeMap key
-            inner_id = outer_to_inner.get(graph_node_id, graph_node_id)
+            # For composite nodes, use inner_call_id as key
+            inner_id = outer_to_inner_call.get(graph_node_id, graph_node_id)
             # Convert Coord to NodeID
-            # coord.col is in [1,4] for IMCE, from_imce_coord expects (row, col-1)
             node_id = NodeID.from_imce_coord(coord.row, coord.col - 1)
             hw_node_map[inner_id] = node_id
 
         # INODE mappings (input vars)
         if result.var_to_inode:
             for var_node_id, coord in result.var_to_inode.items():
-                inner_id = outer_to_inner.get(var_node_id, var_node_id)
                 node_id = NodeID.from_inode_coord(coord.row)
-                hw_node_map[inner_id] = node_id
+                hw_node_map[var_node_id] = node_id
 
         # INODE mappings (funcout)
         if result.funcout_to_inode:
             for funcout_node_id, coord in result.funcout_to_inode.items():
-                inner_id = outer_to_inner.get(funcout_node_id, funcout_node_id)
                 node_id = NodeID.from_inode_coord(coord.row)
-                hw_node_map[inner_id] = node_id
+                hw_node_map[funcout_node_id] = node_id
+
+        # INODE mappings for constants inside composites
+        # Constants load data from INODE at the same row as their composite's IMCE
+        for const_inner_id, outer_id in const_inner_ids.items():
+            if const_inner_id not in hw_node_map and outer_id in result.mapping:
+                composite_coord = result.mapping[outer_id]
+                node_id = NodeID.from_inode_coord(composite_coord.row)
+                hw_node_map[const_inner_id] = node_id
 
 
 def coord_to_node_id(coord: Coord) -> NodeID:
