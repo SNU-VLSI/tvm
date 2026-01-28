@@ -61,12 +61,11 @@ from .xy_router import (
     XYRouterAdapter,
     create_xy_router,
 )
-from .path_tree_builder import (
+# Import from the unified policy_table_builder module
+from .policy_table_builder import (
     PathTreeBuilder,
     PathTreeBuildResult,
-)
-from .policy_table_generator import (
-    generate_policy_tables,
+    PolicyTableBuilder as UnifiedPolicyTableBuilder,
     NodeCapacityError,
 )
 
@@ -197,19 +196,13 @@ class RoutingPipeline:
         # Dump routing results for debugging
         self._dump_routing_results(func_name, routing_result, noc_paths)
 
-        # Phase 2: Build trees
-        tree_builder = PathTreeBuilder(
-            tensor_id_extractor=self.config.tensor_id_extractor or self._default_tensor_id_extractor
+        # Phase 2+3: Build trees and generate policy tables using unified PolicyTableBuilder
+        # The new PolicyTableBuilder handles tree building, policy generation,
+        # EdgeInfo generation, and memory allocation internally
+        policy_builder = UnifiedPolicyTableBuilder(
+            table_capacity=self.config.table_capacity
         )
-        tree_result = tree_builder.build(routing_result)
-
-        # Phase 3: Generate policy tables
-        policy_tables = generate_policy_tables(
-            tree_result,
-            noc_paths,
-            func_name,
-            table_capacity=self.config.table_capacity,
-        )
+        policy_tables = policy_builder.build(routing_result, noc_paths, func_name)
 
         return policy_tables
 
