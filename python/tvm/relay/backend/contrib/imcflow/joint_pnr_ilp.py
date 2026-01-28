@@ -1256,39 +1256,63 @@ def run_joint_pnr(
     return solver.run(mod, tensor_edge_list_dict)
 
 
-def update_hw_node_map(results: Dict[str, JointPnRResult], hw_node_map: Dict):
+def update_hw_node_map(
+    results: Dict[str, JointPnRResult],
+    hw_node_map: Dict,
+    tensor_edge_list_dict: Dict[str, List],
+):
     """
     Update HWNodeMap with placement results.
 
     Includes both IMCE mappings (from ILP solver) and INODE mappings
     (funcin vars and funcout).
 
+    HWNodeMap uses inner_id as key (for composite nodes, inner_id != outer_id).
+    Joint PnR results use outer_id (custom_id), so we need to convert.
+
     Args:
         results: Results from run_joint_pnr
         hw_node_map: ImcflowDeviceConfig().HWNodeMap to update
+        tensor_edge_list_dict: TensorEdgeListDict to build outer_id -> inner_id mapping
     """
     for func_name, result in results.items():
         if not result.success:
             raise RuntimeError(f"Joint PnR failed for {func_name}: {result.solver_status}")
 
+        # Build outer_id -> inner_id mapping from TensorEdgeList
+        # For composite nodes: graph_node_id = (outer_id, inner_id)
+        # For non-composite nodes: outer_id == inner_id
+        outer_to_inner = {}
+        tensor_edge_list = tensor_edge_list_dict.get(func_name, [])
+        for edge in tensor_edge_list:
+            for tensor_id in [edge.src_id, edge.dst_id]:
+                gid = tensor_id.graph_node_id
+                if isinstance(gid, tuple):
+                    outer_id, inner_id = gid[0], gid[1]
+                    outer_to_inner[outer_id] = inner_id
+
         # IMCE mappings (call/split/concat nodes)
         for graph_node_id, coord in result.mapping.items():
+            # Convert outer_id to inner_id for HWNodeMap key
+            inner_id = outer_to_inner.get(graph_node_id, graph_node_id)
             # Convert Coord to NodeID
             # coord.col is in [1,4] for IMCE, from_imce_coord expects (row, col-1)
             node_id = NodeID.from_imce_coord(coord.row, coord.col - 1)
-            hw_node_map[graph_node_id] = node_id
+            hw_node_map[inner_id] = node_id
 
         # INODE mappings (input vars)
         if result.var_to_inode:
             for var_node_id, coord in result.var_to_inode.items():
+                inner_id = outer_to_inner.get(var_node_id, var_node_id)
                 node_id = NodeID.from_inode_coord(coord.row)
-                hw_node_map[var_node_id] = node_id
+                hw_node_map[inner_id] = node_id
 
         # INODE mappings (funcout)
         if result.funcout_to_inode:
             for funcout_node_id, coord in result.funcout_to_inode.items():
+                inner_id = outer_to_inner.get(funcout_node_id, funcout_node_id)
                 node_id = NodeID.from_inode_coord(coord.row)
-                hw_node_map[funcout_node_id] = node_id
+                hw_node_map[inner_id] = node_id
 
 
 def coord_to_node_id(coord: Coord) -> NodeID:
@@ -1495,8 +1519,12 @@ def run_joint_pnr_and_update_config(
     # Run joint PnR
     results = run_joint_pnr(mod, tensor_edge_list_dict)
 
-    # Update HWNodeMap
-    update_hw_node_map(results, config.HWNodeMap)
+    # Update HWNodeMap (pass tensor_edge_list_dict for outer->inner id conversion)
+    update_hw_node_map(results, config.HWNodeMap, tensor_edge_list_dict)
+
+    # dump hardware node map
+    for k, v in config.HWNodeMap.items():
+        debug_print(f"[HWNodeMap] Node {k} -> {v}")
 
     debug_print(f"[run_joint_pnr_and_update_config] Updated HWNodeMap with "
                f"{len(config.HWNodeMap)} mappings")

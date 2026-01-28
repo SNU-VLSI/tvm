@@ -4881,7 +4881,10 @@ class MemoryAllocator:
             if mem_block.size is None:
               raise ValueError("Memory size cannot be none.")
 
-            _, inode_tensorid = self.is_inode_in_edge(edge)
+            is_inode, inode_tensorid = self.is_inode_in_edge(edge)
+            if not is_inode:
+               debug_print(f"  [{self.func_name}] non-inode edge: {edge}")
+               raise ValueError("Edge does not involve an inode.")
             hw_node_id = self.hwnodemap[getInnerNodeID(inode_tensorid.graph_node_id)]
             hw_node_id = hw_node_id if not isinstance(hw_node_id, tuple) else hw_node_id[edge.split_idx]
 
