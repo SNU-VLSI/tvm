@@ -29,6 +29,16 @@ import numpy as np
 
 
 @dataclass
+class IMCECtrlLogEntry:
+    """Represents a single IMCE ctrl_pl log entry"""
+    timestamp: int
+    row: int
+    col: int
+    log_type: str  # EXECUTE, STALL_START, etc.
+    content: str   # Full log line content after timestamp
+
+
+@dataclass
 class MMQuantOutput:
     """Represents a single MM_QUANT operation output"""
     timestamp: int
@@ -96,6 +106,130 @@ def parse_erf_write_line(line: str) -> Optional[ERFWrite]:
         word = int(match.group(3))
         return ERFWrite(timestamp, addr, word)
     return None
+
+
+def parse_imce_ctrl_line(line: str, row: int, col: int) -> Optional[IMCECtrlLogEntry]:
+    """Parse an IMCE ctrl_pl log line"""
+    # Format: [timestamp] [IMCE_EX] LOG_TYPE | ...
+    pattern = r'\[\s*(\d+)\]\s*\[IMCE_EX\]\s*(\w+)'
+    match = re.search(pattern, line)
+    if match:
+        timestamp = int(match.group(1))
+        log_type = match.group(2)
+        # Get content after the log type
+        content_start = line.find(log_type) + len(log_type)
+        content = line[content_start:].strip()
+        return IMCECtrlLogEntry(timestamp, row, col, log_type, content)
+    return None
+
+
+def parse_imce_ctrl_log(log_path: str, row: int, col: int) -> List[IMCECtrlLogEntry]:
+    """Parse IMCE ctrl_pl log file and extract entries"""
+    entries = []
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                if '[IMCE_EX]' in line:
+                    result = parse_imce_ctrl_line(line, row, col)
+                    if result:
+                        entries.append(result)
+    except FileNotFoundError:
+        pass
+    return entries
+
+
+def find_imce_ctrl_logs(base_dir: str) -> Dict[Tuple[int, int], str]:
+    """Find all IMCE ctrl_pl log files"""
+    fsim_dir = os.path.join(base_dir, 'logs', 'rtl_runner', 'fsim_logs')
+    ctrl_logs = {}
+
+    if not os.path.exists(fsim_dir):
+        return ctrl_logs
+
+    for fname in os.listdir(fsim_dir):
+        if 'u_ctrl_pl.log' in fname and 'imce_node.imce' in fname:
+            coord = extract_imce_coord_from_path(fname)
+            if coord:
+                ctrl_logs[coord] = os.path.join(fsim_dir, fname)
+
+    return ctrl_logs
+
+
+def print_imce_ctrl_sorted(entries: List[IMCECtrlLogEntry], limit: int = 100,
+                           from_end: bool = True, filter_type: Optional[str] = None):
+    """Print IMCE ctrl log entries sorted by timestamp"""
+    # Filter by type if specified
+    if filter_type:
+        entries = [e for e in entries if filter_type.upper() in e.log_type.upper()]
+
+    # Sort by timestamp
+    sorted_entries = sorted(entries, key=lambda x: x.timestamp)
+
+    # Get last N entries if from_end
+    if from_end and len(sorted_entries) > limit:
+        sorted_entries = sorted_entries[-limit:]
+    elif not from_end and len(sorted_entries) > limit:
+        sorted_entries = sorted_entries[:limit]
+
+    print(f"\n{'='*100}")
+    print(f"IMCE Ctrl Log Entries (showing {len(sorted_entries)} of {len(entries)} total)")
+    print(f"{'='*100}")
+
+    for entry in sorted_entries:
+        ts_str = f"{entry.timestamp:>18}"
+        print(f"[{ts_str}] IMCE({entry.row},{entry.col}) {entry.log_type:<12} {entry.content}")
+
+
+def find_final_stalls(entries_by_node: Dict[Tuple[int, int], List[IMCECtrlLogEntry]]) -> List[IMCECtrlLogEntry]:
+    """
+    Find the last STALL for each node, only if no other operation was executed after.
+    Excludes stalls where the previous operation was in state=S_IDLE (indicating work is done).
+    Returns list of final stall entries sorted by timestamp.
+    """
+    final_stalls = []
+
+    for coord, entries in entries_by_node.items():
+        if not entries:
+            continue
+
+        # Sort by timestamp
+        sorted_entries = sorted(entries, key=lambda x: x.timestamp)
+
+        # Find the last entry
+        last_entry = sorted_entries[-1]
+
+        # Check if it's a STALL_START (meaning node is still stalled)
+        if last_entry.log_type == 'STALL_START':
+            # Check if the previous entry was in S_IDLE state
+            # If so, the node finished its work and is just waiting - not a real stall
+            if len(sorted_entries) >= 2:
+                prev_entry = sorted_entries[-2]
+                if 'state=S_IDLE' in prev_entry.content:
+                    continue  # Skip this - node is done, just waiting
+
+            final_stalls.append(last_entry)
+
+    # Sort final stalls by timestamp
+    return sorted(final_stalls, key=lambda x: x.timestamp)
+
+
+def print_final_stalls(entries_by_node: Dict[Tuple[int, int], List[IMCECtrlLogEntry]]):
+    """Print the final stall state for each node that is still stalled"""
+    final_stalls = find_final_stalls(entries_by_node)
+
+    print(f"\n{'='*100}")
+    print(f"Final STALL State per Node (nodes still stalled at end of simulation)")
+    print(f"{'='*100}")
+
+    if not final_stalls:
+        print("No nodes are in STALL state at the end of simulation.")
+        return
+
+    print(f"Found {len(final_stalls)} nodes still stalled:\n")
+
+    for entry in final_stalls:
+        ts_str = f"{entry.timestamp:>18}"
+        print(f"[{ts_str}] IMCE({entry.row},{entry.col}) {entry.log_type:<12} {entry.content}")
 
 
 def extract_imce_coord_from_path(path: str) -> Optional[Tuple[int, int]]:
@@ -339,10 +473,56 @@ def main():
     parser.add_argument('--all', action='store_true', help='Show all outputs (no limit)')
     parser.add_argument('--deep-compare', action='store_true', help='Deep comparison with hw_node_map')
     parser.add_argument('--compare-imce', type=str, help='Compare specific IMCE with topo-index (e.g., "3,2:35")')
+    parser.add_argument('--ctrl', action='store_true', help='Show IMCE ctrl_pl logs sorted by timestamp')
+    parser.add_argument('--ctrl-limit', type=int, default=100, help='Number of ctrl log entries to show (default: 100)')
+    parser.add_argument('--ctrl-filter', type=str, help='Filter ctrl logs by type (e.g., "EXECUTE", "STALL")')
+    parser.add_argument('--ctrl-from-start', action='store_true', help='Show entries from start instead of end')
+    parser.add_argument('--final-stall', action='store_true', help='Show final STALL state per node (only nodes still stalled)')
 
     args = parser.parse_args()
 
     base_dir = args.test_dir
+
+    # Handle --ctrl mode: show IMCE ctrl_pl logs sorted by timestamp
+    if args.ctrl:
+        ctrl_logs = find_imce_ctrl_logs(base_dir)
+        print(f"Found ctrl_pl logs for {len(ctrl_logs)} IMCE nodes")
+
+        # Filter by IMCE if specified
+        if args.imce:
+            row, col = map(int, args.imce.split(','))
+            coord = (row, col)
+            if coord in ctrl_logs:
+                ctrl_logs = {coord: ctrl_logs[coord]}
+            else:
+                print(f"IMCE ({row}, {col}) ctrl_pl log not found")
+                return
+
+        # Collect all entries from all IMCE nodes
+        all_entries = []
+        entries_by_node = {}
+        for coord, log_path in ctrl_logs.items():
+            entries = parse_imce_ctrl_log(log_path, coord[0], coord[1])
+            entries_by_node[coord] = entries
+            all_entries.extend(entries)
+
+        if not all_entries:
+            print("No ctrl_pl log entries found")
+            return
+
+        # Handle --final-stall mode
+        if args.final_stall:
+            print_final_stalls(entries_by_node)
+            return
+
+        # Print sorted entries
+        print_imce_ctrl_sorted(
+            all_entries,
+            limit=args.ctrl_limit,
+            from_end=not args.ctrl_from_start,
+            filter_type=args.ctrl_filter
+        )
+        return
 
     # Find all IMCE logs
     imce_logs = find_fsim_logs(base_dir)
