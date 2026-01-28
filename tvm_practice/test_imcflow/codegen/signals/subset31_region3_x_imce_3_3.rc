@@ -1,0 +1,639 @@
+Magic 271485
+Revision Verdi_V-2023.12-SP2-4
+
+; Window Layout <x> <y> <width> <height> <signalwidth> <valuewidth>
+viewPort 0 25 1920 931 319 330
+
+; File list:
+; openDirFile [-d delimiter] [-s time_offset] [-rf auto_bus_rule_file] path_name file_name
+openDirFile -d / "" "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner/imcflow_gem5.fsdb"
+
+; file time scale:
+; fileTimeScale ### s|ms|us|ns|ps
+
+; signal spacing:
+signalSpacing 5
+
+; windowTimeUnit is used for zoom, cursor & marker
+; waveform viewport range
+zoom 3657041211.558330 3657246438.951104
+cursor 50000.000000
+marker 3665980000.000000
+
+; user define markers
+; userMarker time_pos marker_name color linestyle
+; visible top row signal index
+top 6
+; marker line index
+markerPos 371
+
+; rename signal list
+; addRenameSig new_name org_name
+activeDirFile "" "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner/imcflow_gem5.fsdb"
+
+addRenameSig "/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_ctrl/ctrl_id/id_opcode[5:0]" "/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_ctrl/ctrl_id/opcode[5:0]"
+
+; rename signal list
+; addRenameSig new_name org_name
+
+addRenameSig "/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/ctrl_ex/ex_opcode[5:0]" "/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/ctrl_ex/opcode[5:0]"
+
+; event list
+; addEvent event_name event_expression
+; curEvent event_name
+
+
+
+COMPLEX_EVENT_BEGIN
+
+
+COMPLEX_EVENT_END
+
+
+
+; toolbar current search type
+; curSTATUS search_type
+curSTATUS ByChange
+
+
+addGroup "imce_3_3"
+activeDirFile "" "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner/imcflow_gem5.fsdb"
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/ctrl_ex/opcode[5:0]
+addSubGroup "imce_rx"
+addSignal -expanded -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imce_rx/data
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.fifo_id[2:0]
+addSignal -h 15 -UNSIGNED -holdScope data.cmd[4:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.addr[15:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.word[255:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "imce_rx"
+addSubGroup "imce_tx"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imce_tx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "imce_tx"
+addGroup "imce_3_1" -e FALSE
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/ctrl_ex/opcode[5:0]
+addSubGroup "compute_if"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/compute_if/data[63:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "compute_if"
+addSubGroup "imce_rx"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/imce_rx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "imce_rx"
+addSubGroup "imce_tx"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/imce_tx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "imce_tx"
+addSubGroup "s"
+endSubGroup "s"
+addGroup "imce_2_1" -e FALSE
+addSubGroup "bshr_tx" -e FALSE
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath/u_linebuffer/bshr_tx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "bshr_tx"
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/ctrl_ex/ex_opcode[5:0]
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_ctrl/ctrl_id/id_opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+addSignal -h 15 -UNSIGNED -UDEC -holdScope rs2[5:0]
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath/u_erf/creg[0:3]
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_ctrl/hs_remaining
+addSignal -h 15 -holdScope step_hs
+addSubGroup "compute_if"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/compute_if/data[63:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "compute_if"
+addSubGroup "imce_rx"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/imce_rx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope next_policy[5:0]
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX -holdScope uuid[31:0]
+endSubGroup "imce_rx"
+addSubGroup "imce_tx"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/imce_tx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope next_policy[5:0]
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX -holdScope uuid[31:0]
+endSubGroup "imce_tx"
+addSubGroup "G3-1"
+endSubGroup "G3-1"
+addGroup "imce_3_3_detail" -e FALSE
+addSubGroup "u_mem"
+addSubGroup "recv_if"
+addSignal -expanded -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/recv_if/data
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.fifo_id[2:0]
+addSignal -h 15 -UNSIGNED -holdScope data.cmd[4:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.addr[15:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.word[255:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "recv_if"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/recv_hs
+addSignal -h 15 -holdScope is_cmd
+addSignal -h 15 -UNSIGNED -HEX -holdScope pc_addr[7:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope recv_addr[7:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rw_addr[7:0]
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/u_mem/clk_i
+addSignal -h 15 -holdScope rstn_i
+addSignal -h 15 -holdScope csn_i[0:0]
+addSignal -h 15 -holdScope we_i[0:0]
+addSignal -h 15 -holdScope addr_i[0:0]
+addSignal -h 15 -holdScope wdata_i[0:0]
+addSignal -h 15 -holdScope wmask_i[0:0]
+addSignal -h 15 -holdScope rdata_o[0:0]
+endSubGroup "u_mem"
+addSubGroup "u_imem"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/clk_i
+addSignal -h 15 -holdScope rstn_i
+addSignal -h 15 -holdScope compute_start
+addSignal -h 15 -holdScope stall_or_flush
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/recv_if/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/inst[31:0]
+endSubGroup "u_imem"
+addSubGroup "u_hazard_detector" -e FALSE
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_hazard_detector/clk_i
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_hazard_detector/ctrl_id/inst_type[3:0]
+addSignal -h 15 -UNSIGNED -holdScope opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm3[25:0]
+addSignal -h 15 -holdScope re1
+addSignal -h 15 -holdScope re2
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope flag_value[5:0]
+addSignal -h 15 -holdScope is_jump
+addSignal -h 15 -holdScope is_branch_taken
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_hazard_detector/ctrl_ex/opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope bshr_sel[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope blk_strobe[3:0]
+addSignal -h 15 -holdScope dwresult_valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope shift_amt[2:0]
+addSignal -h 15 -holdScope ksel
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -holdScope is_imm
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rd[5:0]
+addSignal -h 15 -holdScope we
+addSignal -h 15 -UNSIGNED -HEX -holdScope qreg_start_idx[3:0]
+addSignal -h 15 -holdScope qreg_we
+addSignal -h 15 -holdScope layer_update
+addSignal -h 15 -holdScope recv_rd_is_zero
+addSignal -h 15 -holdScope recv_addr_is_zero
+addSignal -h 15 -holdScope mem_en
+addSignal -h 15 -holdScope mem_we
+addSignal -h 15 -holdScope is_cmd_rf_write
+addSignal -h 15 -holdScope fifo2lbuf
+addSignal -h 15 -holdScope fifo2rf
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_hazard_detector/recv_hs
+addSignal -h 15 -holdScope send_hs
+addSignal -h 15 -holdScope step_hs
+addSignal -h 15 -UNSIGNED -holdScope state[1:0]
+addSignal -h 15 -holdScope flag_write_hs
+addSignal -h 15 -holdScope flag_same
+addSignal -h 15 -holdScope scan_done
+addSignal -h 15 -holdScope if_stall
+addSignal -h 15 -holdScope if_flush
+addSignal -h 15 -holdScope id_stall
+addSignal -h 15 -holdScope ex_stall
+endSubGroup "u_hazard_detector"
+addSubGroup "ctrl_ex(ctrl_ex_if)#1"
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/ctrl_ex/opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope bshr_sel[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope blk_strobe[3:0]
+addSignal -h 15 -holdScope dwresult_valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope shift_amt[2:0]
+addSignal -h 15 -holdScope ksel
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -holdScope is_imm
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rd[5:0]
+addSignal -h 15 -holdScope we
+addSignal -h 15 -UNSIGNED -HEX -holdScope qreg_start_idx[3:0]
+addSignal -h 15 -holdScope qreg_we
+addSignal -h 15 -holdScope layer_update
+addSignal -h 15 -holdScope recv_rd_is_zero
+addSignal -h 15 -holdScope recv_addr_is_zero
+addSignal -h 15 -holdScope mem_en
+addSignal -h 15 -holdScope mem_we
+addSignal -h 15 -holdScope is_cmd_rf_write
+addSignal -h 15 -holdScope fifo2lbuf
+addSignal -h 15 -holdScope fifo2rf
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+endSubGroup "ctrl_ex(ctrl_ex_if)#1"
+addSubGroup "ctrl_id(ctrl_id_if)#1" -e FALSE
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/ctrl_id/inst_type[3:0]
+addSignal -h 15 -UNSIGNED -holdScope opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm3[25:0]
+addSignal -h 15 -holdScope re1
+addSignal -h 15 -holdScope re2
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope flag_value[5:0]
+addSignal -h 15 -holdScope is_jump
+addSignal -h 15 -holdScope is_branch_taken
+endSubGroup "ctrl_id(ctrl_id_if)#1"
+addSubGroup "inst_field(inst_field_if)" -e FALSE
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/inst_field/opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope bshr_sel[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope blk_strobe[3:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rd[5:0]
+addSignal -h 15 -holdScope dwresult_valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope shift_amt[2:0]
+addSignal -h 15 -holdScope ksel
+addSignal -h 15 -UNSIGNED -HEX -holdScope qreg_start_idx[3:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm3[25:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope flag_value[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+endSubGroup "inst_field(inst_field_if)"
+addSubGroup "u_imce_ctrl" -e FALSE
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/clk_i
+addSignal -h 15 -holdScope rstn_i
+addSignal -h 15 -UNSIGNED -HEX -holdScope recv_fid[2:0]
+addSignal -h 15 -UNSIGNED -holdScope state[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imcflow_flag_read_id[4:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imcflow_flag_write_value[7:0]
+addSignal -h 15 -holdScope flag_write_enable
+addSignal -h 15 -holdScope imcflow_flag_gnt
+addSignal -h 15 -UNSIGNED -HEX -holdScope imcflow_flag_value[7:0]
+addSignal -h 15 -holdScope loop_cnt[0:5]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rdata_b_i[255:0]
+addSignal -h 15 -holdScope scan_done
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/compute_if/data[63:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/recv_if/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/send_if/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope next_policy[5:0]
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX -holdScope uuid[31:0]
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/ctrl_id_out/inst_type[3:0]
+addSignal -h 15 -UNSIGNED -holdScope opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm3[25:0]
+addSignal -h 15 -holdScope re1
+addSignal -h 15 -holdScope re2
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope flag_value[5:0]
+addSignal -h 15 -holdScope is_jump
+addSignal -h 15 -holdScope is_branch_taken
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/ctrl_ex_out/opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope bshr_sel[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope blk_strobe[3:0]
+addSignal -h 15 -holdScope dwresult_valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope shift_amt[2:0]
+addSignal -h 15 -holdScope ksel
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -holdScope is_imm
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rd[5:0]
+addSignal -h 15 -holdScope we
+addSignal -h 15 -UNSIGNED -HEX -holdScope qreg_start_idx[3:0]
+addSignal -h 15 -holdScope qreg_we
+addSignal -h 15 -holdScope layer_update
+addSignal -h 15 -holdScope recv_rd_is_zero
+addSignal -h 15 -holdScope recv_addr_is_zero
+addSignal -h 15 -holdScope mem_en
+addSignal -h 15 -holdScope mem_we
+addSignal -h 15 -holdScope is_cmd_rf_write
+addSignal -h 15 -holdScope fifo2lbuf
+addSignal -h 15 -holdScope fifo2rf
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+endSubGroup "u_imce_ctrl"
+addSubGroup "compute_if(rv_transfer_if)" -e FALSE
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/compute_if/data[63:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "compute_if(rv_transfer_if)"
+addSubGroup "ctrl_ex(ctrl_ex_if)" -e FALSE
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/ctrl_ex/opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope bshr_sel[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope blk_strobe[3:0]
+addSignal -h 15 -holdScope dwresult_valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope shift_amt[2:0]
+addSignal -h 15 -holdScope ksel
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -holdScope is_imm
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rd[5:0]
+addSignal -h 15 -holdScope we
+addSignal -h 15 -UNSIGNED -HEX -holdScope qreg_start_idx[3:0]
+addSignal -h 15 -holdScope qreg_we
+addSignal -h 15 -holdScope layer_update
+addSignal -h 15 -holdScope recv_rd_is_zero
+addSignal -h 15 -holdScope recv_addr_is_zero
+addSignal -h 15 -holdScope mem_en
+addSignal -h 15 -holdScope mem_we
+addSignal -h 15 -holdScope is_cmd_rf_write
+addSignal -h 15 -holdScope fifo2lbuf
+addSignal -h 15 -holdScope fifo2rf
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+endSubGroup "ctrl_ex(ctrl_ex_if)"
+addSubGroup "ctrl_id(ctrl_id_if)"
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/ctrl_id/inst_type[3:0]
+addSignal -h 15 -UNSIGNED -holdScope opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm3[25:0]
+addSignal -h 15 -holdScope re1
+addSignal -h 15 -holdScope re2
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope flag_value[5:0]
+addSignal -h 15 -holdScope is_jump
+addSignal -h 15 -holdScope is_branch_taken
+endSubGroup "ctrl_id(ctrl_id_if)"
+addSubGroup "imce_if_in(s_flow_if)" -e FALSE
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imce_if_in/clk_i
+addSignal -h 15 -holdScope rstn_i
+addSignal -h 15 -holdScope data
+addSignal -h 15 -UNSIGNED -HEX -holdScope next_policy[5:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX -holdScope uuid[31:0]
+addSignal -h 15 -UNSIGNED -UDEC -holdScope x_warning_count[31:0]
+endSubGroup "imce_if_in(s_flow_if)"
+addSubGroup "pop_if(rv_transfer_if)" -e FALSE
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/pop_if/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -holdScope ready
+endSubGroup "pop_if(rv_transfer_if)"
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/clk_i
+addSignal -h 15 -holdScope rstn_i
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imce_rx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope next_policy[5:0]
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX -holdScope uuid[31:0]
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imce_tx/data
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope next_policy[5:0]
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX -holdScope uuid[31:0]
+addSignal -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imcu_dbg/clk_d
+addSignal -h 15 -holdScope rst_d
+addSignal -h 15 -holdScope sram_c_en_d
+addSignal -h 15 -holdScope cim_c_en_d
+addSignal -h 15 -UNSIGNED -HEX -holdScope sram_cmd_d[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope vmode_d[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope adcmode_d[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope multmode_d[1:0]
+addSignal -h 15 -holdScope adata_se_d
+addSignal -h 15 -holdScope adata_si_d
+addSignal -h 15 -holdScope sram_si_d
+addSignal -h 15 -holdScope sram_se_d
+addSignal -h 15 -holdScope result_se_d
+addSignal -h 15 -holdScope result_si_d
+addSignal -h 15 -holdScope offset_si_d
+addSignal -h 15 -holdScope offset_se_d
+addSignal -h 15 -holdScope debug_en_d
+addSignal -h 15 -holdScope adata_so_d
+addSignal -h 15 -holdScope sram_so_d
+addSignal -h 15 -holdScope result_so_d
+addSignal -h 15 -holdScope offset_so_d
+addSignal -h 15 -UNSIGNED -HEX /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/syn_reg_data_i[7:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope syn_reg_read_id_o[4:0]
+addSignal -h 15 -holdScope syn_reg_gnt_i
+addSignal -h 15 -holdScope syn_reg_req_o
+addSignal -h 15 -UNSIGNED -HEX -holdScope syn_reg_data_o[7:0]
+addGroup "G5" -e FALSE
+addGroup "imce_3_4_detail"
+addSubGroup "ctrl_ex"
+addSignal -h 15 -UNSIGNED /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/ctrl_ex/opcode[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope bshr_sel[1:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope blk_strobe[3:0]
+addSignal -h 15 -holdScope dwresult_valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope shift_amt[2:0]
+addSignal -h 15 -holdScope ksel
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm1[13:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope imm2[5:0]
+addSignal -h 15 -holdScope is_imm
+addSignal -h 15 -UNSIGNED -HEX -holdScope fifo_id[5:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope rd[5:0]
+addSignal -h 15 -holdScope we
+addSignal -h 15 -UNSIGNED -HEX -holdScope qreg_start_idx[3:0]
+addSignal -h 15 -holdScope qreg_we
+addSignal -h 15 -holdScope layer_update
+addSignal -h 15 -holdScope recv_rd_is_zero
+addSignal -h 15 -holdScope recv_addr_is_zero
+addSignal -h 15 -holdScope mem_en
+addSignal -h 15 -holdScope mem_we
+addSignal -h 15 -holdScope is_cmd_rf_write
+addSignal -h 15 -holdScope fifo2lbuf
+addSignal -h 15 -holdScope fifo2rf
+addSignal -h 15 -UNSIGNED -HEX -holdScope rs1[5:0]
+endSubGroup "ctrl_ex"
+addSubGroup "imce_tx"
+addSignal -expanded -h 15 /testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/imce_tx/data
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.fifo_id[2:0]
+addSignal -h 15 -UNSIGNED -holdScope data.cmd[4:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.addr[15:0]
+addSignal -h 15 -UNSIGNED -HEX -holdScope data.word[255:0]
+addSignal -h 15 -holdScope valid
+addSignal -h 15 -UNSIGNED -HEX -holdScope next_policy[5:0]
+addSignal -h 15 -holdScope ready
+addSignal -h 15 -UNSIGNED -HEX -holdScope uuid[31:0]
+endSubGroup "imce_tx"
+addSubGroup "fa"
+endSubGroup "fa"
+addGroup "G7"
+
+; getSignalForm Scope Hierarchy Status
+; active file of getSignalForm
+activeDirFile "" "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner/imcflow_gem5.fsdb"
+
+GETSIGNALFORM_SCOPE_HIERARCHY_BEGIN
+getSignalForm close
+
+"/_vcs_unit__502484750"
+"/testbench_imcflow_gem5"
+"/testbench_imcflow_gem5/u_imcflow_with_axi"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce"
+
+SCOPE_LIST_BEGIN
+"/_vcs_unit__502484750"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce"
+"/_vcs_unit__594455087"
+"/testbench_imcflow_gem5"
+"/testbench_imcflow_gem5/u_imcflow_with_axi"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/imce_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/u_router"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_linebuffer"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_linebuffer/bshr_set_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_linebuffer/bshr_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_linebuffer/ctrl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/imce_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_linebuffer/input_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/pimc_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/u_router/flow_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/u_router/flow_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/u_router/crossbar_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/crossbar_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/flow_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/flow_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/u_router"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/u_router/flow_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/u_router/flow_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/u_router"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/u_router/flow_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/u_router/flow_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/flow_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/flow_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/if_stage"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/id_stage"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/ex_stage"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/ex_mem_pipe"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/crossbar_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/packet_intl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/rx_prof"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/tx_prof"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/u_crossbar"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/u_input_block"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/u_policy_table"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/u_policy_table_decoder"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/u_rx_policy_decoder"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/intf_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/intf_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/u_intf_node_fsm"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/wb_stage"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/ex_stage/recv_fifo_pop"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/ex_stage/u_recv_fifo"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_intf_node/ex_stage/intf_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[0]/inode/u_router/u_tx_selector"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/u_crossbar"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_ctrl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]/core_col[0]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]/core_col[0]/inode"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]/core_col[0]/inode/u_intf_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]/core_col[0]/inode/u_intf_node/ex_stage"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]/core_col[0]/inode/u_intf_node/mem_stage"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]/core_col[0]/inode/u_intf_node/id_stage/u_reg_file_intf_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/ctrl_ex"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/ctrl_id"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_erf"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[0]/core_col[0]/inode/u_intf_node/id_stage"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_erf/u_gpr"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_erf/u_gpr/u_mem2"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/u_erf/u_gpr/u_mem1"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_imce_datapath/ctrl_ex_in"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/ctrl_id"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_hazard_detector"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/pimc_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/pimc"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/u_linebuffer"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/u_linebuffer/bshr_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/u_linebuffer/input_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imce_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/imce_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/ctrl_ex"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_fifo_block"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_fifo_block/fifo_gen[2]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/u_fifo_block/fifo_gen[2]/u_fifo"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/u_tx_selector"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/u_tx_selector/crossbar_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/crossbar_tx/in"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/crossbar_tx/rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/crossbar_tx/tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/u_router/u_crossbar/flow_in"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[4]/imce_node/imce/ctrl_ex"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/ctrl_ex"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/ctrl_ex_out"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/recv_if"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/ctrl_ex_in"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/lbuf"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/u_linebuffer/datapath"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/u_linebuffer/ctrl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/imce"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/imce/ctrl_ex"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/imce/imce_if_in"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/imce/imce_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[2]/imce_node/imce/compute_if"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/compute_if"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_datapath/u_linebuffer/bshr_set_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/imce_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/imce_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/ctrl_ex"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/ctrl_ex"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/imce_rx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/imce_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/compute_if"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[1]/imce_node/imce/compute_if"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_ctrl"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_ctrl/u_decoder"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_ctrl/ctrl_id"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath/erf_field"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath/u_erf"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath/u_imcu_core"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath/u_linebuffer"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[2]/core_col[1]/imce_node/imce/u_imce_datapath/u_linebuffer/bshr_tx"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_fsm"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/u_mem"
+"/testbench_imcflow_gem5/u_imcflow_with_axi/u_imcflow_impl/core_row[3]/core_col[3]/imce_node/imce/u_imce_ctrl/u_imem/recv_if"
+SCOPE_LIST_END
+
+GETSIGNALFORM_SCOPE_HIERARCHY_END

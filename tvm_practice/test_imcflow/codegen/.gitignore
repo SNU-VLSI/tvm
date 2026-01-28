@@ -8,3 +8,23 @@ test_inputs/*
 test_mem_alloc_*/
 test.sh
 !handcraft/*_evl
+
+# VCS files
+*.key
+*.history
+*.vpd
+*.fsdb*
+verdi_config_file
+vc_hdrs.h
+
+# verdi files
+verdiLog/
+novas*
+
+# Temporary files
+*.swp
+*.dump
+core.*
+transcript
+*.wlf
+*.vstf
