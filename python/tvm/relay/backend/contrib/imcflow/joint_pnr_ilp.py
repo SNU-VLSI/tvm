@@ -18,7 +18,7 @@ Usage:
     # result.routes: Dict[commodity_id -> List[Edge]]
 """
 
-from typing import Dict, List, Tuple, Set, Optional, Any, Union
+from typing import Dict, List, Tuple, Set, Optional, Any, Union, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from itertools import cycle
@@ -31,6 +31,7 @@ import tvm
 from tvm import relay
 from tvm.relay import op
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID
+from tvm.relay.op.contrib.imcflow import CustomIDToNode
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,236 @@ class JointPnRResult:
 
 
 # ============================================================
-# Graph Extractor
+# TensorEdgeList → GraphInfo Conversion
+# ============================================================
+
+# Constants for node type inference from tensor_type tags
+CONST_TENSOR_TYPES = frozenset([
+    'weight', 'config', 'bias', 'scale', 'fused_scale', 'fused_bias',
+    'min', 'max', 'threshold'
+])
+
+
+def getInnerNodeID(node):
+    """Handle composite nodes where graph_node_id is tuple (outer_id, inner_id).
+
+    Composite nodes have a tuple graph_node_id where:
+    - First element: outer (wrapper) node ID
+    - Second element: inner (actual op) node ID
+
+    For non-composite nodes, return the node as-is.
+    """
+    if isinstance(node, tuple):
+        return node[1]
+    else:
+        return node
+
+
+def _check_split_concat_or_call(graph_node_id: Any) -> NodeType:
+    """Check if node is split, concat, or regular call using CustomIDToNode.
+
+    Uses the custom_id stored in graph_node_id to look up the actual relay node
+    and determine if it's a split or concatenate operation.
+
+    Args:
+        graph_node_id: The graph_node_id from TensorID (may be tuple for composite)
+
+    Returns:
+        NodeType.SPLIT, NodeType.CONCAT, or NodeType.CALL
+    """
+    try:
+        inner_id = getInnerNodeID(graph_node_id)
+        node = CustomIDToNode().get(inner_id)
+        if node is None:
+            return NodeType.CALL
+
+        if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+            if node.op.name == "split":
+                return NodeType.SPLIT
+            elif node.op.name == "concatenate":
+                return NodeType.CONCAT
+        return NodeType.CALL
+    except (KeyError, AttributeError, TypeError):
+        return NodeType.CALL  # Default to CALL if lookup fails
+
+
+def infer_node_type(graph_node_id: Any, tensor_type: str, is_source: bool) -> NodeType:
+    """
+    Infer node type from TensorID.tensor_type tag and CustomIDToNode lookup.
+
+    This function first checks tensor_type for VAR, CONST, and FUNC_OUT.
+    For other types (like 'odata'), it uses CustomIDToNode to detect split/concat.
+
+    Args:
+        graph_node_id: The graph_node_id from TensorID
+        tensor_type: The tensor_type string from TensorID
+        is_source: True if this is the source node, False if destination
+
+    Returns:
+        NodeType enum value
+    """
+    if is_source:
+        if tensor_type == 'var':
+            return NodeType.VAR
+        elif tensor_type in CONST_TENSOR_TYPES:
+            return NodeType.CONST
+        else:  # 'odata', 'data', etc. - need to check for split/concat
+            return _check_split_concat_or_call(graph_node_id)
+    else:  # destination
+        if tensor_type.startswith('func_out'):
+            return NodeType.FUNC_OUT
+        else:  # 'data', 'lhs', 'rhs', etc. - need to check for split/concat
+            return _check_split_concat_or_call(graph_node_id)
+
+
+def tensor_edge_list_to_graph_info(
+    tensor_edge_list: List,  # List[TensorEdge]
+    func_name: str,
+) -> GraphInfo:
+    """
+    Convert TensorEdgeList to GraphInfo for ILP.
+
+    This function replaces GraphExtractor by using the already-constructed
+    TensorEdgeList instead of parsing the relay function directly.
+
+    Node type inference:
+    - src_id.tensor_type == 'var' → VAR (INODE 0,1)
+    - dst_id.tensor_type.startswith('func_out') → FUNC_OUT (INODE 2,3)
+    - src_id.tensor_type in CONST_TENSOR_TYPES → CONST (same row INODE as consumer)
+    - For other types, uses CustomIDToNode to detect split/concat:
+      - node.op.name == "split" → SPLIT (same location as producer)
+      - node.op.name == "concatenate" → CONCAT (same location as last producer)
+      - others → CALL (IMCE placement required)
+
+    Args:
+        tensor_edge_list: List of TensorEdge objects from constructTensorEdgeList
+        func_name: Name of the function being processed
+
+    Returns:
+        GraphInfo with nodes, commodities, and categorized node lists
+    """
+    nodes: Dict[Any, GraphNode] = {}
+    commodities: List[Commodity] = []
+
+    # Track node info for building relationships
+    topo_order = 0
+
+    # First pass: collect all edges and determine node types
+    # Also track producer relationships for split/concat constraints
+    producer_map: Dict[Any, List[Tuple[Any, int]]] = {}  # dst_id -> [(src_id, topo_order), ...]
+
+    for idx, edge in enumerate(tensor_edge_list):
+        src_id = edge.src_id
+        dst_id = edge.dst_id
+        split_idx = edge.split_idx
+
+        # Handle tuple graph_node_id (composite nodes have (outer_id, inner_id))
+        src_graph_id = src_id.graph_node_id
+        dst_graph_id = dst_id.graph_node_id
+
+        # Infer node types using CustomIDToNode for split/concat detection
+        src_type = infer_node_type(src_graph_id, src_id.tensor_type, is_source=True)
+        dst_type = infer_node_type(dst_graph_id, dst_id.tensor_type, is_source=False)
+
+        # Add source node if not exists
+        if src_graph_id not in nodes:
+            topo_order += 1
+            nodes[src_graph_id] = GraphNode(
+                id=src_graph_id,
+                node_type=src_type,
+                topo_order=topo_order,
+            )
+
+        # Add destination node if not exists
+        if dst_graph_id not in nodes:
+            topo_order += 1
+            nodes[dst_graph_id] = GraphNode(
+                id=dst_graph_id,
+                node_type=dst_type,
+                topo_order=topo_order,
+            )
+
+        # Track consumers for source node
+        nodes[src_graph_id].consumers.append(dst_graph_id)
+
+        # Track producers for destination node (for split/concat constraint)
+        if dst_graph_id not in producer_map:
+            producer_map[dst_graph_id] = []
+        producer_map[dst_graph_id].append((src_graph_id, nodes[src_graph_id].topo_order))
+
+        # Create commodity
+        commodity = Commodity(
+            id=idx,
+            source_node_id=src_graph_id,
+            dest_node_id=dst_graph_id,
+            source_type=src_type,
+            dest_type=dst_type,
+            tensor_type=src_id.tensor_type,
+            split_idx=split_idx,
+            metadata=edge,  # Original TensorEdge for reference
+        )
+        commodities.append(commodity)
+
+    # Second pass: set producer/last_producer for split/concat nodes
+    for node_id, node in nodes.items():
+        if node.node_type == NodeType.SPLIT:
+            # Split takes location from its producer
+            if node_id in producer_map and producer_map[node_id]:
+                # Split has exactly one producer
+                node.producer = producer_map[node_id][0][0]
+                debug_print(f"[split] node {node_id} producer: {node.producer}")
+
+        elif node.node_type == NodeType.CONCAT:
+            # Concat takes location from last producer (by topological order)
+            if node_id in producer_map and producer_map[node_id]:
+                # Find the producer with the highest topo_order
+                producers = producer_map[node_id]
+                last_producer = max(producers, key=lambda x: x[1])
+                node.last_producer = last_producer[0]
+                debug_print(f"[concat] node {node_id} last_producer: {node.last_producer}")
+
+    # Categorize nodes by type
+    call_nodes = []
+    split_nodes = []
+    concat_nodes = []
+    var_nodes = []
+    const_nodes = []
+    funcout_nodes = []
+
+    for node_id, node in nodes.items():
+        if node.node_type == NodeType.CALL:
+            call_nodes.append(node_id)
+        elif node.node_type == NodeType.SPLIT:
+            split_nodes.append(node_id)
+        elif node.node_type == NodeType.CONCAT:
+            concat_nodes.append(node_id)
+        elif node.node_type == NodeType.VAR:
+            var_nodes.append(node_id)
+        elif node.node_type == NodeType.CONST:
+            const_nodes.append(node_id)
+        elif node.node_type == NodeType.FUNC_OUT:
+            funcout_nodes.append(node_id)
+
+    debug_print(f"[tensor_edge_list_to_graph_info] {func_name}: "
+               f"{len(call_nodes)} calls, {len(split_nodes)} splits, "
+               f"{len(concat_nodes)} concats, {len(var_nodes)} vars, "
+               f"{len(const_nodes)} consts, {len(funcout_nodes)} func_outs, "
+               f"{len(commodities)} commodities")
+
+    return GraphInfo(
+        nodes=nodes,
+        commodities=commodities,
+        call_nodes=call_nodes,
+        split_nodes=split_nodes,
+        concat_nodes=concat_nodes,
+        var_nodes=var_nodes,
+        const_nodes=const_nodes,
+        funcout_nodes=funcout_nodes,
+    )
+
+
+# ============================================================
+# Graph Extractor (DEPRECATED - kept for reference)
 # ============================================================
 
 class GraphExtractor:
@@ -667,8 +897,20 @@ class JointPnRILP:
         self.imce_nodes = []
         self.inode_nodes = []
 
-    def run(self, mod: tvm.IRModule) -> Dict[str, JointPnRResult]:
-        """Run joint PnR for all imcflow functions"""
+    def run(
+        self,
+        mod: tvm.IRModule,
+        tensor_edge_list_dict: Dict[str, List],
+    ) -> Dict[str, JointPnRResult]:
+        """Run joint PnR for all imcflow functions.
+
+        Args:
+            mod: TVM IRModule containing imcflow functions
+            tensor_edge_list_dict: Dict mapping func_name -> List[TensorEdge]
+
+        Returns:
+            Dict mapping function name to JointPnRResult
+        """
         results = {}
 
         for gv, func in mod.functions.items():
@@ -679,8 +921,15 @@ class JointPnRILP:
                 func_name = gv.name_hint
                 debug_print(f"[JointPnRILP] Processing function: {func_name}")
 
+                if func_name not in tensor_edge_list_dict:
+                    raise ValueError(
+                        f"[JointPnRILP] tensor_edge_list_dict missing entry for '{func_name}'. "
+                        f"Ensure constructTensorEdgeList() is called before Joint PnR."
+                    )
+
                 try:
-                    result = self._run_for_function(func, func_name)
+                    tensor_edge_list = tensor_edge_list_dict[func_name]
+                    result = self._run_for_function(func_name, tensor_edge_list)
                     results[func_name] = result
 
                     if result.success:
@@ -703,11 +952,22 @@ class JointPnRILP:
 
         return results
 
-    def _run_for_function(self, func: relay.Function, func_name: str) -> JointPnRResult:
-        """Run joint PnR for a single function"""
-        # Phase 1: Extract graph
-        extractor = GraphExtractor()
-        self.graph_info = extractor.extract(func, func_name)
+    def _run_for_function(
+        self,
+        func_name: str,
+        tensor_edge_list: List,
+    ) -> JointPnRResult:
+        """Run joint PnR for a single function.
+
+        Args:
+            func_name: Name of the function
+            tensor_edge_list: List of TensorEdge from constructTensorEdgeList()
+
+        Returns:
+            JointPnRResult with mapping and routes
+        """
+        # Phase 1: Extract graph info from TensorEdgeList
+        self.graph_info = tensor_edge_list_to_graph_info(tensor_edge_list, func_name)
 
         if not self.graph_info.call_nodes:
             # No call nodes to place - trivial case
@@ -1143,7 +1403,10 @@ class JointPnRILP:
 # Integration with existing infrastructure
 # ============================================================
 
-def run_joint_pnr(mod: tvm.IRModule) -> Dict[str, JointPnRResult]:
+def run_joint_pnr(
+    mod: tvm.IRModule,
+    tensor_edge_list_dict: Dict[str, List],
+) -> Dict[str, JointPnRResult]:
     """
     Run joint PnR for all imcflow functions in module.
 
@@ -1151,12 +1414,14 @@ def run_joint_pnr(mod: tvm.IRModule) -> Dict[str, JointPnRResult]:
 
     Args:
         mod: TVM module containing imcflow functions
+        tensor_edge_list_dict: Dict mapping func_name -> List[TensorEdge]
+                               Must be constructed via constructTensorEdgeList() first.
 
     Returns:
         Dict mapping function names to JointPnRResult
     """
     solver = JointPnRILP(topology=MeshTopology(4, 5))
-    return solver.run(mod)
+    return solver.run(mod, tensor_edge_list_dict)
 
 
 def update_hw_node_map(results: Dict[str, JointPnRResult], hw_node_map: Dict):
@@ -1363,7 +1628,10 @@ def convert_pnr_result_to_routing_result(
 # Full Integration Entry Point
 # ============================================================
 
-def run_joint_pnr_and_update_config(mod: tvm.IRModule) -> Dict[str, JointPnRResult]:
+def run_joint_pnr_and_update_config(
+    mod: tvm.IRModule,
+    tensor_edge_list_dict: Dict[str, List],
+) -> Dict[str, JointPnRResult]:
     """
     Run joint PnR and update ImcflowDeviceConfig with results.
 
@@ -1371,10 +1639,10 @@ def run_joint_pnr_and_update_config(mod: tvm.IRModule) -> Dict[str, JointPnRResu
     1. Runs Joint PnR ILP for all imcflow functions
     2. Updates HWNodeMap with placement results
 
-    Note: TensorEdgeList must be constructed BEFORE calling this function.
-
     Args:
         mod: TVM module containing imcflow functions
+        tensor_edge_list_dict: Dict mapping func_name -> List[TensorEdge]
+                               Must be constructed via constructTensorEdgeList() first.
 
     Returns:
         Dict mapping function names to JointPnRResult
@@ -1382,7 +1650,7 @@ def run_joint_pnr_and_update_config(mod: tvm.IRModule) -> Dict[str, JointPnRResu
     config = ImcflowDeviceConfig()
 
     # Run joint PnR
-    results = run_joint_pnr(mod)
+    results = run_joint_pnr(mod, tensor_edge_list_dict)
 
     # Update HWNodeMap
     update_hw_node_map(results, config.HWNodeMap)
