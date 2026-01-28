@@ -17,6 +17,7 @@ Usage:
     # result.mapping: Dict[graph_node_id -> Coord]
     # result.routes: Dict[commodity_id -> List[Edge]]
 """
+from __future__ import annotations
 
 from typing import Dict, List, Tuple, Set, Optional, Any, Union, Callable
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from tvm import relay
 from tvm.relay import op
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
+from tvm.relay.backend.contrib.imcflow.transform_utils import *
 
 logger = logging.getLogger(__name__)
 
@@ -214,18 +216,22 @@ class GraphInfo:
     var_nodes: List[Any]              # IDs of var nodes
     const_nodes: List[Any]            # IDs of const nodes
     funcout_nodes: List[Any]          # IDs of func_out nodes
+    var_to_inode: Dict[Any, Coord] = None     # var node_id -> INODE Coord
+    funcout_to_inode: Dict[Any, Coord] = None # funcout node_id -> INODE Coord
 
 
 @dataclass
 class JointPnRResult:
     """Result of joint place and route"""
-    mapping: Dict[Any, Coord]           # graph_node_id -> Coord
+    mapping: Dict[Any, Coord]           # graph_node_id -> Coord (IMCE mappings)
     routes: Dict[int, List[Edge]]       # commodity_id -> list of edges
     commodities: List[Commodity]
     max_congestion: int
     total_hops: int
     solver_status: str
     success: bool = True
+    var_to_inode: Dict[Any, Coord] = None      # var node_id -> INODE Coord
+    funcout_to_inode: Dict[Any, Coord] = None  # funcout node_id -> INODE Coord
 
 
 # ============================================================
@@ -250,6 +256,25 @@ def getInnerNodeID(node):
     """
     if isinstance(node, tuple):
         return node[1]
+    else:
+        return node
+
+
+def getOuterNodeID(node):
+    """Get outer node ID for composite nodes.
+
+    For composite nodes (tuple), returns the outer (wrapper) node ID.
+    This is the ID that GraphExtractor uses for the composite as a whole.
+
+    Examples:
+        (41, 33) → 41   (composite call)
+        (41, -17) → 41  (composite internal constant)
+        40 → 40         (regular node)
+
+    For non-composite nodes, returns the node as-is.
+    """
+    if isinstance(node, tuple):
+        return node[0]
     else:
         return node
 
@@ -309,158 +334,6 @@ def infer_node_type(graph_node_id: Any, tensor_type: str, is_source: bool) -> No
             return NodeType.FUNC_OUT
         else:  # 'data', 'lhs', 'rhs', etc. - need to check for split/concat
             return _check_split_concat_or_call(graph_node_id)
-
-
-def tensor_edge_list_to_graph_info(
-    tensor_edge_list: List,  # List[TensorEdge]
-    func_name: str,
-) -> GraphInfo:
-    """
-    Convert TensorEdgeList to GraphInfo for ILP.
-
-    This function replaces GraphExtractor by using the already-constructed
-    TensorEdgeList instead of parsing the relay function directly.
-
-    Node type inference:
-    - src_id.tensor_type == 'var' → VAR (INODE 0,1)
-    - dst_id.tensor_type.startswith('func_out') → FUNC_OUT (INODE 2,3)
-    - src_id.tensor_type in CONST_TENSOR_TYPES → CONST (same row INODE as consumer)
-    - For other types, uses CustomIDToNode to detect split/concat:
-      - node.op.name == "split" → SPLIT (same location as producer)
-      - node.op.name == "concatenate" → CONCAT (same location as last producer)
-      - others → CALL (IMCE placement required)
-
-    Args:
-        tensor_edge_list: List of TensorEdge objects from constructTensorEdgeList
-        func_name: Name of the function being processed
-
-    Returns:
-        GraphInfo with nodes, commodities, and categorized node lists
-    """
-    nodes: Dict[Any, GraphNode] = {}
-    commodities: List[Commodity] = []
-
-    # Track node info for building relationships
-    topo_order = 0
-
-    # First pass: collect all edges and determine node types
-    # Also track producer relationships for split/concat constraints
-    producer_map: Dict[Any, List[Tuple[Any, int]]] = {}  # dst_id -> [(src_id, topo_order), ...]
-
-    for idx, edge in enumerate(tensor_edge_list):
-        src_id = edge.src_id
-        dst_id = edge.dst_id
-        split_idx = edge.split_idx
-
-        # Handle tuple graph_node_id (composite nodes have (outer_id, inner_id))
-        src_graph_id = src_id.graph_node_id
-        dst_graph_id = dst_id.graph_node_id
-
-        # Infer node types using CustomIDToNode for split/concat detection
-        src_type = infer_node_type(src_graph_id, src_id.tensor_type, is_source=True)
-        dst_type = infer_node_type(dst_graph_id, dst_id.tensor_type, is_source=False)
-
-        # Add source node if not exists
-        if src_graph_id not in nodes:
-            topo_order += 1
-            nodes[src_graph_id] = GraphNode(
-                id=src_graph_id,
-                node_type=src_type,
-                topo_order=topo_order,
-            )
-
-        # Add destination node if not exists
-        if dst_graph_id not in nodes:
-            topo_order += 1
-            nodes[dst_graph_id] = GraphNode(
-                id=dst_graph_id,
-                node_type=dst_type,
-                topo_order=topo_order,
-            )
-
-        # Track consumers for source node
-        nodes[src_graph_id].consumers.append(dst_graph_id)
-
-        # Track producers for destination node (for split/concat constraint)
-        if dst_graph_id not in producer_map:
-            producer_map[dst_graph_id] = []
-        producer_map[dst_graph_id].append((src_graph_id, nodes[src_graph_id].topo_order))
-
-        # Create commodity
-        commodity = Commodity(
-            id=idx,
-            source_node_id=src_graph_id,
-            dest_node_id=dst_graph_id,
-            source_type=src_type,
-            dest_type=dst_type,
-            tensor_type=src_id.tensor_type,
-            split_idx=split_idx,
-            metadata=edge,  # Original TensorEdge for reference
-        )
-        commodities.append(commodity)
-
-    # Second pass: set producer/last_producer for split/concat nodes
-    for node_id, node in nodes.items():
-        if node.node_type == NodeType.SPLIT:
-            # Split takes location from its producer
-            if node_id in producer_map and producer_map[node_id]:
-                # Split has exactly one producer
-                node.producer = producer_map[node_id][0][0]
-                debug_print(f"[split] node {node_id} producer: {node.producer}")
-
-        elif node.node_type == NodeType.CONCAT:
-            # Concat takes location from last producer (by topological order)
-            if node_id in producer_map and producer_map[node_id]:
-                # Find the producer with the highest topo_order
-                producers = producer_map[node_id]
-                last_producer = max(producers, key=lambda x: x[1])
-                node.last_producer = last_producer[0]
-                debug_print(f"[concat] node {node_id} last_producer: {node.last_producer}")
-
-    # Categorize nodes by type
-    call_nodes = []
-    split_nodes = []
-    concat_nodes = []
-    var_nodes = []
-    const_nodes = []
-    funcout_nodes = []
-
-    for node_id, node in nodes.items():
-        if node.node_type == NodeType.CALL:
-            call_nodes.append(node_id)
-        elif node.node_type == NodeType.SPLIT:
-            split_nodes.append(node_id)
-        elif node.node_type == NodeType.CONCAT:
-            concat_nodes.append(node_id)
-        elif node.node_type == NodeType.VAR:
-            var_nodes.append(node_id)
-        elif node.node_type == NodeType.CONST:
-            const_nodes.append(node_id)
-        elif node.node_type == NodeType.FUNC_OUT:
-            funcout_nodes.append(node_id)
-
-    debug_print(f"[tensor_edge_list_to_graph_info] {func_name}: "
-               f"{len(call_nodes)} calls, {len(split_nodes)} splits, "
-               f"{len(concat_nodes)} concats, {len(var_nodes)} vars, "
-               f"{len(const_nodes)} consts, {len(funcout_nodes)} func_outs, "
-               f"{len(commodities)} commodities")
-
-    return GraphInfo(
-        nodes=nodes,
-        commodities=commodities,
-        call_nodes=call_nodes,
-        split_nodes=split_nodes,
-        concat_nodes=concat_nodes,
-        var_nodes=var_nodes,
-        const_nodes=const_nodes,
-        funcout_nodes=funcout_nodes,
-    )
-
-
-# ============================================================
-# Graph Extractor (DEPRECATED - kept for reference)
-# ============================================================
-
 class GraphExtractor:
     """Extract graph structure from relay function for ILP"""
 
@@ -480,11 +353,23 @@ class GraphExtractor:
         self.var_to_inode: Dict[Any, Coord] = {}
         self.funcout_to_inode: Dict[Any, Coord] = {}
 
-    def extract(self, func: relay.Function, func_name: str) -> GraphInfo:
-        """Extract graph info from relay function"""
+    def extract(self, func: relay.Function, func_name: str,
+                tensor_edge_list: List = None) -> GraphInfo:
+        """Extract graph info from relay function.
+
+        Args:
+            func: Relay function to extract from
+            func_name: Name of the function
+            tensor_edge_list: Optional list of TensorEdge for commodity extraction.
+                              If provided, uses TensorEdgeList-based extraction (robust).
+                              If None, falls back to relay parsing (legacy).
+
+        Returns:
+            GraphInfo with nodes, commodities, and categorized node lists
+        """
         # Reset state
         self.nodes = {}
-        self.commodities = []
+        self.graph_commodities = []
         self.topo_order = 0
         self.commodity_id = 0
         self.node_to_producers = {}
@@ -502,8 +387,12 @@ class GraphExtractor:
         # Visit function to extract nodes
         self._visit(func)
 
-        # Extract commodities (data flows)
-        self._extract_commodities(func)
+        for node_id, node in self.nodes.items():
+            debug_print(f"[GraphExtractor] Node ID: {node_id}, Type: {node.node_type}, Topo Order: {node.topo_order}")
+            debug_print(f"  Name : {CustomIDToName()[getInnerNodeID(node_id)]}")
+
+        # Extract graph_commodities (data flows)
+        self._extract_graph_commodities_from_tensor_edge_list(tensor_edge_list)
 
         # Collect nodes by type
         call_nodes = []
@@ -542,6 +431,8 @@ class GraphExtractor:
             var_nodes=var_nodes,
             const_nodes=const_nodes,
             funcout_nodes=funcout_nodes,
+            var_to_inode=self.var_to_inode.copy(),
+            funcout_to_inode=self.funcout_to_inode.copy(),
         )
 
     def _build_use_def_chain(self, func):
@@ -576,9 +467,12 @@ class GraphExtractor:
         UseDefVisitor(self).visit(func)
 
     def _get_node_id(self, expr) -> Any:
-        """Get unique node ID for an expression"""
-        # Use hash as simple ID
-        return hash(expr)
+        """Get unique node ID for an expression.
+
+        For Call/Function nodes with custom_id attr, use custom_id (matches TensorEdgeList IDs).
+        For other nodes, fallback to hash (for internal consistency).
+        """
+        return getNodeID(expr)
 
     def _visit(self, expr, in_composite=False, composite_node_id=None):
         """Visit expression and extract nodes/commodities"""
@@ -609,6 +503,9 @@ class GraphExtractor:
                 relay_expr=fn,
                 topo_order=self.topo_order,
             )
+            # Assign to funcout INODE
+            if node_id not in self.funcout_to_inode:
+                self.funcout_to_inode[node_id] = next(self.funcout_inode_iter)
 
         # Visit function body
         self._visit(fn.body, in_composite, composite_node_id or node_id)
@@ -626,6 +523,9 @@ class GraphExtractor:
             relay_expr=var,
             topo_order=self.topo_order,
         )
+        # Assign to funcin INODE
+        if node_id not in self.var_to_inode:
+            self.var_to_inode[node_id] = next(self.var_inode_iter)
 
     def _visit_constant(self, const, in_composite):
         """Visit constant node"""
@@ -702,151 +602,57 @@ class GraphExtractor:
         if is_composite:
             self._visit(call.op, in_composite=True, composite_node_id=node_id)
 
-    def _extract_commodities(self, func: relay.Function):
-        """Extract commodities (data flows) from relay function"""
-        # Similar to constructTensorEdgeList but builds commodities
+    def _extract_graph_commodities_from_tensor_edge_list(self, tensor_edge_list: List):
+        """Extract commodities from TensorEdgeList.
 
-        class CommodityVisitor(relay.ExprVisitor):
-            def __init__(self, extractor):
-                super().__init__()
-                self.extractor = extractor
-                self.in_composite = False
-                self.composite_node_id = None
-                self.var_properties = {}  # For composite function params
+        Uses validated TensorEdgeList instead of parsing relay function.
+        This is more robust as the edge information is already validated
+        and tensor_type is accurate.
 
-            def visit_function(self, fn):
-                if not self.in_composite:
-                    # Top-level function output
-                    fn_id = self.extractor._get_node_id(fn)
-                    if fn_id in self.extractor.nodes:
-                        # Assign to funcout INODE
-                        if fn_id not in self.extractor.funcout_to_inode:
-                            self.extractor.funcout_to_inode[fn_id] = next(
-                                self.extractor.funcout_inode_iter
-                            )
-                super().visit_function(fn)
+        Args:
+            tensor_edge_list: List of TensorEdge from constructTensorEdgeList()
+        """
+        for edge in tensor_edge_list:
+            src_graph_id = edge.src_id.graph_node_id
+            dst_graph_id = edge.dst_id.graph_node_id
 
-            def visit_var(self, var):
-                if not self.in_composite:
-                    var_id = self.extractor._get_node_id(var)
-                    if var_id not in self.extractor.var_to_inode:
-                        self.extractor.var_to_inode[var_id] = next(
-                            self.extractor.var_inode_iter
-                        )
+            # For composite nodes, use outer_id (the composite call's ID)
+            # TensorEdgeList uses tuple (outer_id, inner_id) for composite internals
+            src_node_id = getOuterNodeID(src_graph_id)
+            dst_node_id = getOuterNodeID(dst_graph_id)
 
-            def visit_call(self, call):
-                # Post-order visit
-                for arg in call.args:
-                    self.visit(arg)
+            # Look up nodes from GraphExtractor's extracted nodes
+            # GraphExtractor now uses custom_id as key for Call nodes
+            src_node = self.nodes.get(src_node_id)
+            dst_node = self.nodes.get(dst_node_id)
 
-                dst_id = self.extractor._get_node_id(call)
-                dst_node = self.extractor.nodes.get(dst_id)
+            # Skip if nodes not found (constants, vars, or internal nodes)
+            if src_node is None or dst_node is None:
+                # Only log if both are positive (should be tracked Call nodes)
+                if src_node_id > 0 and dst_node_id > 0:
+                    debug_print(f"[_extract_commodities_from_tensor_edge_list] "
+                               f"Node not found in GraphExtractor: "
+                               f"src_found={src_node is not None}, dst_found={dst_node is not None}, "
+                               f"node_ids=({src_node_id}, {dst_node_id})")
+                continue
 
-                if dst_node is None or self.in_composite:
-                    # Handle composite
-                    if isinstance(call.op, relay.Function):
-                        if (hasattr(call.op.attrs, "Composite") and
-                            call.op.attrs["Composite"] and
-                            re.match(r"imcflow.*", str(call.op.attrs["Composite"]))):
-                            self.in_composite = True
-                            self.composite_node_id = dst_id
-                            # Map params to args
-                            param_to_arg = {p: a for p, a in zip(call.op.params, call.args)}
-                            self._process_composite_inputs(call, param_to_arg)
-                            self.visit(call.op)
-                            self.in_composite = False
-                            self.composite_node_id = None
-                    return
+            # Add commodity with validated tensor_type from TensorEdgeList
+            self.add_commodity(
+                src_node_id, dst_node_id,
+                src_node.node_type, dst_node.node_type,
+                tensor_type=edge.src_id.tensor_type,
+                split_idx=edge.split_idx,
+                metadata=edge
+            )
 
-                # Process inputs based on operator type
-                is_split = isinstance(call.op, tvm.ir.Op) and call.op.name == "split"
-                is_concat = isinstance(call.op, tvm.ir.Op) and call.op.name == "concatenate"
-
-                if is_split:
-                    self._add_commodity_from_arg(call.args[0], dst_id, "data")
-                elif is_concat:
-                    # Concat takes tuple of inputs
-                    if isinstance(call.args[0], relay.Tuple):
-                        for field in call.args[0].fields:
-                            self._add_commodity_from_arg(field, dst_id, "data")
-                elif isinstance(call.op, tvm.ir.Op):
-                    # Built-in op
-                    self._process_builtin_op(call, dst_id)
-
-            def _process_composite_inputs(self, call, param_to_arg):
-                """Process inputs to composite function"""
-                dst_id = self.extractor._get_node_id(call)
-
-                for param, arg in param_to_arg.items():
-                    # Determine tensor type from parameter name
-                    param_name = param.name_hint if hasattr(param, 'name_hint') else str(param)
-
-                    if 'weight' in param_name:
-                        tensor_type = 'weight'
-                    elif 'config' in param_name:
-                        tensor_type = 'config'
-                    elif 'bias' in param_name:
-                        tensor_type = 'bias'
-                    elif 'scale' in param_name:
-                        tensor_type = 'fused_scale'
-                    elif 'data' in param_name:
-                        tensor_type = 'data'
-                    else:
-                        tensor_type = 'data'  # default
-
-                    self._add_commodity_from_arg(arg, dst_id, tensor_type)
-
-            def _process_builtin_op(self, call, dst_id):
-                """Process built-in operator inputs"""
-                op_name = call.op.name
-
-                if op_name == "nn.conv2d":
-                    self._add_commodity_from_arg(call.args[0], dst_id, "data")
-                    self._add_commodity_from_arg(call.args[1], dst_id, "weight")
-                elif op_name == "nn.bias_add":
-                    self._add_commodity_from_arg(call.args[0], dst_id, "data")
-                    self._add_commodity_from_arg(call.args[1], dst_id, "bias")
-                elif op_name == "nn.relu":
-                    self._add_commodity_from_arg(call.args[0], dst_id, "data")
-                elif op_name in ["add", "multiply"]:
-                    self._add_commodity_from_arg(call.args[0], dst_id, "lhs")
-                    self._add_commodity_from_arg(call.args[1], dst_id, "rhs")
-                elif op_name == "divide":
-                    # One arg is scale (constant), one is data
-                    if isinstance(call.args[0], relay.Constant):
-                        self._add_commodity_from_arg(call.args[0], dst_id, "scale")
-                        self._add_commodity_from_arg(call.args[1], dst_id, "data")
-                    else:
-                        self._add_commodity_from_arg(call.args[0], dst_id, "data")
-                        self._add_commodity_from_arg(call.args[1], dst_id, "scale")
-
-            def _add_commodity_from_arg(self, arg, dst_id, tensor_type, split_idx=None):
-                """Add commodity from argument to destination"""
-                # Find source node - traverse through TupleGetItem
-                src_expr = arg
-                actual_split_idx = split_idx
-
-                while isinstance(src_expr, relay.TupleGetItem):
-                    if actual_split_idx is None:
-                        actual_split_idx = src_expr.index
-                    src_expr = src_expr.tuple_value
-
-                src_id = self.extractor._get_node_id(src_expr)
-                src_node = self.extractor.nodes.get(src_id)
-
-                if src_node is None:
-                    # Source might be inside composite or not tracked
-                    return
-
-                self.extractor.add_commodity(
-                    src_id, dst_id,
-                    src_node.node_type,
-                    self.extractor.nodes[dst_id].node_type,
-                    tensor_type,
-                    actual_split_idx
-                )
-
-        CommodityVisitor(self).visit(func)
+        debug_print(f"[_extract_commodities_from_tensor_edge_list] "
+                   f"Extracted {len(self.commodities)} commodities from "
+                   f"{len(tensor_edge_list)} tensor edges")
+        for comm in self.commodities:
+            debug_print(f"  Commodity {comm.id}: "
+                       f"{comm.source_node_id} ({comm.source_type}) -> "
+                       f"{comm.dest_node_id} ({comm.dest_type}), "
+                       f"type={comm.tensor_type}")
 
     def add_commodity(self, src_node_id: Any, dst_node_id: Any,
                       src_type: NodeType, dst_type: NodeType,
@@ -913,6 +719,10 @@ class JointPnRILP:
         """
         results = {}
 
+        # Get ImcflowFuncMap - TensorEdgeList uses func_info.func_node, we should too
+        imcflow_func_map = ImcflowDeviceConfig().ImcflowFuncMap
+        debug_print(f"[JointPnRILP] ImcflowFuncMap keys: {list(imcflow_func_map.keys())}")
+
         for gv, func in mod.functions.items():
             if (isinstance(func, relay.Function) and
                 hasattr(func.attrs, "Compiler") and
@@ -927,9 +737,18 @@ class JointPnRILP:
                         f"Ensure constructTensorEdgeList() is called before Joint PnR."
                     )
 
+                # Use func_info.func_node from ImcflowFuncMap (same as TensorEdgeList uses)
+                # This ensures GraphExtractor sees the same node instances with matching custom_ids
+                if func_name in imcflow_func_map:
+                    actual_func = imcflow_func_map[func_name].func_node
+                    debug_print(f"[JointPnRILP] Using func_info.func_node for {func_name}")
+                else:
+                    actual_func = func
+                    debug_print(f"[JointPnRILP] Warning: {func_name} not in ImcflowFuncMap, using mod.functions")
+
                 try:
                     tensor_edge_list = tensor_edge_list_dict[func_name]
-                    result = self._run_for_function(func_name, tensor_edge_list)
+                    result = self._run_for_function(actual_func, func_name, tensor_edge_list)
                     results[func_name] = result
 
                     if result.success:
@@ -948,26 +767,33 @@ class JointPnRILP:
                         total_hops=0,
                         solver_status=f"Error: {e}",
                         success=False,
+                        var_to_inode={},
+                        funcout_to_inode={},
                     )
 
         return results
 
     def _run_for_function(
         self,
+        func: relay.Function,
         func_name: str,
         tensor_edge_list: List,
     ) -> JointPnRResult:
         """Run joint PnR for a single function.
 
         Args:
+            func: Relay function
             func_name: Name of the function
             tensor_edge_list: List of TensorEdge from constructTensorEdgeList()
 
         Returns:
             JointPnRResult with mapping and routes
         """
-        # Phase 1: Extract graph info from TensorEdgeList
-        self.graph_info = tensor_edge_list_to_graph_info(tensor_edge_list, func_name)
+        # Phase 1: Extract graph info using GraphExtractor
+        # - Nodes: extracted from relay function (composite = 1 node)
+        # - Commodities: extracted from TensorEdgeList (robust, validated)
+        extractor = GraphExtractor()
+        self.graph_info = extractor.extract(func, func_name, tensor_edge_list)
 
         if not self.graph_info.call_nodes:
             # No call nodes to place - trivial case
@@ -979,6 +805,8 @@ class JointPnRILP:
                 total_hops=0,
                 solver_status="No call nodes",
                 success=True,
+                var_to_inode=self.graph_info.var_to_inode,
+                funcout_to_inode=self.graph_info.funcout_to_inode,
             )
 
         # Phase 2: Build ILP model
@@ -1363,6 +1191,8 @@ class JointPnRILP:
                 total_hops=0,
                 solver_status=f"Infeasible: {status_str}",
                 success=False,
+                var_to_inode={},
+                funcout_to_inode={},
             )
 
         # Extract placement
@@ -1396,6 +1226,8 @@ class JointPnRILP:
             total_hops=total_hops,
             solver_status=status_str,
             success=True,
+            var_to_inode=gi.var_to_inode,
+            funcout_to_inode=gi.funcout_to_inode,
         )
 
 
@@ -1428,6 +1260,9 @@ def update_hw_node_map(results: Dict[str, JointPnRResult], hw_node_map: Dict):
     """
     Update HWNodeMap with placement results.
 
+    Includes both IMCE mappings (from ILP solver) and INODE mappings
+    (funcin vars and funcout).
+
     Args:
         results: Results from run_joint_pnr
         hw_node_map: ImcflowDeviceConfig().HWNodeMap to update
@@ -1436,11 +1271,24 @@ def update_hw_node_map(results: Dict[str, JointPnRResult], hw_node_map: Dict):
         if not result.success:
             raise RuntimeError(f"Joint PnR failed for {func_name}: {result.solver_status}")
 
+        # IMCE mappings (call/split/concat nodes)
         for graph_node_id, coord in result.mapping.items():
             # Convert Coord to NodeID
             # coord.col is in [1,4] for IMCE, from_imce_coord expects (row, col-1)
             node_id = NodeID.from_imce_coord(coord.row, coord.col - 1)
             hw_node_map[graph_node_id] = node_id
+
+        # INODE mappings (input vars)
+        if result.var_to_inode:
+            for var_node_id, coord in result.var_to_inode.items():
+                node_id = NodeID.from_inode_coord(coord.row)
+                hw_node_map[var_node_id] = node_id
+
+        # INODE mappings (funcout)
+        if result.funcout_to_inode:
+            for funcout_node_id, coord in result.funcout_to_inode.items():
+                node_id = NodeID.from_inode_coord(coord.row)
+                hw_node_map[funcout_node_id] = node_id
 
 
 def coord_to_node_id(coord: Coord) -> NodeID:
@@ -1451,11 +1299,6 @@ def coord_to_node_id(coord: Coord) -> NodeID:
     else:
         # IMCE
         return NodeID.from_imce_coord(coord.row, coord.col - 1)
-
-
-# ============================================================
-# TensorEdgeList Integration
-# ============================================================
 
 def extract_commodities_from_tensor_edge_list(
     tensor_edge_list: Dict,
@@ -1699,6 +1542,91 @@ def build_policy_tables_from_pnr_result(
     debug_print(f"[build_policy_tables_from_pnr_result] Built policy tables for {func_name}")
 
     return policy_tables
+
+
+# ============================================================
+# NoCPaths Construction from Joint PnR Results
+# ============================================================
+
+def construct_noc_paths_from_pnr_results(
+    pnr_results: Dict[str, JointPnRResult],
+    tensor_edge_list_dict: Dict[str, List],
+) -> Dict[str, Dict]:
+    """
+    Construct NoCPaths dict from Joint PnR results.
+
+    This replaces the legacy constructNoCPathDict() which used getInnerNodeID()
+    to lookup in HWNodeMap (problematic for composite nodes).
+
+    Args:
+        pnr_results: Results from run_joint_pnr()
+        tensor_edge_list_dict: Dict mapping func_name -> List[TensorEdge]
+
+    Returns:
+        Dict mapping func_name -> {tensor_edge: (src_hwnode, dst_hwnode, split_idx)}
+    """
+    config = ImcflowDeviceConfig()
+    noc_paths = config.NoCPaths
+
+    for func_name, pnr_result in pnr_results.items():
+        if not pnr_result.success:
+            debug_print(f"[construct_noc_paths] Skipping failed function: {func_name}")
+            continue
+
+        noc_paths[func_name] = {}
+
+        # Build commodity_id -> tensor_edge mapping from commodities
+        commodity_id_to_edge = {}
+        for commodity in pnr_result.commodities:
+            if commodity.metadata is not None:
+                # metadata is the original TensorEdge
+                commodity_id_to_edge[commodity.id] = commodity.metadata
+
+        # For each tensor edge, get the src/dst placements
+        tensor_edge_list = tensor_edge_list_dict.get(func_name, [])
+        for tensor_edge in tensor_edge_list:
+            src_tensor_id = tensor_edge.src_id
+            dst_tensor_id = tensor_edge.dst_id
+            split_idx = tensor_edge.split_idx
+
+            # Get graph node IDs (outer ID for composites)
+            src_graph_id = getOuterNodeID(src_tensor_id.graph_node_id)
+            dst_graph_id = getOuterNodeID(dst_tensor_id.graph_node_id)
+
+            # Look up in mapping
+            src_coord = pnr_result.mapping.get(src_graph_id)
+            dst_coord = pnr_result.mapping.get(dst_graph_id)
+
+            if src_coord is None or dst_coord is None:
+                # Node not mapped (could be input var, constant, or funcout)
+                # Try to get from HWNodeMap as fallback
+                hw_node_map = config.HWNodeMap
+                src_hwnode = hw_node_map.get(src_graph_id)
+                dst_hwnode = hw_node_map.get(dst_graph_id)
+
+                if src_hwnode is not None and dst_hwnode is not None:
+                    # Handle split index for tuple hwnode
+                    if isinstance(dst_hwnode, tuple):
+                        dst_hwnode = dst_hwnode[split_idx] if split_idx is not None else dst_hwnode[0]
+                        split_idx = None
+                    noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
+                continue
+
+            # Convert Coord to NodeID
+            src_hwnode = coord_to_node_id(src_coord)
+            dst_hwnode = coord_to_node_id(dst_coord)
+
+            noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
+
+        # Add instruction paths (inode to imce)
+        # Each IMCE receives instructions from its corresponding INODE
+        for dst_hwnode_id in NodeID.imces():
+            inode_id = NodeID.from_inode_coord(NodeID.to_coord(dst_hwnode_id)[0])
+            noc_paths[func_name][dst_hwnode_id] = (inode_id, dst_hwnode_id, None)
+
+        debug_print(f"[construct_noc_paths] {func_name}: {len(noc_paths[func_name])} entries")
+
+    return noc_paths
 
 
 # ============================================================

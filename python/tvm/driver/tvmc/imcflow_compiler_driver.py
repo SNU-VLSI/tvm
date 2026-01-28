@@ -43,6 +43,7 @@ from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
 from tvm.relay.backend.contrib.imcflow.joint_pnr_ilp import (
     run_joint_pnr_and_update_config,
     build_policy_tables_from_pnr_result,
+    construct_noc_paths_from_pnr_results,
 )
 from tvm.relay.backend.contrib.imcflow.policy_table_builder import PolicyTableBuilder
 
@@ -202,7 +203,6 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
                 print(f"{key} : {paths}", file=f)
 
     # Step 17: Joint PnR ILP (mapping + routing simultaneously)
-    # Uses TensorEdgeListDict to extract graph info (replaces GraphExtractor)
     print("[Joint PnR] Running Joint Place & Route ILP...")
     pnr_results = run_joint_pnr_and_update_config(mod, DevConfig().TensorEdgeListDict)
     if save_intermediate:
@@ -225,8 +225,9 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
         with open(f"{output_dir}/active_imce_list.txt", "w") as f:
             pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
 
-    # Step 19: NoCPathDict (requires HWNodeMap from Joint PnR)
-    imcflow_transform.constructNoCPathDict(mod)
+    # Step 19: NoCPathDict from Joint PnR results (replaces legacy constructNoCPathDict)
+    # Uses Joint PnR mapping instead of getInnerNodeID() lookup (works with composite nodes)
+    construct_noc_paths_from_pnr_results(pnr_results, DevConfig().TensorEdgeListDict)
     if save_intermediate:
         with open(f"{output_dir}/noc_paths.txt", "w") as f:
             for key, paths in DevConfig().NoCPaths.items():
