@@ -243,16 +243,15 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
 
     # Step 21: Policy table generation
     # Uses Joint ILP routes via PolicyTableBuilder (MCF router removed)
+    # noc_paths contains both TensorEdge paths and instruction paths (NodeID keys)
     for func_name, pnr_result in pnr_results.items():
         if not pnr_result.success:
             raise RuntimeError(f"Joint PnR failed for {func_name}: {pnr_result.solver_status}")
-        # noc_paths is {TensorEdge -> (src_hwnode, dst_hwnode, split_idx)}
         noc_paths = DevConfig().NoCPaths.get(func_name, {})
         build_policy_tables_from_pnr_result(
             pnr_result,
             func_name,
-            noc_paths,  # Pass noc_paths (dict), not tensor_edge_list (list)
-            DevConfig().HWNodeMap,
+            noc_paths,
         )
     if save_intermediate:
         with open(f"{output_dir}/policy_table.txt", "w") as f:

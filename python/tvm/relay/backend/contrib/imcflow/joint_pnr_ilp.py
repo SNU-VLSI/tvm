@@ -98,6 +98,26 @@ class Edge:
 
 
 @dataclass
+class HWCommodity:
+    """Hardware commodity representing a data flow from source to destination.
+
+    This replaces MCFCommodity for policy table generation.
+    Used after Joint PnR to create commodities from noc_paths (which includes
+    both TensorEdge paths and instruction paths).
+    """
+    id: int
+    source: Coord
+    destination: Coord
+    metadata: Any = None  # (edge, mapping_info) where edge is TensorEdge or NodeID
+
+    def __hash__(self):
+        return hash(self.id)
+
+    def __repr__(self):
+        return f"HWCommodity({self.id}, {self.source} -> {self.destination})"
+
+
+@dataclass
 class MeshTopology:
     """2D Mesh NoC topology"""
     rows: int
@@ -1412,33 +1432,28 @@ def coord_to_node_id(coord: Coord) -> NodeID:
         # IMCE
         return NodeID.from_imce_coord(coord.row, coord.col - 1)
 
-def extract_commodities_from_tensor_edge_list(
-    tensor_edge_list: Dict,
-    hw_node_map: Dict,
-) -> Tuple[List['Commodity'], Dict]:
+def extract_hw_commodities_from_noc_paths(
+    noc_paths: Dict,
+) -> List[HWCommodity]:
     """
-    Extract commodities from TensorEdgeList for routing.
+    Extract HWCommodity objects from noc_paths for policy table generation.
 
-    This function converts TensorEdgeList (from DevConfig().TensorEdgeListDict)
-    into Commodity objects that the ILP solver or PolicyTableBuilder can use.
+    noc_paths contains both:
+    - TensorEdge paths: TensorEdge -> (src_hwnode, dst_hwnode, split_idx)
+    - Instruction paths: NodeID -> (src_hwnode, dst_hwnode, None)
 
     Args:
-        tensor_edge_list: Dict of TensorEdge -> mapping_info from TensorEdgeListDict
-        hw_node_map: Current HWNodeMap for resolving node locations
+        noc_paths: Dict mapping edge (TensorEdge or NodeID) to (src_hwnode, dst_hwnode, split_idx)
 
     Returns:
-        Tuple of (commodities list, noc_paths dict for PolicyTableBuilder)
+        List of HWCommodity objects (only for non-local paths)
     """
-    from .mcf_router import Commodity as MCFCommodity
-
     commodities = []
-    noc_paths = {}
     commodity_id = 0
 
-    for edge, mapping_info in tensor_edge_list.items():
+    for edge, mapping_info in noc_paths.items():
         src_node = mapping_info[0]  # NodeID
         dst_node = mapping_info[1]  # NodeID
-        split_idx = mapping_info[2] if len(mapping_info) > 2 else None
 
         # Convert NodeID to Coord
         src_coord_tuple = NodeID.to_coord(src_node)
@@ -1447,26 +1462,24 @@ def extract_commodities_from_tensor_edge_list(
         src_coord = Coord(src_coord_tuple[0], src_coord_tuple[1])
         dst_coord = Coord(dst_coord_tuple[0], dst_coord_tuple[1])
 
-        # Skip local edges (same node)
+        # Skip local edges (same node) - no routing needed
         if src_coord == dst_coord:
-            noc_paths[edge] = mapping_info
             continue
 
-        # Create commodity
-        commodity = MCFCommodity(
+        # Create HW commodity
+        commodity = HWCommodity(
             id=commodity_id,
             source=src_coord,
             destination=dst_coord,
             metadata=(edge, mapping_info)
         )
         commodities.append(commodity)
-        noc_paths[edge] = mapping_info
         commodity_id += 1
 
-    debug_print(f"[extract_commodities] Extracted {len(commodities)} commodities "
-               f"from {len(tensor_edge_list)} tensor edges")
+    debug_print(f"[extract_hw_commodities] Extracted {len(commodities)} commodities "
+               f"from {len(noc_paths)} noc_paths entries")
 
-    return commodities, noc_paths
+    return commodities
 
 
 # ============================================================
@@ -1480,17 +1493,15 @@ class JointPnRRoutingResult:
     This allows PolicyTableBuilder to use routes from JointPnRILP directly.
     """
 
-    def __init__(self, pnr_result: JointPnRResult, commodities: List, noc_paths: Dict):
+    def __init__(self, pnr_result: JointPnRResult, commodities: List[HWCommodity], noc_paths: Dict):
         """
         Initialize from JointPnRResult.
 
         Args:
             pnr_result: Result from JointPnRILP
-            commodities: List of MCF Commodity objects (from extract_commodities_from_tensor_edge_list)
+            commodities: List of HWCommodity objects (from extract_hw_commodities_from_noc_paths)
             noc_paths: NoCPaths dict
         """
-        from .mcf_router import Commodity as MCFCommodity
-
         self._commodities = {}
         self._paths = {}
         self._noc_paths = noc_paths
@@ -1499,13 +1510,14 @@ class JointPnRRoutingResult:
         for commodity in commodities:
             self._commodities[commodity.id] = commodity
 
-            # Convert edges to path (list of coords)
-            if commodity.id in pnr_result.routes:
+            # Check if this commodity has a route from ILP (TensorEdge commodities)
+            # Instruction commodities won't have ILP routes - use direct path
+            if pnr_result.routes and commodity.id in pnr_result.routes:
                 edges = pnr_result.routes[commodity.id]
                 path = self._edges_to_path(commodity.source, edges)
                 self._paths[commodity.id] = path
             else:
-                # No route found - use direct path (shouldn't happen for valid result)
+                # No ILP route - use direct path (for instruction paths or fallback)
                 self._paths[commodity.id] = [commodity.source, commodity.destination]
 
     def _edges_to_path(self, start: Coord, edges: List[Edge]) -> List[Coord]:
@@ -1556,27 +1568,22 @@ class JointPnRRoutingResult:
 
 def convert_pnr_result_to_routing_result(
     pnr_result: JointPnRResult,
-    tensor_edge_list: Dict,
-    hw_node_map: Dict,
-) -> Tuple[JointPnRRoutingResult, Dict]:
+    noc_paths: Dict,
+) -> JointPnRRoutingResult:
     """
     Convert JointPnRResult to a routing result that PolicyTableBuilder can use.
 
     Args:
         pnr_result: Result from JointPnRILP
-        tensor_edge_list: TensorEdgeList dict
-        hw_node_map: HWNodeMap dict
+        noc_paths: NoCPaths dict containing both TensorEdge and instruction paths
 
     Returns:
-        Tuple of (JointPnRRoutingResult, noc_paths)
+        JointPnRRoutingResult for PolicyTableBuilder
     """
-    commodities, noc_paths = extract_commodities_from_tensor_edge_list(
-        tensor_edge_list, hw_node_map
-    )
-
+    commodities = extract_hw_commodities_from_noc_paths(noc_paths)
     routing_result = JointPnRRoutingResult(pnr_result, commodities, noc_paths)
 
-    return routing_result, noc_paths
+    return routing_result
 
 
 # ============================================================
@@ -1623,22 +1630,20 @@ def run_joint_pnr_and_update_config(
 def build_policy_tables_from_pnr_result(
     pnr_result: JointPnRResult,
     func_name: str,
-    tensor_edge_list: Dict,
-    hw_node_map: Dict,
+    noc_paths: Dict,
     table_capacity: int = 32,
 ) -> Dict:
     """
     Build policy tables from JointPnRResult using PolicyTableBuilder.
 
     This function:
-    1. Converts PnR result to routing result format
+    1. Converts PnR result to routing result format (extracts HWCommodities from noc_paths)
     2. Calls PolicyTableBuilder.build() to generate policy tables
 
     Args:
         pnr_result: Result from JointPnRILP for this function
         func_name: Function name
-        tensor_edge_list: TensorEdgeList for this function
-        hw_node_map: HWNodeMap dict
+        noc_paths: NoCPaths dict containing both TensorEdge and instruction paths
         table_capacity: Max entries per node policy table
 
     Returns:
@@ -1646,10 +1651,8 @@ def build_policy_tables_from_pnr_result(
     """
     from .policy_table_builder import PolicyTableBuilder
 
-    # Convert to routing result
-    routing_result, noc_paths = convert_pnr_result_to_routing_result(
-        pnr_result, tensor_edge_list, hw_node_map
-    )
+    # Convert to routing result (extracts HWCommodities from noc_paths)
+    routing_result = convert_pnr_result_to_routing_result(pnr_result, noc_paths)
 
     # Build policy tables
     builder = PolicyTableBuilder(table_capacity=table_capacity)
