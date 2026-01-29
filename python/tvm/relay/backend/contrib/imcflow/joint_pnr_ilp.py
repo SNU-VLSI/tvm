@@ -37,26 +37,6 @@ from tvm.relay.backend.contrib.imcflow.transform_utils import *
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# Debug Utilities
-# ============================================================
-
-_DEBUG_ENABLED = None
-
-def _is_debug_enabled():
-    global _DEBUG_ENABLED
-    if _DEBUG_ENABLED is None:
-        debug_var = os.environ.get('IMCFLOW_DEBUG', '0')
-        _DEBUG_ENABLED = debug_var == '1' or debug_var.lower() == 'true'
-    return _DEBUG_ENABLED
-
-def debug_print(*args, **kwargs):
-    """Print debug message only if IMCFLOW_DEBUG is enabled"""
-    if _is_debug_enabled():
-        print(*args, **kwargs)
-
-
 # ============================================================
 # Data Structures
 # ============================================================
@@ -307,6 +287,7 @@ class GraphInfo:
     var_to_inode: Dict[Any, Coord] = None      # var node_id -> INODE Coord
     funcout_to_inode: Dict[Any, Coord] = None  # funcout node_id -> INODE Coord
     const_to_inode: Dict[Any, Coord] = None    # const node_id -> INODE Coord
+    tensor_edge_to_commodity_id: Dict[Any, int] = None  # TensorEdge -> commodity_id
 
 
 @dataclass
@@ -322,6 +303,7 @@ class JointPnRResult:
     var_to_inode: Dict[Any, Coord] = None      # var node_id -> INODE Coord
     funcout_to_inode: Dict[Any, Coord] = None  # funcout node_id -> INODE Coord
     const_to_inode: Dict[Any, Coord] = None    # const node_id -> INODE Coord
+    tensor_edge_to_commodity_id: Dict[Any, int] = None  # TensorEdge -> commodity_id
 
 
 # ============================================================
@@ -443,6 +425,7 @@ class GraphExtractor:
         self.var_to_inode: Dict[Any, Coord] = {}
         self.funcout_to_inode: Dict[Any, Coord] = {}
         self.const_to_inode: Dict[Any, Coord] = {}  # const inner_id -> INODE Coord
+        self.tensor_edge_to_commodity_id: Dict[Any, int] = {}  # TensorEdge -> commodity_id
 
     def extract(self, func: relay.Function, func_name: str,
                 tensor_edge_list: List = None) -> GraphInfo:
@@ -526,6 +509,7 @@ class GraphExtractor:
             var_to_inode=self.var_to_inode.copy(),
             funcout_to_inode=self.funcout_to_inode.copy(),
             const_to_inode=self.const_to_inode.copy(),
+            tensor_edge_to_commodity_id=self.tensor_edge_to_commodity_id.copy(),
         )
 
     def _build_use_def_chain(self, func):
@@ -801,6 +785,12 @@ class GraphExtractor:
                        f"{comm.dest_node_id} ({comm.dest_type}), "
                        f"type={comm.tensor_type}")
 
+        # Build TensorEdge -> commodity_id map for routing result matching
+        self.tensor_edge_to_commodity_id = {}
+        for comm in self.commodities:
+            if comm.metadata is not None:
+                self.tensor_edge_to_commodity_id[comm.metadata] = comm.id
+
     def add_commodity(self, src_node_id: Any, dst_node_id: Any,
                       src_type: NodeType, dst_type: NodeType,
                       tensor_type: str, split_idx: Optional[int] = None,
@@ -956,6 +946,7 @@ class JointPnRILP:
                 var_to_inode=self.graph_info.var_to_inode,
                 funcout_to_inode=self.graph_info.funcout_to_inode,
                 const_to_inode=self.graph_info.const_to_inode,
+                tensor_edge_to_commodity_id=self.graph_info.tensor_edge_to_commodity_id,
             )
 
         # Phase 2: Build ILP model
@@ -1325,9 +1316,8 @@ class JointPnRILP:
         debug_print(f"[JointPnRILP] Solving ILP...")
 
         # Dump ILP to file for debugging
-        if _is_debug_enabled():
-            self.prob.writeLP("/tmp/joint_pnr_debug.lp")
-            debug_print(f"[JointPnRILP] Dumped ILP to /tmp/joint_pnr_debug.lp")
+        self.prob.writeLP("/tmp/joint_pnr_debug.lp")
+        debug_print(f"[JointPnRILP] Dumped ILP to /tmp/joint_pnr_debug.lp")
 
         # Solve
         solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=120)
@@ -1348,6 +1338,7 @@ class JointPnRILP:
                 var_to_inode={},
                 funcout_to_inode={},
                 const_to_inode={},
+                tensor_edge_to_commodity_id={},
             )
 
         # Extract placement
@@ -1386,7 +1377,7 @@ class JointPnRILP:
                     # INODE is at the same row as composite's IMCE
                     const_to_inode[const_id] = Coord(composite_coord.row, 0)
 
-        return JointPnRResult(
+        result = JointPnRResult(
             mapping=mapping,
             routes=routes,
             commodities=gi.commodities,
@@ -1397,7 +1388,49 @@ class JointPnRILP:
             var_to_inode=gi.var_to_inode,
             funcout_to_inode=gi.funcout_to_inode,
             const_to_inode=const_to_inode,
+            tensor_edge_to_commodity_id=gi.tensor_edge_to_commodity_id,
         )
+
+        # Dump result for debugging
+        debug_print("=" * 70)
+        debug_print("[JointPnRILP] RESULT DUMP")
+        debug_print("=" * 70)
+        debug_print(f"[RESULT] solver_status: {status_str}")
+        debug_print(f"[RESULT] max_congestion: {max_congestion}, total_hops: {total_hops}")
+
+        debug_print("\n[RESULT] mapping (graph_node_id -> Coord):")
+        for node_id, coord in mapping.items():
+            debug_print(f"  {node_id} -> ({coord.row}, {coord.col})")
+
+        debug_print("\n[RESULT] var_to_inode:")
+        for node_id, coord in (gi.var_to_inode or {}).items():
+            debug_print(f"  {node_id} -> ({coord.row}, {coord.col})")
+
+        debug_print("\n[RESULT] funcout_to_inode:")
+        for node_id, coord in (gi.funcout_to_inode or {}).items():
+            debug_print(f"  {node_id} -> ({coord.row}, {coord.col})")
+
+        debug_print("\n[RESULT] const_to_inode:")
+        for node_id, coord in (const_to_inode or {}).items():
+            debug_print(f"  {node_id} -> ({coord.row}, {coord.col})")
+
+        debug_print("\n[RESULT] commodities:")
+        for comm in gi.commodities:
+            debug_print(f"  Commodity {comm.id}: {comm.source_node_id} ({comm.source_type.name}) "
+                       f"-> {comm.dest_node_id} ({comm.dest_type.name}), type={comm.tensor_type}")
+
+        debug_print("\n[RESULT] routes (commodity_id -> edges):")
+        for comm_id, edges in routes.items():
+            edges_str = ", ".join(f"({e.src.row},{e.src.col})->({e.dst.row},{e.dst.col})" for e in edges)
+            debug_print(f"  Commodity {comm_id}: [{edges_str}]")
+
+        debug_print("\n[RESULT] tensor_edge_to_commodity_id:")
+        for tensor_edge, comm_id in (gi.tensor_edge_to_commodity_id or {}).items():
+            debug_print(f"  {tensor_edge} -> Commodity {comm_id}")
+
+        debug_print("=" * 70)
+
+        return result
 
 
 # ============================================================
@@ -1584,21 +1617,28 @@ class JointPnRRoutingResult:
         self._paths = {}
         self._noc_paths = noc_paths
 
+        # Get TensorEdge -> ILP commodity_id map
+        tensor_edge_to_commodity_id = pnr_result.tensor_edge_to_commodity_id or {}
+
         # Build commodity lookup by id
         for commodity in commodities:
             self._commodities[commodity.id] = commodity
 
-            # Check if this commodity has a route from ILP (TensorEdge commodities)
-            # Instruction commodities won't have ILP routes - use direct path
-            if pnr_result.routes and commodity.id in pnr_result.routes:
-                edges = pnr_result.routes[commodity.id]
-                path = self._edges_to_path(commodity.source, edges)
-                self._paths[commodity.id] = path
-            else:
-                # No ILP route - use direct path (for instruction paths or fallback)
-                # For instruction paths, generate continuous horizontal path
-                path = self._generate_direct_path(commodity.source, commodity.destination)
-                self._paths[commodity.id] = path
+            # Get edge from HWCommodity metadata: (edge, mapping_info)
+            edge = commodity.metadata[0] if commodity.metadata else None
+
+            # TensorEdge commodities: use map to find ILP commodity_id and get route
+            if edge is not None and edge in tensor_edge_to_commodity_id:
+                ilp_commodity_id = tensor_edge_to_commodity_id[edge]
+                if pnr_result.routes and ilp_commodity_id in pnr_result.routes:
+                    edges = pnr_result.routes[ilp_commodity_id]
+                    path = self._edges_to_path(commodity.source, edges)
+                    self._paths[commodity.id] = path
+                    continue
+
+            # Instruction path (NodeID) or fallback: use direct path
+            path = self._generate_direct_path(commodity.source, commodity.destination)
+            self._paths[commodity.id] = path
         
         # dump paths
         for cid, path in self._paths.items():
@@ -1607,6 +1647,8 @@ class JointPnRRoutingResult:
 
     def _edges_to_path(self, start: Coord, edges: List[Edge]) -> List[Coord]:
         """Convert list of edges to path (list of coords)"""
+        debug_print(f"[JointPnRRoutingResult._edges_to_path] Converting {len(edges)} edges to path from start ({start.row}, {start.col})")
+
         if not edges:
             return [start]
 
@@ -1840,6 +1882,13 @@ def construct_noc_paths_from_pnr_results(
         tensor_edge_list = tensor_edge_list_dict.get(func_name, [])
         hw_node_map = config.HWNodeMap
 
+        # Build node_id -> Commodity mapping to check node types
+        commodity_by_src = {}
+        commodity_by_dest = {}
+        for commodity in pnr_result.commodities:
+            commodity_by_src[commodity.source_node_id] = commodity
+            commodity_by_dest[commodity.dest_node_id] = commodity
+
         for tensor_edge in tensor_edge_list:
             src_tensor_id = tensor_edge.src_id
             dst_tensor_id = tensor_edge.dst_id
@@ -1863,34 +1912,52 @@ def construct_noc_paths_from_pnr_results(
                 src_hwnode = hw_node_map.get(const_inner_id)
                 dst_hwnode = hw_node_map.get(dst_graph_id)
 
-                if src_hwnode is not None and dst_hwnode is not None:
-                    if isinstance(dst_hwnode, tuple):
-                        dst_hwnode = dst_hwnode[split_idx] if split_idx is not None else dst_hwnode[0]
-                        split_idx = None
-                    noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
+                if src_hwnode is None:
+                    raise KeyError(f"const_inner_id {const_inner_id} not found in HWNodeMap")
+                if dst_hwnode is None:
+                    raise KeyError(f"dst_graph_id {dst_graph_id} not found in HWNodeMap")
+
+                if isinstance(dst_hwnode, tuple):
+                    dst_hwnode = dst_hwnode[split_idx] if split_idx is not None else dst_hwnode[0]
+                    split_idx = None
+                noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
                 continue
 
             # Get graph node IDs (outer ID for composites)
             src_graph_id = getOuterNodeID(src_gid)
             dst_graph_id = getOuterNodeID(dst_gid)
 
-            # Look up in mapping
-            src_coord = pnr_result.mapping.get(src_graph_id)
-            dst_coord = pnr_result.mapping.get(dst_graph_id)
+            # Check node types from commodities
+            src_commodity = commodity_by_src.get(src_graph_id)
+            dst_commodity = commodity_by_dest.get(dst_graph_id)
 
-            if src_coord is None or dst_coord is None:
-                # Node not mapped (could be input var, constant, or funcout)
-                # Try to get from HWNodeMap as fallback
-                src_hwnode = hw_node_map.get(src_graph_id)
-                dst_hwnode = hw_node_map.get(dst_graph_id)
+            src_is_var = (src_commodity is not None and src_commodity.source_type == NodeType.VAR)
+            src_is_const = (src_commodity is not None and src_commodity.source_type == NodeType.CONST)
+            dst_is_funcout = (dst_commodity is not None and dst_commodity.dest_type == NodeType.FUNC_OUT)
 
-                if src_hwnode is not None and dst_hwnode is not None:
-                    # Handle split index for tuple hwnode
-                    if isinstance(dst_hwnode, tuple):
-                        dst_hwnode = dst_hwnode[split_idx] if split_idx is not None else dst_hwnode[0]
-                        split_idx = None
-                    noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
-                continue
+            # Look up source coordinate based on node type
+            if src_is_var:
+                src_coord = pnr_result.var_to_inode.get(src_graph_id)
+                if src_coord is None:
+                    raise KeyError(f"VAR src_graph_id {src_graph_id} not found in var_to_inode")
+            elif src_is_const:
+                src_coord = pnr_result.const_to_inode.get(src_graph_id)
+                if src_coord is None:
+                    raise KeyError(f"CONST src_graph_id {src_graph_id} not found in const_to_inode")
+            else:
+                src_coord = pnr_result.mapping.get(src_graph_id)
+                if src_coord is None:
+                    raise KeyError(f"src_graph_id {src_graph_id} not found in mapping")
+
+            # Look up destination coordinate based on node type
+            if dst_is_funcout:
+                dst_coord = pnr_result.funcout_to_inode.get(dst_graph_id)
+                if dst_coord is None:
+                    raise KeyError(f"FUNC_OUT dst_graph_id {dst_graph_id} not found in funcout_to_inode")
+            else:
+                dst_coord = pnr_result.mapping.get(dst_graph_id)
+                if dst_coord is None:
+                    raise KeyError(f"dst_graph_id {dst_graph_id} not found in mapping")
 
             # Convert Coord to NodeID
             src_hwnode = coord_to_node_id(src_coord)
@@ -1907,147 +1974,3 @@ def construct_noc_paths_from_pnr_results(
         debug_print(f"[construct_noc_paths] {func_name}: {len(noc_paths[func_name])} entries")
 
     return noc_paths
-
-
-# ============================================================
-# Testing
-# ============================================================
-
-if __name__ == "__main__":
-    def run_tests():
-        all_passed = True
-
-        print("=" * 70)
-        print("Test 1: Basic topology")
-        print("=" * 70)
-
-        topo = MeshTopology(4, 5)
-        print(f"All nodes: {len(topo.get_all_nodes())}")
-        print(f"IMCE nodes: {len(topo.get_imce_nodes())}")
-        print(f"INODE nodes: {len(topo.get_inode_nodes())}")
-        print(f"All edges: {len(topo.get_all_edges())}")
-
-        assert len(topo.get_all_nodes()) == 20
-        assert len(topo.get_imce_nodes()) == 16
-        assert len(topo.get_inode_nodes()) == 4
-        print("✓ PASS: Topology creation works")
-
-        print("\n" + "=" * 70)
-        print("Test 2: Commodity congestion groups")
-        print("=" * 70)
-
-        k1 = Commodity(0, 'src', 'dst', NodeType.CALL, NodeType.CALL, 'data')
-        k2 = Commodity(1, 'src', 'dst', NodeType.CALL, NodeType.CALL, 'weight')
-        k3 = Commodity(2, 'src', 'dst', NodeType.VAR, NodeType.CALL, 'var')
-
-        assert k1.get_congestion_group() == 'data'
-        assert k2.get_congestion_group() == 'const'
-        assert k3.get_congestion_group() == 'data'
-        print("✓ PASS: Congestion group classification")
-
-        print("\n" + "=" * 70)
-        print("Test 3: Build and solve ILP with mock graph")
-        print("=" * 70)
-
-        # Create a simple mock graph info
-        nodes = {
-            'call1': GraphNode('call1', NodeType.CALL, topo_order=1),
-            'call2': GraphNode('call2', NodeType.CALL, topo_order=2),
-            'var1': GraphNode('var1', NodeType.VAR, topo_order=0),
-            'func_out': GraphNode('func_out', NodeType.FUNC_OUT, topo_order=3),
-        }
-
-        commodities = [
-            Commodity(0, 'var1', 'call1', NodeType.VAR, NodeType.CALL, 'data'),
-            Commodity(1, 'call1', 'call2', NodeType.CALL, NodeType.CALL, 'data'),
-            Commodity(2, 'call2', 'func_out', NodeType.CALL, NodeType.FUNC_OUT, 'data'),
-        ]
-
-        graph_info = GraphInfo(
-            nodes=nodes,
-            commodities=commodities,
-            call_nodes=['call1', 'call2'],
-            split_nodes=[],
-            concat_nodes=[],
-            var_nodes=['var1'],
-            const_nodes=[],
-            funcout_nodes=['func_out'],
-        )
-
-        # Create solver and set graph info
-        solver = JointPnRILP()
-        solver.graph_info = graph_info
-
-        # Build and solve
-        solver._build_model()
-        result = solver._solve()
-
-        print(f"  Solver status: {result.solver_status}")
-        print(f"  Success: {result.success}")
-        if result.success:
-            print(f"  Mapping: {result.mapping}")
-            print(f"  Routes: {len(result.routes)} commodities")
-            print(f"  Max congestion: {result.max_congestion}")
-            print(f"  Total hops: {result.total_hops}")
-            print("✓ PASS: ILP solved successfully")
-        else:
-            print("✗ FAIL: ILP failed to solve")
-            all_passed = False
-
-        print("\n" + "=" * 70)
-        print("Test 4: Larger graph with multiple data flows")
-        print("=" * 70)
-
-        # 4 call nodes in a chain
-        nodes2 = {
-            'v1': GraphNode('v1', NodeType.VAR, topo_order=0),
-            'c1': GraphNode('c1', NodeType.CALL, topo_order=1),
-            'c2': GraphNode('c2', NodeType.CALL, topo_order=2),
-            'c3': GraphNode('c3', NodeType.CALL, topo_order=3),
-            'c4': GraphNode('c4', NodeType.CALL, topo_order=4),
-            'fo': GraphNode('fo', NodeType.FUNC_OUT, topo_order=5),
-        }
-
-        commodities2 = [
-            Commodity(0, 'v1', 'c1', NodeType.VAR, NodeType.CALL, 'data'),
-            Commodity(1, 'c1', 'c2', NodeType.CALL, NodeType.CALL, 'data'),
-            Commodity(2, 'c2', 'c3', NodeType.CALL, NodeType.CALL, 'data'),
-            Commodity(3, 'c3', 'c4', NodeType.CALL, NodeType.CALL, 'data'),
-            Commodity(4, 'c4', 'fo', NodeType.CALL, NodeType.FUNC_OUT, 'data'),
-        ]
-
-        graph_info2 = GraphInfo(
-            nodes=nodes2,
-            commodities=commodities2,
-            call_nodes=['c1', 'c2', 'c3', 'c4'],
-            split_nodes=[],
-            concat_nodes=[],
-            var_nodes=['v1'],
-            const_nodes=[],
-            funcout_nodes=['fo'],
-        )
-
-        solver2 = JointPnRILP()
-        solver2.graph_info = graph_info2
-        solver2._build_model()
-        result2 = solver2._solve()
-
-        print(f"  Solver status: {result2.solver_status}")
-        if result2.success:
-            print(f"  Placed {len(result2.mapping)} call nodes")
-            print(f"  Total hops: {result2.total_hops}")
-            print("✓ PASS: Larger graph solved")
-        else:
-            print("✗ FAIL: Larger graph failed")
-            all_passed = False
-
-        print("\n" + "=" * 70)
-        if all_passed:
-            print("All tests PASSED!")
-        else:
-            print("Some tests FAILED!")
-        print("=" * 70)
-
-        return all_passed
-
-    run_tests()
