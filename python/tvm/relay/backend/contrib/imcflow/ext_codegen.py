@@ -36,6 +36,7 @@ ALIGNMENT_BYTES = 32
 
 # Polling configuration
 USE_POLLING = True
+MAX_POLL_COUNT = 20000  # Maximum polling iterations before auto-termination
 
 def getInnerNodeID(graph_node_id):
   if isinstance(graph_node_id, tuple):
@@ -325,6 +326,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     return ("""
 // Poll until ImcFlow returns to IDLE state
 #define POLL_LOG_INTERVAL 1000
+#define MAX_POLL_COUNT 20000
 static void wait_for_idle(volatile uint32_t* npu_pointer) {
   uint32_t poll_count = 0;
   uint32_t state;
@@ -341,7 +343,14 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
     poll_count++;
 
-    // Log progress every 100k polls for debugging
+    // Check for timeout
+    if (poll_count >= MAX_POLL_COUNT) {
+      fprintf(stderr,"[POLLING ERROR] Timeout after %u polls (state: 0x%x)\\n", poll_count, state);
+      fprintf(stderr,"[POLLING ERROR] ImcFlow hardware appears to be stuck. Terminating.\\n");
+      exit(1);
+    }
+
+    // Log progress every 1000 polls for debugging
     if (poll_count % POLL_LOG_INTERVAL == 0) {
       fprintf(stderr,"[POLLING] Still waiting... (poll count: %u, current state: 0x%x)\\n",
              poll_count, state);
