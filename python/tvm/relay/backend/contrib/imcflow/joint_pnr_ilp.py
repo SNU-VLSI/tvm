@@ -1596,7 +1596,9 @@ class JointPnRRoutingResult:
                 self._paths[commodity.id] = path
             else:
                 # No ILP route - use direct path (for instruction paths or fallback)
-                self._paths[commodity.id] = [commodity.source, commodity.destination]
+                # For instruction paths, generate continuous horizontal path
+                path = self._generate_direct_path(commodity.source, commodity.destination)
+                self._paths[commodity.id] = path
         
         # dump paths
         for cid, path in self._paths.items():
@@ -1629,6 +1631,56 @@ class JointPnRRoutingResult:
                 current = next_node
             else:
                 break
+
+        return path
+
+    def _generate_direct_path(self, source: Coord, destination: Coord) -> List[Coord]:
+        """Generate a continuous direct path from source to destination.
+
+        For instruction paths (INODE to IMCE), this generates a horizontal path
+        where only the column index changes. The path is continuous with each
+        step incrementing the column by 1.
+
+        Example: (0,0) to (0,3) -> [(0,0), (0,1), (0,2), (0,3)]
+
+        Args:
+            source: Starting coordinate
+            destination: Ending coordinate
+
+        Returns:
+            List of coordinates forming a continuous path
+        """
+        path = [source]
+
+        # Assume horizontal movement (same row, columns change)
+        if source.row == destination.row:
+            # Same row - horizontal path
+            col_start = source.col
+            col_end = destination.col
+            step = 1 if col_end > col_start else -1
+            for col in range(col_start + step, col_end + step, step):
+                path.append(Coord(source.row, col))
+        elif source.col == destination.col:
+            # Same column - vertical path
+            row_start = source.row
+            row_end = destination.row
+            step = 1 if row_end > row_start else -1
+            for row in range(row_start + step, row_end + step, step):
+                path.append(Coord(row, source.col))
+        else:
+            # Different row and column - use XY routing (horizontal first, then vertical)
+            # Horizontal part
+            col_start = source.col
+            col_end = destination.col
+            step = 1 if col_end > col_start else -1
+            for col in range(col_start + step, col_end + step, step):
+                path.append(Coord(source.row, col))
+            # Vertical part
+            row_start = source.row
+            row_end = destination.row
+            step = 1 if row_end > row_start else -1
+            for row in range(row_start + step, row_end + step, step):
+                path.append(Coord(row, destination.col))
 
         return path
 

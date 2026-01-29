@@ -31,6 +31,7 @@ from tvm.contrib.imcflow import (
     DataBlock,
 )
 from tvm.relay.op.contrib.imcflow import CustomIDToName, CustomIDToNode
+from tvm.relay.backend.contrib.imcflow.transform import debug_print
 
 from .joint_pnr_ilp import (
     Coord,
@@ -683,6 +684,11 @@ class PolicyTableGenerator:
                             self.router_entry_list[edge] = []
                         self.router_entry_list[edge].append((node_id, entry_addr))
                     break
+        
+        # dump
+        for edge, entries in self.router_entry_list.items():
+            entry_str = ", ".join(f"({nid.name}, {addr})" for nid, addr in entries)
+            debug_print(f"[RouterEntry] Edge: {edge}, Entries: {entry_str}")
 
     def get_router_entries(self) -> Dict[Any, List[Tuple[NodeID, int]]]:
         """Get recorded router entries for EdgeInfo generation."""
