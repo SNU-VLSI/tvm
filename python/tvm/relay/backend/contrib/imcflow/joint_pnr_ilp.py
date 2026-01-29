@@ -58,8 +58,17 @@ def debug_print(*args, **kwargs):
 
 
 # ============================================================
-# Data Structures (reuse patterns from mcf_router.py)
+# Data Structures
 # ============================================================
+
+class Direction(Enum):
+    """Direction in 2D mesh NoC"""
+    NORTH = "North"
+    SOUTH = "South"
+    EAST = "East"
+    WEST = "West"
+    LOCAL = "Local"
+
 
 @dataclass
 class Coord:
@@ -96,6 +105,18 @@ class Edge:
     def __repr__(self):
         return f"{self.src} -> {self.dst}"
 
+    def get_direction(self) -> Direction:
+        """Get direction of this edge"""
+        if self.src.col < self.dst.col:
+            return Direction.EAST
+        elif self.src.col > self.dst.col:
+            return Direction.WEST
+        elif self.src.row < self.dst.row:
+            return Direction.SOUTH
+        elif self.src.row > self.dst.row:
+            return Direction.NORTH
+        return Direction.LOCAL
+
 
 @dataclass
 class HWCommodity:
@@ -115,6 +136,49 @@ class HWCommodity:
 
     def __repr__(self):
         return f"HWCommodity({self.id}, {self.source} -> {self.destination})"
+
+
+@dataclass
+class RoutingResult:
+    """Result of routing a single commodity"""
+    commodity: HWCommodity
+    path: List[Coord]  # List of coordinates from source to destination
+    edges: List[Edge]  # List of edges used
+
+    def get_path_length(self) -> int:
+        return len(self.edges)
+
+
+@dataclass
+class BaseRoutingResult:
+    """Base class for routing results from any router implementation.
+
+    All router implementations should return a result that inherits from this class.
+    Provides common interface and helper methods for Phase 2 (Tree Builder).
+    """
+    routes: Dict[int, RoutingResult]  # commodity_id -> routing result
+
+    def get_path(self, commodity_id: int) -> List[Coord]:
+        """Get the path for a specific commodity."""
+        if commodity_id not in self.routes:
+            raise KeyError(f"Commodity {commodity_id} not found in routes")
+        return self.routes[commodity_id].path
+
+    def get_edges(self, commodity_id: int) -> List[Edge]:
+        """Get the edges used by a specific commodity."""
+        if commodity_id not in self.routes:
+            raise KeyError(f"Commodity {commodity_id} not found in routes")
+        return self.routes[commodity_id].edges
+
+    def get_commodity(self, commodity_id: int) -> HWCommodity:
+        """Get the commodity object by id."""
+        if commodity_id not in self.routes:
+            raise KeyError(f"Commodity {commodity_id} not found in routes")
+        return self.routes[commodity_id].commodity
+
+    def get_all_commodity_ids(self) -> List[int]:
+        """Get all commodity ids."""
+        return list(self.routes.keys())
 
 
 @dataclass
@@ -143,28 +207,32 @@ class MeshTopology:
         """Get INODEs for function outputs (rows 2, 3)"""
         return [Coord(2, 0), Coord(3, 0)]
 
-    def get_neighbors(self, coord: Coord) -> List[Coord]:
-        """Get valid neighbors of a node"""
+    def get_neighbors(self, coord: Coord) -> List[Tuple[Coord, Direction]]:
+        """Get valid neighbors of a node with their directions"""
         neighbors = []
         # North
         if coord.row > 0:
-            neighbors.append(Coord(coord.row - 1, coord.col))
+            neighbors.append((Coord(coord.row - 1, coord.col), Direction.NORTH))
         # South
         if coord.row < self.rows - 1:
-            neighbors.append(Coord(coord.row + 1, coord.col))
+            neighbors.append((Coord(coord.row + 1, coord.col), Direction.SOUTH))
         # West
         if coord.col > 0:
-            neighbors.append(Coord(coord.row, coord.col - 1))
+            neighbors.append((Coord(coord.row, coord.col - 1), Direction.WEST))
         # East
         if coord.col < self.cols - 1:
-            neighbors.append(Coord(coord.row, coord.col + 1))
+            neighbors.append((Coord(coord.row, coord.col + 1), Direction.EAST))
         return neighbors
+
+    def is_valid_coord(self, coord: Coord) -> bool:
+        """Check if coordinate is within mesh bounds"""
+        return 0 <= coord.row < self.rows and 0 <= coord.col < self.cols
 
     def get_all_edges(self) -> List[Edge]:
         """Get all directed edges in the mesh"""
         edges = []
         for node in self.get_all_nodes():
-            for neighbor in self.get_neighbors(node):
+            for neighbor, _direction in self.get_neighbors(node):
                 edges.append(Edge(node, neighbor))
         return edges
 
@@ -1256,6 +1324,11 @@ class JointPnRILP:
         """Solve ILP and extract results"""
         debug_print(f"[JointPnRILP] Solving ILP...")
 
+        # Dump ILP to file for debugging
+        if _is_debug_enabled():
+            self.prob.writeLP("/tmp/joint_pnr_debug.lp")
+            debug_print(f"[JointPnRILP] Dumped ILP to /tmp/joint_pnr_debug.lp")
+
         # Solve
         solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=120)
         status = self.prob.solve(solver)
@@ -1478,6 +1551,11 @@ def extract_hw_commodities_from_noc_paths(
 
     debug_print(f"[extract_hw_commodities] Extracted {len(commodities)} commodities "
                f"from {len(noc_paths)} noc_paths entries")
+    
+    # dump hw commodities
+    for c in commodities:
+        debug_print(f"[HWCommodity] ID: {c.id}, Source: ({c.source.row}, {c.source.col}), "
+                   f"Destination: ({c.destination.row}, {c.destination.col}), Metadata: {c.metadata}")
 
     return commodities
 
@@ -1519,6 +1597,11 @@ class JointPnRRoutingResult:
             else:
                 # No ILP route - use direct path (for instruction paths or fallback)
                 self._paths[commodity.id] = [commodity.source, commodity.destination]
+        
+        # dump paths
+        for cid, path in self._paths.items():
+            path_str = " -> ".join(f"({c.row},{c.col})" for c in path)
+            debug_print(f"[RoutingResult] Commodity ID: {cid}, Path: {path_str}")
 
     def _edges_to_path(self, start: Coord, edges: List[Edge]) -> List[Coord]:
         """Convert list of edges to path (list of coords)"""

@@ -26,13 +26,11 @@ from .policy_table_builder import (
 )
 
 # Re-export types for backward compatibility
-from .mcf_router import (
-    BaseRoutingResult,
-    RoutingResult,
-    Commodity,
+from .joint_pnr_ilp import (
     Coord,
     Edge,
     Direction,
+    HWCommodity,
 )
 
 __all__ = [

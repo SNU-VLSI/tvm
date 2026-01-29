@@ -32,13 +32,10 @@ from tvm.contrib.imcflow import (
 )
 from tvm.relay.op.contrib.imcflow import CustomIDToName, CustomIDToNode
 
-from .mcf_router import (
-    BaseRoutingResult,
-    RoutingResult,
-    Commodity,
+from .joint_pnr_ilp import (
     Coord,
-    Edge,
     Direction,
+    HWCommodity,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,7 +186,7 @@ class PathTreeBuilder:
         except (TypeError, ValueError, AttributeError):
             return None
 
-    def build(self, routing_result: BaseRoutingResult) -> PathTreeBuildResult:
+    def build(self, routing_result: Any) -> PathTreeBuildResult:
         """Build path trees from routing results.
 
         Args:
@@ -211,7 +208,7 @@ class PathTreeBuilder:
 
     def _group_commodities(
         self,
-        routing_result: BaseRoutingResult
+        routing_result: Any
     ) -> Dict[Tuple[Coord, Any], List[int]]:
         """Group commodities by (source, tensor_id)."""
         groups: Dict[Tuple[Coord, Any], List[int]] = {}
@@ -229,7 +226,7 @@ class PathTreeBuilder:
 
     def _build_tree_for_group(
         self,
-        routing_result: BaseRoutingResult,
+        routing_result: Any,
         source: Coord,
         tensor_id: Any,
         commodity_ids: List[int]
@@ -256,7 +253,7 @@ class PathTreeBuilder:
         root: PathTreeNode,
         path: List[Coord],
         commodity_id: int,
-        commodity: Commodity
+        commodity: HWCommodity
     ) -> None:
         """Add a single commodity's path to the tree.
 
@@ -305,7 +302,7 @@ class PathTreeBuilder:
             return Direction.NORTH
         return Direction.LOCAL
 
-    def _extract_destination_info(self, commodity: Commodity) -> Optional[Dict[str, Any]]:
+    def _extract_destination_info(self, commodity: HWCommodity) -> Optional[Dict[str, Any]]:
         """Extract destination-specific info from commodity metadata.
 
         This includes split_idx (chunk_index) and ksel for the destination node.
@@ -720,7 +717,7 @@ class PolicyTableBuilder:
 
     def build(
         self,
-        routing_result: BaseRoutingResult,
+        routing_result: Any,
         noc_paths: Dict,
         func_name: str,
     ) -> Dict[NodeID, List[Dict]]:
@@ -772,7 +769,7 @@ class PolicyTableBuilder:
 # =============================================================================
 
 def build_path_trees(
-    routing_result: BaseRoutingResult,
+    routing_result: Any,
     tensor_id_extractor=None
 ) -> PathTreeBuildResult:
     """Convenience function to build path trees from routing results.

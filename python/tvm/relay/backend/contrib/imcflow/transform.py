@@ -5494,20 +5494,8 @@ class MemoryAllocator:
           func_info = imcflow_func_map[gv.name_hint]
           self.run_(mod, func_info.func_node, gv.name_hint, ttype_map[gv.name_hint])
 
-# PolicyTableGenerator is now in separate modules:
-# - routing_pipeline.py: 3-phase pipeline with pluggable routers (PolicyTableGenerator)
-# - mcf_router.py: MCF (ILP-based) router
-# - xy_router.py: XY/YX dimension-ordered router
-#
-# Import for use:
-from tvm.relay.backend.contrib.imcflow.routing_pipeline import (
-    PolicyTableGenerator,
-    RoutingPipeline,
-    BaseRouter,
-    create_mcf_router,
-    create_xy_router,
-    create_policy_table_generator,
-)
+# Policy table generation is now handled by joint_pnr_ilp.py
+# The old routing_pipeline.py, mcf_router.py, xy_router.py have been removed.
 
 
 class TensorPathVisualizer:
