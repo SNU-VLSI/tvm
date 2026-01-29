@@ -1148,9 +1148,12 @@ class JointPnRILP:
                             f"L3_var_src_not_{k.id}_{v.row}_{v.col}"
                         )
 
-            # L4: Func_out dest (fixed to inode)
+            # L4: Func_out dest (fixed to inode from funcout_to_inode)
             if dst_node.node_type == NodeType.FUNC_OUT:
-                funcout_inode = Coord(3 if hash(k.dest_node_id) % 2 == 0 else 2, 0)
+                funcout_inode = self.graph_info.funcout_to_inode.get(k.dest_node_id)
+                if funcout_inode is None:
+                    raise KeyError(f"FUNC_OUT dest_node_id {k.dest_node_id} not found in funcout_to_inode")
+                debug_print(f"[L4] Commodity {k.id}: FUNC_OUT {k.dest_node_id} -> INODE ({funcout_inode.row}, {funcout_inode.col})")
                 for v in self.all_nodes:
                     if v == funcout_inode:
                         self.prob += (
