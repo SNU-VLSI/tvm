@@ -294,15 +294,15 @@ class RecvBlockInterleaved(InodeCodeBlock):
       active_infos = [x for x in info_list if x['recv_count'] > current_base]
 
       # Generate loop for this interval
+      loop_body = SequentialBlock()
       for x in active_infos:
         var = UniqueVar("recv_offset_address", dtype="int")
-        self.body.add(TextBlock(f"{var} = {x['offset']};"))
-        self.body.add(SimpleFor(duration,
-            lambda iter, base=current_base, offset_var=var, fid=x['fid']:
-              f"__builtin_INODE_RECV({offset_var} + ({f'({base} + {iter})' if base > 0 else iter})*32, 0, 0, {fid});"))
-
+        loop_body.add(TextBlock(f"{var} = {x['offset']};"))
+        loop_body.add(TextBlock(f"__builtin_INODE_RECV({var} + ({f'({current_base} + {iter})' if current_base > 0 else iter})*32, 0, 0, {x['fid']});"))
         # Add sync after each recv in interleaved block
         self._add_sync_for_edge(x['block'])
+
+      self.body.add(SimpleFor(duration, TextBlock(loop_body.render())))
 
       current_base = limit
 

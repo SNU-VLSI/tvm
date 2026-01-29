@@ -40,6 +40,12 @@ from tvm.relay.op.contrib.imcflow import HashToCustomID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.micro import export_model_library_format
 from tvm.contrib.relay_viz import RelayVisualizer, DotPlotter, DotVizParser
+from tvm.relay.backend.contrib.imcflow.joint_pnr_ilp import (
+    run_joint_pnr_and_update_config,
+    build_policy_tables_from_pnr_result,
+    construct_noc_paths_from_pnr_results,
+)
+from tvm.relay.backend.contrib.imcflow.policy_table_builder import PolicyTableBuilder
 
 def printModel(result_dir, mod, param_dict, mod_name):
   RelayVisualizer(
@@ -78,6 +84,7 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
         Tuple of (transformed_mod, param_dict)
     """
     DevConfig().clear()
+    os.environ['IMCFLOW_EVAL_DIR'] = output_dir
 
     def _print(name):
         if save_intermediate:
@@ -174,13 +181,13 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
 
     _print("15_with_mappings")
 
-    # Step 16: Node mapping
-    imcflow_transform.NodeMapper().run(mod)
-    if save_intermediate:
-        with open(f"{output_dir}/hw_node_map.txt", "w") as f:
-            pprint.pprint(DevConfig().HWNodeMap, stream=f)
+    # ========================================================================
+    # NEW PIPELINE: Joint PnR ILP Integration
+    # ========================================================================
 
-    # Step 17: Construct tensor edge list
+    # Step 16a: Construct tensor edge list FIRST (provides input for Joint PnR)
+    # Note: TensorEdgeList is constructed from logical edges, does NOT require HWNodeMap
+    print("[TensorEdgeList] Constructing tensor edge list...")
     imcflow_transform.constructTensorEdgeList(mod)
     if save_intermediate:
         with open(f"{output_dir}/tensor_edge_list.txt", "w") as f:
@@ -189,21 +196,39 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
                 for path in paths:
                     print(path, file=f)
 
-    # Step 18: Active IMCE
-    imcflow_transform.constructActiveIMCEDict(mod)
-    if save_intermediate:
-        with open(f"{output_dir}/active_imce_list.txt", "w") as f:
-            pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
-
-    # Step 19: Tensor ID to edge
+    # Step 16b: Tensor ID to edge mapping
     imcflow_transform.constructTensorIDToTensorEdgeDict()
     if save_intermediate:
         with open(f"{output_dir}/tensor_id_to_edge.txt", "w") as f:
             for key, paths in DevConfig().TensorIDtoEdge.items():
                 print(f"{key} : {paths}", file=f)
 
-    # Step 20: NoC paths
-    imcflow_transform.constructNoCPathDict(mod)
+    # Step 17: Joint PnR ILP (mapping + routing simultaneously)
+    print("[Joint PnR] Running Joint Place & Route ILP...")
+    pnr_results = run_joint_pnr_and_update_config(mod, DevConfig().TensorEdgeListDict)
+    if save_intermediate:
+        with open(f"{output_dir}/hw_node_map.txt", "w") as f:
+            pprint.pprint(DevConfig().HWNodeMap, stream=f)
+        with open(f"{output_dir}/joint_pnr_results.txt", "w") as f:
+            for func_name, result in pnr_results.items():
+                print(f"Function: {func_name}", file=f)
+                print(f"  Success: {result.success}", file=f)
+                print(f"  Status: {result.solver_status}", file=f)
+                print(f"  Max congestion: {result.max_congestion}", file=f)
+                print(f"  Total hops: {result.total_hops}", file=f)
+                print(f"  Mappings: {len(result.mapping)}", file=f)
+                print(f"  Routes: {len(result.routes)}", file=f)
+                print("", file=f)
+
+    # Step 18: Active IMCE (requires HWNodeMap from Joint PnR)
+    imcflow_transform.constructActiveIMCEDict(mod)
+    if save_intermediate:
+        with open(f"{output_dir}/active_imce_list.txt", "w") as f:
+            pprint.pprint(DevConfig().ActiveIMCEPerFunc, stream=f)
+
+    # Step 19: NoCPathDict from Joint PnR results (replaces legacy constructNoCPathDict)
+    # Uses Joint PnR mapping instead of getInnerNodeID() lookup (works with composite nodes)
+    construct_noc_paths_from_pnr_results(pnr_results, DevConfig().TensorEdgeListDict)
     if save_intermediate:
         with open(f"{output_dir}/noc_paths.txt", "w") as f:
             for key, paths in DevConfig().NoCPaths.items():
@@ -211,14 +236,24 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
                 for k, v in paths.items():
                     print(k, v, file=f)
 
-    # Step 21: Memory allocation
+    # Step 20: Memory allocation (tensor memory)
     imcflow_transform.MemoryAllocator().run(mod, ttype_map)
     if save_intermediate:
         with open(f"{output_dir}/mem_layout.txt", "w") as f:
             pprint.pprint(DevConfig().MemLayout, stream=f)
 
-    # Step 22: Policy table generation
-    imcflow_transform.PolicyTableGenerator(DevConfig().NoCPaths).run(mod)
+    # Step 21: Policy table generation
+    # Uses Joint ILP routes via PolicyTableBuilder (MCF router removed)
+    # noc_paths contains both TensorEdge paths and instruction paths (NodeID keys)
+    for func_name, pnr_result in pnr_results.items():
+        if not pnr_result.success:
+            raise RuntimeError(f"Joint PnR failed for {func_name}: {pnr_result.solver_status}")
+        noc_paths = DevConfig().NoCPaths.get(func_name, {})
+        build_policy_tables_from_pnr_result(
+            pnr_result,
+            func_name,
+            noc_paths,
+        )
     if save_intermediate:
         with open(f"{output_dir}/policy_table.txt", "w") as f:
             f.write(DevConfig().format_policy_table())

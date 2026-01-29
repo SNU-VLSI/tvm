@@ -6,6 +6,8 @@ multi-node hardware. Each send-recv pair (including multicasts) is assigned
 a unique UUID, and all participating nodes synchronize after send/recv operations.
 """
 
+import tvm
+from tvm import relay
 from typing import List, Dict, Set, Tuple
 from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
@@ -203,9 +205,14 @@ class SendRecvPairManager:
         """Get hardware node ID for a tensor ID"""
         gid = tensor_id.graph_node_id
         if isinstance(gid, tuple):
-            gid = gid[-1]  # Use inner ID for composite calls
-        hw_node = DevConfig().get_hw_node(gid)
-        return hw_node
+            node = CustomIDToNode()[gid[-1]]
+            if isinstance(node, relay.Constant):
+                return DevConfig().get_hw_node(gid[1]) # Constant node - inode
+            else:
+                return DevConfig().get_hw_node(gid[0]) # other nodes in composite -> imce
+        else:
+          hw_node = DevConfig().get_hw_node(gid)
+          return hw_node
 
     def get_pair(self, edge: TensorEdge, needs_sync=True) -> SendRecvPair:
         """Get the send-recv pair for a given edge
