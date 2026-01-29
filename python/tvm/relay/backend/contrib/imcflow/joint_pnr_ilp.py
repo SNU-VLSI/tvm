@@ -927,6 +927,8 @@ class JointPnRILP:
         Returns:
             JointPnRResult with mapping and routes
         """
+        debug_print(f"[JointPnRILP] Running Joint PnR for function: {func_name}")
+
         # Phase 1: Extract graph info using GraphExtractor
         # - Nodes: extracted from relay function (composite = 1 node)
         # - Commodities: extracted from TensorEdgeList (robust, validated)
@@ -1132,10 +1134,12 @@ class JointPnRILP:
                             f"L2_dst_not_inode_{k.id}_{v.row}_{v.col}"
                         )
 
-            # L3: Var source (fixed to inode)
+            # L3: Var source (fixed to inode from var_to_inode)
             if src_node.node_type == NodeType.VAR:
-                # Assign to INODE based on hash (round-robin between row 0 and 1)
-                var_inode = Coord(0 if hash(k.source_node_id) % 2 == 0 else 1, 0)
+                var_inode = self.graph_info.var_to_inode.get(k.source_node_id)
+                if var_inode is None:
+                    raise KeyError(f"VAR source_node_id {k.source_node_id} not found in var_to_inode")
+                debug_print(f"[L3] Commodity {k.id}: VAR {k.source_node_id} -> INODE ({var_inode.row}, {var_inode.col})")
                 for v in self.all_nodes:
                     if v == var_inode:
                         self.prob += (
@@ -1637,20 +1641,18 @@ class JointPnRRoutingResult:
                     edges = pnr_result.routes[ilp_commodity_id]
                     path = self._edges_to_path(commodity.source, edges)
                     self._paths[commodity.id] = path
+                    debug_print(f"[JointPnRRoutingResult.__init__] edge:{edge}, gcomm_id:{ilp_commodity_id}, hcomm_id:{commodity.id}, path:{path}")
                     continue
 
             # Instruction path (NodeID) or fallback: use direct path
             path = self._generate_direct_path(commodity.source, commodity.destination)
             self._paths[commodity.id] = path
+            debug_print(f"[JointPnRRoutingResult.__init__] inst path for hcomm_id:{commodity.id}, path:{path}")
         
-        # dump paths
-        for cid, path in self._paths.items():
-            path_str = " -> ".join(f"({c.row},{c.col})" for c in path)
-            debug_print(f"[RoutingResult] Commodity ID: {cid}, Path: {path_str}")
-
     def _edges_to_path(self, start: Coord, edges: List[Edge]) -> List[Coord]:
         """Convert list of edges to path (list of coords)"""
-        debug_print(f"[JointPnRRoutingResult._edges_to_path] Converting {len(edges)} edges to path from start ({start.row}, {start.col})")
+        debug_print(f"[JointPnRRoutingResult._edges_to_path]:")
+        debug_print(f"  edges:{edges}")
 
         if not edges:
             return [start]
@@ -1676,7 +1678,8 @@ class JointPnRRoutingResult:
                 current = next_node
             else:
                 break
-
+        
+        debug_print(f"  generated path:{path}")
         return path
 
     def _generate_direct_path(self, source: Coord, destination: Coord) -> List[Coord]:
