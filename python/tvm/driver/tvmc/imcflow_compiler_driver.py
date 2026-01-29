@@ -84,6 +84,7 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
         Tuple of (transformed_mod, param_dict)
     """
     DevConfig().clear()
+    os.environ['IMCFLOW_EVAL_DIR'] = output_dir
 
     def _print(name):
         if save_intermediate:

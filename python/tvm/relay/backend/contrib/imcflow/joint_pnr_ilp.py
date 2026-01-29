@@ -351,6 +351,20 @@ def getOuterNodeID(node):
         return node
 
 
+def parse_funcout_tuple_idx(tensor_type: str) -> int:
+    """Parse tuple index from func_out tensor type.
+
+    Examples:
+        'func_out0' -> 0
+        'func_out1' -> 1
+        'func_out' -> 0 (default)
+    """
+    if not tensor_type.startswith('func_out'):
+        raise ValueError(f"Not a func_out tensor type: {tensor_type}")
+    idx_str = tensor_type[8:]  # Remove 'func_out' prefix
+    return int(idx_str) if idx_str else 0
+
+
 def _check_split_concat_or_call(graph_node_id: Any) -> NodeType:
     """Check if node is split, concat, or regular call using CustomIDToNode.
 
@@ -462,9 +476,18 @@ class GraphExtractor:
         # Visit function to extract nodes
         self._visit(func)
 
+        for expr, node in self.var_to_inode.items():
+            debug_print(f"[GraphExtractor] Var node ID: {getNodeID(expr)}, assigned INODE: {node}")
+        
+        for expr, node in self.funcout_to_inode.items():
+            debug_print(f"[GraphExtractor] FuncOut node ID: {getNodeID(expr)}, assigned INODE: {node}")
+
         for node_id, node in self.nodes.items():
             debug_print(f"[GraphExtractor] Node ID: {node_id}, Type: {node.node_type}, Topo Order: {node.topo_order}")
-            debug_print(f"  Name : {CustomIDToName()[getInnerNodeID(node_id)]}")
+            if node.node_type == NodeType.FUNC_OUT:
+              debug_print(f"  Name : {CustomIDToName()[getOuterNodeID(node_id)]}")
+            else:
+              debug_print(f"  Name : {CustomIDToName()[getInnerNodeID(node_id)]}")
 
         # Extract graph_commodities (data flows)
         self._extract_graph_commodities_from_tensor_edge_list(tensor_edge_list)
@@ -573,16 +596,33 @@ class GraphExtractor:
 
         if not in_composite:
             # Top-level function -> func_out
-            self.topo_order += 1
-            self.nodes[node_id] = GraphNode(
-                id=node_id,
-                node_type=NodeType.FUNC_OUT,
-                relay_expr=fn,
-                topo_order=self.topo_order,
-            )
-            # Assign to funcout INODE
-            if node_id not in self.funcout_to_inode:
-                self.funcout_to_inode[node_id] = next(self.funcout_inode_iter)
+            # Check if function returns a tuple (multiple outputs)
+            if isinstance(fn.body, relay.Tuple):
+                # Multiple outputs - create separate FUNC_OUT node for each tuple element
+                for tuple_idx in range(len(fn.body.fields)):
+                    funcout_key = (node_id, tuple_idx)
+                    self.topo_order += 1
+                    self.nodes[funcout_key] = GraphNode(
+                        id=funcout_key,
+                        node_type=NodeType.FUNC_OUT,
+                        relay_expr=fn,
+                        topo_order=self.topo_order,
+                    )
+                    # Assign each tuple output to a different INODE
+                    if funcout_key not in self.funcout_to_inode:
+                        self.funcout_to_inode[funcout_key] = next(self.funcout_inode_iter)
+            else:
+                # Single output - use (node_id, 0) for consistency with TensorEdgeList format
+                funcout_key = (node_id, 0)
+                self.topo_order += 1
+                self.nodes[funcout_key] = GraphNode(
+                    id=funcout_key,
+                    node_type=NodeType.FUNC_OUT,
+                    relay_expr=fn,
+                    topo_order=self.topo_order,
+                )
+                if funcout_key not in self.funcout_to_inode:
+                    self.funcout_to_inode[funcout_key] = next(self.funcout_inode_iter)
 
         # Visit function body
         self._visit(fn.body, in_composite, composite_node_id or node_id)
@@ -748,7 +788,16 @@ class GraphExtractor:
             else:
                 # Regular edge: use outer_id for both src and dst
                 src_node_id = getOuterNodeID(src_graph_id)
-                dst_node_id = dst_outer_id
+
+                # Check if destination is FUNC_OUT (tensor_type starts with 'func_out')
+                # FUNC_OUT nodes use tuple key (node_id, tuple_idx) for multiple outputs
+                dst_tensor_type = edge.dst_id.tensor_type
+                if dst_tensor_type.startswith('func_out'):
+                    # Parse tuple index from 'func_outN' (e.g., 'func_out0' -> 0)
+                    tuple_idx = parse_funcout_tuple_idx(dst_tensor_type)
+                    dst_node_id = (dst_outer_id, tuple_idx)
+                else:
+                    dst_node_id = dst_outer_id
 
                 # Look up nodes from GraphExtractor's extracted nodes
                 src_node = self.nodes.get(src_node_id)
@@ -756,7 +805,7 @@ class GraphExtractor:
 
                 # Skip if nodes not found
                 if src_node is None or dst_node is None:
-                    if src_node_id > 0 and dst_node_id > 0:
+                    if isinstance(src_node_id, int) and src_node_id > 0:
                         debug_print(f"[_extract_commodities_from_tensor_edge_list] "
                                    f"Node not found: src_found={src_node is not None}, "
                                    f"dst_found={dst_node is not None}, "
@@ -883,31 +932,16 @@ class JointPnRILP:
                     actual_func = func
                     debug_print(f"[JointPnRILP] Warning: {func_name} not in ImcflowFuncMap, using mod.functions")
 
-                try:
-                    tensor_edge_list = tensor_edge_list_dict[func_name]
-                    result = self._run_for_function(actual_func, func_name, tensor_edge_list)
-                    results[func_name] = result
+                tensor_edge_list = tensor_edge_list_dict[func_name]
+                result = self._run_for_function(actual_func, func_name, tensor_edge_list)
+                results[func_name] = result
 
-                    if result.success:
-                        debug_print(f"[JointPnRILP] Success: max_cong={result.max_congestion}, "
-                                   f"hops={result.total_hops}")
-                    else:
-                        debug_print(f"[JointPnRILP] Failed: {result.solver_status}")
+                if result.success:
+                    debug_print(f"[JointPnRILP] Success: max_cong={result.max_congestion}, "
+                                f"hops={result.total_hops}")
+                else:
+                    debug_print(f"[JointPnRILP] Failed: {result.solver_status}")
 
-                except Exception as e:
-                    logger.error(f"JointPnRILP failed for {func_name}: {e}")
-                    results[func_name] = JointPnRResult(
-                        mapping={},
-                        routes={},
-                        commodities=[],
-                        max_congestion=0,
-                        total_hops=0,
-                        solver_status=f"Error: {e}",
-                        success=False,
-                        var_to_inode={},
-                        funcout_to_inode={},
-                        const_to_inode={},
-                    )
 
         return results
 
@@ -1524,16 +1558,30 @@ def update_hw_node_map(
 
         # INODE mappings (funcout)
         if result.funcout_to_inode:
+            node_out_len = {}
+            temp_map = {}
             for funcout_node_id, coord in result.funcout_to_inode.items():
-                node_id = NodeID.from_inode_coord(coord.row)
-                hw_node_map[funcout_node_id] = node_id
+              if funcout_node_id[0] not in node_out_len:
+                node_out_len[funcout_node_id[0]] = 0
+              node_out_len[funcout_node_id[0]] += 1
+            
+            temp_map = {k: [None for _ in range(v)] for k,v in node_out_len.items()}
+            for funcout_node_id, coord in result.funcout_to_inode.items():
+              node_id = NodeID.from_inode_coord(coord.row)
+              temp_map[funcout_node_id[0]][funcout_node_id[1]] = node_id
+            
+            for funcout_node_id, node_id in temp_map.items():
+              if len(node_id) == 1:
+                hw_node_map[funcout_node_id] = node_id[0]
+              else:
+                hw_node_map[funcout_node_id] = tuple(node_id)
 
         # INODE mappings for constants inside composites
         # const_to_inode is computed in _solve() based on composite placement
         if result.const_to_inode:
             for const_id, coord in result.const_to_inode.items():
                 node_id = NodeID.from_inode_coord(coord.row)
-                hw_node_map[const_id] = node_id
+                hw_node_map[getInnerNodeID(const_id)] = node_id
 
 
 def coord_to_node_id(coord: Coord) -> NodeID:
@@ -1770,6 +1818,246 @@ def convert_pnr_result_to_routing_result(
 
 
 # ============================================================
+# Visualization
+# ============================================================
+
+def visualize_pnr_mapping(
+    pnr_result: JointPnRResult,
+    func_name: str,
+    output_path: str = None,
+    topology: MeshTopology = None,
+) -> str:
+    """
+    Visualize PnR mapping result using matplotlib.
+
+    Creates a mesh grid showing:
+    - IMCE nodes with mapped CALL/SPLIT/CONCAT nodes
+    - INODE nodes with VAR, CONST, and FUNC_OUT assignments
+    - Color coding by node type
+
+    Args:
+        pnr_result: Result from JointPnRILP
+        func_name: Function name for title
+        output_path: Path to save the figure. If None, auto-generates path.
+        topology: MeshTopology (default: 4x5)
+
+    Returns:
+        Path to saved figure
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.patches import FancyBboxPatch
+    except ImportError:
+        debug_print("[visualize_pnr_mapping] matplotlib not available, skipping visualization")
+        return None
+
+    if topology is None:
+        topology = MeshTopology(4, 5)
+
+    rows = topology.rows
+    cols = topology.cols
+
+    # Create figure
+    fig, ax = plt.subplots(1, 1, figsize=(cols * 2.5, rows * 2.5))
+
+    # Colors for different node types
+    colors = {
+        'CALL': '#4CAF50',      # Green
+        'SPLIT': '#2196F3',     # Blue
+        'CONCAT': '#9C27B0',    # Purple
+        'VAR': '#FF9800',       # Orange
+        'CONST': '#795548',     # Brown
+        'FUNC_OUT': '#F44336',  # Red
+        'EMPTY': '#E0E0E0',     # Light gray
+        'INODE': '#BDBDBD',     # Gray
+    }
+
+    # Build reverse mapping: Coord -> list of (node_id, node_type)
+    coord_to_nodes = {}
+
+    # IMCE mappings (CALL, SPLIT, CONCAT)
+    for node_id, coord in pnr_result.mapping.items():
+        key = (coord.row, coord.col)
+        if key not in coord_to_nodes:
+            coord_to_nodes[key] = []
+        # Determine node type from commodities
+        node_type = 'CALL'  # Default
+        for comm in pnr_result.commodities:
+            if comm.source_node_id == node_id:
+                if comm.source_type == NodeType.SPLIT:
+                    node_type = 'SPLIT'
+                elif comm.source_type == NodeType.CONCAT:
+                    node_type = 'CONCAT'
+                break
+            if comm.dest_node_id == node_id:
+                if comm.dest_type == NodeType.SPLIT:
+                    node_type = 'SPLIT'
+                elif comm.dest_type == NodeType.CONCAT:
+                    node_type = 'CONCAT'
+                break
+        coord_to_nodes[key].append((node_id, node_type))
+
+    # VAR mappings
+    if pnr_result.var_to_inode:
+        for node_id, coord in pnr_result.var_to_inode.items():
+            key = (coord.row, coord.col)
+            if key not in coord_to_nodes:
+                coord_to_nodes[key] = []
+            coord_to_nodes[key].append((node_id, 'VAR'))
+
+    # CONST mappings
+    if pnr_result.const_to_inode:
+        for node_id, coord in pnr_result.const_to_inode.items():
+            key = (coord.row, coord.col)
+            if key not in coord_to_nodes:
+                coord_to_nodes[key] = []
+            coord_to_nodes[key].append((node_id, 'CONST'))
+
+    # FUNC_OUT mappings
+    if pnr_result.funcout_to_inode:
+        for node_id, coord in pnr_result.funcout_to_inode.items():
+            key = (coord.row, coord.col)
+            if key not in coord_to_nodes:
+                coord_to_nodes[key] = []
+            coord_to_nodes[key].append((node_id, 'FUNC_OUT'))
+
+    # Draw mesh grid
+    for row in range(rows):
+        for col in range(cols):
+            x = col
+            y = rows - 1 - row  # Flip y-axis so row 0 is at top
+
+            is_inode = (col == 0)
+            key = (row, col)
+            nodes = coord_to_nodes.get(key, [])
+
+            # Determine background color
+            if nodes:
+                # Use the type of the first "important" node
+                priority = ['CALL', 'SPLIT', 'CONCAT', 'FUNC_OUT', 'VAR', 'CONST']
+                bg_color = colors['EMPTY']
+                for ptype in priority:
+                    for _, ntype in nodes:
+                        if ntype == ptype:
+                            bg_color = colors[ptype]
+                            break
+                    if bg_color != colors['EMPTY']:
+                        break
+            else:
+                bg_color = colors['INODE'] if is_inode else colors['EMPTY']
+
+            # Draw cell
+            rect = FancyBboxPatch(
+                (x - 0.45, y - 0.45), 0.9, 0.9,
+                boxstyle="round,pad=0.02,rounding_size=0.1",
+                facecolor=bg_color,
+                edgecolor='black',
+                linewidth=2 if nodes else 1,
+            )
+            ax.add_patch(rect)
+
+            # Label: coordinate
+            coord_label = f"({'I' if is_inode else 'M'}{row},{col})"
+            ax.text(x, y + 0.35, coord_label, ha='center', va='center',
+                   fontsize=8, fontweight='bold', color='#333333')
+
+            # Label: node IDs
+            if nodes:
+                # Group by type and show counts or IDs
+                node_strs = []
+                for node_id, ntype in nodes[:4]:  # Show up to 4 nodes
+                    short_type = ntype[0]  # First letter
+                    node_strs.append(f"{short_type}:{node_id}")
+                if len(nodes) > 4:
+                    node_strs.append(f"+{len(nodes)-4} more")
+
+                label = '\n'.join(node_strs)
+                ax.text(x, y - 0.1, label, ha='center', va='center',
+                       fontsize=7, color='white' if bg_color not in [colors['EMPTY'], colors['INODE']] else 'black')
+
+    # Draw connections (edges between adjacent nodes)
+    for row in range(rows):
+        for col in range(cols):
+            x = col
+            y = rows - 1 - row
+            # Horizontal edge (to East)
+            if col < cols - 1:
+                ax.plot([x + 0.45, x + 0.55], [y, y], 'k-', linewidth=0.5, alpha=0.3)
+            # Vertical edge (to South)
+            if row < rows - 1:
+                ax.plot([x, x], [y - 0.45, y - 0.55], 'k-', linewidth=0.5, alpha=0.3)
+
+    # Set axis properties
+    ax.set_xlim(-0.6, cols - 0.4)
+    ax.set_ylim(-0.6, rows - 0.4)
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    # Title
+    short_name = func_name.split('_')[-1] if '_' in func_name else func_name
+    ax.set_title(f"PnR Mapping: {short_name}\n({rows}x{cols} Mesh)", fontsize=12, fontweight='bold')
+
+    # Legend
+    legend_elements = [
+        mpatches.Patch(facecolor=colors['CALL'], edgecolor='black', label='CALL'),
+        mpatches.Patch(facecolor=colors['SPLIT'], edgecolor='black', label='SPLIT'),
+        mpatches.Patch(facecolor=colors['CONCAT'], edgecolor='black', label='CONCAT'),
+        mpatches.Patch(facecolor=colors['VAR'], edgecolor='black', label='VAR'),
+        mpatches.Patch(facecolor=colors['CONST'], edgecolor='black', label='CONST'),
+        mpatches.Patch(facecolor=colors['FUNC_OUT'], edgecolor='black', label='FUNC_OUT'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1),
+              fontsize=8, framealpha=0.9)
+
+    plt.tight_layout()
+
+    # Save figure
+    if output_path is None:
+        config = ImcflowDeviceConfig()
+        eval_dir = config.eval_dir
+        output_path = os.path.join(eval_dir, f"pnr_mapping_{short_name}.png")
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+
+    debug_print(f"[visualize_pnr_mapping] Saved mapping visualization to {output_path}")
+    return output_path
+
+
+def visualize_all_pnr_results(
+    pnr_results: Dict[str, JointPnRResult],
+    output_dir: str = None,
+) -> List[str]:
+    """
+    Visualize all PnR results.
+
+    Args:
+        pnr_results: Dict mapping func_name -> JointPnRResult
+        output_dir: Directory to save figures
+
+    Returns:
+        List of saved figure paths
+    """
+    if output_dir is None:
+        config = ImcflowDeviceConfig()
+        output_dir = config.eval_dir
+
+    paths = []
+    for func_name, result in pnr_results.items():
+        if not result.success:
+            continue
+        short_name = func_name.split('_')[-1] if '_' in func_name else func_name
+        output_path = os.path.join(output_dir, f"pnr_mapping_{short_name}.png")
+        path = visualize_pnr_mapping(result, func_name, output_path)
+        if path:
+            paths.append(path)
+
+    return paths
+
+
+# ============================================================
 # Full Integration Entry Point
 # ============================================================
 
@@ -1806,6 +2094,9 @@ def run_joint_pnr_and_update_config(
 
     debug_print(f"[run_joint_pnr_and_update_config] Updated HWNodeMap with "
                f"{len(config.HWNodeMap)} mappings")
+
+    # Visualize PnR mapping
+    visualize_all_pnr_results(results, os.environ.get("IMCFLOW_EVAL_DIR", "/tmp/imcflow"))
 
     return results
 
@@ -1932,6 +2223,12 @@ def construct_noc_paths_from_pnr_results(
             # Get graph node IDs (outer ID for composites)
             src_graph_id = getOuterNodeID(src_gid)
             dst_graph_id = getOuterNodeID(dst_gid)
+            dst_graph_node = CustomIDToNode()[dst_graph_id] 
+            if isinstance(dst_graph_node, relay.Function):
+              if split_idx is not None:
+                dst_graph_id = (getOuterNodeID(dst_gid), split_idx) # func out node with tuple idx
+              else:
+                dst_graph_id = (getOuterNodeID(dst_gid), 0)
 
             # Check node types from commodities
             src_commodity = commodity_by_src.get(src_graph_id)

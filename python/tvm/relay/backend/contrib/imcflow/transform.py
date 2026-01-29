@@ -4216,10 +4216,13 @@ class MemoryAllocator:
           src_hw_node_id = None
           is_inode = False
           inode_tensorid = None
+          split_or_tuple_idx = edge.split_idx
 
           #dst id
-          if getInnerNodeID(edge.dst_id.graph_node_id) in self.hwnodemap:
-            dst_hw_node_id = self.hwnodemap[getInnerNodeID(edge.dst_id.graph_node_id)]
+          # if getInnerNodeID(edge.dst_id.graph_node_id) in self.hwnodemap:
+          if ImcflowDeviceConfig().is_in_hw_node(edge.dst_id.graph_node_id):
+            # dst_hw_node_id = self.hwnodemap[getInnerNodeID(edge.dst_id.graph_node_id)]
+            dst_hw_node_id = ImcflowDeviceConfig().get_hw_node(edge.dst_id.graph_node_id, split_or_tuple_idx)
             # determine whether inode is included in the edge and which id it is.
             if isinstance(dst_hw_node_id, tuple):
               # use first tuple element to determine
@@ -4232,8 +4235,8 @@ class MemoryAllocator:
               inode_tensorid = edge.dst_id
 
           #src id
-          if getInnerNodeID(edge.src_id.graph_node_id) in self.hwnodemap:
-            src_hw_node_id = self.hwnodemap[getInnerNodeID(edge.src_id.graph_node_id)]
+          if ImcflowDeviceConfig().is_in_hw_node(edge.src_id.graph_node_id):
+            src_hw_node_id = ImcflowDeviceConfig().get_hw_node(edge.src_id.graph_node_id)
             # determine whether inode is included in the edge and which id it is.
             if src_hw_node_id.name.startswith("inode"):
               is_inode = True
@@ -4885,8 +4888,8 @@ class MemoryAllocator:
             if not is_inode:
                debug_print(f"  [{self.func_name}] non-inode edge: {edge}")
                raise ValueError("Edge does not involve an inode.")
-            hw_node_id = self.hwnodemap[getInnerNodeID(inode_tensorid.graph_node_id)]
-            hw_node_id = hw_node_id if not isinstance(hw_node_id, tuple) else hw_node_id[edge.split_idx]
+            hw_node_id = ImcflowDeviceConfig().get_hw_node(inode_tensorid.graph_node_id, edge.split_idx)
+            # hw_node_id = hw_node_id if not isinstance(hw_node_id, tuple) else hw_node_id[edge.split_idx]
 
             inode_name = hw_node_id.name  # ex) inode_3_0
 

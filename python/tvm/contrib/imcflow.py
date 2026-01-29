@@ -24,6 +24,10 @@ import re
 import math
 import os
 
+import tvm
+from tvm import relay
+from tvm.relay.op.contrib.imcflow import CustomIDToNode
+
 SMALL_DEBUG = 0
 
 BIG_IMEM = os.getenv("IMCFLOW_BIG_IMEM", "0") == "1"
@@ -742,9 +746,21 @@ class ImcflowDeviceConfig:
   def add_hw_node(self, graph_node_id: Union[int, Tuple], hwnode_id: int):
     self.HWNodeMap[graph_node_id] = hwnode_id
 
-  def get_hw_node(self, graph_node_id: Union[int, Tuple]):
-    return self.HWNodeMap.get(graph_node_id, None)
+  def get_hw_node(self, graph_node_id: Union[int, Tuple], tuple_idx=None):
+    out = None
+    if graph_node_id in self.HWNodeMap:
+      out = self.HWNodeMap[graph_node_id]
+    elif isinstance(graph_node_id, Tuple):
+      out = self.HWNodeMap.get(graph_node_id[1], None)
 
+    if tuple_idx is not None:
+      return out[tuple_idx] if out is not None else None
+    else:
+      return out
+  
+  def is_in_hw_node(self, graph_node_id: Union[int, Tuple], tuple_idx=None):
+    return self.get_hw_node(graph_node_id, tuple_idx) is not None
+  
   def add_tensor_edge(self, tensor_id: TensorID, tensor_edge: TensorEdge):
     self.TensorIDtoEdge[tensor_id] = tensor_edge
 
