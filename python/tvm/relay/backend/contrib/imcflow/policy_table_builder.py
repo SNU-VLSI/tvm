@@ -658,13 +658,12 @@ class PolicyTableGenerator:
                     edge = info['edge']
                     mapping_info = info.get('mapping_info')
                     if mapping_info and mapping_info[2] is not None:
-                        try:
-                            dst_graph_node = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
-                            kernel_size = dst_graph_node.attrs['kernel_size'][0].value
-                            if kernel_size in [1, 2, 3, 5, 7]:
-                                return kernel_size
-                        except (KeyError, AttributeError, TypeError):
-                            pass
+                        dst_graph_node = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
+                        if isinstance(dst_graph_node, relay.expr.Call) and isinstance(dst_graph_node.op, tvm.ir.Op) and \
+                           "conv" in dst_graph_node.op.name:
+                          kernel_size = dst_graph_node.attrs['kernel_size'][0].value
+                          if kernel_size in [1, 2, 3, 5, 7]:
+                              return kernel_size
         return 0
 
     def _record_router_entry(

@@ -246,12 +246,12 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     for func_name, pnr_result in pnr_results.items():
         if not pnr_result.success:
             raise RuntimeError(f"Joint PnR failed for {func_name}: {pnr_result.solver_status}")
+        # noc_paths is {TensorEdge -> (src_hwnode, dst_hwnode, split_idx)}
         noc_paths = DevConfig().NoCPaths.get(func_name, {})
-        tensor_edge_list = DevConfig().TensorEdgeListDict.get(func_name, [])
         build_policy_tables_from_pnr_result(
             pnr_result,
             func_name,
-            tensor_edge_list,
+            noc_paths,  # Pass noc_paths (dict), not tensor_edge_list (list)
             DevConfig().HWNodeMap,
         )
     if save_intermediate:

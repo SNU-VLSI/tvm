@@ -216,8 +216,9 @@ class GraphInfo:
     var_nodes: List[Any]              # IDs of var nodes
     const_nodes: List[Any]            # IDs of const nodes
     funcout_nodes: List[Any]          # IDs of func_out nodes
-    var_to_inode: Dict[Any, Coord] = None     # var node_id -> INODE Coord
-    funcout_to_inode: Dict[Any, Coord] = None # funcout node_id -> INODE Coord
+    var_to_inode: Dict[Any, Coord] = None      # var node_id -> INODE Coord
+    funcout_to_inode: Dict[Any, Coord] = None  # funcout node_id -> INODE Coord
+    const_to_inode: Dict[Any, Coord] = None    # const node_id -> INODE Coord
 
 
 @dataclass
@@ -232,6 +233,7 @@ class JointPnRResult:
     success: bool = True
     var_to_inode: Dict[Any, Coord] = None      # var node_id -> INODE Coord
     funcout_to_inode: Dict[Any, Coord] = None  # funcout node_id -> INODE Coord
+    const_to_inode: Dict[Any, Coord] = None    # const node_id -> INODE Coord
 
 
 # ============================================================
@@ -352,6 +354,7 @@ class GraphExtractor:
         self.funcout_inode_iter = None
         self.var_to_inode: Dict[Any, Coord] = {}
         self.funcout_to_inode: Dict[Any, Coord] = {}
+        self.const_to_inode: Dict[Any, Coord] = {}  # const inner_id -> INODE Coord
 
     def extract(self, func: relay.Function, func_name: str,
                 tensor_edge_list: List = None) -> GraphInfo:
@@ -380,6 +383,7 @@ class GraphExtractor:
         self.funcout_inode_iter = cycle([Coord(3, 0), Coord(2, 0)])
         self.var_to_inode = {}
         self.funcout_to_inode = {}
+        self.const_to_inode = {}
 
         # Build use-def chain first
         self._build_use_def_chain(func)
@@ -433,6 +437,7 @@ class GraphExtractor:
             funcout_nodes=funcout_nodes,
             var_to_inode=self.var_to_inode.copy(),
             funcout_to_inode=self.funcout_to_inode.copy(),
+            const_to_inode=self.const_to_inode.copy(),
         )
 
     def _build_use_def_chain(self, func):
@@ -609,41 +614,95 @@ class GraphExtractor:
         This is more robust as the edge information is already validated
         and tensor_type is accurate.
 
+        Handles constants inside composites:
+        - Adds constant nodes to self.nodes
+        - Creates commodities from constant -> composite (INODE -> IMCE)
+        - const_to_inode is populated later based on composite placement
+
         Args:
             tensor_edge_list: List of TensorEdge from constructTensorEdgeList()
         """
+        # CustomIDToNode is imported at module level
+        id_to_node = CustomIDToNode()
+
         for edge in tensor_edge_list:
             src_graph_id = edge.src_id.graph_node_id
             dst_graph_id = edge.dst_id.graph_node_id
+            tensor_type = edge.src_id.tensor_type
 
-            # For composite nodes, use outer_id (the composite call's ID)
-            # TensorEdgeList uses tuple (outer_id, inner_id) for composite internals
-            src_node_id = getOuterNodeID(src_graph_id)
-            dst_node_id = getOuterNodeID(dst_graph_id)
+            # Check if source is a constant inside composite
+            src_is_const_in_composite = False
+            src_inner_id = None
+            src_outer_id = None
+            if isinstance(src_graph_id, tuple):
+                src_outer_id, src_inner_id = src_graph_id[0], src_graph_id[1]
+                src_relay_node = id_to_node.get(src_inner_id)
+                if src_relay_node is not None and isinstance(src_relay_node, relay.Constant):
+                    src_is_const_in_composite = True
 
-            # Look up nodes from GraphExtractor's extracted nodes
-            # GraphExtractor now uses custom_id as key for Call nodes
-            src_node = self.nodes.get(src_node_id)
-            dst_node = self.nodes.get(dst_node_id)
+            # Get destination node info
+            dst_outer_id = getOuterNodeID(dst_graph_id)
+            dst_inner_id = getInnerNodeID(dst_graph_id) if isinstance(dst_graph_id, tuple) else dst_graph_id
 
-            # Skip if nodes not found (constants, vars, or internal nodes)
-            if src_node is None or dst_node is None:
-                # Only log if both are positive (should be tracked Call nodes)
-                if src_node_id > 0 and dst_node_id > 0:
-                    debug_print(f"[_extract_commodities_from_tensor_edge_list] "
-                               f"Node not found in GraphExtractor: "
-                               f"src_found={src_node is not None}, dst_found={dst_node is not None}, "
-                               f"node_ids=({src_node_id}, {dst_node_id})")
-                continue
+            if src_is_const_in_composite:
+                # Constant inside composite: add constant node and commodity
+                # The constant will be loaded from INODE at the same row as the composite's IMCE
 
-            # Add commodity with validated tensor_type from TensorEdgeList
-            self.add_commodity(
-                src_node_id, dst_node_id,
-                src_node.node_type, dst_node.node_type,
-                tensor_type=edge.src_id.tensor_type,
-                split_idx=edge.split_idx,
-                metadata=edge
-            )
+                # Add constant node if not already present
+                if src_inner_id not in self.nodes:
+                    self.topo_order += 1
+                    self.nodes[src_inner_id] = GraphNode(
+                        id=src_inner_id,
+                        node_type=NodeType.CONST,
+                        relay_expr=id_to_node.get(src_inner_id),
+                        topo_order=self.topo_order,
+                    )
+
+                # Get destination node (the composite)
+                dst_node = self.nodes.get(src_outer_id)  # composite outer_id
+                if dst_node is None:
+                    debug_print(f"[_extract_commodities] Composite {src_outer_id} not found for const {src_inner_id}")
+                    continue
+
+                # Add commodity: constant -> composite
+                # Source is INODE (determined later), destination is composite IMCE
+                self.add_commodity(
+                    src_inner_id, src_outer_id,
+                    NodeType.CONST, dst_node.node_type,
+                    tensor_type=tensor_type,
+                    split_idx=edge.split_idx,
+                    metadata=edge
+                )
+            else:
+                # Regular edge: use outer_id for both src and dst
+                src_node_id = getOuterNodeID(src_graph_id)
+                dst_node_id = dst_outer_id
+
+                # Look up nodes from GraphExtractor's extracted nodes
+                src_node = self.nodes.get(src_node_id)
+                dst_node = self.nodes.get(dst_node_id)
+
+                # Skip if nodes not found
+                if src_node is None or dst_node is None:
+                    if src_node_id > 0 and dst_node_id > 0:
+                        debug_print(f"[_extract_commodities_from_tensor_edge_list] "
+                                   f"Node not found: src_found={src_node is not None}, "
+                                   f"dst_found={dst_node is not None}, "
+                                   f"node_ids=({src_node_id}, {dst_node_id})")
+                    continue
+
+                # Skip self-loops (same composite)
+                if src_node_id == dst_node_id:
+                    continue
+
+                # Add commodity with validated tensor_type from TensorEdgeList
+                self.add_commodity(
+                    src_node_id, dst_node_id,
+                    src_node.node_type, dst_node.node_type,
+                    tensor_type=tensor_type,
+                    split_idx=edge.split_idx,
+                    metadata=edge
+                )
 
         debug_print(f"[_extract_commodities_from_tensor_edge_list] "
                    f"Extracted {len(self.commodities)} commodities from "
@@ -769,6 +828,7 @@ class JointPnRILP:
                         success=False,
                         var_to_inode={},
                         funcout_to_inode={},
+                        const_to_inode={},
                     )
 
         return results
@@ -807,6 +867,7 @@ class JointPnRILP:
                 success=True,
                 var_to_inode=self.graph_info.var_to_inode,
                 funcout_to_inode=self.graph_info.funcout_to_inode,
+                const_to_inode=self.graph_info.const_to_inode,
             )
 
         # Phase 2: Build ILP model
@@ -1193,6 +1254,7 @@ class JointPnRILP:
                 success=False,
                 var_to_inode={},
                 funcout_to_inode={},
+                const_to_inode={},
             )
 
         # Extract placement
@@ -1218,6 +1280,19 @@ class JointPnRILP:
         debug_print(f"[JointPnRILP] Extracted {len(mapping)} placements, "
                    f"{len(routes)} routes, max_cong={max_congestion}, hops={total_hops}")
 
+        # Compute const_to_inode based on placement
+        # Constants inside composites get INODE at the same row as their composite's IMCE
+        const_to_inode = {}
+        for commodity in gi.commodities:
+            if commodity.source_type == NodeType.CONST:
+                # Source is a constant, destination is its composite
+                const_id = commodity.source_node_id
+                composite_id = commodity.dest_node_id
+                if composite_id in mapping:
+                    composite_coord = mapping[composite_id]
+                    # INODE is at the same row as composite's IMCE
+                    const_to_inode[const_id] = Coord(composite_coord.row, 0)
+
         return JointPnRResult(
             mapping=mapping,
             routes=routes,
@@ -1228,6 +1303,7 @@ class JointPnRILP:
             success=True,
             var_to_inode=gi.var_to_inode,
             funcout_to_inode=gi.funcout_to_inode,
+            const_to_inode=const_to_inode,
         )
 
 
@@ -1266,7 +1342,7 @@ def update_hw_node_map(
 
     HWNodeMap key convention:
     - Composite calls: use inner_id (the inner call's ID)
-    - Constants inside composites: use inner_id -> INODE
+    - Constants inside composites: use inner_id -> INODE (from const_to_inode)
     - Regular calls: use custom_id
     - Vars/FuncOut: use custom_id
 
@@ -1275,18 +1351,15 @@ def update_hw_node_map(
         hw_node_map: ImcflowDeviceConfig().HWNodeMap to update
         tensor_edge_list_dict: TensorEdgeListDict for composite inner_id mapping
     """
-    from tvm.relay.backend.contrib.imcflow import CustomIDToNode
-
+    # CustomIDToNode is imported at module level
     id_to_node = CustomIDToNode()
 
     for func_name, result in results.items():
         if not result.success:
             raise RuntimeError(f"Joint PnR failed for {func_name}: {result.solver_status}")
 
-        # Build outer_id -> inner_id mapping from TensorEdgeList
-        # Also collect constants inside composites for INODE mapping
+        # Build outer_id -> inner_id mapping from TensorEdgeList for IMCE keys
         outer_to_inner_call = {}  # outer_id -> inner_call_id
-        const_inner_ids = {}      # const_inner_id -> outer_id (for INODE mapping)
         tensor_edge_list = tensor_edge_list_dict.get(func_name, [])
         for edge in tensor_edge_list:
             for tensor_id in [edge.src_id, edge.dst_id]:
@@ -1295,10 +1368,8 @@ def update_hw_node_map(
                     outer_id, inner_id = gid[0], gid[1]
                     # Check if inner_id is a Constant using CustomIDToNode
                     node = id_to_node.get(inner_id)
-                    if node is not None and isinstance(node, relay.Constant):
-                        const_inner_ids[inner_id] = outer_id
-                    else:
-                        # Inner call inside composite
+                    if node is None or not isinstance(node, relay.Constant):
+                        # Inner call inside composite (not constant)
                         outer_to_inner_call[outer_id] = inner_id
 
         # IMCE mappings (call/split/concat nodes)
@@ -1308,6 +1379,9 @@ def update_hw_node_map(
             # Convert Coord to NodeID
             node_id = NodeID.from_imce_coord(coord.row, coord.col - 1)
             hw_node_map[inner_id] = node_id
+            # Also store outer_id -> NodeID for composite nodes (so other inner nodes can find IMCE)
+            if graph_node_id in outer_to_inner_call:
+                hw_node_map[graph_node_id] = node_id
 
         # INODE mappings (input vars)
         if result.var_to_inode:
@@ -1322,12 +1396,11 @@ def update_hw_node_map(
                 hw_node_map[funcout_node_id] = node_id
 
         # INODE mappings for constants inside composites
-        # Constants load data from INODE at the same row as their composite's IMCE
-        for const_inner_id, outer_id in const_inner_ids.items():
-            if const_inner_id not in hw_node_map and outer_id in result.mapping:
-                composite_coord = result.mapping[outer_id]
-                node_id = NodeID.from_inode_coord(composite_coord.row)
-                hw_node_map[const_inner_id] = node_id
+        # const_to_inode is computed in _solve() based on composite placement
+        if result.const_to_inode:
+            for const_id, coord in result.const_to_inode.items():
+                node_id = NodeID.from_inode_coord(coord.row)
+                hw_node_map[const_id] = node_id
 
 
 def coord_to_node_id(coord: Coord) -> NodeID:
@@ -1627,14 +1700,41 @@ def construct_noc_paths_from_pnr_results(
 
         # For each tensor edge, get the src/dst placements
         tensor_edge_list = tensor_edge_list_dict.get(func_name, [])
+        hw_node_map = config.HWNodeMap
+
         for tensor_edge in tensor_edge_list:
             src_tensor_id = tensor_edge.src_id
             dst_tensor_id = tensor_edge.dst_id
             split_idx = tensor_edge.split_idx
 
+            # Check if source is a constant inside composite (tuple with negative inner_id)
+            src_gid = src_tensor_id.graph_node_id
+            dst_gid = dst_tensor_id.graph_node_id
+
+            src_is_const_in_composite = (
+                isinstance(src_gid, tuple) and
+                len(src_gid) >= 2 and
+                src_gid[-1] < 0
+            )
+
+            if src_is_const_in_composite:
+                # Constant inside composite: use inner_id for src, outer_id for dst
+                const_inner_id = src_gid[-1]
+                dst_graph_id = getOuterNodeID(dst_gid)
+
+                src_hwnode = hw_node_map.get(const_inner_id)
+                dst_hwnode = hw_node_map.get(dst_graph_id)
+
+                if src_hwnode is not None and dst_hwnode is not None:
+                    if isinstance(dst_hwnode, tuple):
+                        dst_hwnode = dst_hwnode[split_idx] if split_idx is not None else dst_hwnode[0]
+                        split_idx = None
+                    noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
+                continue
+
             # Get graph node IDs (outer ID for composites)
-            src_graph_id = getOuterNodeID(src_tensor_id.graph_node_id)
-            dst_graph_id = getOuterNodeID(dst_tensor_id.graph_node_id)
+            src_graph_id = getOuterNodeID(src_gid)
+            dst_graph_id = getOuterNodeID(dst_gid)
 
             # Look up in mapping
             src_coord = pnr_result.mapping.get(src_graph_id)
@@ -1643,7 +1743,6 @@ def construct_noc_paths_from_pnr_results(
             if src_coord is None or dst_coord is None:
                 # Node not mapped (could be input var, constant, or funcout)
                 # Try to get from HWNodeMap as fallback
-                hw_node_map = config.HWNodeMap
                 src_hwnode = hw_node_map.get(src_graph_id)
                 dst_hwnode = hw_node_map.get(dst_graph_id)
 
