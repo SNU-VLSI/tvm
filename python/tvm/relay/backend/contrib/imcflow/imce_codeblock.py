@@ -760,6 +760,17 @@ class DWConvBlock(ImceCallCodeBlock):
     # Weight variables will be filled by _build_weight_recv
     self.weight_vars = []
 
+    # Initialize ConvUtil for 2D pattern extraction (like ConvBlock)
+    self.conv = ConvUtil(self.in_h, self.in_w,
+                         self.padding, self.stride,
+                         self.kernel_h, self.kernel_w)
+    self.total_in_read_counts = self.conv.get_total_input_read_counts()
+    self.origin_hw = self.in_h * self.in_w  # H * W
+    self.remain = self.origin_hw - self.total_in_read_counts
+
+    # Will be set by _build_loop_body
+    self.load_edge_info = None
+
     # Link post-ops
     prev = self
     for op in self.post_ops:
@@ -943,23 +954,65 @@ class DWConvBlock(ImceCallCodeBlock):
   def _build_structure(self) -> CodeBlock:
     """Build the overall loop structure for depthwise convolution.
 
+    Uses ConvUtil.extract_2d_pattern() like ConvBlock for proper loop optimization.
+
     Structure:
     1. INIT phase: Receive weights into GPR registers
-    2. EXEC phase: Loop over output pixels, execute DWCONV
+    2. EXEC phase: Nested loops over output pixels using 2D pattern
+    3. TAIL phase: Read remaining pixels if any
+
+    row pattern example (from ConvBlock):
+    [
+      {'count': 1, 'pattern': [
+        {'count': 1, 'pattern': 6}, {'count': 2, 'pattern': 1}, {'count': 1, 'pattern': 0}]
+      },
+      {'count': 2, 'pattern': [
+        {'count': 1, 'pattern': 2}, {'count': 2, 'pattern': 1}, {'count': 1, 'pattern': 0}
+      ]},
+      {'count': 1, 'pattern': [
+        {'count': 4, 'pattern': 0}
+      ]}
+    ]
     """
+    from pprint import pprint
+
     root = SequentialBlock()
 
     # 1. Receive weights into GPR (INIT phase - executed once)
     root.add(self._build_weight_recv())
 
-    # 2. Main loop over output pixels
-    total_output_pixels = self.out_h * self.out_w
-    # Each output pixel needs kernel_h * kernel_w input reads
-    recv_count = self.kernel_h * self.kernel_w
+    # 2. Main loop using 2D pattern (same as ConvBlock)
+    row_pattern = self.conv.extract_2d_pattern()
+    pprint(f"[DWConvBlock] row pattern for node {getNodeID(self.call.call)}:")
+    pprint(row_pattern)
 
-    loop_body = self._build_loop_body(recv_count)
-    main_loop = SimpleFor(total_output_pixels, loop_body, f"{self.annotation}_dwconv_loop")
-    root.add(main_loop)
+    for idx, row_pat in enumerate(row_pattern):
+      # row_pat["count"]: number of rows that share the same pattern
+      # row_pat["pattern"]: pattern for a row. list of {count, pattern}
+      # pattern is the read count for an output pixel
+
+      outer_body = SequentialBlock()
+      tag = self.annotation + f"_row_group{idx}"
+
+      for inner_idx, pat in enumerate(row_pat["pattern"]):
+        inner_loop = SimpleFor(pat["count"],
+                               self._build_loop_body(pat["pattern"]),
+                               f"{tag}_col_group{inner_idx}")
+        outer_body.add(inner_loop)
+
+      outer_loop = SimpleFor(row_pat["count"], outer_body,
+                             f"{tag}_outer_loop(iterate row offset)")
+      root.add(outer_loop)
+
+    # 3. Read remaining pixels if any (tail loop)
+    if self.remain > 0 and self.load_edge_info is not None:
+      print(f"[DWConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
+      tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")
+      tail_loop = SimpleFor(self.remain * self.num_blocks, tail_body,
+                            f"{self.annotation}_tail_loop")
+      add_to_map(self.load_edge_info.owner,
+                 RecvSendNum("recv", self.remain * self.num_blocks), is_send=False)
+      root.add(tail_loop)
 
     return root
 
