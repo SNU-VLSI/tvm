@@ -186,7 +186,11 @@ MODEL_REGISTRY = {
     # Other models
     # "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
     # "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
-    # "ds_cnn_imcflow": (lambda: ds_cnn_imcflow.getModel(False), "random"),
+
+    # ------------------------------------------------------------------------------------------
+    # DS CNN
+    # ------------------------------------------------------------------------------------------
+    "ds_cnn_imcflow_small": (lambda: ds_cnn_imcflow.getModel(True, replicate_factor=1), "ones"),
 
     # Legacy models (for backward compatibility)
     # "big": (real_model.getModel, "random"),

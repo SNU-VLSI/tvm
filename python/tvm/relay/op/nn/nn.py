@@ -3979,6 +3979,7 @@ def imcflow_qconv2d(
     kernel_layout="OIHW",
     out_layout="",
     out_dtype="",
+    replicate_factor=1
 ):
     # Extract adcmode, vmode, acc_mask from config if it's a Constant and these values are default
     # This allows passing config tensor without needing separate parameters
@@ -4023,6 +4024,7 @@ def imcflow_qconv2d(
         adcmode,
         vmode,
         acc_mask,
+        replicate_factor,
     )
 
 

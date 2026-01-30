@@ -1622,6 +1622,7 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
   int adcmode;
   int vmode;
   int acc_mask;
+  int replicate_factor;
 
   TVM_DECLARE_ATTRS(ImcflowQConv2DAttrs, "relay.attrs.ImcflowQConv2DAttrs") {
     TVM_ATTR_FIELD(strides)
@@ -1685,6 +1686,9 @@ struct ImcflowQConv2DAttrs : public tvm::AttrsNode<ImcflowQConv2DAttrs> {
         .describe("Accumulation mask. For each bit position b, if (acc_mask & (1 << b)) == 0, "
                   "accumulation mode is enabled. When enabled and input bitplane has < 8 ones, "
                   "quantization is bypassed.");
+    TVM_ATTR_FIELD(replicate_factor)
+        .describe( "The replicate factor for weight copy.")
+        .set_default(1);
   }
 };
 
