@@ -28,6 +28,7 @@ from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import resnet8_subset_models
+from models import ds_cnn_subset_models
 from models import models_for_test
 
 # Import shared input generator
@@ -192,6 +193,35 @@ MODEL_REGISTRY = {
     # DS CNN
     # ------------------------------------------------------------------------------------------
     "ds_cnn_imcflow_small": (lambda: ds_cnn_imcflow.getModel(True, replicate_factor=1), "ones"),
+
+    # DS-CNN subset models (pretrained, input 10x10)
+    "ds_cnn_subset04_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=4), "ones"),
+    "ds_cnn_subset05_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=5), "ones"),
+    "ds_cnn_subset06_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=6), "ones"),
+    "ds_cnn_subset07_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=7), "ones"),
+    "ds_cnn_subset08_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=8), "ones"),
+    "ds_cnn_subset09_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=9), "ones"),
+    "ds_cnn_subset10_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=10), "ones"),
+    "ds_cnn_subset11_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=11), "ones"),
+    "ds_cnn_subset12_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=12), "ones"),
+    "ds_cnn_subset13_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=13), "ones"),
+    "ds_cnn_subset14_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=14), "ones"),
+    "ds_cnn_subset15_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=15), "ones"),
+    "ds_cnn_subset16_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=16), "ones"),
+    "ds_cnn_subset17_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=17), "ones"),
+    "ds_cnn_subset18_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=18), "ones"),
+    "ds_cnn_subset19_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=19), "ones"),
+    "ds_cnn_subset20_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=20), "ones"),
+    "ds_cnn_subset21_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=21), "ones"),
+    "ds_cnn_subset22_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=22), "ones"),
+    "ds_cnn_subset23_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=23), "ones"),
+    "ds_cnn_subset24_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=24), "ones"),
+    "ds_cnn_subset25_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=25), "ones"),
+    "ds_cnn_subset26_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=26), "ones"),
+    "ds_cnn_subset27_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=27), "ones"),
+    "ds_cnn_subset28_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=28), "ones"),
+    # Full model (no until_relay)
+    "ds_cnn_full_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(), "ones"),
 
     # Legacy models (for backward compatibility)
     # "big": (real_model.getModel, "random"),
