@@ -113,7 +113,7 @@ def getModel_(input_shape, until_relay: int = None, replicate_factor: int = 1):
         y = c.check(imcflow_qdwconv2d(
             y,
             relay.var("weight_dw_1", shape=(filters, 1, 3, 3), dtype="int8"),
-            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
             in_channels=filters,
             channels=filters,
             kernel_size=(3, 3),
@@ -166,7 +166,7 @@ def getModel_(input_shape, until_relay: int = None, replicate_factor: int = 1):
         y = c.check(imcflow_qdwconv2d(
             y,
             relay.var("weight_dw_2", shape=(filters, 1, 3, 3), dtype="int8"),
-            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
             in_channels=filters,
             channels=filters,
             kernel_size=(3, 3),
@@ -219,7 +219,7 @@ def getModel_(input_shape, until_relay: int = None, replicate_factor: int = 1):
         y = c.check(imcflow_qdwconv2d(
             y,
             relay.var("weight_dw_3", shape=(filters, 1, 3, 3), dtype="int8"),
-            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
             in_channels=filters,
             channels=filters,
             kernel_size=(3, 3),
@@ -272,7 +272,7 @@ def getModel_(input_shape, until_relay: int = None, replicate_factor: int = 1):
         y = c.check(imcflow_qdwconv2d(
             y,
             relay.var("weight_dw_4", shape=(filters, 1, 3, 3), dtype="int8"),
-            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+            ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
             in_channels=filters,
             channels=filters,
             kernel_size=(3, 3),

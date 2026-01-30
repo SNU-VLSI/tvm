@@ -101,7 +101,7 @@ def getModel_(input_shape, replicate_factor=1):
     y = imcflow_qdwconv2d(
         y,
         relay.var("weight_dw1", shape=(filters, 1, 3, 3), dtype="int8"),
-        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
         in_channels=filters,
         channels=filters,
         kernel_size=(3, 3),
@@ -141,7 +141,7 @@ def getModel_(input_shape, replicate_factor=1):
     y = imcflow_qdwconv2d(
         y,
         relay.var("weight_dw2", shape=(filters, 1, 3, 3), dtype="int8"),
-        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
         in_channels=filters,
         channels=filters,
         kernel_size=(3, 3),
@@ -180,7 +180,7 @@ def getModel_(input_shape, replicate_factor=1):
     y = imcflow_qdwconv2d(
         y,
         relay.var("weight_dw3", shape=(filters, 1, 3, 3), dtype="int8"),
-        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
         in_channels=filters,
         channels=filters,
         kernel_size=(3, 3),
@@ -219,7 +219,7 @@ def getModel_(input_shape, replicate_factor=1):
     y = imcflow_qdwconv2d(
         y,
         relay.var("weight_dw4", shape=(filters, 1, 3, 3), dtype="int8"),
-        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1).get_as_const_tensor(),
+        ConfigData((N, IC, H, W), (filters, 1, 3, 3), padding=1, stride=1, use_imcu=0).get_as_const_tensor(),
         in_channels=filters,
         channels=filters,
         kernel_size=(3, 3),
