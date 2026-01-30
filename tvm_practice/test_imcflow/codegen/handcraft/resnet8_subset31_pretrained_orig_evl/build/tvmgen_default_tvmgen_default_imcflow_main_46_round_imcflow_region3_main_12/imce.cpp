@@ -147,16 +147,37 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
   short16 var143; // (AddBlock(gid: 93), 3)
   if (hid == 0 && wid == 1) { // imce_0_1
     // generate: call_created_loop
-    for (int i1 = 0; i1 < 512; i1++) { // generate : call_created_loop
+    for (int i1 = 0; i1 < 256; i1++) { // generate : call_created_loop
       // generate: add standalone
 
+      __builtin_IMCE_SETFLAG(1);
+      __builtin_IMCE_STANDBY(0, 1);
+      __builtin_IMCE_STANDBY(5, 1);
+      __builtin_IMCE_SETFLAG(0);
       var37 = __builtin_IMCE_RECV(2); // TensorEdge((-61, odata), (85, lhs)), inode_0_0 -> imce_0_1
       var38 = __builtin_IMCE_RECV(3); // TensorEdge((-62, odata), (85, rhs)), inode_1_0 -> imce_0_1
+
+      __builtin_IMCE_SETFLAG(1);
+      __builtin_IMCE_STANDBY(0, 1);
+      __builtin_IMCE_STANDBY(5, 1);
+      __builtin_IMCE_SETFLAG(0);
+      short16 var237, var238, var239;
+      var237 = __builtin_IMCE_RECV(2); // TensorEdge((-61, odata), (85, lhs)), inode_0_0 -> imce_0_1
+      var238 = __builtin_IMCE_RECV(3); // TensorEdge((-62, odata), (85, rhs)), inode_1_0 -> imce_0_1
       // generate: add
 
       var39 = __builtin_IMCE_ADD(var37, var38, 15);
+      var239 = __builtin_IMCE_ADD(var237, var238, 15);
       // endgenerate: add
+
+      __builtin_IMCE_STANDBY(2, 2);
+      __builtin_IMCE_STANDBY(6, 2);
+      __builtin_IMCE_SETFLAG(2);
+      __builtin_IMCE_STANDBY(2, 0);
+      __builtin_IMCE_STANDBY(6, 0);
+      __builtin_IMCE_SETFLAG(0);
       __builtin_IMCE_SEND(1, var39, 2, 0); // TensorEdge((85, odata), (103, data)),TensorEdge((85, odata), (86, data)), imce_0_1 -> imce_0_2
+      __builtin_IMCE_SEND(1, var239, 2, 0); // TensorEdge((85, odata), (103, data)),TensorEdge((85, odata), (86, data)), imce_0_1 -> imce_0_2
       // endgenerate: add standalone
     } // endgenerate : call_created_loop
     // endgenerate: call_created_loop
@@ -175,6 +196,9 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
     for (int i1 = 0; i1 < 256; i1++) { // generate : call_created_loop
       // generate: min_max_quantize_standalone
 
+      __builtin_IMCE_SETFLAG(2);
+      __builtin_IMCE_STANDBY(1, 2);
+      __builtin_IMCE_SETFLAG(0);
       var42 = __builtin_IMCE_RECV(2); // TensorEdge((85, odata), (86, data)), imce_0_1 -> imce_0_2
       var43 = __builtin_IMCE_RECV(2); // TensorEdge((85, odata), (86, data)), imce_0_1 -> imce_0_2
       // generate: min_max_quantize
@@ -186,6 +210,8 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
       var46 = __builtin_IMCE_GET_QREG(2);
       var47 = __builtin_IMCE_GET_QREG(3);
       // endgenerate: min_max_quantize
+
+      __builtin_IMCE_STANDBY(7, 1);
       __builtin_IMCE_SEND(1, var44, 0, 0); // TensorEdge((86, odata), (87, data)), imce_0_2 -> imce_1_2
       __builtin_IMCE_SEND(1, var45, 0, 0); // TensorEdge((86, odata), (87, data)), imce_0_2 -> imce_1_2
       __builtin_IMCE_SEND(1, var46, 0, 0); // TensorEdge((86, odata), (87, data)), imce_0_2 -> imce_1_2
@@ -212,6 +238,10 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
     for (int i1 = 0; i1 < 256; i1++) { // generate : call_created_loop
       // generate: min_max_quantize_standalone
 
+      __builtin_IMCE_SETFLAG(2);
+      __builtin_IMCE_STANDBY(1, 2);
+      __builtin_IMCE_SETFLAG(0);
+
       var50 = __builtin_IMCE_RECV(2); // TensorEdge((85, odata), (103, data)), imce_0_1 -> imce_1_1
       var51 = __builtin_IMCE_RECV(2); // TensorEdge((85, odata), (103, data)), imce_0_1 -> imce_1_1
       // generate: min_max_quantize
@@ -223,6 +253,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
       var54 = __builtin_IMCE_GET_QREG(2);
       var55 = __builtin_IMCE_GET_QREG(3);
       // endgenerate: min_max_quantize
+      __builtin_IMCE_STANDBY(11, 1);
       __builtin_IMCE_SEND(9, var52, 0, 0); // TensorEdge((103, odata), ((104, 98), data)), imce_1_1 -> imce_2_1
       __builtin_IMCE_SEND(9, var53, 0, 0); // TensorEdge((103, odata), ((104, 98), data)), imce_1_1 -> imce_2_1
       __builtin_IMCE_SEND(9, var54, 0, 0); // TensorEdge((103, odata), ((104, 98), data)), imce_1_1 -> imce_2_1
@@ -380,10 +411,13 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
       // generate: load_block
       for (int i2 = 0; i2 < 18; i2++) { // generate : load_block
+
+        __builtin_IMCE_SETFLAG(1);
         for (int i3 = 0; i3 < 4; i3++) { // generate
           __builtin_IMCE_LOAD_LB(0); // TensorEdge((87, odata), (88, data), 1), imce_0_2 -> imce_1_3
 
         } // endgenerate
+        __builtin_IMCE_SETFLAG(0);
       } // endgenerate : load_block
       // endgenerate: load_block
       __builtin_IMCE_STEP();
@@ -404,10 +438,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
         // generate: load_block
         for (int i3 = 0; i3 < 2; i3++) { // generate : load_block
+          __builtin_IMCE_SETFLAG(1);
           for (int i4 = 0; i4 < 4; i4++) { // generate
             __builtin_IMCE_LOAD_LB(0); // TensorEdge((87, odata), (88, data), 1), imce_0_2 -> imce_1_3
 
           } // endgenerate
+          __builtin_IMCE_SETFLAG(0);
         } // endgenerate : load_block
         // endgenerate: load_block
         __builtin_IMCE_STEP();
@@ -471,10 +507,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
     // generate: load_block
     // generate : load_block. loop count == 1
+    __builtin_IMCE_SETFLAG(1);
     for (int i1 = 0; i1 < 4; i1++) { // generate
       __builtin_IMCE_LOAD_LB(0); // TensorEdge((103, odata), ((104, 98), data)), imce_1_1 -> imce_2_1
 
     } // endgenerate
+    __builtin_IMCE_SETFLAG(0);
     // endgenerate : load_block
     // endgenerate: load_block
     __builtin_IMCE_STEP();
@@ -520,10 +558,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
       // generate: load_block
       for (int i2 = 0; i2 < 2; i2++) { // generate : load_block
+        __builtin_IMCE_SETFLAG(1);
         for (int i3 = 0; i3 < 4; i3++) { // generate
           __builtin_IMCE_LOAD_LB(0); // TensorEdge((103, odata), ((104, 98), data)), imce_1_1 -> imce_2_1
 
         } // endgenerate
+        __builtin_IMCE_SETFLAG(0);
       } // endgenerate : load_block
       // endgenerate: load_block
       __builtin_IMCE_STEP();
@@ -573,10 +613,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
       // generate: load_block
       for (int i2 = 0; i2 < 18; i2++) { // generate : load_block
+        __builtin_IMCE_SETFLAG(1);
         for (int i3 = 0; i3 < 4; i3++) { // generate
           __builtin_IMCE_LOAD_LB(0); // TensorEdge((103, odata), ((104, 98), data)), imce_1_1 -> imce_2_1
 
         } // endgenerate
+        __builtin_IMCE_SETFLAG(0);
       } // endgenerate : load_block
       // endgenerate: load_block
       __builtin_IMCE_STEP();
@@ -622,10 +664,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
         // generate: load_block
         for (int i3 = 0; i3 < 2; i3++) { // generate : load_block
+          __builtin_IMCE_SETFLAG(1);
           for (int i4 = 0; i4 < 4; i4++) { // generate
             __builtin_IMCE_LOAD_LB(0); // TensorEdge((103, odata), ((104, 98), data)), imce_1_1 -> imce_2_1
 
           } // endgenerate
+          __builtin_IMCE_SETFLAG(0);
         } // endgenerate : load_block
         // endgenerate: load_block
         __builtin_IMCE_STEP();
@@ -669,8 +713,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
     } // endgenerate : conv exec11_row_group1_outer_loop(iterate row offset)
     // endgenerate: conv exec11_row_group1_outer_loop(iterate row offset)
     // generate: conv exec11_tail_loop
-    for (int i1 = 0; i1 < 68; i1++) { // generate : conv exec11_tail_loop
-      __builtin_IMCE_RECV(0);
+    for (int i1 = 0; i1 < 17; i1++) { // generate : conv exec11_tail_loop
+      __builtin_IMCE_SETFLAG(1);
+      for (int i2 = 0; i2 < 4; i2++) { // generate
+        __builtin_IMCE_RECV(0);
+      }
+      __builtin_IMCE_SETFLAG(0);
     } // endgenerate : conv exec11_tail_loop
     // endgenerate: conv exec11_tail_loop
     // endgenerate: conv exec11
@@ -726,10 +774,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
     // generate: load_block
     for (int i1 = 0; i1 < 10; i1++) { // generate : load_block
+      __builtin_IMCE_SETFLAG(1);
       for (int i2 = 0; i2 < 4; i2++) { // generate
         __builtin_IMCE_LOAD_LB(0); // TensorEdge((91, odata), (95, data), 1), imce_2_2 -> imce_2_3
 
       } // endgenerate
+      __builtin_IMCE_SETFLAG(0);
     } // endgenerate : load_block
     // endgenerate: load_block
     __builtin_IMCE_STEP();
@@ -750,10 +800,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
       // generate: load_block
       // generate : load_block. loop count == 1
+      __builtin_IMCE_SETFLAG(1);
       for (int i2 = 0; i2 < 4; i2++) { // generate
         __builtin_IMCE_LOAD_LB(0); // TensorEdge((91, odata), (95, data), 1), imce_2_2 -> imce_2_3
 
       } // endgenerate
+      __builtin_IMCE_SETFLAG(0);
       // endgenerate : load_block
       // endgenerate: load_block
       __builtin_IMCE_STEP();
@@ -797,10 +849,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
       // generate: load_block
       for (int i2 = 0; i2 < 2; i2++) { // generate : load_block
+        __builtin_IMCE_SETFLAG(1);
         for (int i3 = 0; i3 < 4; i3++) { // generate
           __builtin_IMCE_LOAD_LB(0); // TensorEdge((91, odata), (95, data), 1), imce_2_2 -> imce_2_3
 
         } // endgenerate
+        __builtin_IMCE_SETFLAG(0);
       } // endgenerate : load_block
       // endgenerate: load_block
       __builtin_IMCE_STEP();
@@ -821,10 +875,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
 
         // generate: load_block
         // generate : load_block. loop count == 1
+        __builtin_IMCE_SETFLAG(1);
         for (int i3 = 0; i3 < 4; i3++) { // generate
           __builtin_IMCE_LOAD_LB(0); // TensorEdge((91, odata), (95, data), 1), imce_2_2 -> imce_2_3
 
         } // endgenerate
+        __builtin_IMCE_SETFLAG(0);
         // endgenerate : load_block
         // endgenerate: load_block
         __builtin_IMCE_STEP();
