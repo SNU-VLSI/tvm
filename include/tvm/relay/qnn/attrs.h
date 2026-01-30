@@ -132,6 +132,7 @@ struct ImcflowMinMaxQuantizeAttrs : public tvm::AttrsNode<ImcflowMinMaxQuantizeA
   DataType param_dtype;
   int axis;
   int channel;
+  int replicate_factor;
 
   TVM_DECLARE_ATTRS(ImcflowMinMaxQuantizeAttrs, "relay.attrs.ImcflowMinMaxQuantizeAttrs") {
     TVM_ATTR_FIELD(out_dtype).describe("Output data type, always int4.").set_default(DataType::Float(32));
@@ -145,6 +146,10 @@ struct ImcflowMinMaxQuantizeAttrs : public tvm::AttrsNode<ImcflowMinMaxQuantizeA
         .describe(
             "The number of channels. we need this retrieve the channel number after padding inserted")
         .set_default(-1);
+    TVM_ATTR_FIELD(replicate_factor)
+        .describe(
+            "The replicate factor for weight copy.")
+        .set_default(1);
   }
 };
 

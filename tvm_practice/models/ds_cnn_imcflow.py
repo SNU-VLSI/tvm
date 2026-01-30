@@ -25,7 +25,7 @@ def get_width(W, KW, padding, stride):
     return out_w
 
 
-def getModel_(input_shape):
+def getModel_(input_shape, replicate_factor=1):
     """
     Define the IMCFlow version of DS-CNN (td_cnn variant)
     First two conv2d layers (time-domain and regular) use CPU (float32),
@@ -96,7 +96,8 @@ def getModel_(input_shape):
     # Depthwise conv
     y = imcflow_min_max_quantize(y, relay.var("quant_min1", shape=(), dtype="int16"),
                                   relay.var("quant_max1", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=filters)
+                                  axis=1, out_dtype="uint8", channel=filters,
+                                  replicate_factor=1)
     y = imcflow_qdwconv2d(
         y,
         relay.var("weight_dw1", shape=(filters, 1, 3, 3), dtype="int8"),
@@ -116,7 +117,8 @@ def getModel_(input_shape):
     # Pointwise conv (1x1)
     y = imcflow_min_max_quantize(y, relay.var("quant_min2", shape=(), dtype="int16"),
                                   relay.var("quant_max2", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=filters)
+                                  axis=1, out_dtype="uint8", channel=filters,
+                                  replicate_factor=replicate_factor)
     y = imcflow_qconv2d(
         y,
         relay.var("weight_pw1", shape=(filters, filters, 1, 1), dtype="int8"),
@@ -124,7 +126,8 @@ def getModel_(input_shape):
         in_channels=filters,
         channels=filters,
         kernel_size=(1, 1),
-        out_dtype="int16"
+        out_dtype="int16",
+        replicate_factor=replicate_factor
     )
     
     y = imcflow_batch_norm(y, relay.var("fused_scale2", shape=(filters,), dtype="int16"),
@@ -153,7 +156,8 @@ def getModel_(input_shape):
     # Pointwise conv (1x1)
     y = imcflow_min_max_quantize(y, relay.var("quant_min4", shape=(), dtype="int16"),
                                   relay.var("quant_max4", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=filters)
+                                  axis=1, out_dtype="uint8", channel=filters,
+                                  replicate_factor=replicate_factor)
     y = imcflow_qconv2d(
         y,
         relay.var("weight_pw2", shape=(filters, filters, 1, 1), dtype="int8"),
@@ -161,7 +165,8 @@ def getModel_(input_shape):
         in_channels=filters,
         channels=filters,
         kernel_size=(1, 1),
-        out_dtype="int16"
+        out_dtype="int16",
+        replicate_factor=replicate_factor
     )
     
     y = imcflow_batch_norm(y, relay.var("fused_scale4", shape=(filters,), dtype="int16"),
@@ -190,7 +195,8 @@ def getModel_(input_shape):
     # Pointwise conv (1x1)
     y = imcflow_min_max_quantize(y, relay.var("quant_min6", shape=(), dtype="int16"),
                                   relay.var("quant_max6", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=filters)
+                                  axis=1, out_dtype="uint8", channel=filters,
+                                  replicate_factor=replicate_factor)
     y = imcflow_qconv2d(
         y,
         relay.var("weight_pw3", shape=(filters, filters, 1, 1), dtype="int8"),
@@ -198,7 +204,8 @@ def getModel_(input_shape):
         in_channels=filters,
         channels=filters,
         kernel_size=(1, 1),
-        out_dtype="int16"
+        out_dtype="int16",
+        replicate_factor=replicate_factor
     )
     
     y = imcflow_batch_norm(y, relay.var("fused_scale6", shape=(filters,), dtype="int16"),
@@ -227,7 +234,8 @@ def getModel_(input_shape):
     # Pointwise conv (1x1)
     y = imcflow_min_max_quantize(y, relay.var("quant_min8", shape=(), dtype="int16"),
                                   relay.var("quant_max8", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=filters)
+                                  axis=1, out_dtype="uint8", channel=filters,
+                                  replicate_factor=replicate_factor)
     y = imcflow_qconv2d(
         y,
         relay.var("weight_pw4", shape=(filters, filters, 1, 1), dtype="int8"),
@@ -235,7 +243,8 @@ def getModel_(input_shape):
         in_channels=filters,
         channels=filters,
         kernel_size=(1, 1),
-        out_dtype="int16"
+        out_dtype="int16",
+        replicate_factor=replicate_factor
     )
     
     y = imcflow_batch_norm(y, relay.var("fused_scale8", shape=(filters,), dtype="int16"),
@@ -261,7 +270,7 @@ def getModel_(input_shape):
     return out, var_info
 
 
-def getModel(small_debug=False):
+def getModel(small_debug=False, replicate_factor=1):
     """
     Create a test model for IMCFlow DS-CNN (td_cnn variant)
     Input shape: (1, 1, 16000, 1) - batch=1, channels=1, time_samples=16000, width=1
@@ -271,7 +280,7 @@ def getModel(small_debug=False):
       input_shape = (1, 1, 4000, 1)  # NCHW format for time-domain samples
     else:
       input_shape = (1, 1, 16000, 1)  # NCHW format for time-domain samples
-    out, var_dict = getModel_(input_shape)
+    out, var_dict = getModel_(input_shape, replicate_factor=replicate_factor)
     params_dict = {}
     for name in sorted(var_dict.keys()):
       info = var_dict[name]

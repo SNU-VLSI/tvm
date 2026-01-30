@@ -201,6 +201,7 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   Array<IndexExpr> data_shape = data->shape;
   const DataType input_dtype = data->dtype;
   int in_last_dim = data_shape.size()-1;
+  int replicate_factor = quantize_attrs->replicate_factor;
   IndexExpr batch; 
   IndexExpr ic; 
   IndexExpr ih; 
@@ -224,6 +225,9 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   }
   ICHECK(input_dtype == DataType::Int(16)) << "Input type should be int16 but was " << input_dtype;
 
+  ICHECK(((replicate_factor-1) & replicate_factor) == 0 && replicate_factor >=1)
+      << "Replicate factor should be a power of 2 integer but was " << replicate_factor;
+
   // check param data layout and dtype
   const auto* min_param = types[1].as<TensorTypeNode>();
   const auto* max_param = types[2].as<TensorTypeNode>();
@@ -236,6 +240,7 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
   ICHECK(max_param->shape.size() == 0) << "Max param should be scalar but was "
                                       << max_param->shape.size();
   // assign output tensor type
+  ic = ic * replicate_factor;
   if(quantize_attrs->out_node) {
     IndexExpr c_group = ceildiv(ic,256);
     Array<IndexExpr> oshape({batch, c_group, ih, iw, 4, 8});
@@ -255,12 +260,13 @@ bool ImcflowMinMaxQuantizeRel(const Array<Type>& types, int num_inputs, const At
 }
 
 Expr MakeImcflowMinMaxQuantize(Expr data, Expr min, Expr max, int axis, DataType out_dtype,
-                               DataType param_dtype, int channel) {
+                               DataType param_dtype, int channel, int replicate_factor) {
   auto attrs = make_object<ImcflowMinMaxQuantizeAttrs>();
   attrs->axis = axis;
   attrs->out_dtype = std::move(out_dtype);
   attrs->param_dtype = std::move(param_dtype);
   attrs->channel = channel;
+  attrs->replicate_factor = replicate_factor;
   static const Op& op = Op::Get("qnn.imcflow_min_max_quantize");
   return Call(op, {data, min, max}, Attrs(attrs), {});
 }
