@@ -796,10 +796,26 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     #self.visit(fn.body)
     # traverse constant nodes
 
+    def is_dwconv_weight(edge: TensorEdge) -> bool:
+      """Check if this weight edge goes to a qdwconv node.
+
+      DW conv weights need to be sent via FIFO (unlike standard conv weights
+      which are loaded into IMCU). This function identifies weight edges that
+      should be included in const_edges for INODE SEND block generation.
+      """
+      if edge.src_id.tensor_type != "weight":
+        return False
+      dst_node_id = getInnerNodeID(edge.dst_id.graph_node_id)
+      dst_node = CustomIDToNode()[dst_node_id]
+      if isinstance(dst_node, relay.Call) and isinstance(dst_node.op, tvm.ir.Op):
+        return dst_node.op == op.get("nn.imcflow_qdwconv")
+      return False
+
     for edge in self.edges:
       arg_id = edge.src_id.graph_node_id
       if ConstPat.match(CustomIDToNode()[arg_id]):
-        if edge.src_id.tensor_type != "weight":
+        # Include DW conv weight (not standard conv weight which goes to IMCU)
+        if edge.src_id.tensor_type != "weight" or is_dwconv_weight(edge):
           const_edges.append(edge)
           # self.add_send_block(edge)
 

@@ -325,7 +325,7 @@ class PolicyTableGeneratorLegacy:
                                 # get src node name from CustomIDToName
                                 dst_node_name = ID_dict[getInnerNodeID(edge.dst_id.graph_node_id)]
 
-                                if dst_node_name == "nn.imcflow_qconv":
+                                if dst_node_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
                                     edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
                                     ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
                                 else:

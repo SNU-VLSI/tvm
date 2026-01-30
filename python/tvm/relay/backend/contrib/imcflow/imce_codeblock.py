@@ -697,6 +697,276 @@ class ConvBlock(ImceCallCodeBlock):
     return self.body.render()
 
 
+class DWConvBlock(ImceCallCodeBlock):
+  """Code block for depthwise convolution using OP_DWCONV instruction.
+
+  Depthwise convolution operates on:
+  - Input: BSHR (bit shift register), loaded via linebuffer
+  - Weight: GPR registers (received via FIFO, not IMCU like standard conv)
+
+  Key parameters from ISA (A-type instruction):
+  - bshr_sel: Input channel group index (16 channels per group)
+  - src_mask: Mask for which input channels in group are used
+  - shift_amt: Weight bitplane weight (2^shift_amt), 8 bitplanes total
+  - dwresult_valid: Set to 1 when ending accumulation for all weight bitplanes
+
+  Weight layout: ic16_pad16_kh3_kw3 - 8 bitplanes per channel group
+  Total weight registers: 8 * num_channel_groups
+
+  Only 3x3 kernel is supported in hardware.
+  """
+  num_in_edges = 3  # data, weight, (bias or config)
+
+  def __init__(self, call: 'BuilderContext', shapes: dict, conv_attrs,
+               weight_edge: TensorEdge = None,
+               post_ops: List[ImceCallCodeBlock] = None, annotation: str = ""):
+    super().__init__(call, annotation)
+    self.builder = call.builder
+    self.shapes = shapes
+    self.conv_attrs = conv_attrs
+    self.weight_edge = weight_edge
+    self.post_ops = post_ops if post_ops is not None else []
+
+    # Extract convolution parameters
+    self.kernel_h = conv_attrs.kernel_size[0].value if hasattr(conv_attrs.kernel_size[0], 'value') else conv_attrs.kernel_size[0]
+    self.kernel_w = conv_attrs.kernel_size[1].value if hasattr(conv_attrs.kernel_size[1], 'value') else conv_attrs.kernel_size[1]
+    self.stride = conv_attrs.strides[0].value if hasattr(conv_attrs.strides[0], 'value') else conv_attrs.strides[0]
+    self.padding = conv_attrs.padding[0].value if hasattr(conv_attrs.padding[0], 'value') else conv_attrs.padding[0]
+
+    # Depthwise conv: in_channels == out_channels == groups
+    self.channels = conv_attrs.channels.value if hasattr(conv_attrs.channels, 'value') else conv_attrs.channels
+
+    # Validate 3x3 kernel constraint
+    if self.kernel_h != 3 or self.kernel_w != 3:
+      logging.warning(f"DWConvBlock: Only 3x3 kernel supported, got {self.kernel_h}x{self.kernel_w}")
+
+    # Input spatial dimensions
+    self.in_h = shapes["data"][2]
+    self.in_w = shapes["data"][3]
+
+    # Calculate output spatial dimensions
+    self.out_h = (self.in_h + 2 * self.padding - self.kernel_h) // self.stride + 1
+    self.out_w = (self.in_w + 2 * self.padding - self.kernel_w) // self.stride + 1
+
+    # Number of input channel groups (16 channels per group due to BSHR constraint)
+    self.num_channel_groups = math.ceil(self.channels / 16)
+
+    # Number of weight bitplanes (8 bitplanes per channel group for int8 weights)
+    self.num_weight_bitplanes = 8
+
+    # Total weight registers: 8 bitplanes × num_channel_groups
+    self.num_weight_regs = self.num_weight_bitplanes * self.num_channel_groups
+
+    # Weight variables will be filled by _build_weight_recv
+    self.weight_vars = []
+
+    # Link post-ops
+    prev = self
+    for op in self.post_ops:
+      op.prev_op = prev
+      prev = op
+
+    self.body = self._build_structure()
+
+  @property
+  def num_blocks(self) -> int:
+    # Depthwise conv processes 4 bitplanes (for input)
+    return 4
+
+  @property
+  def num_out_blocks(self) -> int:
+    return 4
+
+  def _build_weight_recv(self) -> CodeBlock:
+    """Receive DW conv weights into GPR registers.
+
+    DW conv weights are sent via FIFO (unlike standard conv weights which
+    go to IMCU). Each weight register contains one bitplane of weights
+    for a channel group.
+
+    Returns:
+        CodeBlock with RECV instructions for all weight registers
+    """
+    if self.weight_edge is None:
+      raise ValueError("DWConvBlock: weight_edge is None, cannot generate weight RECV")
+
+    te_infos = DevConfig().get_tensor_edge_info_with_id_dir(
+        self.weight_edge.dst_id, "in")
+
+    if not te_infos:
+      raise ValueError(f"DWConvBlock: No tensor edge info found for weight edge {self.weight_edge}")
+
+    te_info = te_infos[0]
+
+    weight_code = TextBlock("")
+    self.weight_vars = []
+
+    # Receive all weight registers
+    # Layout: for each channel group, receive 8 bitplane weights
+    for i in range(self.num_weight_regs):
+      var = UniqueVar((self.weight_edge, i))
+      var.set_static()  # Mark as static so it persists across loop iterations
+      weight_code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id}); // weight bitplane {i}"
+      self.weight_vars.append(var)
+
+    # Track recv count for validation
+    add_to_map(self.weight_edge, RecvSendNum("recv", self.num_weight_regs), is_send=False)
+
+    return weight_code
+
+  def _build_dwconv_compute(self) -> CodeBlock:
+    """Build DWCONV computation for one output pixel.
+
+    For each output pixel:
+    1. Iterate over channel groups (bshr_sel)
+    2. For each channel group, iterate over 8 weight bitplanes (shift_amt)
+    3. On the last bitplane (shift_amt=7), set dwresult_valid=1 to capture result
+
+    Returns:
+        CodeBlock with DWCONV instructions
+    """
+    comp = SequentialBlock()
+
+    # Add comment header
+    comp.add(TextBlock(f"// OP_DWCONV: {self.channels} channels, {self.num_channel_groups} groups, {self.num_weight_bitplanes} bitplanes\n"))
+
+    # Iterate over channel groups
+    for bshr_sel in range(self.num_channel_groups):
+      # Calculate src_mask for this channel group
+      # src_mask indicates which channels in the 16-channel group are valid
+      channels_in_group = min(16, self.channels - bshr_sel * 16)
+      src_mask = channels_in_group - 1  # 0-indexed mask (15 for full group)
+
+      # Iterate over weight bitplanes (8 bitplanes for int8 weights)
+      for shift_amt in range(self.num_weight_bitplanes):
+        weight_idx = bshr_sel * self.num_weight_bitplanes + shift_amt
+
+        if weight_idx >= len(self.weight_vars):
+          raise ValueError(f"DWConvBlock: weight_idx {weight_idx} out of range for weight_vars length {len(self.weight_vars)}")
+
+        weight_var = self.weight_vars[weight_idx]
+
+        # dwresult_valid = 1 on the last bitplane of each channel group
+        dwresult_valid = 1 if shift_amt == self.num_weight_bitplanes - 1 else 0
+
+        if dwresult_valid:
+          # Last bitplane: capture result in output variable
+          out_var = UniqueVar((self, bshr_sel))
+          # Builtin signature: __builtin_IMCE_DWCONV(weight, shift_amt, dwresult_valid, src_mask, bshr_sel)
+          comp.add(TextBlock(f"{out_var} = __builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel});\n"))
+        else:
+          # Intermediate bitplane: no result capture, accumulates internally
+          comp.add(TextBlock(f"__builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel});\n"))
+
+    return comp
+
+  def _build_loop_body(self, recv_count: int) -> CodeBlock:
+    """Build the inner loop body for depthwise convolution.
+
+    For each output pixel:
+    1. Load input data to linebuffer (LOAD_LB)
+    2. Execute OP_DWCONV for each weight bitplane and channel group
+    3. SEND results
+    """
+    # Get load edge info
+    load_info = []
+    for edge in self.in_edges:
+      te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
+      if not te_infos:
+        continue
+      te_info = te_infos[0]
+      try:
+        arg_id = edge.src_id.graph_node_id
+        if ConstPat.match(CustomIDToNode()[arg_id]):
+          continue
+      except KeyError:
+        pass
+      load_info.append({"edge": edge, "te_info": te_info})
+
+    assert len(load_info) == 1, "DWConvBlock: should have exactly one data load edge"
+    load_edge = load_info[0]["edge"]
+    load_edge_info = load_info[0]["te_info"]
+    self.load_edge_info = load_edge_info
+
+    comp = SequentialBlock()
+
+    # 1. Load input to linebuffer
+    comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info, builder=self.builder))
+
+    # 2. Execute DWCONV computation
+    comp.add(self._build_dwconv_compute())
+
+    # Handle post-ops if any
+    if self.post_ops:
+      all_in_edges = copy(self.in_edges)
+      all_out_edges = copy(self.out_edges)
+      for op in self.post_ops:
+        all_in_edges += op.in_edges
+        all_out_edges += op.out_edges
+      internal_edges = set(all_out_edges)
+
+      for op in self.post_ops:
+        op_external_edges = [e for e in op.in_edges if e not in internal_edges and e != load_edge]
+        for edge in op_external_edges:
+          if edge in DevConfig().TensorEdgetoInfo:
+            te_info = DevConfig().TensorEdgetoInfo[edge]
+          else:
+            continue
+          if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+            continue
+          try:
+            arg_id = edge.src_id.graph_node_id
+            if ConstPat.match(CustomIDToNode()[arg_id]):
+              continue
+          except KeyError:
+            pass
+          if te_info.fifo_id != 0:
+            for i in range(op.num_blocks):
+              var_i = UniqueVar((edge, i))
+              if var_i.static:
+                continue
+              annotation = f"{edge}, {te_info.node_info_str}"
+              owner_edge = te_info.owner
+              recv_code = IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation)
+              comp.add(recv_code)
+        comp.add(op)
+
+    # Wrap with RECV/SEND
+    if self.post_ops:
+      send_edges = list(set(all_out_edges) - set(all_in_edges))
+      send_block = self.post_ops[-1]
+      num_out_blocks = send_block.num_out_blocks
+      return RecvSendWrapper(comp, self.num_blocks, num_out_blocks, send_block, [], send_edges, builder=self.builder)
+    else:
+      return RecvSendWrapper(comp, self.num_blocks, self.num_out_blocks, self, self.in_edges, self.out_edges, builder=self.builder)
+
+  def _build_structure(self) -> CodeBlock:
+    """Build the overall loop structure for depthwise convolution.
+
+    Structure:
+    1. INIT phase: Receive weights into GPR registers
+    2. EXEC phase: Loop over output pixels, execute DWCONV
+    """
+    root = SequentialBlock()
+
+    # 1. Receive weights into GPR (INIT phase - executed once)
+    root.add(self._build_weight_recv())
+
+    # 2. Main loop over output pixels
+    total_output_pixels = self.out_h * self.out_w
+    # Each output pixel needs kernel_h * kernel_w input reads
+    recv_count = self.kernel_h * self.kernel_w
+
+    loop_body = self._build_loop_body(recv_count)
+    main_loop = SimpleFor(total_output_pixels, loop_body, f"{self.annotation}_dwconv_loop")
+    root.add(main_loop)
+
+    return root
+
+  def _render(self) -> str:
+    return self.body.render()
+
+
 class BatchNormBlock(ImceCallCodeBlock):
   """
   BatchNormBlock for batch normalization operations.
