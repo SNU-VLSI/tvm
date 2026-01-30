@@ -434,7 +434,7 @@ class EdgeInfoGenerator:
         if edge.src_id.tensor_type in ["odata", "var"]:
             dst_node_name = ID_dict[getInnerNodeID(edge.dst_id.graph_node_id)]
 
-            if dst_node_name == "nn.imcflow_qconv":
+            if dst_node_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
                 edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
             else:
                 edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])

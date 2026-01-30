@@ -57,6 +57,7 @@ MODEL_REGISTRY = {
     "one_conv_small": (lambda: models_for_test.getOneConvModel(iH=4,iW=4), "random"),
     "one_conv_big": (lambda: models_for_test.getOneConvModel(iH=32,iW=32), "random"),
     "one_conv_wide": (lambda: models_for_test.getOneConvModel(iH=4,iW=4,IC=56), "random"),
+    "one_dwconv_small": (lambda: models_for_test.getOneDWConvModel(iH=4,iW=4), "random"),
     "conv_quant_conv_big": (lambda: models_for_test.getConvQuantConvModel(iH=32, iW=32), "random"),
     "s2_conv_quant_conv_med": (lambda: models_for_test.getS2ConvQuantConvModel(iH=16, iW=16), "random"),
     "s2_conv_quant_conv_big": (lambda: models_for_test.getS2ConvQuantConvModel(iH=32, iW=64), "random"),
@@ -186,7 +187,11 @@ MODEL_REGISTRY = {
     # Other models
     # "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
     # "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
-    # "ds_cnn_imcflow": (lambda: ds_cnn_imcflow.getModel(False), "random"),
+
+    # ------------------------------------------------------------------------------------------
+    # DS CNN
+    # ------------------------------------------------------------------------------------------
+    "ds_cnn_imcflow_small": (lambda: ds_cnn_imcflow.getModel(True, replicate_factor=1), "ones"),
 
     # Legacy models (for backward compatibility)
     # "big": (real_model.getModel, "random"),

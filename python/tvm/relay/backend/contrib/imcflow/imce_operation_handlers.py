@@ -55,7 +55,7 @@ class CompositeHandler(OperationHandler):
     # Visit the body of the composite function using self.builder
     self.builder.visit(call.call.op.body)
 
-    # Assemble ConvBlock if pending info exists
+    # Assemble ConvBlock or DWConvBlock if pending info exists
     if call.conv_pending_info:
         info = call.conv_pending_info
         conv_ctx = info['ctx']
@@ -63,8 +63,13 @@ class CompositeHandler(OperationHandler):
         attrs = info['attrs']
         hid = info['hid']
         annotation = info['annotation']
-        
-        block = ConvBlock(conv_ctx, shapes, attrs, post_ops=call.post_op_stack, annotation=annotation)
+        is_depthwise = info.get('is_depthwise', False)
+
+        if is_depthwise:
+            weight_edge = info.get('weight_edge')
+            block = DWConvBlock(conv_ctx, shapes, attrs, weight_edge=weight_edge, post_ops=call.post_op_stack, annotation=annotation)
+        else:
+            block = ConvBlock(conv_ctx, shapes, attrs, post_ops=call.post_op_stack, annotation=annotation)
         call.codeblocks.append(hid, block, CodePhase.EXEC)
 
     # Clear composite context on both BuilderContext and builder
@@ -127,7 +132,8 @@ class ConvHandler(OperationHandler):
             'shapes': shapes,
             'attrs': call.call.attrs,
             'hid': hid,
-            'annotation': f"conv exec{ConvHandler.uid}"
+            'annotation': f"conv exec{ConvHandler.uid}",
+            "is_depthwise": False
         })
     else:
         # Standalone Conv
@@ -135,6 +141,67 @@ class ConvHandler(OperationHandler):
         call.codeblocks.append(hid, block, CodePhase.EXEC)
         
     ConvHandler.uid += 1
+
+
+@register_operation_handler
+class DwConvHandler(OperationHandler):
+  """Handles nn.imcflow_qdwconv (depthwise convolution) operations.
+
+  Generates DWConvBlock for depthwise convolution execution.
+  Uses OP_DWCONV instruction which operates on BSHR input and register weights.
+
+  Key differences from standard convolution:
+  - Uses BSHR (bit shift register) for input data
+  - Weight stored in registers with layout ic16_pad16_kh3_kw3
+  - Only 3x3 kernel supported
+  - Uses bshr_sel for input channel group selection
+  """
+
+  uid = 0
+
+  @property
+  def priority(self) -> int:
+    return 10
+
+  def can_handle(self, call: relay.Call) -> bool:
+    return call.op == op.get("nn.imcflow_qdwconv")
+
+  def handle(self, call: 'BuilderContext') -> None:
+    # Get hid and shapes
+    hid = call.get_hid()
+    graph_node_id = getNodeID(call.call)
+    shapes = call.get_arg_shape_dict()
+    shapes["output"] = infer_shape(call.call)
+
+    # config reg
+    config_edge = call.get_tensor_edge_from_tag("config")
+    block = RecvConstBlock(config_edge, RecvConstBlock.ConstType.CONFIG, f"{config_edge}, config write")
+    call.codeblocks.append(hid, block, CodePhase.INIT)
+    # add constedge info to codeblock info
+    IMCECodeBlockInfo().append_const_edge_info(config_edge, hid)
+
+    # DW conv weight: received via FIFO (not loaded to IMCU like standard conv)
+    weight_edge = call.get_tensor_edge_from_tag("weight")
+    # Register weight edge so INODE knows to SEND it
+    IMCECodeBlockInfo().append_const_edge_info(weight_edge, hid)
+
+    if call.curr_composite_id:
+        # Defer DWConvBlock creation if inside composite
+        call.conv_pending_info.update({
+            'ctx': call,
+            'shapes': shapes,
+            'attrs': call.call.attrs,
+            'hid': hid,
+            'annotation': f"dwconv exec{DwConvHandler.uid}",
+            'is_depthwise': True,
+            'weight_edge': weight_edge,
+        })
+    else:
+        # Standalone DWConv
+        block = DWConvBlock(call, shapes, call.call.attrs, weight_edge=weight_edge, post_ops=[], annotation=f"dwconv exec{DwConvHandler.uid}")
+        call.codeblocks.append(hid, block, CodePhase.EXEC)
+
+    DwConvHandler.uid += 1
 
 
 @register_operation_handler

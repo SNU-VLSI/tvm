@@ -215,3 +215,67 @@ def imcflow_qconv2d(
       Output = te.compute(Output.shape, lambda *i: Output(*i).astype(out_dtype), name="OutputCast")
 
   return Output
+
+
+def imcflow_qdwconv2d(
+    input : te.Tensor,
+    filter : te.Tensor,
+    strides, padding, dilation,
+    adcmode=0, vmode=0,
+    data_layout="NCHW", kernel_layout="", out_dtype=None
+):
+  """
+  Depthwise convolution without psum quantization.
+
+  Depthwise conv differs from standard conv:
+  - Each input channel is convolved with its own filter (no cross-channel reduction)
+  - Filter shape: (channels, 1, KH, KW)
+  - Output channels = input channels
+
+  Args:
+    input: Input tensor of shape [N, C, H, W]
+    filter: Filter tensor of shape [C, 1, KH, KW]
+    strides: Stride values (tuple)
+    padding: Padding values (tuple)
+    dilation: Dilation values (tuple) - currently not used
+    adcmode: ADC mode (not used in no_psum_quant version)
+    vmode: Voltage mode (not used in no_psum_quant version)
+  """
+  batch, channels, IH, IW = input.shape
+  _, _, KH, KW = filter.shape  # filter shape: (C, 1, KH, KW)
+  OH = (IH - KH + 2 * padding[0]) // strides[0] + 1
+  OW = (IW - KW + 2 * padding[1]) // strides[1] + 1
+
+  # Pad input
+  Apad = te.compute(
+      (batch, channels, IH + 2 * padding[0], IW + 2 * padding[1]),
+      lambda nn, cc, hh, ww: tvm.tir.if_then_else(
+          tvm.tir.all(
+            hh >= padding[0],
+            (hh - padding[0]) < IH,
+            ww >= padding[1],
+            (ww - padding[1]) < IW
+          ),
+          input[nn, cc, hh - padding[0], ww - padding[1]],
+          tvm.tir.const(0, "uint8"),
+      ),
+      name="Apad",
+  )
+
+  # Create reduction variables (no channel reduction for depthwise)
+  ry = te.reduce_axis((0, KH), name="ry")
+  rx = te.reduce_axis((0, KW), name="rx")
+
+  # Compute depthwise convolution
+  # Each channel is convolved independently with its own filter
+  B = te.compute(
+      (batch, channels, OH, OW),
+      lambda nn, cc, hh, ww: te.sum(
+          Apad[nn, cc, hh * strides[0] + ry, ww * strides[1] + rx].astype("int16") *
+          filter[cc, 0, ry, rx].astype("int16"),
+          axis=[ry, rx]
+      ),
+      name="B",
+  )
+
+  return B

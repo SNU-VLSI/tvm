@@ -1962,6 +1962,10 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
   //   return false;
   // }
 
+  int replicate_factor = param->replicate_factor;
+  ICHECK(((replicate_factor-1) & replicate_factor) == 0 && replicate_factor >=1)
+      << "Replicate factor should be a power of 2 integer but was " << replicate_factor;
+
   if (param->meta_schedule_original_shape.size() != 0) {
     reporter->GetDiagCtx().Emit(
         Diagnostic::Error(reporter->GetSpan())
@@ -2000,6 +2004,7 @@ bool ImcflowQConv2DRel(const Array<Type>& types, int num_inputs, const Attrs& at
     ih    = data_shape[2];
     iw    = data_shape[3];
   }
+  ic = ceildiv(ic, replicate_factor);
 
   // weight type check
   IndexExpr oc, kh, kw, ic_weight;
@@ -2054,7 +2059,7 @@ inline Expr MakeImcflowQConv(Expr data, Expr weight, Expr config, Array<IndexExp
                      Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                      Array<IndexExpr> kernel_size, std::string data_layout,
                      std::string kernel_layout, std::string out_layout, DataType out_dtype,
-                     int adcmode, int vmode, int acc_mask,
+                     int adcmode, int vmode, int acc_mask, int replicate_factor,
                      std::string op_name) {
   auto attrs = make_object<ImcflowQConv2DAttrs>();
   attrs->strides = std::move(strides);
@@ -2071,6 +2076,7 @@ inline Expr MakeImcflowQConv(Expr data, Expr weight, Expr config, Array<IndexExp
   attrs->adcmode = adcmode;
   attrs->vmode = vmode;
   attrs->acc_mask = acc_mask;
+  attrs->replicate_factor = replicate_factor;
   const Op& op = Op::Get(op_name);
   return Call(op, {data, weight, config}, Attrs(attrs), {});
 }
@@ -2079,10 +2085,10 @@ TVM_REGISTER_GLOBAL("relay.op.nn._make.imcflow_qconv")
     .set_body_typed([](Expr data, Expr weight, Expr config, Array<IndexExpr> strides, Array<IndexExpr> padding,
                        Array<IndexExpr> dilation, int groups, IndexExpr channels, IndexExpr in_channels,
                        Array<IndexExpr> kernel_size, String data_layout, String kernel_layout,
-                       String out_layout, DataType out_dtype, int adcmode, int vmode, int acc_mask) {
+                       String out_layout, DataType out_dtype, int adcmode, int vmode, int acc_mask, int replicate_factor) {
       return MakeImcflowQConv(data, weight, config, strides, padding, dilation, groups, channels, in_channels,
                                    kernel_size, data_layout, kernel_layout, out_layout, out_dtype,
-                                   adcmode, vmode, acc_mask,
+                                   adcmode, vmode, acc_mask, replicate_factor,
                                    "nn.imcflow_qconv");
     });
 
