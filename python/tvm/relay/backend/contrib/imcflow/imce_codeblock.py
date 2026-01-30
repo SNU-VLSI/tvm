@@ -786,7 +786,8 @@ class DWConvBlock(ImceCallCodeBlock):
 
   @property
   def num_out_blocks(self) -> int:
-    return 4
+    # DWConv produces one result per channel group (not fixed 4 like standard conv)
+    return self.num_channel_groups
 
   def _build_weight_recv(self) -> CodeBlock:
     """Receive DW conv weights into GPR registers.

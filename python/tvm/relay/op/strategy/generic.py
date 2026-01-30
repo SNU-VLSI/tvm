@@ -2226,6 +2226,68 @@ def imcflow_qconv2d_strategy(attrs, inputs, out_type, target):
     return strategy
 
 
+def wrap_compute_imcflow_qdwconv2d(
+    topi_compute,
+    *,
+    need_data_layout=False,
+    need_kernel_layout=False,
+):
+    """Wrap imcflow_qdwconv2d topi compute.
+
+    Depthwise convolution without psum quantization.
+    """
+
+    def _compute_dwconv2d(attrs, inputs, out_type):
+        padding = get_const_tuple(attrs.padding)
+        strides = get_const_tuple(attrs.strides)
+        dilation = get_const_tuple(attrs.dilation)
+        data_layout = attrs.get_str("data_layout")
+        kernel_layout = attrs.get_str("kernel_layout")
+        out_dtype = attrs.out_dtype
+        out_dtype = inputs[0].dtype if out_dtype in ("same", "") else out_dtype
+        # DW conv doesn't use psum quantization, but we pass adcmode/vmode for API compatibility
+        adcmode = attrs.adcmode if hasattr(attrs, 'adcmode') else 0
+        vmode = attrs.vmode if hasattr(attrs, 'vmode') else 0
+        args = [inputs[0], inputs[1], strides, padding, dilation, adcmode, vmode]
+        if need_data_layout:
+            args.append(data_layout)
+        if need_kernel_layout:
+            args.append(kernel_layout)
+        args.append(out_dtype)
+        return [topi_compute(*args)]
+
+    return _compute_dwconv2d
+
+
+@override_native_generic_func("imcflow_qdwconv2d_strategy")
+def imcflow_qdwconv2d_strategy(attrs, inputs, out_type, target):
+    """imcflow_qdwconv2d generic strategy.
+
+    Depthwise convolution for imcflow hardware.
+    Unlike standard conv, DW conv doesn't use psum quantization.
+    """
+    strategy = _op.OpStrategy()
+    data, kernel, config = inputs
+    dilation = get_const_tuple(attrs.dilation)
+    layout = attrs.data_layout
+    kernel_layout = attrs.kernel_layout
+    (dilation_h, dilation_w) = dilation
+    if dilation_h < 1 or dilation_w < 1:
+        raise ValueError("dilation should be positive value")
+
+    strategy.add_implementation(
+        wrap_compute_imcflow_qdwconv2d(
+            topi.imcflow.imcflow_qdwconv2d,
+            need_data_layout=True,
+            need_kernel_layout=True
+        ),
+        wrap_topi_schedule(topi.generic.schedule_depthwise_conv2d_nchw),
+        name="imcflow_qdwconv2d.generic",
+    )
+
+    return strategy
+
+
 def wrap_compute_imcflow_min_max_quantize(topi_compute):
     """wrap imcflow_min_max_quantize topi compute"""
 
