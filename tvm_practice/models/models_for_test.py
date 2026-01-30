@@ -156,9 +156,9 @@ def getOneConvModel(iH=4, iW=4, IC=28):
 
   return out, param_dict
 
-def getOneDWConvModel(iH=4, iW=4, IC=32):
+def getOneDWConvModel(iH=4, iW=4, IC=32, random=True):
   N, IC, H, W = 1, IC, iH, iW
-  OC = 32
+  OC = IC
   KH, KW = 3, 3
   stride, padding = 1, 1
   # input = relay.var("conv_input", shape=(N,math.ceil(IC/256),H,W,4,8), dtype="int32")
@@ -178,8 +178,7 @@ def getOneDWConvModel(iH=4, iW=4, IC=32):
 
   # param_dict = {"conv_weight": np.ones((OC,IC,KH,KW), dtype="int8")}
   param_dict = {
-    "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
-    # "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
+    "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8) if random else np.ones((OC,IC,KH,KW), dtype="int8"),
   }
 
   out = tvm.IRModule.from_expr(y)
