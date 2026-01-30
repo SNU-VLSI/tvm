@@ -935,7 +935,7 @@ class AttrsNode : public BaseAttrsNode {
       // construct a map then do lookup.
       std::unordered_map<std::string, runtime::TVMArgValue> kwargs;
       for (int i = 0; i < args.size(); i += 2) {
-        ICHECK_EQ(args.type_codes[i], kTVMStr);
+        ICHECK_EQ(args.type_codes[i], kTVMStr) << "attr idx is" << (i/2) << std::endl;
         kwargs[args[i].operator std::string()] = args[i + 1];
       }
       auto ffind = [&kwargs, this](const char* key, runtime::TVMArgValue* val) {

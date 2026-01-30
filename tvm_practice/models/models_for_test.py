@@ -167,7 +167,7 @@ def getOneDWConvModel(iH=4, iW=4, IC=32):
   y = imcflow_qdwconv2d(
     input,
     relay.var("conv_weight", shape=(OC,IC,KH,KW), dtype="int8"),
-    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride, use_imcu=0).get_as_const_tensor(),
     in_channels=IC,
     channels=OC,
     kernel_size=(KH, KW),
@@ -179,7 +179,7 @@ def getOneDWConvModel(iH=4, iW=4, IC=32):
   # param_dict = {"conv_weight": np.ones((OC,IC,KH,KW), dtype="int8")}
   param_dict = {
     "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
-    # "conv_weight": np.random.randint(-1, 0, size=(OC,IC,KH,KW), dtype=np.int8),
+    # "conv_weight": np.ones((OC,IC,KH,KW), dtype="int8"),
   }
 
   out = tvm.IRModule.from_expr(y)

@@ -162,6 +162,9 @@ def make_cpu_runnable(mod, use_saturating_arithmetic=True):
             KH, KW = new_call.attrs.kernel_size
             # For depthwise, in_channels is 1 per group. groups=OC.
             
+            OC = OC.value if hasattr(OC, 'value') else OC
+            KH = KH.value if hasattr(KH, 'value') else KH
+            KW = KW.value if hasattr(KW, 'value') else KW
             restored_weight_data = np.zeros((OC, 1, KH, KW), dtype=np.int8)
             
             for c in range(OC):
@@ -193,7 +196,7 @@ def make_cpu_runnable(mod, use_saturating_arithmetic=True):
 
             new_attrs = {}
             for key in new_call.attrs.keys():
-                new_attrs[key] = new_call.attrs[key]
+                new_attrs[str(key)] = new_call.attrs[key]
             new_attrs["const_packed_node"] = False
             new_attr_node = tvm.ir.make_node("relay.attrs.ImcflowQDwConv2DAttrs", **new_attrs)
             return Call(new_call.op, new_args, new_attr_node, new_type_args, new_call.span)
