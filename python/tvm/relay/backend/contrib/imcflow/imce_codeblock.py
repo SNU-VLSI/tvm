@@ -786,8 +786,9 @@ class DWConvBlock(ImceCallCodeBlock):
 
   @property
   def num_out_blocks(self) -> int:
-    # DWConv produces one result per channel group (not fixed 4 like standard conv)
-    return self.num_channel_groups
+    # Output layout is always NCHW64C (64 channels = 4 groups × 16 channels)
+    # Must match ConvBlock's num_out_blocks for consistent output format
+    return 4
 
   def _build_weight_recv(self) -> CodeBlock:
     """Receive DW conv weights into GPR registers.
@@ -842,7 +843,7 @@ class DWConvBlock(ImceCallCodeBlock):
     # Add comment header
     comp.add(TextBlock(f"// OP_DWCONV: {self.channels} channels, {self.num_channel_groups} groups, {self.num_weight_bitplanes} bitplanes\n"))
 
-    # Iterate over channel groups
+    # Iterate over actual channel groups
     for bshr_sel in range(self.num_channel_groups):
       # Calculate src_mask for this channel group
       # src_mask indicates which channels in the 16-channel group are valid
@@ -869,6 +870,12 @@ class DWConvBlock(ImceCallCodeBlock):
         else:
           # Intermediate bitplane: no result capture, accumulates internally
           comp.add(TextBlock(f"__builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel});\n"))
+
+    # Initialize zero outputs for unused channel groups (padding to 64 channels for NCHW64C layout)
+    # num_out_blocks is always 4 (64 channels), but actual channels may be less
+    for bshr_sel in range(self.num_channel_groups, 4):
+      out_var = UniqueVar((self, bshr_sel))
+      comp.add(TextBlock(f"{out_var} = (short16)0; // padding for NCHW64C layout\n"))
 
     return comp
 
