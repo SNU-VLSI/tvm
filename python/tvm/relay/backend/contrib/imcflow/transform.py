@@ -786,7 +786,9 @@ def partitionImcflowSubGraph(mod):
 def split_conv_to_atomic(mod, OldParamDict):
 
     #- we never include min_max_quant as conv2d post op. min_max_quant never be split into multiple nodes.
-    post_op_candidates = [op.get("nn.bias_add"), op.get("nn.relu"), op.get("nn.batch_norm"), op.get("imcflow.fused_batch_norm")]
+    #- we never include batch_norm as conv2d post op. BN is channel-wise operation, so it can be applied after concat.
+    #  This simplifies parameter management and allows BN + min_max_quant to be fused into a single composite.
+    post_op_candidates = [op.get("nn.bias_add"), op.get("nn.relu")]
     class Worker:
       def __init__(self, OldParamDict):
         self.OldParamDict = OldParamDict

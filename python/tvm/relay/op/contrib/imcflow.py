@@ -449,6 +449,42 @@ def makeReluPattern(data):
 def makeMinMaxQauntPattern(data):
   return is_op("qnn.imcflow_min_max_quantize")(data, is_constant(), is_constant())
 
+def makeBNMinMaxQuantPattern(data):
+  """Pattern for BN followed by min_max_quant.
+
+  This pattern allows BN + min_max_quant to be fused into a single composite,
+  which is useful when Conv is split by OC and BN is applied after concat.
+  """
+  bn = makeBNPattern(data)
+  mmq = makeMinMaxQauntPattern(bn)
+  return mmq
+
+def makeBNMulAddMinMaxQuantPattern():
+  """Pattern for residual block: BN path + skip path (multiply) -> Add -> MinMax.
+
+  This pattern matches the residual block structure:
+  - Path 1: data1 -> BN
+  - Path 2: data2 -> multiply(data2, const) [skip connection with scale]
+  - Converge: add(bn_out, mul_out)
+  - Output: minmax_quantize
+
+  The pattern has two wildcard inputs (data1 for BN, data2 for multiply).
+  """
+  # BN path: wildcard input -> BN
+  data1 = wildcard()
+  bn = makeBNPattern(data1)
+
+  # Skip path: wildcard input -> multiply with constant
+  data2 = wildcard()
+  mul = is_op("multiply")(data2, is_constant()) | is_op("multiply")(is_constant(), data2)
+
+  # Converge: add(bn, mul) or add(mul, bn)
+  add_out = is_op("add")(bn, mul) | is_op("add")(mul, bn)
+
+  # Output: minmax quantize
+  mmq = makeMinMaxQauntPattern(add_out)
+  return mmq
+
 def makeNUQauntPattern(data):
   return is_op("qnn.imcflow_nu_quantize")(data, is_constant())
 
@@ -515,14 +551,15 @@ def pattern_table():
       # out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeMinMaxQauntPattern(data) | makeNUQauntPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
       # for i in range(1, 10):
       #   out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
-      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
+      # BN is separated from Conv composite and integrated with min_max_quant as imcflow.bn-minmax
+      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeMulPattern(data)
       for i in range(1, 10):
-        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
-      
+        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeMulPattern(out)
+
       out = out | makeSplitPatern(out) | imcflow_concat(out)
 
       return out
-    
+
     def imcflow_vec_op_combs(data):
       out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeBNPattern(data) | makeMulPattern(data)
       for i in range(1, 10):
@@ -533,13 +570,17 @@ def pattern_table():
       return out
     
     imcflow_patterns.extend(
-      [ 
+      [
         ("imcflow.qconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qconv")),
         ("imcflow.qdwconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qdwconv")),
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
         ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),
         # ("imcflow.vec_ops", imcflow_vec_op_combs(wildcard())),
+        # BN + Mul(skip) + Add + min_max_quant composite: for residual blocks
+        ("imcflow.bn-mul-add-minmax", makeBNMulAddMinMaxQuantPattern()),
+        # BN + min_max_quant composite: used when Conv is split by OC and BN is applied after concat
+        ("imcflow.bn-minmax", makeBNMinMaxQuantPattern(wildcard())),
       ]
     )
 
