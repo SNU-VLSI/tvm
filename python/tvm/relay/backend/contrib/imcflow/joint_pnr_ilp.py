@@ -250,6 +250,7 @@ class Commodity:
     tensor_type: str        # e.g., 'data', 'weight', 'config'
     split_idx: Optional[int] = None
     metadata: Any = None    # Original TensorEdge for reference
+    is_multicast: bool = True  # False for split outputs that need individual routing
 
     def get_congestion_group(self) -> str:
         """Get congestion group for this commodity"""
@@ -490,7 +491,7 @@ class GraphExtractor:
               debug_print(f"  Name : {CustomIDToName()[getInnerNodeID(node_id)]}")
 
         # Extract graph_commodities (data flows)
-        self._extract_graph_commodities_from_tensor_edge_list(tensor_edge_list)
+        self._extract_graph_commodities_from_tensor_edge_list(tensor_edge_list, func_name)
 
         # Collect nodes by type
         call_nodes = []
@@ -719,7 +720,7 @@ class GraphExtractor:
         if is_composite:
             self._visit(call.op, in_composite=True, composite_node_id=node_id)
 
-    def _extract_graph_commodities_from_tensor_edge_list(self, tensor_edge_list: List):
+    def _extract_graph_commodities_from_tensor_edge_list(self, tensor_edge_list: List, func_name: str):
         """Extract commodities from TensorEdgeList.
 
         Uses validated TensorEdgeList instead of parsing relay function.
@@ -733,9 +734,14 @@ class GraphExtractor:
 
         Args:
             tensor_edge_list: List of TensorEdge from constructTensorEdgeList()
+            func_name: Function name for SplitInfo lookup
         """
         # CustomIDToNode is imported at module level
         id_to_node = CustomIDToNode()
+
+        # Get SplitInfo for this function to determine multicast vs unicast for split outputs
+        from tvm.contrib.imcflow import ImcflowDeviceConfig
+        split_info_dict = ImcflowDeviceConfig().SplitInfo.get(func_name, {})
 
         for edge in tensor_edge_list:
             src_graph_id = edge.src_id.graph_node_id
@@ -816,13 +822,25 @@ class GraphExtractor:
                 if src_node_id == dst_node_id:
                     continue
 
+                # Determine multicast flag for split outputs
+                is_multicast = True
+                if src_node.node_type == NodeType.SPLIT:
+                    debug_print(f"[GraphExtractor.split_multicast] Checking edge {edge} for multicast enable at split node {src_node_id}")
+                    split_inner_id = getInnerNodeID(src_node_id)
+                    if split_inner_id in split_info_dict:
+                        is_multicast = split_info_dict[split_inner_id].get('is_multi_cast', True)
+                        debug_print(f"  edge {edge}: is_multicast={is_multicast} from SplitInfo")
+                    else:
+                        debug_print(f"  edge {edge}: No SplitInfo found for split node {split_inner_id}, defaulting to multicast")
+
                 # Add commodity with validated tensor_type from TensorEdgeList
                 self.add_commodity(
                     src_node_id, dst_node_id,
                     src_node.node_type, dst_node.node_type,
                     tensor_type=tensor_type,
                     split_idx=edge.split_idx,
-                    metadata=edge
+                    metadata=edge,
+                    is_multicast=is_multicast,
                 )
 
         debug_print(f"[_extract_commodities_from_tensor_edge_list] "
@@ -843,7 +861,7 @@ class GraphExtractor:
     def add_commodity(self, src_node_id: Any, dst_node_id: Any,
                       src_type: NodeType, dst_type: NodeType,
                       tensor_type: str, split_idx: Optional[int] = None,
-                      metadata: Any = None):
+                      metadata: Any = None, is_multicast: bool = True):
         """Add a commodity (data flow) between nodes"""
         commodity = Commodity(
             id=self.commodity_id,
@@ -854,6 +872,7 @@ class GraphExtractor:
             tensor_type=tensor_type,
             split_idx=split_idx,
             metadata=metadata,
+            is_multicast=is_multicast,
         )
         self.commodities.append(commodity)
         self.commodity_id += 1
@@ -1066,9 +1085,16 @@ class JointPnRILP:
 
         # Multicast grouping: y[g][e] for commodities with same source
         # Group by (source_node_id, tensor_type) for multicast
+        # Non-multicast split outputs get individual groups (unicast routing)
         self.multicast_groups = {}  # group_key -> [commodity_ids]
         for k in gi.commodities:
-            key = (k.source_node_id, k.tensor_type)
+            if not k.is_multicast and k.split_idx is not None:
+                # Non-multicast split output: each goes to separate group for individual routing
+                key = (k.source_node_id, k.tensor_type, k.split_idx)
+                debug_print(f"[JointPnRILP.multicast] Commodity {k.id} non-multicast split output, separate group key: {key}")
+                debug_print(f"  Source node: {k.source_node_id}, tensor_type: {k.tensor_type}, split_idx: {k.split_idx}")
+            else:
+                key = (k.source_node_id, k.tensor_type)
             if key not in self.multicast_groups:
                 self.multicast_groups[key] = []
             self.multicast_groups[key].append(k.id)
