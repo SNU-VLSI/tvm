@@ -6881,6 +6881,143 @@ def constructCustomIDInFunc(mod):
   for func_name in mod.functions:
     if "imcflow" in func_name.name_hint: _Visitor(func_name.name_hint).visit(mod[func_name.name_hint])
 
+def constructSplitInfo(mod):
+  """Construct SplitInfo by analyzing split nodes and their downstream consumers.
+
+  This function should be called after constructUsefulMappings() and constructCustomIDInFunc().
+  It finds split nodes in the graph and determines:
+  - is_multi_cast: True for normal conv (same data to multiple IC slices), False for DW conv
+  - channels: Number of input channels being split
+  - num_splits: Number of splits
+
+  The is_multi_cast is determined by looking at the downstream conv2d/qdwconv nodes.
+  """
+  config = ImcflowDeviceConfig()
+  id_in_func = CustomIDInFunc()
+  id_to_node = CustomIDToNode()
+
+  # Clear existing SplitInfo
+  config.SplitInfo = {}
+
+  class SplitInfoVisitor(tvm.relay.ExprVisitor):
+    def __init__(self, func_name):
+      super().__init__()
+      self.func_name = func_name
+      self.split_consumers = {}  # split_custom_id -> list of consumer nodes
+
+    def visit_call(self, call):
+      super().visit_call(call)
+
+      # Check if this is a split node
+      if isinstance(call.op, tvm.ir.Op) and call.op.name == "split":
+        split_id = int(call.attrs.custom_id)
+        if split_id not in self.split_consumers:
+          self.split_consumers[split_id] = []
+
+    def visit_tuple_getitem(self, tgi):
+      super().visit_tuple_getitem(tgi)
+
+      # Check if this TupleGetItem's tuple is a split
+      if isinstance(tgi.tuple_value, relay.Call):
+        if isinstance(tgi.tuple_value.op, tvm.ir.Op) and tgi.tuple_value.op.name == "split":
+          split_id = int(tgi.tuple_value.attrs.custom_id)
+          if split_id not in self.split_consumers:
+            self.split_consumers[split_id] = []
+          # We'll find consumers in a second pass
+
+  class ConsumerFinder(tvm.relay.ExprVisitor):
+    """Find what consumes each TupleGetItem from a split."""
+    def __init__(self, split_ids):
+      super().__init__()
+      self.split_ids = split_ids
+      self.tgi_to_split = {}  # id(tgi) -> split_id
+      self.split_to_consumers = {sid: [] for sid in split_ids}
+
+    def visit_tuple_getitem(self, tgi):
+      super().visit_tuple_getitem(tgi)
+      if isinstance(tgi.tuple_value, relay.Call):
+        if isinstance(tgi.tuple_value.op, tvm.ir.Op) and tgi.tuple_value.op.name == "split":
+          split_id = int(tgi.tuple_value.attrs.custom_id)
+          if split_id in self.split_ids:
+            self.tgi_to_split[id(tgi)] = split_id
+
+    def visit_call(self, call):
+      super().visit_call(call)
+      # Check if any argument is a TupleGetItem from our splits
+      for arg in call.args:
+        if isinstance(arg, relay.TupleGetItem) and id(arg) in self.tgi_to_split:
+          split_id = self.tgi_to_split[id(arg)]
+          self.split_to_consumers[split_id].append(call)
+
+  for func_name in mod.functions:
+    if "imcflow" not in func_name.name_hint:
+      continue
+
+    func = mod[func_name.name_hint]
+
+    # First pass: find all split nodes
+    visitor = SplitInfoVisitor(func_name.name_hint)
+    visitor.visit(func)
+
+    if not visitor.split_consumers:
+      continue
+
+    # Second pass: find consumers of each split
+    consumer_finder = ConsumerFinder(visitor.split_consumers.keys())
+    consumer_finder.visit(func)
+
+    # Analyze each split
+    for split_id, _ in visitor.split_consumers.items():
+      split_node = id_to_node.get(split_id)
+      if split_node is None:
+        continue
+
+      consumers = consumer_finder.split_to_consumers.get(split_id, [])
+
+      # Determine if depthwise by checking consumer conv nodes
+      is_depthwise = False
+      for consumer in consumers:
+        if isinstance(consumer.op, tvm.ir.Op):
+          op_name = consumer.op.name
+          if "qdwconv" in op_name or "dwconv" in op_name:
+            is_depthwise = True
+            break
+          elif "qconv" in op_name or "conv2d" in op_name:
+            is_depthwise = False
+            break
+        elif isinstance(consumer.op, relay.Function):
+          # Check Composite attribute for composite functions
+          if hasattr(consumer.op.attrs, "Composite"):
+            composite_name = str(consumer.op.attrs["Composite"])
+            if "qdwconv" in composite_name or "dwconv" in composite_name:
+              is_depthwise = True
+              break
+            elif "qconv" in composite_name and "dwconv" not in composite_name:
+              is_depthwise = False
+              break
+
+      # Get split info from the split node
+      num_splits = len(split_node.attrs.indices_or_sections) + 1 if hasattr(split_node.attrs, 'indices_or_sections') else 2
+
+      # Get input channels from split input shape
+      channels = 0
+      if hasattr(split_node.args[0], 'checked_type'):
+        input_type = split_node.args[0].checked_type
+        if hasattr(input_type, 'shape') and len(input_type.shape) > 1:
+          # Assume NCHW format, channel is dim 1
+          channels = int(input_type.shape[1])
+
+      # Store split info
+      if func_name.name_hint not in config.SplitInfo:
+        config.SplitInfo[func_name.name_hint] = {}
+
+      config.SplitInfo[func_name.name_hint][split_id] = {
+        'is_multi_cast': not is_depthwise,
+        'channels': channels,
+        'num_splits': num_splits
+      }
+      debug_print(f"[constructSplitInfo] {func_name.name_hint}:{split_id} - is_multi_cast={not is_depthwise}, channels={channels}, num_splits={num_splits}")
+
 #TODO: DataBlock -> TVM name. consider difference between function parameter, constant, instruction
 class CodeWriter:
     def __init__(self, indent_str="  "):
