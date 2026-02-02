@@ -162,10 +162,16 @@ def getOneDWConvModel(iH=4, iW=4, IC=32, random=True):
   KH, KW = 3, 3
   stride, padding = 1, 1
   # input = relay.var("conv_input", shape=(N,math.ceil(IC/256),H,W,4,8), dtype="int32")
-  input = relay.var("conv_input", shape=(N,IC,H,W), dtype="uint8")
+  input = relay.var("conv_input", shape=(N,IC,H,W), dtype="int16")
+
+  y = imcflow_min_max_quantize(
+    input, 
+    relay.var("quant_min", shape=(), dtype="int16"), 
+    relay.var("quant_max", shape=(), dtype="int16"), 
+    axis=1, out_dtype="uint8", channel=IC)
 
   y = imcflow_qdwconv2d(
-    input,
+    y,
     relay.var("conv_weight", shape=(OC,IC,KH,KW), dtype="int8"),
     ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride, use_imcu=0).get_as_const_tensor(),
     in_channels=IC,
@@ -178,6 +184,8 @@ def getOneDWConvModel(iH=4, iW=4, IC=32, random=True):
 
   # param_dict = {"conv_weight": np.ones((OC,IC,KH,KW), dtype="int8")}
   param_dict = {
+    "quant_min": np.array(-2**15, dtype="int16"),
+    "quant_max": np.array(2**15-1, dtype="int16"),
     "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8) if random else np.ones((OC,IC,KH,KW), dtype="int8"),
   }
 
