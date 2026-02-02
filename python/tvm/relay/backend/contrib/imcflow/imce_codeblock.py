@@ -942,10 +942,14 @@ class DWConvBlock(ImceCallCodeBlock):
         else:
           # Intermediate bitplane: no result capture, accumulates internally
           comp.add(TextBlock(f"__builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel});\n"))
+    
+    for bshr_sel in range(self.num_channel_groups, 2):
+      out_var = UniqueVar((self, bshr_sel))
+      comp.add(TextBlock(f"{out_var} = __builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel}); // this is dummy \n"))
 
     # Initialize zero outputs for unused channel groups (padding to 64 channels for NCHW64C layout)
     # num_out_blocks is always 4 (64 channels), but actual channels may be less
-    for bshr_sel in range(self.num_channel_groups, 4):
+    for bshr_sel in range(2, 4):
       out_var = UniqueVar((self, bshr_sel))
       comp.add(TextBlock(f"{out_var} = (short16)0; // padding for NCHW64C layout\n"))
 
