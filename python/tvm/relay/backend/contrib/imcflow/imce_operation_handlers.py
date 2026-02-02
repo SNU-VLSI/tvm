@@ -271,8 +271,7 @@ class MultHandler(OperationHandler):
       else:
         to_process_in_edges.append(in_edge)
 
-    # block = MultlBlock(call, "multl")
-    block = MultlSWFixBlock(call, "multl-swfix")
+    block = MultlBlock(call, "multl")
     if call.curr_composite_id is not None:
       call.post_op_stack.append(block)
     else:
