@@ -607,8 +607,18 @@ class TensorEdgeInfo(EdgeInfo):
     return []
 
   def __str__(self):
-    policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"
-    return f"TensorEdgeInfo([{policy_info_str}], {self.data_block}, {self.fifo_id})"
+    # policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"
+    policy_info_str = "router entries:\n"
+    for entry in self.policy_info:
+      policy_info_str += f"  {str(entry)}"
+    
+    data = "TensorEdgeInfo(\n"
+    data += f"  {policy_info_str}\n"
+    data += f"  data_block={self.data_block}\n"
+    data += f"  fifo_id={self.fifo_id}\n"
+    data += ")"
+
+    return data
 
   def __repr__(self):
     return self.__str__()
@@ -735,6 +745,7 @@ class ImcflowDeviceConfig:
     self.LayoutMap={}
     self.FIFOConflictTable = {}
     self.NoCDeadlockTable = {}
+    self.SplitInfo = {} # func_name : {split_node_id : split_info}. split_info = {'is_multi_cast':bool, channels : int, num_splits : int}
 
   def clear(self):
     self._initialize()
