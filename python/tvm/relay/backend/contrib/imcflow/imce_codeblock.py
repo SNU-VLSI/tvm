@@ -20,9 +20,9 @@ import pdb
 from dataclasses import dataclass
 
 # Environment variable to enable MULTL overflow bug SW fix
-# Set BUG_FIX_OVERFLOW_SW=1 to enable the fix
+# Set IMCFLOW_BUGFIX_OVERFLOW_SW=1 to enable the fix
 def _is_multl_swfix_enabled():
-  return os.environ.get("BUG_FIX_OVERFLOW_SW", "0") == "1"
+  return os.environ.get("IMCFLOW_BUGFIX_OVERFLOW_SW", "0") == "1"
 
 if TYPE_CHECKING:
   from .builder_context import BuilderContext
@@ -334,7 +334,7 @@ class DivBlock(VecBlock):
 class MultlBlock(ImceCallCodeBlock):
   """MULTL operation block with optional SW fix for hardware overflow bug.
 
-  If BUG_FIX_OVERFLOW_SW=1, uses MultlSWFixOp for overflow bug fix.
+  If IMCFLOW_BUGFIX_OVERFLOW_SW=1, uses MultlSWFixOp for overflow bug fix.
   Otherwise, uses simple MULTL instruction.
   """
   num_in_edges = 2
@@ -406,7 +406,6 @@ class MultlSWFixOp(ImceCodeBlock):
     # Intermediate variables (unique per block_id)
     var_L = UniqueVar((self.block_id, "L"))
     var_H = UniqueVar((self.block_id, "H"))
-    var_zero = UniqueVar((self.block_id, "zero"))
     var_neg1 = UniqueVar((self.block_id, "neg1"))
     var_const_7fff = UniqueVar((self.block_id, "const_7fff"))
     var_H_sign = UniqueVar((self.block_id, "H_sign"))
@@ -421,9 +420,8 @@ class MultlSWFixOp(ImceCodeBlock):
     code += f"{var_L} = __builtin_IMCE_MULTL({self.var_a}, {self.var_b}, {self.imm_value});"
     code += f"{var_H} = __builtin_IMCE_MULTH({self.var_a}, {self.var_b}, {self.imm_value});"
 
-    # Constant generation (only uses immediate 1 and 15)
-    code += f"{var_zero} = __builtin_IMCE_XOR({var_H}, {var_H}, {self.imm_value});"  # generate 0
-    code += f"{var_neg1} = __builtin_IMCE_SUBI({var_zero}, 1);"  # 0 - 1 = -1 (0xFFFF)
+    # Constant generation (uses zero register directly, immediate 1 only)
+    code += f"{var_neg1} = __builtin_IMCE_SUBI(0, 1);"  # 0 - 1 = -1 (0xFFFF), uses zero register
     code += f"{var_const_7fff} = __builtin_IMCE_SRLI({var_neg1}, 1);"  # -1 >>> 1 = 0x7FFF (32767)
 
     # Sign extraction
@@ -1150,7 +1148,7 @@ class BatchNormBlock(ImceCallCodeBlock):
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND.
 
-    If BUG_FIX_OVERFLOW_SW=1, uses MultlSWFixOp for overflow bug fix.
+    If IMCFLOW_BUGFIX_OVERFLOW_SW=1, uses MultlSWFixOp for overflow bug fix.
     Otherwise, uses simple MULTL instruction.
     """
     code = TextBlock("")
