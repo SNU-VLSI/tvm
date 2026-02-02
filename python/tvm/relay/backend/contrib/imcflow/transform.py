@@ -16,6 +16,7 @@ from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomI
 from tvm.relay.backend.contrib.imcflow.layout import ImcflowLayoutLegalizer, apply_layout_to_type
 from tvm.relay.backend.contrib.imcflow import layout as imcflow_layout
 from tvm.relay.backend.contrib.imcflow import transform_utils
+from tvm.relay.backend.contrib.imcflow.tensor_graph import OpTagger
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInodePktCntForEdge, NodeCollector
 from itertools import cycle
 from collections import defaultdict
@@ -4012,80 +4013,13 @@ def constructTensorEdgeList(mod):
                               self.VarProperties[var]["dst_graph_node_id"], self.VarProperties[var]["dst_tag"],
                               self.getInputGraphNodeSplitIndex(arg))
         elif IsSupportedOp:
-          if call.op == op.get("split"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          elif call.op == op.get("concatenate"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          elif call.op == op.get("add"):
-            # Detect which input is constant (if any)
-            if isinstance(call.args[0], Constant):
-              ScaleNode, InputNode = 0, 1
-            elif isinstance(call.args[1], Constant):
-              ScaleNode, InputNode = 1, 0
-            else:
-              ScaleNode, InputNode = None, None
-
-            if ScaleNode is not None:
-              _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs",
-                                self.getInputGraphNodeSplitIndex(call.args[InputNode]))
-              _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
-            else:
-              _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs",
-                                self.getInputGraphNodeSplitIndex(call.args[0]))
-              _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs",
-                                self.getInputGraphNodeSplitIndex(call.args[1]))
-          elif call.op == op.get("divide"):
-            ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
-            InputNode = 1 if ScaleNode == 0 else 0
-            _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
-            _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
-          elif call.op == op.get("multiply"):
-            # Detect which input is constant (if any)
-            if isinstance(call.args[0], Constant):
-              ScaleNode, InputNode = 0, 1
-            elif isinstance(call.args[1], Constant):
-              ScaleNode, InputNode = 1, 0
-            else:
-              ScaleNode, InputNode = None, None
-
-            if ScaleNode is not None:
-              _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs",
-                                self.getInputGraphNodeSplitIndex(call.args[InputNode]))
-              _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
-            else:
-              _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs",
-                                self.getInputGraphNodeSplitIndex(call.args[0]))
-              _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs",
-                                self.getInputGraphNodeSplitIndex(call.args[1]))
-          elif call.op == op.get("nn.conv2d"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
-          elif call.op == op.get("nn.bias_add"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "bias", DstGraphNodeID, "bias", None)
-          elif call.op == op.get("nn.relu"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          elif call.op == op.get("nn.imcflow_qconv") or call.op == op.get("nn.imcflow_qdwconv"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)
-            _processInputNode(call.args[2], "config", DstGraphNodeID, "config", None)
-          elif call.op == op.get("imcflow.fused_batch_norm"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "fused_scale", DstGraphNodeID, "fused_scale", None)
-            _processInputNode(call.args[2], "fused_bias", DstGraphNodeID, "fused_bias", None)
-          elif call.op == op.get("qnn.imcflow_min_max_quantize"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "min", DstGraphNodeID, "min", None)
-            _processInputNode(call.args[2], "max", DstGraphNodeID, "max", None)
-          elif call.op == op.get("qnn.imcflow_nu_quantize"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "threshold", DstGraphNodeID, "threshold", None)
-          # elif call.op == op.get("imcflow_packing"):python_dbg main.py -p random -m super_big_conv  2>&1 | tee main.log
-          #   _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          # elif call.op == op.get("imcflow_unpacking"):
-          #   _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
-          else:
-            raise ValueError("Unsupported operator detected. please check.")
+          op_name = call.op.name
+          input_tags = OpTagger.get_input_tags(call, op_name)
+          if input_tags is None:
+            raise ValueError(f"Unsupported operator detected: {op_name}. please check.")
+          for arg_idx, src_tag, dst_tag, needs_split_idx in input_tags:
+            split_idx = self.getInputGraphNodeSplitIndex(call.args[arg_idx]) if needs_split_idx else None
+            _processInputNode(call.args[arg_idx], src_tag, DstGraphNodeID, dst_tag, split_idx)
 
         #Pre DFS search: Traverse child nodes
         for a in call.args:
