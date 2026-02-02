@@ -131,6 +131,24 @@ class ImceCallCodeBlock(ImceCodeBlock):
   def __repr__(self):
     return f"{self.__class__.__name__}(gid: {self.call.get_gid()})"
 
+# ======================================================
+# helper functions
+# ======================================================
+def get_total_bytes(ttype):
+    elem_count = math.prod(list(ttype.shape))
+    if isinstance(elem_count, tvm.tir.expr.IntImm):
+      elem_count = elem_count.value
+    dtype = ttype.dtype
+    if "int8" in dtype or "uint8" in dtype:
+      bytes_per_elem = 1
+    elif "int16" in dtype or "uint16" in dtype:
+      bytes_per_elem = 2
+    elif "int32" in dtype or "uint32" in dtype or "float32" in dtype:
+      bytes_per_elem = 4
+    else:
+      raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
+    total_bytes = elem_count * bytes_per_elem
+    return total_bytes
 
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
@@ -271,6 +289,24 @@ class IMCERecvBlock(ImceCodeBlock):
     add_to_map(self.owner_edge, RecvSendNum("recv", 1), is_send=False)
     return f"{self.var_name} = __builtin_IMCE_RECV({self.fifo_id}); // {self.annotation}"
 
+class IMCESendBlock(ImceCodeBlock):
+  """
+  Code block for sending data to a fifo.
+  Calls add_to_map during _render() so that count_stack is properly populated.
+  """
+  def __init__(self, var_name: str, fifo_id: int, policy_addr : int, owner_edges: TensorEdge, annotation: str = ""):
+    super().__init__(annotation)
+    self.var_name = var_name
+    self.fifo_id = fifo_id
+    self.policy_addr = policy_addr
+    # list if multicast
+    self.owner_edges = owner_edges if isinstance(owner_edges, list) else [owner_edges]
+
+  def _render(self) -> str:
+    # Call add_to_map at render time when count_stack is properly populated
+    for owner_edge in self.owner_edges:
+      add_to_map(owner_edge, RecvSendNum("send", 1), is_send=True)
+    return f"__builtin_IMCE_SEND({self.policy_addr}, {self.var_name}, {self.fifo_id}, 0); // {self.annotation}"
 
 class VecBlock(ImceCallCodeBlock):
   """
@@ -373,6 +409,95 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
   def num_out_blocks(self) -> int:
     return 4  # FIXED in MinmaxQuantBlock
 
+  def consumer_is_non_multicast_split(self):
+    assert len(self.out_edges) == 1, "Only one output edge is expected"
+    out_edge = self.out_edges[0]
+    dst_gid = out_edge.dst_id.graph_node_id
+    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
+      split_info = DevConfig().SplitInfo[self.call.func_name][getNodeID(dst_node)]
+      is_multicast = split_info["is_multi_cast"]
+      channels = split_info["channels"]
+      num_splits = split_info["num_splits"]
+      return (not is_multicast), channels, num_splits
+    else:
+      return False, None, None
+  
+  def get_split_consumer_edge_info(self):
+    assert len(self.out_edges) == 1, "Only one output edge is expected"
+    out_edge = self.out_edges[0]
+    dst_gid = out_edge.dst_id.graph_node_id
+    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    assert isinstance(dst_node, relay.Call) and dst_node.op.name == "split", "Output consumer must be a split"
+
+    split_out_edges = DevConfig().get_tensor_edges_from_graph_node_id(
+      graph_node_id=dst_gid,
+      dir="out"
+    )
+
+    split_out_edge_infos = [
+      DevConfig().get_tensor_edge_info(out_edge) for out_edge in split_out_edges
+    ]
+
+    return split_out_edges, split_out_edge_infos
+  
+  def build_mmquant_for_dwconv(self):
+    code = SequentialBlock()
+    is_non_multicast_split, channels, num_splits = self.consumer_is_non_multicast_split()
+    ch_group_nums = math.ceil(channels / 32)
+
+    call_node = self.call.call
+    arg = call_node.args[0]
+    layout = DevConfig().LayoutMap[arg]
+    vir_ttype = get_type(self.call.module, arg)
+    N, C, H, W = vir_ttype.shape
+    assert channels == C.value, "Channel size mismatch"
+    
+    in_edge = self.in_edges[0]
+    in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
+    out_edge = self.out_edges[0]
+    split_out_edges, split_out_edge_infos = self.get_split_consumer_edge_info()
+    out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
+    loop_cnt = N * H * W
+
+    for ch_group_idx in range(ch_group_nums):
+      # recv
+      for i in range(2): # 32 -> 16 x 2
+        code += IMCERecvBlock(
+          var_name=UniqueVar((in_edge, 2*ch_group_idx+i)),
+          fifo_id=in_edge_info.fifo_id,
+          owner_edge=in_edge,
+          annotation=f"dwconv minmaxquant recv ch_group {ch_group_idx}, part {i}"
+        )
+
+      # compute
+      src_mask = 15
+      for i in range(2):
+        qreg_idx = i
+        var_i = UniqueVar((in_edge, 2*ch_group_idx+i))
+        var_o = UniqueVar((self, 2*ch_group_idx+i))
+        code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_idx});"
+      
+      # get_qreg
+      for i in range(4):
+        var_o = UniqueVar((self, i))
+        code += f"{var_o} = __builtin_IMCE_GET_QREG({qreg_idx});"
+
+      # send
+      for i in range(4):
+        split_out_edge_info = split_out_edge_infos[ch_group_idx]
+        code += IMCESendBlock(
+          var_name=UniqueVar((self, i)),
+          fifo_id=split_out_edge_info.fifo_id,
+          policy_addr=split_out_edge_info.policy_info[0].address,
+          owner_edges=split_out_edges[ch_group_idx],
+          annotation=f"dwconv minmaxquant send ch_group {ch_group_idx}, part {i}"
+        )
+
+    for_code = SimpleFor(loop_cnt, code, "dwconv_minmaxquant_loop")
+
+    return for_code
+
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
     data_edge = next(
@@ -380,9 +505,8 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
 
     code = TextBlock("")
 
-    # arg = CustomIDToNode()[getInnerNodeID(data_edge.src_id.graph_node_id)]
-    # arg_shape = get_type(call.module, arg).shape
-    # arg_layout = DevConfig().LayoutMap[arg]
+    is_non_multicast_split, _, _ = self.consumer_is_non_multicast_split()
+    assert is_non_multicast_split==False, "MinmaxQuantBlock for non-multicast split is handled separately."
 
     #TODO: maybe we need to clear qreg before
     src_masks = [min(15, self.channels - i - 1) for i in range(0, self.channels, 16)]
@@ -1464,7 +1588,6 @@ class RecvSendWrapper(ImceCodeBlock):
                             self.send_block, self.in_edges, self.out_edges, self.annotation, builder=self.builder)
 
     return SimpleFor(count, inner, f"call_created_loop")
-
 
 class ImceCodeBlockManager(NodeCodeBlockManager):
   """A class that manages and generates code blocks for imces."""

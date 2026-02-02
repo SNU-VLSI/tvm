@@ -402,6 +402,21 @@ class MinMaxQuantizeHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("qnn.imcflow_min_max_quantize")
 
+  def consumer_is_non_multicast_split(self, call:'BuilderContext') -> tuple[bool, int, int]:
+    out_edges = call.get_output_edges()
+    assert len(out_edges) == 1, "Only one output edge is expected"
+    out_edge = out_edges[0]
+    dst_gid = out_edge.dst_id.graph_node_id
+    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
+      split_info = DevConfig().SplitInfo[call.func_name][getNodeID(dst_node)]
+      is_multicast = split_info["is_multi_cast"]
+      channels = split_info["channels"]
+      num_splits = split_info["num_splits"]
+      return (not is_multicast), channels, num_splits
+    else:
+      return False, None, None
+
   def handle(self, call: 'BuilderContext') -> None:
     print(f"[IMCE CODE BUILDER] handle MinMaxQuantize: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
     hid = call.get_hid()
@@ -422,14 +437,18 @@ class MinMaxQuantizeHandler(OperationHandler):
     # block = RecvConstBlock(_edge, f"qreg reset")
     # call.codeblocks.append(hid, block, CodePhase.INIT)
 
+    is_non_multicast_split, channels, num_splits = self.consumer_is_non_multicast_split(call)
+
     # set o_split_idx to 0 when last_tuple_idx is None
     block = MinmaxQuantBlock(call, call.last_tuple_idx or 0, "min_max_quantize")
     if call.curr_composite_id is not None:
       call.post_op_stack.append(block)
-    else:
+    elif not is_non_multicast_split:
       # Standalone minmax quantize needs RECV/SEND wrapper
       wrapped_block = RecvSendWrapper.from_codeblock(block, "min_max_quantize_standalone", builder=call.builder).create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
+    else:
+      call.codeblocks.append(hid, block.build_mmquant_for_dwconv(), CodePhase.EXEC)
 
 
 @register_operation_handler
