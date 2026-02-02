@@ -332,6 +332,78 @@ class MultlBlock(VecBlock):
   def _op_name(self) -> str:
     return "MULTL"
 
+class MultlSWFixBlock(ImceCallCodeBlock):
+  """
+  MultlSWFix is a class fixing MULTL operation HW bug via sw workaround.
+  Similar to VecBlock its RECV/SEND is handled by wrapper or ConvBlock.
+  """
+  num_in_edges = 2
+
+  def __init__(self, call: 'BuilderContext', annotation: str = ""):
+    """ Code block for vector operations """
+    super().__init__(call, annotation)
+    self.imm_value = self._get_imm_value()
+
+  def _get_imm_value(self) -> int:
+    return 15  # src_mask
+
+  def _render(self) -> str:
+    """Generate only computation, no RECV/SEND.
+
+    MULTL bug software fix algorithm (14-bit immediate constraint):
+    - Overflow occurs when H and L signs mismatch
+    - Replace with saturate value on overflow (H_sign XOR 0x7FFF)
+    - Uses only immediate values 1 and 15 (within 14-bit range)
+    """
+    code = TextBlock("")
+
+    for i in range(self.num_blocks):
+      # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
+      var_ins = [self._make_unique_input_var_for_post_op(
+          edge, i) for edge in self.in_edges]
+      var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
+
+      # Intermediate variables (unique per block)
+      var_L = UniqueVar((self, i, "L"))
+      var_H = UniqueVar((self, i, "H"))
+      var_zero = UniqueVar((self, i, "zero"))
+      var_neg1 = UniqueVar((self, i, "neg1"))
+      var_const_7fff = UniqueVar((self, i, "const_7fff"))
+      var_H_sign = UniqueVar((self, i, "H_sign"))
+      var_L_sign = UniqueVar((self, i, "L_sign"))
+      var_mismatch = UniqueVar((self, i, "mismatch"))
+      var_saturate_val = UniqueVar((self, i, "saturate_val"))
+      var_not_mismatch = UniqueVar((self, i, "not_mismatch"))
+      var_part1 = UniqueVar((self, i, "part1"))
+      var_part2 = UniqueVar((self, i, "part2"))
+      var_o = UniqueVar((self, i))
+
+      # MULTL/MULTH operations
+      code += f"{var_L} = __builtin_IMCE_MULTL({var_in_str}, {self.imm_value});"
+      code += f"{var_H} = __builtin_IMCE_MULTH({var_in_str}, {self.imm_value});"
+
+      # Constant generation (only uses immediate 1 and 15)
+      code += f"{var_zero} = __builtin_IMCE_XOR({var_H}, {var_H}, {self.imm_value});"  # generate 0
+      code += f"{var_neg1} = __builtin_IMCE_SUBI({var_zero}, 1);"  # 0 - 1 = -1 (0xFFFF)
+      code += f"{var_const_7fff} = __builtin_IMCE_SRLI({var_neg1}, 1);"  # -1 >>> 1 = 0x7FFF (32767)
+
+      # Sign extraction
+      code += f"{var_H_sign} = __builtin_IMCE_SRAI({var_H}, 15);"  # -1 or 0
+      code += f"{var_L_sign} = __builtin_IMCE_SRAI({var_L}, 15);"  # -1 or 0
+
+      # Detect sign mismatch
+      code += f"{var_mismatch} = __builtin_IMCE_XOR({var_H_sign}, {var_L_sign}, {self.imm_value});"
+
+      # Determine saturate value
+      code += f"{var_saturate_val} = __builtin_IMCE_XOR({var_H_sign}, {var_const_7fff}, {self.imm_value});"
+
+      # Masking and synthesis
+      code += f"{var_not_mismatch} = __builtin_IMCE_XOR({var_mismatch}, {var_neg1}, {self.imm_value});"
+      code += f"{var_part1} = __builtin_IMCE_AND({var_mismatch}, {var_saturate_val}, {self.imm_value});"
+      code += f"{var_part2} = __builtin_IMCE_AND({var_not_mismatch}, {var_L}, {self.imm_value});"
+      code += f"{var_o} = __builtin_IMCE_OR({var_part1}, {var_part2}, {self.imm_value});"
+
+    return code.render()
 
 class MulthBlock(VecBlock):
   def _get_imm_value(self) -> int:
