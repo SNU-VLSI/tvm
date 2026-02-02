@@ -158,14 +158,16 @@ class PathTreeBuilder:
     generator to efficiently generate policy table entries with path sharing.
     """
 
-    def __init__(self, tensor_id_extractor=None):
+    def __init__(self, tensor_id_extractor=None, func_name: str = None):
         """Initialize the PathTreeBuilder.
 
         Args:
             tensor_id_extractor: Optional function to extract tensor_id from commodity metadata.
                                 If None, uses default extractor that looks for graph_node_id.
+            func_name: Name of the function being processed (for SplitInfo lookup).
         """
         self.tensor_id_extractor = tensor_id_extractor or self._default_tensor_id_extractor
+        self.func_name = func_name
 
     @staticmethod
     def _default_tensor_id_extractor(metadata: Any) -> Optional[Any]:
@@ -211,12 +213,33 @@ class PathTreeBuilder:
         self,
         routing_result: Any
     ) -> Dict[Tuple[Coord, Any], List[int]]:
-        """Group commodities by (source, tensor_id)."""
+        """Group commodities by (source, tensor_id).
+
+        For non-multicast splits (DW conv), includes split_idx in the tensor_id
+        so each split output gets its own tree with separate address.
+        """
         groups: Dict[Tuple[Coord, Any], List[int]] = {}
+
+        # Get SplitInfo for the current function
+        split_info = {}
+        if self.func_name:
+            split_info = ImcflowDeviceConfig().SplitInfo.get(self.func_name, {})
 
         for cid in routing_result.get_all_commodity_ids():
             commodity = routing_result.get_commodity(cid)
             tensor_id = self.tensor_id_extractor(commodity.metadata)
+
+            # Check if this is a non-multicast split (DW conv)
+            # If so, include split_idx in tensor_id to create separate trees
+            split_idx = self._get_split_idx_from_metadata(commodity.metadata)
+            if tensor_id is not None and split_idx is not None:
+                # Check if the source node is a split with is_multi_cast=False
+                src_node_id = self._get_src_node_id_from_metadata(commodity.metadata)
+                if src_node_id is not None and src_node_id in split_info:
+                    if not split_info[src_node_id].get('is_multi_cast', True):
+                        # Non-multicast: include split_idx in tensor_id
+                        tensor_id = (tensor_id, split_idx)
+                        debug_print(f"[PathTreeBuilder] Non-multicast split: tensor_id={tensor_id}, split_idx={split_idx}")
 
             key = (commodity.source, tensor_id)
             if key not in groups:
@@ -224,6 +247,34 @@ class PathTreeBuilder:
             groups[key].append(cid)
 
         return groups
+
+    def _get_split_idx_from_metadata(self, metadata: Any) -> Optional[int]:
+        """Extract split_idx from commodity metadata."""
+        if metadata is None:
+            return None
+        try:
+            edge, mapping_info = metadata
+            # mapping_info is (src_node, dst_node, split_idx)
+            if len(mapping_info) > 2:
+                return mapping_info[2]
+            # Also check edge.split_idx for TensorEdge
+            if hasattr(edge, 'split_idx'):
+                return edge.split_idx
+            return None
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _get_src_node_id_from_metadata(self, metadata: Any) -> Optional[int]:
+        """Extract source node custom_id from commodity metadata."""
+        if metadata is None:
+            return None
+        try:
+            edge, _ = metadata
+            if hasattr(edge, 'src_id') and hasattr(edge.src_id, 'graph_node_id'):
+                return edge.src_id.graph_node_id
+            return None
+        except (TypeError, ValueError, AttributeError):
+            return None
 
     def _build_tree_for_group(
         self,
@@ -745,7 +796,7 @@ class PolicyTableBuilder:
             Dictionary mapping NodeID to list of policy table entries
         """
         # Phase 2: Build multicast trees from routing result
-        tree_builder = PathTreeBuilder()
+        tree_builder = PathTreeBuilder(func_name=func_name)
         tree_result = tree_builder.build(routing_result)
 
         # Phase 3a: Generate policy tables
