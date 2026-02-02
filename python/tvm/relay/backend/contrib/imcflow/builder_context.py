@@ -51,7 +51,8 @@ class BuilderContext:
                module : Optional[tvm.ir.IRModule] = None,
                func_name : Optional[str] = None,
                post_op_stack: Optional[List[Any]] = None,
-               conv_pending_info: Optional[Dict[str, Any]] = None):
+               conv_pending_info: Optional[Dict[str, Any]] = None,
+               vec_op_stack: Optional[List[Any]] = None):
     """Initialize context with call and shared state.
 
     Args:
@@ -63,6 +64,7 @@ class BuilderContext:
         last_tuple_idx: Last tuple index (optional)
         post_op_stack: Stack for accumulating post-ops (optional)
         conv_pending_info: Dictionary to store pending convolution info (optional)
+        vec_op_stack: Stack for accumulating vec_ops in vec_op composites (optional)
     """
     self.call = call
     self.edges = edges
@@ -79,6 +81,7 @@ class BuilderContext:
     self.builder =None
     self.post_op_stack = post_op_stack if post_op_stack is not None else []
     self.conv_pending_info = conv_pending_info
+    self.vec_op_stack = vec_op_stack
 
   def fork(self, call: relay.Call) -> 'BuilderContext':
     """Create a new context for a different call, preserving shared state.
@@ -101,7 +104,8 @@ class BuilderContext:
         module=self.module,
         func_name=self.func_name,
         post_op_stack=self.post_op_stack,
-        conv_pending_info=self.conv_pending_info
+        conv_pending_info=self.conv_pending_info,
+        vec_op_stack=self.vec_op_stack
     )
 
   # Hardware and node mapping helpers

@@ -571,6 +571,7 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.last_tuple_idx = None
     self.post_op_stack = None
     self.conv_pending_info = None
+    self.vec_op_stack = None
     self._handler_registry = get_handler_registry()
     self.send_map = {}
     self.recv_map = {}

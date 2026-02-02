@@ -111,8 +111,11 @@ class ImceCallCodeBlock(ImceCodeBlock):
     self.in_edges = call.get_input_edges()
     self.out_edges = call.get_output_edges()
     self.prev_op = None
-    if self.num_in_edges is not None:
-      assert len(self.in_edges) == self.num_in_edges
+    # Skip edge count assertion when inside a composite (edges may not be individually tracked)
+    # The composite handler will manage edges at the composite level
+    if self.num_in_edges is not None and call.curr_composite_id is None:
+      assert len(self.in_edges) == self.num_in_edges, \
+        f"{self.__class__.__name__}: expected {self.num_in_edges} input edges, got {len(self.in_edges)}"
   
   def get_graph_node_id(self) -> NodeID:
     return getNodeID(self.call.call)
@@ -477,8 +480,14 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
 
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
+    # Find data edge from in_edges or use prev_op if inside composite
     data_edge = next(
-        edge for edge in self.in_edges if edge.dst_id.tensor_type == "data")
+        (edge for edge in self.in_edges if edge.dst_id.tensor_type == "data"),
+        None
+    )
+    if data_edge is None and self.prev_op is not None:
+      # Inside composite: use prev_op's output as data source
+      data_edge = self.prev_op
 
     code = TextBlock("")
 
@@ -486,8 +495,15 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     # arg_shape = get_type(call.module, arg).shape
     # arg_layout = DevConfig().LayoutMap[arg]
 
+    # Determine channels: from explicit setting, prev_op, or default to 64
+    channels = self.channels
+    if channels is None and self.prev_op is not None:
+      channels = getattr(self.prev_op, 'channels', None) or getattr(self.prev_op, 'num_out_blocks', 4) * 16
+    if channels is None:
+      channels = 64  # Default
+
     #TODO: maybe we need to clear qreg before
-    src_masks = [min(15, self.channels - i - 1) for i in range(0, self.channels, 16)]
+    src_masks = [min(15, channels - i - 1) for i in range(0, channels, 16)]
 
     for i, src_mask in enumerate(src_masks):
       var_i = self._make_unique_input_var_for_post_op(data_edge, i)
@@ -1134,6 +1150,149 @@ class DWConvBlock(ImceCallCodeBlock):
     return self.body.render()
 
 
+class VecOpBlock(ImceCallCodeBlock):
+  """
+  VecOpBlock assembles a sequence of vec_ops (add, mult, bn, relu, minmax, etc.)
+  into a single code block with proper variable chaining.
+
+  This is the "anchor" block for imcflow.vecops and imcflow.preop-minmax composites,
+  analogous to how ConvBlock anchors imcflow.qconv2d-with-postop composites.
+
+  VecOpBlock handles internal edge RECV only:
+  - First op's external input RECV: RecvSendWrapper handles this
+  - Internal edges between ops: prev_op chaining (no RECV needed)
+  - Mid-chain external inputs (e.g., converging patterns): internal RECV
+  - Final output SEND: RecvSendWrapper handles this
+  """
+
+  def __init__(self, call: 'BuilderContext', ops: List['ImceCallCodeBlock'], annotation: str = ""):
+    """Initialize VecOpBlock.
+
+    Args:
+        call: BuilderContext for the composite function call
+        ops: List of vec_op blocks in execution order
+        annotation: Debug annotation
+    """
+    self.call = call
+    self.builder = call.builder
+    self.ops = ops
+    self.annotation = annotation
+    self._original = self
+    self.prev_op = None  # For compatibility with post_op chaining
+
+    # Link ops via prev_op chain (same pattern as ConvBlock post_ops)
+    prev = None
+    for op in self.ops:
+      op.prev_op = prev
+      prev = op
+
+    # Compute edge sets
+    self._compute_edges()
+    self.body = self._build_structure()
+
+  def _compute_edges(self):
+    """Classify edges as internal vs external."""
+    all_in_edges = []
+    all_out_edges = []
+    for op in self.ops:
+      all_in_edges.extend(op.in_edges)
+      all_out_edges.extend(op.out_edges)
+
+    self.in_edges = all_in_edges
+    self.out_edges = all_out_edges
+    self.internal_edges = set(all_out_edges) & set(all_in_edges)
+    self.external_in_edges = [e for e in all_in_edges if e not in self.internal_edges]
+    self.final_out_edges = [e for e in all_out_edges if e not in set(all_in_edges)]
+
+  @property
+  def num_blocks(self) -> int:
+    """Number of input blocks (typically 4 for bit planes or channel groups)."""
+    return self.ops[0].num_blocks if self.ops else 4
+
+  @property
+  def num_out_blocks(self) -> int:
+    """Number of output blocks."""
+    return self.ops[-1].num_out_blocks if self.ops else 4
+
+  def get_graph_node_id(self):
+    return getNodeID(self.call.call)
+
+  def _build_structure(self) -> CodeBlock:
+    """Build the computation body.
+
+    Assembles ops in order, adding RECV for mid-chain external inputs.
+    First op's external inputs and final SEND are handled by RecvSendWrapper.
+    """
+    comp = SequentialBlock()
+    first_op_edges = set(self.ops[0].in_edges) if self.ops else set()
+    received_edges = set()
+
+    for op in self.ops:
+      # For non-first ops, RECV external inputs (converging pattern, etc.)
+      for edge in op.in_edges:
+        if edge in self.internal_edges:
+          continue  # Output from prior op -> input to current (no RECV needed)
+        if edge in first_op_edges:
+          continue  # First op's external inputs handled by RecvSendWrapper
+        if edge in received_edges:
+          continue  # Already received
+
+        # Mid-chain external input - generate RECV
+        self._add_recv_for_edge(comp, edge, op)
+        received_edges.add(edge)
+
+      # Add the operation
+      comp.add(op)
+
+    return comp
+
+  def _add_recv_for_edge(self, comp: SequentialBlock, edge: TensorEdge, op: 'ImceCallCodeBlock'):
+    """Generate RECV code for an edge.
+
+    Based on ConvBlock._build_loop_body() post_op external RECV logic.
+    """
+    if edge not in DevConfig().TensorEdgetoInfo:
+      return
+
+    te_info = DevConfig().TensorEdgetoInfo[edge]
+
+    if te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+      return  # Local edge, no RECV needed
+
+    # Skip constants (handled in INIT phase)
+    try:
+      arg_id = edge.src_id.graph_node_id
+      if ConstPat.match(CustomIDToNode()[arg_id]):
+        return
+    except KeyError:
+      pass
+
+    if te_info.fifo_id != 0:
+      # Generate RECV for each block
+      for i in range(op.num_blocks):
+        var_i = UniqueVar((edge, i))
+        if var_i.static:
+          continue
+        annotation = f"{edge}, {te_info.node_info_str}"
+        owner_edge = te_info.owner
+        recv_code = IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation)
+        comp.add(recv_code)
+
+        # Add sync after recv if pair_manager exists
+        if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+          pair = self.builder.pair_manager.get_pair(edge)
+          if pair:
+            sync_code = SequentialBlock()
+            sync_code.add(f"// sync after IMCE recv: uuid={pair.uuid}")
+            sync_code.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
+            sync_code.add(f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {pair.uuid});")
+            sync_code.add(f"__builtin_IMCE_SETFLAG(0);")
+            comp.add(sync_code)
+
+  def _render(self) -> str:
+    return self.body.render()
+
+
 class BatchNormBlock(ImceCallCodeBlock):
   """
   BatchNormBlock for batch normalization operations.
@@ -1154,6 +1313,9 @@ class BatchNormBlock(ImceCallCodeBlock):
     code = TextBlock("")
 
     # Identify edges by tensor type
+    data_edge = None
+    scale_edge = None
+    bias_edge = None
     for edge in self.in_edges:
       if edge.dst_id.tensor_type == "fused_scale":
         scale_edge = edge
@@ -1162,11 +1324,15 @@ class BatchNormBlock(ImceCallCodeBlock):
       elif edge.dst_id.tensor_type == "data":
         data_edge = edge
 
+    # If inside composite, data may come from prev_op
+    if data_edge is None and self.prev_op is not None:
+      data_edge = self.prev_op
+
     print("[BatchNormBlock] num blocks:", self.num_blocks)
     for i in range(self.num_blocks):
       var_data = self._make_unique_input_var_for_post_op(data_edge, i)
-      var_scale = UniqueVar((scale_edge, i))
-      var_bias = UniqueVar((bias_edge, i))
+      var_scale = UniqueVar((scale_edge, i)) if scale_edge else UniqueVar((self, i, "scale_placeholder"))
+      var_bias = UniqueVar((bias_edge, i)) if bias_edge else UniqueVar((self, i, "bias_placeholder"))
       var_o = UniqueVar((self, i))
 
       if _is_multl_swfix_enabled():

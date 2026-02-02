@@ -153,7 +153,8 @@ class OperationHandlerRegistry:
           module=builder.module,
           func_name=builder.func_name,
           post_op_stack=builder.post_op_stack,
-          conv_pending_info=builder.conv_pending_info
+          conv_pending_info=builder.conv_pending_info,
+          vec_op_stack=builder.vec_op_stack
       )
       call_ctx.builder = builder
 

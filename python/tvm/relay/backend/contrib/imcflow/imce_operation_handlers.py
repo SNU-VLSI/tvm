@@ -23,6 +23,85 @@ if TYPE_CHECKING:
 
 
 @register_operation_handler
+class VecOpCompositeHandler(OperationHandler):
+  """Handles vec_op composite function calls (imcflow.vecops, imcflow.preop-minmax).
+
+  These composites contain sequences of vec_ops (add, mult, bn, relu, minmax)
+  without a convolution anchor. This handler assembles them into a VecOpBlock.
+
+  Priority -1 ensures this is checked before CompositeHandler (priority 0),
+  allowing it to intercept vec_op patterns before they fall through to the
+  generic composite handling.
+  """
+
+  @property
+  def priority(self) -> int:
+    return -1  # Higher priority than CompositeHandler (0)
+
+  def can_handle(self, call: relay.Call) -> bool:
+    if not (isinstance(call.op, relay.Function) and "Composite" in call.op.attrs):
+      return False
+    composite_name = call.op.attrs["Composite"]
+    return composite_name in ("imcflow.vecops", "imcflow.preop-minmax")
+
+  def handle(self, call: 'BuilderContext') -> None:
+    composite_id = getNodeID(call.call)
+    composite_name = call.call.op.attrs["Composite"]
+
+    print(f"[VecOpCompositeHandler] Handling {composite_name} composite: {composite_id}")
+
+    # Set composite context
+    call.curr_composite_id = composite_id
+    self.builder.curr_composite_id = composite_id
+
+    # Initialize vec_op_stack for this composite
+    call.vec_op_stack = []
+    self.builder.vec_op_stack = call.vec_op_stack
+
+    # Set post_op_stack to None to prevent accidental use by handlers
+    call.post_op_stack = None
+    self.builder.post_op_stack = None
+
+    # Visit the body of the composite function
+    self.builder.visit(call.call.op.body)
+
+    # Assemble VecOpBlock from collected ops
+    if call.vec_op_stack:
+      hid = call.get_hid()
+
+      print(f"[VecOpCompositeHandler] Assembling VecOpBlock with {len(call.vec_op_stack)} ops")
+      for i, op in enumerate(call.vec_op_stack):
+        print(f"  [{i}] {type(op).__name__}")
+
+      block = VecOpBlock(call, ops=call.vec_op_stack, annotation=f"{composite_name}_block")
+
+      # Determine external input edges for RecvSendWrapper (non-constant)
+      to_process_in_edges = []
+      for edge in block.external_in_edges:
+        try:
+          arg_id = edge.src_id.graph_node_id
+          if not ConstPat.match(CustomIDToNode()[arg_id]):
+            to_process_in_edges.append(edge)
+        except KeyError:
+          to_process_in_edges.append(edge)
+
+      # Wrap with RecvSendWrapper and create loop
+      wrapped = RecvSendWrapper.from_codeblock(
+        block, f"{composite_name}_wrapper", builder=call.builder
+      ).create_loop_from_call(call, to_process_in_edges)
+
+      call.codeblocks.append(hid, wrapped, CodePhase.EXEC)
+    else:
+      print(f"[VecOpCompositeHandler] WARNING: Empty vec_op_stack for {composite_name}")
+
+    # Clear context
+    call.curr_composite_id = None
+    self.builder.curr_composite_id = None
+    call.vec_op_stack = None
+    self.builder.vec_op_stack = None
+
+
+@register_operation_handler
 class CompositeHandler(OperationHandler):
   """Handles composite function calls.
 
@@ -235,7 +314,10 @@ class AddHandler(OperationHandler):
         to_process_in_edges.append(in_edge)
       
     block = AddBlock(call, "add")
-    if call.curr_composite_id is not None:
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id is not None and call.post_op_stack is not None:
       call.post_op_stack.append(block)
     else:
       wrapped_block = RecvSendWrapper.from_codeblock(block, "add standalone").create_loop_from_call(call, to_process_in_edges)
@@ -272,7 +354,10 @@ class MultHandler(OperationHandler):
         to_process_in_edges.append(in_edge)
 
     block = MultlBlock(call, "multl")
-    if call.curr_composite_id is not None:
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id is not None and call.post_op_stack is not None:
       call.post_op_stack.append(block)
     else:
       wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone", builder=call.builder).create_loop_from_call(call, to_process_in_edges)
@@ -310,7 +395,10 @@ class DivideHandler(OperationHandler):
         to_process_in_edges.append(in_edge)
     block = DivBlock(call, "div")
 
-    if call.curr_composite_id is not None:
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id is not None and call.post_op_stack is not None:
       call.post_op_stack.append(block)
     else:
       wrapped_block = RecvSendWrapper.from_codeblock(block, "divide standalone").create_loop_from_call(call, to_process_in_edges)
@@ -356,7 +444,10 @@ class ConcatHandler(OperationHandler):
     block.set_type(or_concat=False)
     block.set_channel(channels)
 
-    if call.curr_composite_id is not None:
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id is not None and call.post_op_stack is not None:
       call.post_op_stack.append(block)
     else:
       # Standalone concat needs RECV/SEND wrapper
@@ -424,7 +515,10 @@ class MinMaxQuantizeHandler(OperationHandler):
 
     # set o_split_idx to 0 when last_tuple_idx is None
     block = MinmaxQuantBlock(call, call.last_tuple_idx or 0, "min_max_quantize")
-    if call.curr_composite_id is not None:
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id is not None and call.post_op_stack is not None:
       call.post_op_stack.append(block)
     else:
       # Standalone minmax quantize needs RECV/SEND wrapper
@@ -452,8 +546,10 @@ class ReLUHandler(OperationHandler):
     # Create ReLU computation block
     block = ReLUBlock(call, "relu")
 
-    # Wrap with RECV/SEND if standalone, or add as post-op if in composite
-    if call.curr_composite_id is not None:
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id is not None and call.post_op_stack is not None:
       call.post_op_stack.append(block)
     else:
       # Standalone ReLU needs RECV/SEND wrapper
@@ -525,8 +621,10 @@ class BatchNormHandler(OperationHandler):
     IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)
 
     block = BatchNormBlock(call, "batch_norm")
-    if call.curr_composite_id:
-      # TODO: how to scale?
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id and call.post_op_stack is not None:
       call.post_op_stack.append(block)
     else:
       wrapped_block = RecvSendWrapper.from_codeblock(block, "bn_standalone", builder=call.builder).create_loop_from_call(call)
