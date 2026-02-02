@@ -6939,14 +6939,14 @@ def constructSplitInfo(mod):
         if isinstance(tgi.tuple_value.op, tvm.ir.Op) and tgi.tuple_value.op.name == "split":
           split_id = int(tgi.tuple_value.attrs.custom_id)
           if split_id in self.split_ids:
-            self.tgi_to_split[id(tgi)] = split_id
+            self.tgi_to_split[hash(tgi)] = split_id
 
     def visit_call(self, call):
       super().visit_call(call)
       # Check if any argument is a TupleGetItem from our splits
       for arg in call.args:
-        if isinstance(arg, relay.TupleGetItem) and id(arg) in self.tgi_to_split:
-          split_id = self.tgi_to_split[id(arg)]
+        if isinstance(arg, relay.TupleGetItem) and hash(arg) in self.tgi_to_split:
+          split_id = self.tgi_to_split[hash(arg)]
           self.split_to_consumers[split_id].append(call)
 
   for func_name in mod.functions:
