@@ -296,40 +296,43 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     return mod, param_dict
 
 
-def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=False, codegen_only=False):
+def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_cpp_only=False, stop_at_codegen=False):
     """
     Run IMCFLOW codegen to generate hardware deployment code.
 
     Args:
         mod: Transformed TVM IRModule
         output_dir: Directory to save generated code
-        rebuild_modified_cpp: If True, just rebuild modified C++ files before simulation
         save_intermediate: If True, save intermediate files during codegen
+        rebuild_cpp_only: If True, just rebuild modified C++ files before simulation
+        stop_at_codegen: If True, return early after codegen (don't build data blocks)
+
+    Returns:
+        dict: Status information. Returns {"status": "codegen_complete"} if stop_at_codegen=True.
     """
     config = DevConfig()
 
     CodegenSuite = imcflow_codegen.CodegenSuite(
-        output_dir, mod, host_isa=DevConfig().HOST_ISA, rebuild_modified_cpp=rebuild_modified_cpp
+        output_dir, mod, host_isa=DevConfig().HOST_ISA, rebuild_modified_cpp=rebuild_cpp_only
     )
     CodegenSuite(mod)
     print(f"mem_layout: {config.MemLayout}")
     if save_intermediate:
         with open(f"{output_dir}/mem_layout.txt", "w") as f:
             pprint.pprint(DevConfig().MemLayout, stream=f)
-    
-    if codegen_only:
-      print("\n⏭️  Codegen only mode: exiting after rebuilding modified C++ files")
-      # Exit the program entirely
-      import sys
-      sys.exit(0)
-      
 
-    imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=rebuild_modified_cpp)
+    if stop_at_codegen:
+        print("\n⏭️  Codegen only mode: returning after codegen")
+        return {"status": "codegen_complete"}
+
+    imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=rebuild_cpp_only)
     print(f"data_blocks: {config.DataBlocks}")
 
     # Update the DevConfig's DataBlocks state after codegen
     devconfig_state_path = os.path.join(output_dir, "devconfig_state.pkl")
     config.update_datablocks_state(devconfig_state_path)
+
+    return {"status": "complete"}
 
 
 def generate_graph_executor(mod, param_dict, output_dir):
@@ -393,7 +396,7 @@ def compile_for_imcflow(mod, param_dict, output_dir, skip_codegen=False):
 
     # Step 2: Run codegen
     print("\n--- Running IMCFlow Codegen ---")
-    run_imcflow_codegen(mod, output_dir, save_intermediate=True, codegen_only=False)
+    run_imcflow_codegen(mod, output_dir, save_intermediate=True, stop_at_codegen=False)
 
     # Step 3: Generate graph executor
     print("\n--- Generating Graph Executor ---")
@@ -401,7 +404,7 @@ def compile_for_imcflow(mod, param_dict, output_dir, skip_codegen=False):
 
     return mod, param_dict, tar_path
 
-def rebuild_imcflow_cpp_only(mod, param_dict, output_dir, codegen_only=False):
+def rebuild_imcflow_cpp_only(mod, param_dict, output_dir, stop_at_codegen=False):
     """
     Rebuild modified IMCFlow C++ files only.
 
@@ -409,11 +412,19 @@ def rebuild_imcflow_cpp_only(mod, param_dict, output_dir, codegen_only=False):
     without going through the full transformation and codegen pipeline.
 
     Args:
+        mod: TVM IRModule
+        param_dict: Dictionary of model parameters
         output_dir: Directory where the model and C++ files are located
-    """
+        stop_at_codegen: If True, stop after codegen and don't generate graph executor
 
+    Returns:
+        Tuple of (mod, param_dict, tar_path). tar_path is None if stop_at_codegen=True.
+    """
     print("\n--- Rebuilding Modified IMCFlow C++ Files Only ---")
-    run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modified_cpp=True, codegen_only=codegen_only)
+    result = run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_cpp_only=True, stop_at_codegen=stop_at_codegen)
+
+    if stop_at_codegen:
+        return mod, param_dict, None
 
     print("\n--- Generating Graph Executor ---")
     _, tar_path = generate_graph_executor(mod, param_dict, output_dir)

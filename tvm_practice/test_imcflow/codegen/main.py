@@ -10,6 +10,7 @@ experimenting with different inputs on an already-compiled model.
 import argparse
 import sys
 from test import MODEL_REGISTRY, INPUT_PATTERNS, run_test_pipeline
+from pipeline_options import PipelineOptions, PipelineStage, parse_stop_at
 
 
 def main():
@@ -25,18 +26,21 @@ Examples:
   # Run with specific input pattern
   python main.py --model one_relu --pattern random
 
+  # Stop at specific pipeline stage
+  python main.py --model one_relu --stop-at transform   # Frontend only
+  python main.py --model one_relu --stop-at compile     # Compile only
+
+  # Rebuild modified C++ files only (skip TVM transform)
+  python main.py --model one_relu --rebuild-cpp-only
+
+  # Stop at codegen to observe memlayout changes
+  python main.py --model one_relu --stop-at codegen --rebuild-cpp-only
+
   # Skip setup (reuse existing compiled model)
   python main.py --model one_relu --pattern zeros --skip-setup
 
   # List available models
   python main.py --list-models
-
-  # Test multiple patterns quickly (shell script)
-  # 1. First run with full setup:
-  python main.py --model resnet8_small_pretrained --pattern ones
-  # 2. Then test other patterns with --skip-setup:
-  python main.py --model resnet8_small_pretrained --pattern random --skip-setup
-  python main.py --model resnet8_small_pretrained --pattern zeros --skip-setup
     """
   )
 
@@ -54,21 +58,23 @@ Examples:
   )
 
   parser.add_argument(
+    "--stop-at",
+    type=str,
+    choices=["transform", "codegen", "compile", "full"],
+    default="full",
+    help="Pipeline stage to stop at: transform (frontend only), codegen, compile (skip simulation), full (default)"
+  )
+
+  parser.add_argument(
     "--skip-setup", "-s",
     action="store_true",
     help="Skip model transformation, codegen, and graph generation (reuse existing compiled model)"
   )
 
   parser.add_argument(
-    "--rebuild_modified_cpp", "-r",
+    "--rebuild-cpp-only", "-r",
     action="store_true",
-    help="Assume C++ files have been modified and skips tvm, and rebuild them before running the test"
-  )
-
-  parser.add_argument(
-    "--codegen-only",
-    action="store_true",
-    help="Run until codegen and end program. Used with --rebuild_modified_cpp to observe memlayout"
+    help="Rebuild modified C++ files only (skip TVM transform, use saved DevConfig state)"
   )
 
   parser.add_argument(
@@ -77,25 +83,7 @@ Examples:
     help="List available models and their default input patterns"
   )
 
-  parser.add_argument(
-    "--compile-only", "-c",
-    action="store_true",
-    help="Only compile the model (skip CPU validation and simulation)"
-  )
-
   args = parser.parse_args()
-
-  # only one of --skip-setup and --rebuild_modified_cpp can be set
-  if args.skip_setup and args.rebuild_modified_cpp:
-    parser.print_help()
-    print("\n❌ Error: --skip-setup and --rebuild_modified_cpp cannot be used together")
-    return 1
-
-  # assert that if --codegen_only is set, --rebuild_modified_cpp must also be set
-  if args.codegen_only and not args.rebuild_modified_cpp:
-    parser.print_help()
-    print("\n❌ Error: --codegen_only must be used with --rebuild_modified_cpp")
-    return 1
 
   # Handle list models
   if args.list_models:
@@ -120,9 +108,32 @@ Examples:
     print("Use --list-models for more details")
     return 1
 
+  # Build PipelineOptions from CLI arguments
+  try:
+    stop_at = parse_stop_at(args.stop_at)
+    skip_stages = set()
 
-  # if --rebuild_modified_cpp is set, use copy_cpp.py to copy modified C++ files from handcraft to evl
-  if args.rebuild_modified_cpp:
+    if args.skip_setup:
+      # Skip transform, codegen, and graph executor stages
+      skip_stages = {
+        PipelineStage.TRANSFORM,
+        PipelineStage.CODEGEN,
+        PipelineStage.GRAPH_EXECUTOR,
+      }
+
+    options = PipelineOptions(
+      stop_at=stop_at,
+      skip_stages=skip_stages,
+      rebuild_cpp_only=args.rebuild_cpp_only,
+      input_pattern=args.pattern if args.pattern else "default",
+    )
+  except ValueError as e:
+    parser.print_help()
+    print(f"\n❌ Error: {e}")
+    return 1
+
+  # If rebuild_cpp_only, copy modified C++ files from handcraft to evl
+  if options.rebuild_cpp_only:
     import subprocess
     import os
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -139,14 +150,7 @@ Examples:
       return result.returncode
 
   # Run the test
-  run_test_pipeline(
-    test_name=args.model,
-    input_pattern=args.pattern,
-    skip_setup=args.skip_setup,
-    rebuild_modified_cpp=args.rebuild_modified_cpp,
-    codegen_only=args.codegen_only,
-    compile_only=args.compile_only
-  )
+  run_test_pipeline(test_name=args.model, options=options)
   return 0
 
 

@@ -25,6 +25,9 @@ from contextlib import contextmanager
 # Import IMCFlow compiler driver
 from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild_imcflow_cpp_only
 
+# Import pipeline options
+from pipeline_options import PipelineOptions, PipelineStage
+
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import resnet8_subset_models
@@ -708,50 +711,71 @@ def compare_outputs(cpu_output, imcflow_output):
   else:
     print("\n✅ Test completed successfully")
 
-def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_setup=False, rebuild_modified_cpp=False, codegen_only=False, compile_only=False):
+def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, input_data_dict=None):
   """Generate IMCFLOW evaluation results with optional CPU validation
 
   Args:
     test_name: Name of the test
     eval_dir: evaluation directory name
-    mod: The TVM relay module (only used if skip_setup=False)
-    param_dict: Model parameters (only used if skip_setup=False)
+    mod: The TVM relay module (only used if not skipping transform)
+    param_dict: Model parameters (only used if not skipping transform)
+    options: PipelineOptions controlling execution behavior
     input_data_dict: Optional dict of input name -> numpy array for CPU validation
-    skip_setup: If True, skip transformations, codegen, and graph generation.
-                Loads previously transformed model from file.
-    rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
-    codegen_only: If True, run until codegen and exit program.
-    compile_only: If True, only compile the model (skip CPU validation and simulation).
+
+  Returns:
+    None on success, or early return if stopping at an intermediate stage
   """
   print(f"\n{'='*60}")
   print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
+  print(f"Options: {options}")
   print(f"{'='*60}")
 
-  if not skip_setup and not rebuild_modified_cpp:
+  skip_setup = options.should_skip_transform()
+  rebuild_cpp_only = options.rebuild_cpp_only
+  stop_at_codegen = options.stop_at == PipelineStage.CODEGEN
+
+  if not skip_setup and not rebuild_cpp_only:
     # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
-    mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir)
+    skip_codegen = not options.should_run(PipelineStage.CODEGEN)
+    mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
 
     # Save transformed model for future reuse
     save_transformed_model(mod, param_dict, eval_dir)
+
+    # If stopping at transform, return after frontend transformation
+    if options.stop_at == PipelineStage.TRANSFORM:
+      print("\n⏭️  Frontend only mode: returning after model transformation")
+      return None
   else:
     # Skip setup: load previously transformed model
     print("\n⏭️  Skipping model transformation, codegen, and graph generation (skip_setup=True)")
     print("   Loading previously transformed model from file...")
     mod, param_dict = load_transformed_model(eval_dir)
 
-  if rebuild_modified_cpp:
-    mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, codegen_only)
+  if rebuild_cpp_only:
+    mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=stop_at_codegen)
 
-  # If compile_only, skip CPU validation and simulation
-  if compile_only:
+    # If stopping at codegen, return after codegen
+    if stop_at_codegen:
+      print("\n⏭️  Codegen only mode: returning after rebuilding modified C++ files")
+      return None
+
+  # If stopping at graph executor (compile_only), skip CPU validation and simulation
+  if options.stop_at == PipelineStage.GRAPH_EXECUTOR:
     print("\n⏭️  Compile only mode: skipping CPU validation and simulation")
     return None
 
-  # Run CPU validation if input data is provided
-  if input_data_dict is not None:
-    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup, rebuild_modified_cpp)
+  # Run CPU validation if input data is provided and stage should run
+  cpu_output = None
+  if input_data_dict is not None and options.should_run(PipelineStage.CPU_VALIDATION):
+    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup, rebuild_cpp_only)
     if cpu_output is not None:
       print("✅ CPU validation completed successfully")
+
+  # Skip simulation if not needed
+  if not options.should_run(PipelineStage.SIMULATION):
+    print("\n⏭️  Skipping simulation stage")
+    return None
 
   config = DevConfig()
 
@@ -766,17 +790,19 @@ def run_test(test_name, eval_dir, mod, param_dict, input_data_dict=None, skip_se
     return None
 
   # Compare the reference CPU output with IMCFLOW simulated output
-  if input_data_dict is not None:
+  if input_data_dict is not None and options.should_run(PipelineStage.COMPARISON):
     if imcflow_output is None:
       pytest.fail(f"IMCFLOW output file missing, cannot compare outputs")
 
     compare_outputs(cpu_output, imcflow_output)
 
+  return None
+
 
 # ============================================================================
 # Test Pipeline
 # ============================================================================
-def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebuild_modified_cpp=False, codegen_only=False, compile_only=False):
+def run_test_pipeline(test_name: str, options: PipelineOptions):
   """
   Test pipeline that:
   1. Gets the model from registry
@@ -786,14 +812,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebu
 
   Args:
     test_name: Name of the test (must exist in MODEL_REGISTRY)
-    input_pattern: Input pattern to use ("random", "ones", "zeros", "linear").
-                   If "default", uses the default pattern from MODEL_REGISTRY.
-    skip_setup: If True, skip codegen, and graph generation steps.
-                Useful for testing different inputs on an already-compiled model.
-                NOTE: When True, assumes directory already exists from previous run.
-    rebuild_modified_cpp: If True, rebuild modified C++ files before simulation.
-    codegen_only: If True, run until codegen and exit program.
-    compile_only: If True, only compile the model (skip CPU validation and simulation).
+    options: PipelineOptions controlling execution behavior
   """
   if test_name not in MODEL_REGISTRY:
     raise ValueError(f"Unknown test: {test_name}. Available tests: {list(MODEL_REGISTRY.keys())}")
@@ -802,14 +821,19 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebu
   model_getter, default_input_pattern = MODEL_REGISTRY[test_name]
 
   # Use provided pattern or fall back to default
+  input_pattern = options.input_pattern
   if input_pattern == "default":
     input_pattern = default_input_pattern
 
   # Determine directory name
   dir_name = f"{test_name}_evl"
 
+  # Extract flags from options for directory setup logic
+  skip_setup = options.should_skip_transform()
+  rebuild_cpp_only = options.rebuild_cpp_only
+
   # Setup directory: only clean/create if NOT skipping setup
-  if not skip_setup and not rebuild_modified_cpp:
+  if not skip_setup and not rebuild_cpp_only:
     # Full setup: clean and recreate directory
     setup_dir(dir_name)
   else:
@@ -817,8 +841,8 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebu
     if not os.path.exists(dir_name):
       raise FileNotFoundError(
         f"Directory '{dir_name}' does not exist. "
-        f"Cannot use skip_setup=True or rebuild_modified_cpp=True without a previous run. "
-        f"Run without --skip-setup and --rebuild_modified_cpp first to compile the model."
+        f"Cannot use --skip-setup or --rebuild-cpp-only without a previous run. "
+        f"Run without these flags first to compile the model."
       )
     # Ensure test_inputs directory exists for new input files
     os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
@@ -832,7 +856,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebu
   # Wrap the entire test execution in the tee logger
   with tee_output_to_log(log_file_path):
     print(f"Logging test output to: {log_file_path}")
-    print(f"Test: {test_name}, Input pattern: {input_pattern}, Skip setup: {skip_setup}, Rebuild modified C++: {rebuild_modified_cpp}, Compile only: {compile_only}")
+    print(f"Test: {test_name}, Options: {options}")
 
     # Get original model (needed for input generation)
     # This is lightweight compared to transformation/codegen
@@ -854,7 +878,7 @@ def run_test_pipeline(test_name, input_pattern="default", skip_setup=False, rebu
 
     # Run with CPU validation enabled
     # Note: When skip_setup=True, run_test will load the transformed model from file
-    run_test(test_name, dir_name, mod, param_dict, input_data_dict=input_dict, skip_setup=skip_setup, rebuild_modified_cpp=rebuild_modified_cpp, codegen_only=codegen_only, compile_only=compile_only)
+    run_test(test_name, dir_name, mod, param_dict, options=options, input_data_dict=input_dict)
 
 
 # ============================================================================
@@ -909,15 +933,17 @@ def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_
   allowing both 'pytest -k default' and 'pytest -k <pattern>' to work correctly.
   """
   # Check if this model has already been set up in this test session
-  skip_setup = test_name in setup_cache
+  should_skip = test_name in setup_cache
 
-  if not skip_setup:
+  if not should_skip:
     print(f"\n🔧 First run for {test_name}: Running full setup")
     setup_cache[test_name] = True
+    options = PipelineOptions.full_run(input_pattern=input_pattern)
   else:
     print(f"\n⚡ Reusing compiled model for {test_name}")
+    options = PipelineOptions.reuse_compiled(input_pattern=input_pattern)
 
-  run_test_pipeline(test_name, input_pattern, skip_setup=skip_setup)
+  run_test_pipeline(test_name, options=options)
 
 
 if __name__ == "__main__":
