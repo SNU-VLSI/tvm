@@ -728,8 +728,47 @@ def is_layout_compatible_with_type(layout, ttype):
 def _deduce_layout_from_op_const(call, index, not_const_layouts):
   if not isinstance(call, relay.Call):
     raise ValueError("Input must be a relay.Call")
+
+  # Case 1: composite function - find builtin call that uses the parameter
+  if isinstance(call.op, relay.Function):
+    target_param = call.op.params[index]
+
+    # UseDefChainParser to find parameter usage inside composite body
+    use_def = UseDefChainParser()
+    use_def.visit(call.op.body)
+    users = use_def.get_users(target_param)
+
+    # Find builtin call usage
+    for user, arg_idx in users:
+      if isinstance(user, relay.Call) and isinstance(user.op, tvm.ir.Op):
+        # Recursive call to handle the builtin call
+        return _deduce_layout_from_op_const(user, arg_idx, not_const_layouts)
+
+    # Fallback: constant shape-based inference for binary ops
+    const = call.args[index]
+    ttype = const.checked_type
+    if len(ttype.shape) == 0:
+      return LayoutType.SCALAR
+    # Use not_const_layouts to infer layout (same logic as add/multiply/divide)
+    nchw16 = LayoutType.NCHW16C in not_const_layouts
+    nchw64 = LayoutType.NCHW64C in not_const_layouts
+    nhwc16 = LayoutType.NHWC16C in not_const_layouts
+    nhwc64 = LayoutType.NHWC64C in not_const_layouts
+    if nchw16 and not nchw64 and not nhwc16 and not nhwc64:
+      return LayoutType.NCHW16C
+    if nchw64 and not nchw16 and not nhwc16 and not nhwc64:
+      return LayoutType.NCHW64C
+    if nhwc16 and not nhwc64 and not nchw16 and not nchw64:
+      return LayoutType.NHWC16C
+    if nhwc64 and not nhwc16 and not nchw16 and not nchw64:
+      return LayoutType.NHWC64C
+    raise ValueError(
+      "Cannot deduce constant layout for composite function with ambiguous input layouts."
+    )
+
+  # Case 2: builtin op - existing logic
   if not isinstance(call.op, tvm.ir.Op):
-    raise ValueError("call.op must be a tvm.ir.Op")
+    raise ValueError("call.op must be a tvm.ir.Op or relay.Function")
 
   op_name = call.op.name
   const = call.args[index]

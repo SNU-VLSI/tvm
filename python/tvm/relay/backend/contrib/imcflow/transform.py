@@ -4004,7 +4004,11 @@ def constructTensorEdgeList(mod):
           ParamToArg = {x: y for x, y in zip(call.op.params, call.args)}
           for var, arg in ParamToArg.items():
             # print(f"var: {var}, arg: {arg}, var_properties: {self.VarProperties[var]}")
-            _processInputNode(arg, self.VarProperties[var]["src_tag"],
+            src_tag = self.VarProperties[var]["src_tag"]
+            # If the actual argument is a Constant and tagged as odata, change to scale
+            if isinstance(arg, Constant) and src_tag == "odata":
+              src_tag = "scale"
+            _processInputNode(arg, src_tag,
                               self.VarProperties[var]["dst_graph_node_id"], self.VarProperties[var]["dst_tag"],
                               self.getInputGraphNodeSplitIndex(arg))
         elif IsSupportedOp:
@@ -4013,17 +4017,46 @@ def constructTensorEdgeList(mod):
           elif call.op == op.get("concatenate"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
           elif call.op == op.get("add"):
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
+            # Detect which input is constant (if any)
+            if isinstance(call.args[0], Constant):
+              ScaleNode, InputNode = 0, 1
+            elif isinstance(call.args[1], Constant):
+              ScaleNode, InputNode = 1, 0
+            else:
+              ScaleNode, InputNode = None, None
+
+            if ScaleNode is not None:
+              _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs",
+                                self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+              _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
+            else:
+              _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs",
+                                self.getInputGraphNodeSplitIndex(call.args[0]))
+              _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs",
+                                self.getInputGraphNodeSplitIndex(call.args[1]))
           elif call.op == op.get("divide"):
             ScaleNode = 0 if isinstance(call.args[0], Constant) else 1
             InputNode = 1 if ScaleNode == 0 else 0
             _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[InputNode]))
             _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
           elif call.op == op.get("multiply"):
-            #TODO multiply input node can be constant.
-            _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs", self.getInputGraphNodeSplitIndex(call.args[0]))
-            _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs", self.getInputGraphNodeSplitIndex(call.args[1]))
+            # Detect which input is constant (if any)
+            if isinstance(call.args[0], Constant):
+              ScaleNode, InputNode = 0, 1
+            elif isinstance(call.args[1], Constant):
+              ScaleNode, InputNode = 1, 0
+            else:
+              ScaleNode, InputNode = None, None
+
+            if ScaleNode is not None:
+              _processInputNode(call.args[InputNode], "odata", DstGraphNodeID, "lhs",
+                                self.getInputGraphNodeSplitIndex(call.args[InputNode]))
+              _processInputNode(call.args[ScaleNode], "scale", DstGraphNodeID, "rhs", None)
+            else:
+              _processInputNode(call.args[0], "odata", DstGraphNodeID, "lhs",
+                                self.getInputGraphNodeSplitIndex(call.args[0]))
+              _processInputNode(call.args[1], "odata", DstGraphNodeID, "rhs",
+                                self.getInputGraphNodeSplitIndex(call.args[1]))
           elif call.op == op.get("nn.conv2d"):
             _processInputNode(call.args[0], "odata", DstGraphNodeID, "data", self.getInputGraphNodeSplitIndex(call.args[0]))
             _processInputNode(call.args[1], "weight", DstGraphNodeID, "weight", None)

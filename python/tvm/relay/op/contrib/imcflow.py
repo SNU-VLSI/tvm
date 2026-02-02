@@ -518,9 +518,6 @@ def makeConvergingVecOpPattern():
   data1 = wildcard()
   data2 = wildcard()
 
-  # Each path: 0 to 3 vec_ops (keep it simple to avoid complexity explosion)
-  # Path with 0 ops = just the wildcard data
-  # Path with 1-3 ops = linear chain
   def make_path(data):
     p0 = data  # no ops
     p1 = _make_single_vec_op(data)
@@ -531,7 +528,6 @@ def makeConvergingVecOpPattern():
   path1 = make_path(data1)
   path2 = make_path(data2)
 
-  # Converge via add (element-wise add of two tensor paths)
   converged = is_op("add")(path1, path2)
 
   return converged
