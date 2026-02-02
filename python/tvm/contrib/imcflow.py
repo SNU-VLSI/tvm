@@ -778,6 +778,25 @@ class ImcflowDeviceConfig:
   def get_tensor_edge(self, tensor_id: TensorID):
     return self.TensorIDtoEdge.get(tensor_id, None)
 
+  def get_tensor_edges_from_graph_node_id(self, graph_node_id: Union[int, Tuple], dir="inout"):
+    edges = []
+    for tensor_edge in self.TensorEdgeList:
+      src_gid = tensor_edge.src_id.graph_node_id
+      dst_gid = tensor_edge.dst_id.graph_node_id
+      getInnerID = lambda gid: gid[1] if isinstance(gid, Tuple) else gid
+      if dir == "inout":
+        if getInnerID(src_gid) == getInnerID(graph_node_id) or getInnerID(dst_gid) == getInnerID(graph_node_id):
+          edges.append(tensor_edge)
+      elif dir == "in":
+        if getInnerID(dst_gid) == getInnerID(graph_node_id):
+          edges.append(tensor_edge)
+      elif dir == "out":
+        if getInnerID(src_gid) == getInnerID(graph_node_id):
+          edges.append(tensor_edge)
+      else:
+        raise ValueError("Invalid direction")
+    return edges
+
   def add_tensor_edge_info(self, tensor_edge: TensorEdge, tensor_edge_info: TensorEdgeInfo):
     tensor_edge_info.owner = tensor_edge
     self.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
@@ -806,10 +825,6 @@ class ImcflowDeviceConfig:
       if tid.graph_node_id == graph_node_id:
         tids.append(tid)
     return tids
-
-  def get_tensor_edges_from_graph_node_id(self, graph_node_id: Union[int, Tuple]):
-    for tid in self.get_tensor_edges_from_graph_node_id(graph_node_id):
-      yield self.get_tensor_edge(tid)
 
   def add_inst_edge_info(self, func_name: str, imce_id: NodeID, inst_edge_info: InstEdgeInfo):
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
