@@ -170,6 +170,7 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     imcflow_transform.constructUsefulMappings(mod)
     imcflow_transform.constructCustomIDInFunc(mod)
     imcflow_transform.constructImcflowFuncMap(mod)
+    imcflow_transform.constructSplitInfo(mod)
 
     if save_intermediate:
         with open(f"{output_dir}/custom_id_to_name.txt", "w") as f:
@@ -178,6 +179,8 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
             pprint.pprint(HashToCustomID(), stream=f)
         with open(f"{output_dir}/func_map.txt", "w") as f:
             pprint.pprint(DevConfig().ImcflowFuncMap, stream=f)
+        with open(f"{output_dir}/split_info.txt", "w") as f:
+            pprint.pprint(DevConfig().SplitInfo, stream=f)
 
     _print("15_with_mappings")
 
