@@ -485,6 +485,85 @@ def makeBNMulAddMinMaxQuantPattern():
   mmq = makeMinMaxQauntPattern(add_out)
   return mmq
 
+def _make_single_vec_op(inp):
+  """Single vec_op: unary ops or binary with constant."""
+  # Unary ops
+  unary = (makeBiasAddPattern(inp) | makeReluPattern(inp) |
+           makeDivPattern(inp) | makeBNPattern(inp))
+  # Binary with constant
+  add_const = is_op("add")(inp, is_constant()) | is_op("add")(is_constant(), inp)
+  mul_const = is_op("multiply")(inp, is_constant()) | is_op("multiply")(is_constant(), inp)
+  return unary | add_const | mul_const
+
+def makeLinearVecOpChain(data, max_depth=5):
+  """Build a linear chain of vec_ops (no converging, single path only).
+
+  Returns a pattern that matches 1 to max_depth vec_ops applied to data.
+  """
+  out = _make_single_vec_op(data)
+  for _ in range(1, max_depth):
+    out = out | _make_single_vec_op(out)
+  return out
+
+def makeConvergingVecOpPattern():
+  """Build a pattern that matches converging vec_op paths.
+
+  Pattern structure:
+    data1 -> [0-3 vec_ops] -> ┐
+                               add
+    data2 -> [0-3 vec_ops] -> ┘
+
+  Matches residual-like structures where two paths merge via add.
+  """
+  data1 = wildcard()
+  data2 = wildcard()
+
+  # Each path: 0 to 3 vec_ops (keep it simple to avoid complexity explosion)
+  # Path with 0 ops = just the wildcard data
+  # Path with 1-3 ops = linear chain
+  def make_path(data):
+    p0 = data  # no ops
+    p1 = _make_single_vec_op(data)
+    p2 = _make_single_vec_op(p1)
+    p3 = _make_single_vec_op(p2)
+    return p0 | p1 | p2 | p3
+
+  path1 = make_path(data1)
+  path2 = make_path(data2)
+
+  # Converge via add (element-wise add of two tensor paths)
+  converged = is_op("add")(path1, path2)
+
+  return converged
+
+def makePreopMinMaxQuantPattern():
+  """Pattern for vec_ops (with converging) followed by min_max_quant.
+
+  Matches:
+  - Simple: data -> [vec_ops] -> minmax
+  - Converging: data1 -> [vec_ops] -> add <- [vec_ops] <- data2 -> minmax
+  """
+  data = wildcard()
+
+  # Simple linear chain (1-5 ops) + minmax
+  simple = makeLinearVecOpChain(data, max_depth=5)
+  simple_mmq = makeMinMaxQauntPattern(simple)
+
+  # Converging pattern + minmax
+  converging = makeConvergingVecOpPattern()
+  converging_mmq = makeMinMaxQauntPattern(converging)
+
+  return converging_mmq | simple_mmq
+
+def makeVecOpsPattern():
+  """Pattern for converging vec_ops NOT followed by min_max_quant.
+
+  Only matches converging patterns (two paths merging via add).
+  Simple linear chains without minmax are left unmatched to avoid
+  greedy matching that prevents larger converging matches.
+  """
+  return makeConvergingVecOpPattern()
+
 def makeNUQauntPattern(data):
   return is_op("qnn.imcflow_nu_quantize")(data, is_constant())
 
@@ -576,11 +655,10 @@ def pattern_table():
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
         ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),
-        # ("imcflow.vec_ops", imcflow_vec_op_combs(wildcard())),
-        # BN + Mul(skip) + Add + min_max_quant composite: for residual blocks
-        ("imcflow.bn-mul-add-minmax", makeBNMulAddMinMaxQuantPattern()),
-        # BN + min_max_quant composite: used when Conv is split by OC and BN is applied after concat
-        ("imcflow.bn-minmax", makeBNMinMaxQuantPattern(wildcard())),
+        # Unified pattern for vec_ops + min_max_quant (converging + simple)
+        ("imcflow.preop-minmax", makePreopMinMaxQuantPattern()),
+        # Vec_ops pattern - matches both converging paths and simple linear chains
+        ("imcflow.vecops", makeVecOpsPattern()),
       ]
     )
 
