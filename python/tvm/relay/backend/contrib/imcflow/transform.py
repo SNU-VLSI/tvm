@@ -937,7 +937,8 @@ def split_conv_to_atomic(mod, OldParamDict):
                         data_shape=(N, IC_slice, IH_slice, IW_slice),
                         weight_shape=(oc_size, ic_size, KH, KW),
                         padding=padding[0] if isinstance(padding, (list, tuple)) else padding,
-                        stride=strides[0] if isinstance(strides, (list, tuple)) else strides
+                        stride=strides[0] if isinstance(strides, (list, tuple)) else strides,
+                        use_imcu=True if (not IsDepthWise) else False
                     )
 
                     if not IsDepthWise:
