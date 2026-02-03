@@ -2,6 +2,7 @@ from abc import *
 from typing import *
 from copy import copy
 import math
+import os
 from pprint import pprint
 from tvm import relay
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
@@ -17,6 +18,11 @@ from textwrap import indent
 import logging
 import pdb
 from dataclasses import dataclass
+
+# Environment variable to enable MULTL overflow bug SW fix
+# Set IMCFLOW_BUGFIX_OVERFLOW_SW=1 to enable the fix
+def _is_multl_swfix_enabled():
+  return os.environ.get("IMCFLOW_BUGFIX_OVERFLOW_SW", "0") == "1"
 
 if TYPE_CHECKING:
   from .builder_context import BuilderContext
@@ -368,12 +374,36 @@ class DivBlock(VecBlock):
     return "DIV"
 
 
-class MultlBlock(VecBlock):
-  def _get_imm_value(self) -> int:
-    return 15  # src_mask
+class MultlBlock(ImceCallCodeBlock):
+  """MULTL operation block with optional SW fix for hardware overflow bug.
 
-  def _op_name(self) -> str:
-    return "MULTL"
+  If IMCFLOW_BUGFIX_OVERFLOW_SW=1, uses MultlSWFixOp for overflow bug fix.
+  Otherwise, uses simple MULTL instruction.
+  """
+  num_in_edges = 2
+
+  def __init__(self, call: 'BuilderContext', annotation: str = ""):
+    super().__init__(call, annotation)
+    self.imm_value = 15  # src_mask
+
+  def _render(self) -> str:
+    """Generate only computation, no RECV/SEND."""
+    code = TextBlock("")
+
+    for i in range(self.num_blocks):
+      var_ins = [self._make_unique_input_var_for_post_op(
+          edge, i) for edge in self.in_edges]
+      var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
+      var_o = UniqueVar((self, i))
+
+      if _is_multl_swfix_enabled():
+        # Use composable MultlSWFixOp for overflow bug fix
+        code += MultlSWFixOp(var_ins[0], var_ins[1], var_o, (self, i), self.imm_value)
+      else:
+        # Use simple MULTL instruction
+        code += f"{var_o} = __builtin_IMCE_MULTL({var_in_str}, {self.imm_value});"
+
+    return code.render()
 
 
 class MulthBlock(VecBlock):
@@ -382,6 +412,78 @@ class MulthBlock(VecBlock):
 
   def _op_name(self) -> str:
     return "MULTH"
+
+
+class MultlSWFixOp(ImceCodeBlock):
+  """Composable MULTL with SW fix for hardware overflow bug.
+
+  MULTL bug software fix algorithm (14-bit immediate constraint):
+  - Overflow occurs when H and L signs mismatch
+  - Replace with saturate value on overflow (H_sign XOR 0x7FFF)
+  - Uses only immediate values 1 and 15 (within 14-bit range)
+
+  Can be used standalone or composed into other blocks.
+  """
+
+  def __init__(self, var_a, var_b, var_out, block_id, imm_value: int = 15, annotation: str = ""):
+    """Initialize MultlSWFixOp.
+
+    Args:
+        var_a: First input variable (UniqueVar or str)
+        var_b: Second input variable (UniqueVar or str)
+        var_out: Output variable (UniqueVar or str)
+        block_id: Unique identifier for intermediate variables (e.g., (self, i))
+        imm_value: Immediate value for src_mask (default 15)
+        annotation: Optional annotation string
+    """
+    super().__init__(annotation)
+    self.var_a = var_a
+    self.var_b = var_b
+    self.var_out = var_out
+    self.block_id = block_id
+    self.imm_value = imm_value
+
+  def _render(self) -> str:
+    code = TextBlock("")
+
+    # Intermediate variables (unique per block_id)
+    var_L = UniqueVar((self.block_id, "L"))
+    var_H = UniqueVar((self.block_id, "H"))
+    var_neg1 = UniqueVar((self.block_id, "neg1"))
+    var_const_7fff = UniqueVar((self.block_id, "const_7fff"))
+    var_H_sign = UniqueVar((self.block_id, "H_sign"))
+    var_L_sign = UniqueVar((self.block_id, "L_sign"))
+    var_mismatch = UniqueVar((self.block_id, "mismatch"))
+    var_saturate_val = UniqueVar((self.block_id, "saturate_val"))
+    var_not_mismatch = UniqueVar((self.block_id, "not_mismatch"))
+    var_part1 = UniqueVar((self.block_id, "part1"))
+    var_part2 = UniqueVar((self.block_id, "part2"))
+
+    # MULTL/MULTH operations
+    code += f"{var_L} = __builtin_IMCE_MULTL({self.var_a}, {self.var_b}, {self.imm_value});"
+    code += f"{var_H} = __builtin_IMCE_MULTH({self.var_a}, {self.var_b}, {self.imm_value});"
+
+    # Constant generation (uses zero register directly, immediate 1 only)
+    code += f"{var_neg1} = __builtin_IMCE_SUBI(0, 1);"  # 0 - 1 = -1 (0xFFFF), uses zero register
+    code += f"{var_const_7fff} = __builtin_IMCE_SRLI({var_neg1}, 1);"  # -1 >>> 1 = 0x7FFF (32767)
+
+    # Sign extraction
+    code += f"{var_H_sign} = __builtin_IMCE_SRAI({var_H}, 15);"  # -1 or 0
+    code += f"{var_L_sign} = __builtin_IMCE_SRAI({var_L}, 15);"  # -1 or 0
+
+    # Detect sign mismatch
+    code += f"{var_mismatch} = __builtin_IMCE_XOR({var_H_sign}, {var_L_sign}, {self.imm_value});"
+
+    # Determine saturate value
+    code += f"{var_saturate_val} = __builtin_IMCE_XOR({var_H_sign}, {var_const_7fff}, {self.imm_value});"
+
+    # Masking and synthesis
+    code += f"{var_not_mismatch} = __builtin_IMCE_XOR({var_mismatch}, {var_neg1}, {self.imm_value});"
+    code += f"{var_part1} = __builtin_IMCE_AND({var_mismatch}, {var_saturate_val}, {self.imm_value});"
+    code += f"{var_part2} = __builtin_IMCE_AND({var_not_mismatch}, {var_L}, {self.imm_value});"
+    code += f"{self.var_out} = __builtin_IMCE_OR({var_part1}, {var_part2}, {self.imm_value});"
+
+    return code.render()
 
 
 class ReLUBlock(VecBlock):
@@ -1205,7 +1307,11 @@ class BatchNormBlock(ImceCallCodeBlock):
     super().__init__(call, annotation)
 
   def _render(self) -> str:
-    """Generate only computation, no RECV/SEND."""
+    """Generate only computation, no RECV/SEND.
+
+    If IMCFLOW_BUGFIX_OVERFLOW_SW=1, uses MultlSWFixOp for overflow bug fix.
+    Otherwise, uses simple MULTL instruction.
+    """
     code = TextBlock("")
 
     # Identify edges by tensor type
@@ -1224,10 +1330,15 @@ class BatchNormBlock(ImceCallCodeBlock):
       var_bias = UniqueVar((bias_edge, i))
       var_o = UniqueVar((self, i))
 
-      # e.g. __builtin_IMCE_MULTL(data, scale, 15);
-      code += f"{var_o} = __builtin_IMCE_MULTL({var_data}, {var_scale}, 15);"
-      # e.g. __builtin_IMCE_ADD(out, bias, 15);
-      code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);"
+      if _is_multl_swfix_enabled():
+        # Use composable MultlSWFixOp for overflow bug fix
+        var_mult_result = UniqueVar((self, i, "mult_result"))
+        code += MultlSWFixOp(var_data, var_scale, var_mult_result, (self, i))
+        code += f"{var_o} = __builtin_IMCE_ADD({var_mult_result}, {var_bias}, 15);"
+      else:
+        # Use simple MULTL instruction
+        code += f"{var_o} = __builtin_IMCE_MULTL({var_data}, {var_scale}, 15);"
+        code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);"
 
     return code.render()
 
