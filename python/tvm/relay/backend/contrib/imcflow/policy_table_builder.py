@@ -291,7 +291,9 @@ class PathTreeBuilder:
         for cid in commodity_ids:
             path = routing_result.get_path(cid)
             commodity = routing_result.get_commodity(cid)
-            self._add_path_to_tree(root, path, cid, commodity)
+            # Get is_multicast from routing_result (ILP Commodity)
+            is_multicast = routing_result.is_multicast(cid) if hasattr(routing_result, 'is_multicast') else True
+            self._add_path_to_tree(root, path, cid, commodity, is_multicast)
 
         return MulticastTree(
             source=source,
@@ -305,7 +307,8 @@ class PathTreeBuilder:
         root: PathTreeNode,
         path: List[Coord],
         commodity_id: int,
-        commodity: HWCommodity
+        commodity: HWCommodity,
+        is_multicast: bool = True
     ) -> None:
         """Add a single commodity's path to the tree.
 
@@ -337,8 +340,8 @@ class PathTreeBuilder:
         # Mark the last node as destination
         current_node.is_destination = True
 
-        # Store destination metadata (e.g., split_idx, ksel)
-        dest_info = self._extract_destination_info(commodity)
+        # Store destination metadata (e.g., split_idx, ksel, is_multicast)
+        dest_info = self._extract_destination_info(commodity, is_multicast)
         if dest_info:
             current_node.destination_info[commodity_id] = dest_info
 
@@ -354,10 +357,10 @@ class PathTreeBuilder:
             return Direction.NORTH
         return Direction.LOCAL
 
-    def _extract_destination_info(self, commodity: HWCommodity) -> Optional[Dict[str, Any]]:
+    def _extract_destination_info(self, commodity: HWCommodity, is_multicast: bool = True) -> Optional[Dict[str, Any]]:
         """Extract destination-specific info from commodity metadata.
 
-        This includes split_idx (chunk_index) and ksel for the destination node.
+        This includes split_idx (chunk_index), is_multicast, and ksel for the destination node.
         """
         if commodity.metadata is None:
             return None
@@ -371,6 +374,7 @@ class PathTreeBuilder:
                 'split_idx': split_idx,
                 'edge': edge,
                 'mapping_info': mapping_info,
+                'is_multicast': is_multicast,
             }
         except (TypeError, ValueError, IndexError):
             return None
@@ -698,12 +702,20 @@ class PolicyTableGenerator:
         tree_node: PathTreeNode,
         dest_info_map: Dict[int, Dict[str, Any]]
     ) -> int:
-        """Get ksel value for a node based on destination info."""
+        """Get ksel value for a node based on destination info.
+
+        For non-multicast commodities (e.g., DW conv split outputs), ksel should be 0
+        to pass full data without chunk selection.
+        """
         # Use the first commodity's destination info for ksel
         for cid in tree_node.commodity_ids:
             if cid in dest_info_map:
                 info = dest_info_map[cid]
                 if info and 'edge' in info:
+                    # Check is_multicast: if False, don't apply chunk selection
+                    if not info.get('is_multicast', True):
+                        return 0
+
                     edge = info['edge']
                     mapping_info = info.get('mapping_info')
                     if mapping_info and mapping_info[2] is not None:

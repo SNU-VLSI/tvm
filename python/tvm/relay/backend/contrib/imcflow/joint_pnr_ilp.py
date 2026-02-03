@@ -1697,9 +1697,13 @@ class JointPnRRoutingResult:
         self._commodities = {}
         self._paths = {}
         self._noc_paths = noc_paths
+        self._hw_to_ilp_commodity = {}  # HWCommodity ID -> ILP Commodity map
 
         # Get TensorEdge -> ILP commodity_id map
         tensor_edge_to_commodity_id = pnr_result.tensor_edge_to_commodity_id or {}
+
+        # Build ILP commodity lookup by ID
+        ilp_commodities_by_id = {c.id: c for c in (pnr_result.commodities or [])}
 
         # Build commodity lookup by id
         for commodity in commodities:
@@ -1711,6 +1715,11 @@ class JointPnRRoutingResult:
             # TensorEdge commodities: use map to find ILP commodity_id and get route
             if edge is not None and edge in tensor_edge_to_commodity_id:
                 ilp_commodity_id = tensor_edge_to_commodity_id[edge]
+
+                # Store HW -> ILP commodity mapping
+                if ilp_commodity_id in ilp_commodities_by_id:
+                    self._hw_to_ilp_commodity[commodity.id] = ilp_commodities_by_id[ilp_commodity_id]
+
                 if pnr_result.routes and ilp_commodity_id in pnr_result.routes:
                     edges = pnr_result.routes[ilp_commodity_id]
                     path = self._edges_to_path(commodity.source, edges)
@@ -1821,6 +1830,32 @@ class JointPnRRoutingResult:
     def get_noc_paths(self) -> Dict:
         """Get NoCPaths dict"""
         return self._noc_paths
+
+    def get_ilp_commodity(self, hw_commodity_id: int):
+        """Get the original ILP Commodity for a HWCommodity ID.
+
+        Args:
+            hw_commodity_id: The HWCommodity ID
+
+        Returns:
+            The corresponding ILP Commodity, or None if not found
+        """
+        return self._hw_to_ilp_commodity.get(hw_commodity_id)
+
+    def is_multicast(self, hw_commodity_id: int) -> bool:
+        """Check if the commodity is multicast.
+
+        For non-multicast (e.g., DW conv split outputs), chunk selection (ksel)
+        should not be applied in routing.
+
+        Args:
+            hw_commodity_id: The HWCommodity ID
+
+        Returns:
+            True if multicast, False otherwise. Defaults to True if not found.
+        """
+        ilp_comm = self._hw_to_ilp_commodity.get(hw_commodity_id)
+        return ilp_comm.is_multicast if ilp_comm else True
 
 
 def convert_pnr_result_to_routing_result(
