@@ -184,8 +184,8 @@ def getOneDWConvModel(iH=4, iW=4, IC=32, random=True):
 
   # param_dict = {"conv_weight": np.ones((OC,IC,KH,KW), dtype="int8")}
   param_dict = {
-    "quant_min": np.array(-2**15, dtype="int16"),
-    "quant_max": np.array(2**15-1, dtype="int16"),
+    "quant_min": np.array(-2**10, dtype="int16"),
+    "quant_max": np.array(2**10-1, dtype="int16"),
     "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8) if random else np.ones((OC,IC,KH,KW), dtype="int8"),
   }
 
