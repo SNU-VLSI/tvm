@@ -5147,27 +5147,47 @@ class MemoryAllocator:
 
           if final_trimmed_input_tiles and len(final_output_tile_specs) > 0:
             # Recalculate output tiles from the finalized input tiles
+            # Note: recalculated_output_tile_specs uses body.fields index (func_out index)
             recalculated_output_tile_specs = self.calculate_all_output_tiles_from_input(
               func, final_trimmed_input_tiles
             )
+
+            # Build mapping from output_tensor_info index (out_idx) to func_out index (body.fields index)
+            # This is needed because:
+            # - output_tensor_info is ordered by inode traversal order
+            # - recalculated_output_tile_specs uses body.fields order (func_out0, func_out1, ...)
+            out_idx_to_funcout_idx = {}
+            for out_idx, (edge, _, _, _, _, _, _) in enumerate(output_tensor_info):
+              # Extract func_out index from edge's dst_id tensor_type (e.g., "func_out0" -> 0, "func_out1" -> 1)
+              tensor_type = edge.dst_id.tensor_type
+              if tensor_type.startswith("func_out"):
+                funcout_idx_str = tensor_type[len("func_out"):]
+                funcout_idx = int(funcout_idx_str) if funcout_idx_str else 0
+              else:
+                funcout_idx = out_idx  # fallback to same index
+              out_idx_to_funcout_idx[out_idx] = funcout_idx
+              debug_print(f"  [{self.func_name}] Mapping: out_idx={out_idx} -> funcout_idx={funcout_idx} (edge={edge.dst_id.tensor_type})")
 
             # Compare and warn/update if mismatches found
             for out_idx in sorted(final_output_tile_specs.keys()):
               original_bases, original_sizes = final_output_tile_specs[out_idx]
 
-              if out_idx in recalculated_output_tile_specs:
-                recalc_result = recalculated_output_tile_specs[out_idx]
+              # Use the correct funcout_idx to lookup recalculated result
+              funcout_idx = out_idx_to_funcout_idx.get(out_idx, out_idx)
+
+              if funcout_idx in recalculated_output_tile_specs:
+                recalc_result = recalculated_output_tile_specs[funcout_idx]
 
                 if recalc_result is None:
                   # Conv path - cannot recalculate from trimmed input, keep original
-                  debug_print(f"  [{self.func_name}] Output[{out_idx}] has conv operations, keeping original tiles: bases={original_bases}, sizes={original_sizes}")
+                  debug_print(f"  [{self.func_name}] Output[{out_idx}] (funcout_idx={funcout_idx}) has conv operations, keeping original tiles: bases={original_bases}, sizes={original_sizes}")
                 else:
                   recalc_bases, recalc_sizes = recalc_result
 
                   # Check for mismatch
                   if (list(recalc_bases) != list(original_bases) or
                       list(recalc_sizes) != list(original_sizes)):
-                    debug_print(f"  [{self.func_name}] MISMATCH DETECTED for Output[{out_idx}]:")
+                    debug_print(f"  [{self.func_name}] MISMATCH DETECTED for Output[{out_idx}] (funcout_idx={funcout_idx}):")
                     debug_print(f"    Original: bases={original_bases}, sizes={original_sizes}")
                     debug_print(f"    Recalculated: bases={recalc_bases}, sizes={recalc_sizes}")
                     debug_print(f"    Using recalculated values.")
@@ -5175,9 +5195,9 @@ class MemoryAllocator:
                     # Update with recalculated values
                     final_output_tile_specs[out_idx] = (recalc_bases, recalc_sizes)
                   else:
-                    debug_print(f"  [{self.func_name}] Output[{out_idx}] tiles verified: bases={recalc_bases}, sizes={recalc_sizes}")
+                    debug_print(f"  [{self.func_name}] Output[{out_idx}] (funcout_idx={funcout_idx}) tiles verified: bases={recalc_bases}, sizes={recalc_sizes}")
               else:
-                debug_print(f"  [{self.func_name}] Warning: Could not recalculate tiles for Output[{out_idx}]")
+                debug_print(f"  [{self.func_name}] Warning: Could not recalculate tiles for Output[{out_idx}] (funcout_idx={funcout_idx})")
 
           debug_print(f"  [{self.func_name}] ===== END VERIFICATION =====")
 
