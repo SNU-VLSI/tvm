@@ -1226,6 +1226,13 @@ class VecOpBlock(ImceCallCodeBlock):
     """Number of output blocks."""
     return self.ops[-1].num_out_blocks if self.ops else 4
 
+  def get_send_block(self) -> 'ImceCallCodeBlock':
+    """Return the block whose output variables should be used for SEND.
+
+    For VecOpBlock, this is the last op in the chain (e.g., MinmaxQuantBlock).
+    """
+    return self.ops[-1] if self.ops else self
+
   def get_graph_node_id(self):
     return getNodeID(self.call.call)
 
@@ -1500,13 +1507,19 @@ class RecvSendWrapper(ImceCodeBlock):
       # TEMPORARILY DISABLED: Testing UUID-based sync instead
       # code += f"__builtin_IMCE_SETFLAG(0);"
 
+      # Get actual send block for variable reference
+      # For VecOpBlock, use the last op (e.g., MinmaxQuantBlock)
+      actual_send_block = self.send_block
+      if isinstance(self.send_block, VecOpBlock):
+        actual_send_block = self.send_block.get_send_block()
+
       # Per-packet sync: Send one packet, then sync immediately
       for i in range(self.num_out_blocks):
         for te_out_info in [te_out_info]: #TODO: current version doesn't need it
           if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
             continue # this edge's src and dst hw node is equal
 
-          var_o = UniqueVar((self.send_block, i))
+          var_o = UniqueVar((actual_send_block, i))
           if te_out_info:
             annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
@@ -1715,9 +1728,16 @@ class RecvSendWrapper(ImceCodeBlock):
       num_out_blocks=1
       count=out_total_bytes//32
     
-    # for min_max_quant, it has minimum granularity more then one.
-    # It have to recv all input channels first.
-    if isinstance(self.send_block, MinmaxQuantBlock):
+    # Get actual send block (for VecOpBlock, use the last op in the chain)
+    # This ensures proper handling when blocks like MinmaxQuantBlock, ConcatBlock,
+    # or BatchNormBlock are wrapped inside a VecOpBlock
+    actual_send_block = self.send_block
+    if isinstance(self.send_block, VecOpBlock):
+      actual_send_block = self.send_block.get_send_block()
+
+    # Apply block-specific adjustments based on the actual send block type
+    if isinstance(actual_send_block, MinmaxQuantBlock):
+      # MinmaxQuant has minimum granularity of 4 (must recv all input channels first)
       if num_out_blocks <= 4:
         ratio = 4 // num_out_blocks
         num_blocks = num_blocks * ratio
@@ -1728,29 +1748,21 @@ class RecvSendWrapper(ImceCodeBlock):
         num_out_blocks = 4
         count = count * ratio
         num_blocks = num_blocks // ratio
-      self.send_block._num_blocks = num_blocks
+      actual_send_block._num_blocks = num_blocks
       arg_vtype = arg_types[0]
       N, IC, H, W = arg_vtype.shape
       N, IC, H, W = N.value, IC.value, H.value, W.value
-      self.send_block.channels = IC
-
-      # N, IC, H, W = arg_vtype.shape
-      # N, IC, H, W = N.value, IC.value, H.value, W.value
-      # num_blocks = math.ceil(IC/4.0)*4
-      # num_out_blocks = 4
-      # self.send_block._num_blocks = num_blocks
-      # self.send_block.channels = IC
-      # count = N*H*W
-    elif isinstance(self.send_block, ConcatBlock):
+      actual_send_block.channels = IC
+    elif isinstance(actual_send_block, ConcatBlock):
       # For concat, num_out_blocks is determined by number of input edges
       # Each input edge has num_blocks blocks
-      num_blocks = self.send_block.num_blocks
-      num_out_blocks = self.send_block.num_out_blocks
+      num_blocks = actual_send_block.num_blocks
+      num_out_blocks = actual_send_block.num_out_blocks
       count = in_total_bytes // (32 * num_blocks)
-    elif isinstance(self.send_block, BatchNormBlock):
+    elif isinstance(actual_send_block, BatchNormBlock):
       # For standalone BatchNorm, use num_blocks from the block which is
       # calculated based on scale/bias edge size
-      bn_num_blocks = self.send_block.num_blocks
+      bn_num_blocks = actual_send_block.num_blocks
       if bn_num_blocks > 1 and num_blocks < bn_num_blocks:
         # Adjust count and num_blocks to match the scale/bias recv_count
         ratio = bn_num_blocks // num_blocks
