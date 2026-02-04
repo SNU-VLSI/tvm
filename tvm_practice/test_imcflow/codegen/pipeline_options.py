@@ -62,13 +62,6 @@ class PipelineOptions:
                 "--rebuild-cpp-only reruns codegen with modified C++ files."
             )
 
-        # codegen stop requires rebuild_cpp_only (needs C++ to observe)
-        if self.stop_at == PipelineStage.CODEGEN and not self.rebuild_cpp_only:
-            raise ValueError(
-                "--stop-at codegen requires --rebuild-cpp-only. "
-                "Use --stop-at codegen --rebuild-cpp-only to observe memlayout changes."
-            )
-
         # Can't skip transform if stopping at transform
         if self.stop_at == PipelineStage.TRANSFORM and self.should_skip_transform():
             raise ValueError(
