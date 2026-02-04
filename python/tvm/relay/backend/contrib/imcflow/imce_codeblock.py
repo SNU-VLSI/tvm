@@ -130,12 +130,24 @@ class ImceCallCodeBlock(ImceCodeBlock):
 
   @property
   def num_blocks(self) -> int:
-    # return 4 if self.prev_op else 1
-    return self.prev_op.num_out_blocks if self.prev_op else 1
+    if self.prev_op:
+      return self.prev_op.num_out_blocks
+    else:
+      # Standalone BatchNorm: calculate from scale/bias edge size
+      scale_edge = next(
+          (e for e in self.in_edges if e.dst_id.tensor_type == "fused_scale"), None)
+      if scale_edge:
+        size = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(scale_edge).size
+        return math.ceil(size / 32.0)
+      return 1
 
   @property
   def num_out_blocks(self) -> int:
-    return self.prev_op.num_out_blocks if self.prev_op else 1
+    if self.prev_op:
+      return self.prev_op.num_out_blocks
+    else:
+      # Standalone: same as num_blocks
+      return self.num_blocks
 
   def __repr__(self):
     return f"{self.__class__.__name__}(gid: {self.call.get_gid()})"
@@ -1735,6 +1747,16 @@ class RecvSendWrapper(ImceCodeBlock):
       num_blocks = self.send_block.num_blocks
       num_out_blocks = self.send_block.num_out_blocks
       count = in_total_bytes // (32 * num_blocks)
+    elif isinstance(self.send_block, BatchNormBlock):
+      # For standalone BatchNorm, use num_blocks from the block which is
+      # calculated based on scale/bias edge size
+      bn_num_blocks = self.send_block.num_blocks
+      if bn_num_blocks > 1 and num_blocks < bn_num_blocks:
+        # Adjust count and num_blocks to match the scale/bias recv_count
+        ratio = bn_num_blocks // num_blocks
+        count = count // ratio
+        num_blocks = bn_num_blocks
+        num_out_blocks = bn_num_blocks
 
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks,
