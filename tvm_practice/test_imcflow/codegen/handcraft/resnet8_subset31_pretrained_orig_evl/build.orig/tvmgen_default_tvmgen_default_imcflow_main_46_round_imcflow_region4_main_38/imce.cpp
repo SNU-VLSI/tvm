@@ -1,10 +1,10 @@
 #include "../common_decl.h"
-void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_20() {
+void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_38() {
   int hid = __builtin_IMCE_GET_CORE_HID();
   int wid = __builtin_IMCE_GET_CORE_WID();
-  short16 var1; // (TensorEdge((-98, odata), (112, lhs)), 0)
-  short16 var2; // (TensorEdge((-99, odata), (112, rhs)), 0)
-  short16 var3; // (AddBlock(gid: 112), 0)
+  short16 var1; // (TensorEdge((-104, odata), ((118, 116), lhs)), 0)
+  short16 var2; // (TensorEdge((-105, odata), ((118, 116), rhs)), 0)
+  short16 var3; // (AddBlock(gid: 116), 0)
   if (hid == 0 && wid == 1) { // imce_0_1
   }
   else if (hid == 0 && wid == 2) { // imce_0_2
@@ -16,16 +16,18 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_20
   else if (hid == 1 && wid == 1) { // imce_1_1
     // generate: call_created_loop
     for (int i1 = 0; i1 < 256; i1++) { // generate : call_created_loop
-      // generate: add standalone
+      // generate: imcflow.vecops_wrapper
 
-      var1 = __builtin_IMCE_RECV(2); // TensorEdge((-98, odata), (112, lhs)), inode_0_0 -> imce_1_1
-      var2 = __builtin_IMCE_RECV(3); // TensorEdge((-99, odata), (112, rhs)), inode_1_0 -> imce_1_1
+      var1 = __builtin_IMCE_RECV(2); // TensorEdge((-104, odata), ((118, 116), lhs)), inode_0_0 -> imce_1_1
+      var2 = __builtin_IMCE_RECV(3); // TensorEdge((-105, odata), ((118, 116), rhs)), inode_1_0 -> imce_1_1
+      // generate: imcflow.vecops_block
       // generate: add
 
       var3 = __builtin_IMCE_ADD(var1, var2, 15);
       // endgenerate: add
-      __builtin_IMCE_SEND(1, var3, 2, 0); // TensorEdge((112, odata), (113, func_out0)), imce_1_1 -> inode_3_0
-      // endgenerate: add standalone
+      // endgenerate: imcflow.vecops_block
+      __builtin_IMCE_SEND(1, var3, 2, 0); // TensorEdge(((118, 116), odata), (119, func_out0)), imce_1_1 -> inode_3_0
+      // endgenerate: imcflow.vecops_wrapper
     } // endgenerate : call_created_loop
     // endgenerate: call_created_loop
     __builtin_IMCE_STOP();
