@@ -845,17 +845,15 @@ def parse_rtl_dwconv(log_path: str, coord: Tuple[int, int]) -> List[DWConvOp]:
     """Parse RTL VPU log for DWCONV operations (input, weight, output)"""
     outputs = []
 
-    # RTL log format (two types):
-    # [timestamp] DWCONV ACC    | bshr_sel: X | shift_amt: X | weight: [...] | bshr[0]: [...] | mac: [...] | acc: [...]
-    # [timestamp] DWCONV RESULT | bshr_sel: X | shift_amt: X | weight: [...] | mac: [...] | acc: [...] | result: [...]
+    # RTL log format (updated with mac_shift field):
+    # [timestamp] DWCONV ACC    | bshr_sel: X | shift_amt: X | opA_raw: [...] | weight[0]: [...] | mac: [...] | mac_shift: [...] | acc: [...]
+    # [timestamp] DWCONV RESULT | bshr_sel: X | shift_amt: X | opA_raw: [...] | weight[0]: [...] | mac: [...] | mac_shift: [...] | acc: [...] | result: [...]
 
     # Pattern for DWCONV ACC (intermediate accumulation step)
-    # Note: ACC has bshr[0] field between weight and mac
-    acc_pattern = r'\[\s*(\d+)\]\s*DWCONV ACC\s+\|\s*bshr_sel:\s*(\d+)\s*\|\s*shift_amt:\s*(\d+)\s*\|\s*weight:\s*\[([^\]]*)\]\s*\|\s*bshr\[\d+\]:\s*\[([^\]]*)\]\s*\|\s*mac:\s*\[([^\]]*)\]\s*\|\s*acc:\s*\[([^\]]*)\]'
+    acc_pattern = r'\[\s*(\d+)\]\s*DWCONV ACC\s+\|\s*bshr_sel:\s*(\d+)\s*\|\s*shift_amt:\s*(\d+)\s*\|\s*opA_raw:\s*\[([^\]]*)\]\s*\|\s*weight\[0\]:\s*\[([^\]]*)\]\s*\|\s*mac:\s*\[([^\]]*)\]\s*\|\s*mac_shift:\s*\[([^\]]*)\]\s*\|\s*acc:\s*\[([^\]]*)\]'
 
     # Pattern for DWCONV RESULT (final result with shift)
-    # Note: RESULT doesn't have bshr[0] field
-    result_pattern = r'\[\s*(\d+)\]\s*DWCONV RESULT\s*\|\s*bshr_sel:\s*(\d+)\s*\|\s*shift_amt:\s*(\d+)\s*\|\s*weight:\s*\[([^\]]*)\]\s*\|\s*mac:\s*\[([^\]]*)\]\s*\|\s*acc:\s*\[([^\]]*)\]\s*\|\s*result:\s*\[([^\]]*)\]'
+    result_pattern = r'\[\s*(\d+)\]\s*DWCONV RESULT\s*\|\s*bshr_sel:\s*(\d+)\s*\|\s*shift_amt:\s*(\d+)\s*\|\s*opA_raw:\s*\[([^\]]*)\]\s*\|\s*weight\[0\]:\s*\[([^\]]*)\]\s*\|\s*mac:\s*\[([^\]]*)\]\s*\|\s*mac_shift:\s*\[([^\]]*)\]\s*\|\s*acc:\s*\[([^\]]*)\]\s*\|\s*result:\s*\[([^\]]*)\]'
 
     op_index = 0
 
@@ -869,17 +867,19 @@ def parse_rtl_dwconv(log_path: str, coord: Tuple[int, int]) -> List[DWConvOp]:
                     timestamp = int(match.group(1))
                     bshr_sel = int(match.group(2))
                     shift_amt = int(match.group(3))
-                    weights = [int(x) for x in match.group(4).split()]
-                    mac = [int(x) for x in match.group(5).split()]
-                    acc = [int(x) for x in match.group(6).split()]
-                    result = [int(x) for x in match.group(7).split()]
+                    opA_raw = [int(x) for x in match.group(4).split()]
+                    weights = [int(x) for x in match.group(5).split()]
+                    mac = [int(x) for x in match.group(6).split()]
+                    mac_shift = [int(x) for x in match.group(7).split()]
+                    acc = [int(x) for x in match.group(8).split()]
+                    result = [int(x) for x in match.group(9).split()]
 
                     outputs.append(DWConvOp(
                         imce_coord=coord,
                         bshr_sel=bshr_sel,
                         shift_amt=shift_amt,
                         weights=weights,
-                        inputs=[],  # RTL doesn't log linebuffer input directly in VPU
+                        inputs=opA_raw,  # Use opA_raw as inputs
                         inner_product=mac,
                         acc_values=acc,
                         result=result,
@@ -896,17 +896,18 @@ def parse_rtl_dwconv(log_path: str, coord: Tuple[int, int]) -> List[DWConvOp]:
                     timestamp = int(match.group(1))
                     bshr_sel = int(match.group(2))
                     shift_amt = int(match.group(3))
-                    weights = [int(x) for x in match.group(4).split()]
-                    bshr_input = [int(x) for x in match.group(5).split()]  # linebuffer input
+                    opA_raw = [int(x) for x in match.group(4).split()]
+                    weights = [int(x) for x in match.group(5).split()]
                     mac = [int(x) for x in match.group(6).split()]
-                    acc = [int(x) for x in match.group(7).split()]
+                    mac_shift = [int(x) for x in match.group(7).split()]
+                    acc = [int(x) for x in match.group(8).split()]
 
                     outputs.append(DWConvOp(
                         imce_coord=coord,
                         bshr_sel=bshr_sel,
                         shift_amt=shift_amt,
                         weights=weights,
-                        inputs=bshr_input,  # Use bshr[0] as inputs
+                        inputs=opA_raw,  # Use opA_raw as inputs
                         inner_product=mac,
                         acc_values=acc,
                         result=[],  # ACC entries don't have final result
