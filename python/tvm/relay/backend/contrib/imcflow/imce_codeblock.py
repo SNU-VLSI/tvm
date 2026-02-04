@@ -725,13 +725,21 @@ class ConcatBlock(ImceCallCodeBlock):
 
     external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
     internal_in_edge = (set(self.in_edges) - set(external_in_edges))
+    in_edges_sorted = []
+    for arg in self.call.call.args[0].fields:
+      if isinstance(arg, relay.Var):
+        arg = self.call.conv_pending_info["param_to_arg"][arg]
+      for e in self.in_edges:
+        if getInnerNodeID(e.src_id.graph_node_id) == getNodeID(arg):
+          in_edges_sorted.append(e)
+          break
 
     assert self.call.curr_composite_id is not None, "standalone concat will be handled at handler"
     if not self.or_concat: # input is vector form
-      for in_edge in self.in_edges:
+      for in_edge in in_edges_sorted:
         for b in range(self.num_blocks):
           var_i = self._make_unique_input_var_for_post_op(in_edge, b)
-          var_o = UniqueVar((self, b + self.num_blocks * self.in_edges.index(in_edge)))
+          var_o = UniqueVar((self, b + self.num_blocks * in_edges_sorted.index(in_edge)))
           code += f"{var_o} = {var_i};"
     else: # input is bitplane form
       external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]

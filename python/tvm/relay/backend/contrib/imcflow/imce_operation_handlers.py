@@ -52,6 +52,12 @@ class CompositeHandler(OperationHandler):
     self.builder.post_op_stack = call.post_op_stack
     self.builder.conv_pending_info = call.conv_pending_info
 
+    # map params to args
+    param_to_arg = {
+      param: arg for param, arg in zip(call.call.op.params, call.call.args)
+    }
+    call.conv_pending_info['param_to_arg'] = param_to_arg
+
     # Visit the body of the composite function using self.builder
     self.builder.visit(call.call.op.body)
 
