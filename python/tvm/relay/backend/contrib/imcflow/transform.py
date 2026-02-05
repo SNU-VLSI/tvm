@@ -7002,11 +7002,8 @@ def constructSplitInfo(mod):
 
       # Get input channels from split input shape
       channels = 0
-      if hasattr(split_node.args[0], 'checked_type'):
-        input_type = split_node.args[0].checked_type
-        if hasattr(input_type, 'shape') and len(input_type.shape) > 1:
-          # Assume NCHW format, channel is dim 1
-          channels = int(input_type.shape[1])
+      input_type = _get_type(mod, split_node.args[0])
+      channels = int(input_type.shape[1])
 
       # Store split info
       if func_name.name_hint not in config.SplitInfo:
