@@ -48,7 +48,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
 
 # TVM imports
-from tvm.contrib.imcflow import NodeID, ImcflowDeviceConfig as DevConfig, DataBlock, CodegenContext
+from tvm.contrib.imcflow import NodeID, InstEdgeInfo, ImcflowDeviceConfig as DevConfig, DataBlock, CodegenContext
 from tvm.relay.backend.contrib.imcflow.codeblock import (
     CodePhase, TextBlock, SequentialBlock, CodeBlock, SimpleFor, UniqueVar
 )
@@ -60,6 +60,7 @@ from tvm.relay.backend.contrib.imcflow.inode_codeblock import (
     SyncAllINodes,
     DoneAndIntrtBlock,
     ClearFlag,
+    IMCEComputeBlock,
 )
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 
@@ -82,6 +83,24 @@ else:
 # ============================================================================
 # Helper Functions for Memory Layout Access
 # ============================================================================
+class WriteSCANIMEMBlock(InodeCodeBlock):
+  """ Code block for writing IMEM given InstEdgeInfo """
+
+  def __init__(self, edge_info: InstEdgeInfo, annotation: str = ""):
+    super().__init__(annotation)
+    self.edge_info = edge_info
+    self._build()
+
+  def _build(self):
+    db = self.edge_info.data_block
+    policy_addr = self.edge_info.policy_info[0].address
+
+    var = UniqueVar("imem_start_address", dtype="int")
+    self.body.add(TextBlock(f"{var} = {db.offset};"))
+    self.body.add(TextBlock(f"__builtin_INODE_SET_ADDR_CNT(0);"))
+
+    self.body.add(SimpleFor(math.ceil(db.size / 32),
+                      lambda iter: f"__builtin_INODE_WR_IMEM({var} + {iter}*32, 0, {policy_addr});"))
 
 def get_scan_data_block(func_name: str) -> Optional[DataBlock]:
     """Get scan data block from DevConfig memory layout.
@@ -135,7 +154,7 @@ def get_policy_block_address(func_name: str, node_id: NodeID) -> Optional[int]:
     for block in inode_data.blocks.values():
         # DataBlock.id returns the block identifier (string or TensorEdge)
         if isinstance(block.id, str) and f"{node_id.name}_scan_reg_policy" == block.id:
-            return block.base_address
+            return block.offset
 
     return None
 
@@ -169,15 +188,15 @@ class ScanPolicyUpdateBlock(InodeCodeBlock):
             if len(policy_entries) <= 1:  # Skip nodes with only zero entry
                 continue
 
-            # Get base address from DevConfig memory layout
-            base_addr = get_policy_block_address(self.func_name, id)
-            if base_addr is None:
+            # Get offset from DevConfig memory layout
+            offset = get_policy_block_address(self.func_name, id)
+            if offset is None:
                 continue
 
             var = UniqueVar("policy_table_start_address", dtype="int")
             loop_count = len(policy_entries)
 
-            self.body.add(TextBlock(f"{var} = {base_addr};"))
+            self.body.add(TextBlock(f"{var} = {offset};"))
 
             if loop_count > 5:
                 # Using lambda for SimpleFor body to inject 'iter' variable
@@ -232,7 +251,7 @@ class ScanImceCodeBlockBuilder:
         # Add STOP blocks for all active IMCE nodes
         for imce_node in self.noc_paths.keys():
             self.codeblocks.blocks[imce_node][CodePhase.END].append(
-                TextBlock("__builtin_IMCE_STEP(); // STOP")
+                TextBlock("__builtin_IMCE_STOP(); // STOP")
             )
 
     def generate(self) -> str:
@@ -272,8 +291,23 @@ class ScanInodeCodeBlockBuilder:
         # Sync and interrupt
         self.sync_and_halt(CodePhase.INIT)
 
-        # Note: We don't need WriteIMEMBlock for scan register programming
-        # because we're sending data packets, not writing IMCE instructions
+        # IMEM write (same pattern as codegen.py)
+        # This writes the IMCE instruction binaries (e.g., {imce}_imem.bin) into IMCE IMEM,
+        # using InstEdgeInfoDict populated by scan_reg_policy_gen.add_edge_info().
+        inst_edges = DevConfig().InstEdgeInfoDict.get(self.func_name, {})
+        if not inst_edges:
+            raise RuntimeError(
+                f"InstEdgeInfoDict['{self.func_name}'] is empty. "
+                "Run scan_reg_policy_gen.add_edge_info(func_name=...) before codegen."
+            )
+
+        for imce, inst_edge in sorted(inst_edges.items(), key=lambda x: x[0].name):
+            block = WriteSCANIMEMBlock(inst_edge, f"imem write: {imce.name}")
+            self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+
+        self.build_imce_compute()
+
+        self.sync_and_halt(CodePhase.INIT)
 
     def build_scan_send(self, scan_packet_count: int, fifo_id: int = 0, per_imce_packets: int = 2) -> None:
         """Build scan register send operations.
@@ -317,8 +351,8 @@ class ScanInodeCodeBlockBuilder:
                 raise RuntimeError(f"Scan data block not found for {master_inode.name}")
 
             # Get policy address for broadcast (all IMCEs in group)
-            policy_entries = self.policy_table.get(master_inode, [])
-            policy_addr = 1 if len(policy_entries) > 1 else 0  # Skip zero entry at index 0
+            # policy_entries = self.policy_table.get(master_inode, [])
+            # policy_addr = 1 if len(policy_entries) > 1 else 0  # Skip zero entry at index 0
 
             # Send packets for each IMCE in this group
             # Use local packet index within this INode's data block
@@ -328,7 +362,10 @@ class ScanInodeCodeBlockBuilder:
                 for pkt_idx in range(per_imce_packets):
                     # Local packet offset within this INode's scan_data block
                     packet_offset = local_pkt_idx * 32  # 32 bytes per packet
-                    packet_addr = scan_data_block.base_address + packet_offset
+                    packet_addr = scan_data_block.offset + packet_offset
+
+                    # policy address setting
+                    policy_addr = imce_node.to_coord(1)
 
                     # INODE_SEND(addr, imm, policy, fifo_id)
                     self.codeblocks.blocks[master_inode][CodePhase.EXEC].append(
@@ -342,6 +379,13 @@ class ScanInodeCodeBlockBuilder:
     def build_finalization(self) -> None:
         """Build finalization phase: sync, done, halt."""
         self.sync_and_halt(CodePhase.END)
+    
+    def build_imce_compute(self) -> None:
+        """Build IMCE compute phase."""
+        for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[self.func_name].items(), key=lambda x: x[0].name):
+            policy_addr = inst_edge.policy_info[0].address # get first policy address
+            block = IMCEComputeBlock(policy_addr, f"{imce.name} compute")
+            self.codeblocks.append(imce.master(), block, CodePhase.INIT)
 
     def sync_and_halt(self, phase: CodePhase) -> None:
         """Sync all inodes and halt."""
@@ -424,7 +468,12 @@ class ScanPolicyTableCodegen:
                 continue
 
             # Generate binary file
-            bin_filename = f"{node_id.name}_scan_policy.bin"
+            # Note: When ld -r -b binary converts the file, it creates symbols based on:
+            # _binary_<dir_name>_<file_name>_bin_<start|end|size>
+            # Since we're in the {func_name} directory and want symbols like:
+            # _binary_{func_name}_{node_id}_scan_reg_policy_bin_start
+            # The filename should be: {node_id}_scan_reg_policy.bin
+            bin_filename = f"{node_id.name}_scan_reg_policy.bin"
             bin_path = os.path.join(self.func_dir, bin_filename)
 
             with open(bin_path, "wb") as f:
@@ -435,7 +484,7 @@ class ScanPolicyTableCodegen:
             generated_files.append(Path(bin_path))
 
             # Generate host object file
-            host_obj_filename = f"{node_id.name}_scan_policy.host.o"
+            host_obj_filename = f"{node_id.name}_scan_reg_policy.host.o"
             dev_codegen = DeviceCodegen("inode", self.build_dir, self.host_isa)
             dev_codegen.func_dir = self.func_dir
             dev_codegen.create_host_object(bin_filename, host_obj_filename)
@@ -458,10 +507,14 @@ class ScanKernelCodegen:
     def __init__(
         self,
         func_name: str,
-        scan_packet_count: int
+        scan_packet_count: int,
+        host_os: str = "linux",
+        use_polling: bool = True,
     ):
         self.func_name = func_name
         self.scan_packet_count = scan_packet_count
+        self.host_os = host_os
+        self.use_polling = use_polling
 
         # Initialize base address macros (similar to ext_codegen.py)
         self.base_address_macros = {
@@ -484,16 +537,24 @@ class ScanKernelCodegen:
 
     def generate_header(self) -> str:
         """Generate C header includes."""
+        # Note: we keep Linux-only headers unconditionally for now since
+        # this generator primarily targets the existing Linux host runner.
+        # The OS-specific behavior is handled in generated C code blocks.
         return """
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <stdio.h>
 #include <stdint.h>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include <cnpy.h>
+#include <vector>
 """
 
     def generate_base_addr_macros(self) -> str:
@@ -578,26 +639,115 @@ class ScanKernelCodegen:
     def generate_utilities(self) -> str:
         """Generate utility functions."""
         return """
-static inline void enable_interrupt(int fd) {
-    uint32_t info = 1;
-    write(fd, &info, sizeof(info));
+static inline void enable_imcflow_interrupt(int fd)
+{
+  uint32_t info = 1;
+  ssize_t nb = write(fd, &info, sizeof(info));
+  if (nb != (ssize_t)sizeof(info)) {
+    perror("write failed");
+    close(fd);
+    exit(1);
+  }
 }
 
-static inline void wait_interrupt(int fd) {
-    uint32_t info;
-    read(fd, &info, sizeof(info));
+static inline void wait_imcflow_interrupt(int fd)
+{
+  uint32_t info;
+  ssize_t nb = read(fd, &info, sizeof(info));
 }
 
-static inline void generate_ack(uint32_t* int_ack_gen) {
-    int_ack_gen[0] = 0b1;
+static inline void generate_ack(uint32_t* int_ack_gen)
+{
+  int_ack_gen[0] = 0b1;
 }
 
-static void wait_for_idle(volatile uint32_t* npu_pointer) {
-    while (npu_pointer[STATE_REG_IDX] != SET_IDLE_CODE) {
-        // Busy wait
-    }
+// Poll until ImcFlow returns to IDLE state
+static void wait_for_idle(volatile uint32_t* npu_pointer)
+{
+  while (npu_pointer[STATE_REG_IDX] != SET_IDLE_CODE) {
+    // Busy wait
+  }
 }
 """
+
+    def _generate_device_pointer_setup(self) -> str:
+        """Generate OS-specific device open + mmap setup (ext_codegen.py style)."""
+        if self.host_os == "linux":
+            # Match ext_codegen.py behavior: open both UIO devices and mmap.
+            return """
+    int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
+    if (npu_fd < 0) {
+        perror("npu UIO cannot be opened");
+        free(scan_data);
+        return -1;
+    }
+
+    int int_ack_gen_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
+    if (int_ack_gen_fd < 0) {
+        perror("interrupt ack gen UIO cannot be opened");
+        close(npu_fd);
+        free(scan_data);
+        return -1;
+    }
+
+    size_t npu_len = (size_t)IMCFLOW_LEN;
+    uint32_t* npu_ptr = (uint32_t*)mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);
+    if (npu_ptr == MAP_FAILED) {
+        perror("npu_ptr mmap error");
+        close(npu_fd);
+        close(int_ack_gen_fd);
+        free(scan_data);
+        return -1;
+    }
+
+    size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;
+    uint32_t* int_ack_ptr = (uint32_t*)mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);
+    if (int_ack_ptr == MAP_FAILED) {
+        perror("int_ack_ptr mmap error");
+        munmap(npu_ptr, npu_len);
+        close(npu_fd);
+        close(int_ack_gen_fd);
+        free(scan_data);
+        return -1;
+    }
+"""
+        if self.host_os == "baremetal":
+            return """
+    uint32_t* npu_ptr = (uint32_t*)IMCFLOW_ADDR;
+    uint32_t* int_ack_ptr = (uint32_t*)INT_ACK_GEN_ADDR;
+"""
+        raise ValueError(f"Unsupported host_os: {self.host_os}")
+
+    def _generate_device_pointer_cleanup(self) -> str:
+        """Generate OS-specific device cleanup (ext_codegen.py style)."""
+        if self.host_os == "linux":
+            return """
+    // Cleanup device pointer
+    munmap(npu_ptr, (size_t)IMCFLOW_LEN);
+    close(npu_fd);
+    munmap(int_ack_ptr, (size_t)INT_ACK_GEN_LEN);
+    close(int_ack_gen_fd);
+"""
+        if self.host_os == "baremetal":
+            return """
+    // baremetal: no cleanup
+"""
+        raise ValueError(f"Unsupported host_os: {self.host_os}")
+
+    def _generate_wait_completion(self) -> str:
+        """Generate wait-for-completion code based on OS and polling config."""
+        if self.host_os == "linux":
+            return "wait_imcflow_interrupt(npu_fd);\n    generate_ack(int_ack_ptr);\n"
+        # baremetal
+        if self.use_polling:
+            return "wait_for_idle(npu_ptr);\n"
+        # If polling disabled on baremetal, there's currently no interrupt path.
+        return "// NOTE: baremetal without polling is not supported; falling back to polling\n    wait_for_idle(npu_ptr);\n"
+
+    def _generate_enable_interrupt(self) -> str:
+        if self.host_os == "linux":
+            return "enable_imcflow_interrupt(npu_fd);\n"
+        return ""
 
     def generate_scan_data_array(self, scan_values: List[List[int]]) -> str:
         """Generate C array containing scan register values.
@@ -634,14 +784,17 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
                     break
 
         if len(scan_data_blocks) != 4:
-            raise RuntimeError(f"Expected 4 scan_data blocks (one per INode), found {len(scan_data_blocks)}")
+            raise RuntimeError(
+                f"Expected 4 scan_data blocks (one per INode), found {len(scan_data_blocks)}"
+            )
 
         # Generate transfer code for each INode's scan_data block
         transfer_code = []
         packets_per_inode = 8  # 4 IMCEs × 2 packets each
         for inode_idx, (inode, block) in enumerate(scan_data_blocks):
             packet_start = inode_idx * packets_per_inode
-            transfer_code.append(f"""
+            transfer_code.append(
+                f"""
     // Transfer scan data for {inode.name} (packets {packet_start}-{packet_start + packets_per_inode - 1})
     fprintf(stderr, "  {inode.name}: 0x%x ({packets_per_inode} packets)\\n", {block.base_address});
     npu_scan_base = &npu_ptr[{block.base_address} / 4];
@@ -650,83 +803,215 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
         for (int j = 0; j < 8; j++) {{
             npu_scan_base[(i - {packet_start}) * 8 + j] = scan_data_ptr[i * 8 + j];
         }}
-    }}""")
+    }}"""
+            )
 
         transfer_code_str = "".join(transfer_code)
 
+        device_setup = self._generate_device_pointer_setup()
+        device_cleanup = self._generate_device_pointer_cleanup()
+        enable_intr = self._generate_enable_interrupt()
+        wait_done = self._generate_wait_completion()
+
         return f"""
-void {self.func_name}_kernel(void) {{
-    fprintf(stderr, "Starting {self.func_name} kernel\\n");
-
-    // Open devices
-    int npu_fd = open(IMCFLOW_DEVICE, O_RDWR);
-    if (npu_fd < 0) {{
-        perror("Cannot open NPU device");
-        return;
+#ifdef __cplusplus
+extern "C"
+#endif
+int32_t program_scan_reg(const char* file_name) {{
+    // Check if file_name is provided
+    if (file_name == NULL || file_name[0] == '\\0') {{
+        fprintf(stderr, "Error: NPZ directory path is required for program_scan_reg\\n");
+        fprintf(stderr, "Usage: program_scan_reg <npz_directory_path>\\n");
+        return -1;
     }}
 
-    int int_fd = open(INT_ACK_GEN_DEVICE, O_RDWR);
-    if (int_fd < 0) {{
-        perror("Cannot open interrupt device");
-        close(npu_fd);
-        return;
+    // Strip surrounding quotes from file_name if present
+    std::string file_name_str(file_name);
+    if (file_name_str.size() >= 2 && file_name_str.front() == '"' && file_name_str.back() == '"') {{
+        file_name_str = file_name_str.substr(1, file_name_str.size() - 2);
+    }}
+    const char* actual_file_name = file_name_str.c_str();
+
+    fprintf(stderr, "Starting program_scan_reg from directory: %s\\n", actual_file_name);
+
+    // Allocate memory for scan data (32 packets × 32 bytes = 1024 bytes)
+    const int num_packets = {self.scan_packet_count};
+    const int bytes_per_packet = 32;
+    uint32_t* scan_data = (uint32_t*)malloc(num_packets * bytes_per_packet);
+    if (!scan_data) {{
+        fprintf(stderr, "Error: Failed to allocate memory for scan data\\n");
+        return -1;
     }}
 
-    // Map NPU memory
-    uint32_t* npu_ptr = (uint32_t*)mmap(NULL, IMCFLOW_LEN,
-                                         PROT_READ | PROT_WRITE,
-                                         MAP_SHARED, npu_fd, 0);
-    if (npu_ptr == MAP_FAILED) {{
-        perror("mmap failed");
-        close(npu_fd);
-        close(int_fd);
-        return;
-    }}
+    // Convert NPZ files to scan packets
+    // Each IMCE has its own NPZ file with 64 bytes → 2 packets (32 bytes each)
+    // 16 IMCEs × 2 packets = 32 packets total
+    const int imce_count = 16;
+    const int bytes_per_imce = 64;
 
-    uint32_t* int_ack_ptr = (uint32_t*)mmap(NULL, 4096,
-                                             PROT_READ | PROT_WRITE,
-                                             MAP_SHARED, int_fd, 0);
+    // Convert NPZ bytes to scan packets following the same logic as load_scan_values_from_npz
+    // For each IMCE: load NPZ file, 64 bytes → 512 bits → bit-reverse → split into reg0/reg1 → 2 packets
+    fprintf(stderr, "Loading and converting NPZ data with bit reversal...\\n");
+    
+    for (int imce_idx = 0; imce_idx < imce_count; imce_idx++) {{
+        // Calculate IMCE coordinates: h=0-3, w=1-4
+        int h = imce_idx / 4;
+        int w = imce_idx % 4 + 1;
+        std::string imce_filename = std::string(actual_file_name) + "/imce_" + std::to_string(h) + "_" + std::to_string(w) + ".npz";
+        
+        // Load IMCE NPZ file
+        cnpy::npz_t imce_npz;
+        try {{
+            imce_npz = cnpy::npz_load(imce_filename);
+        }} catch (const std::exception& e) {{
+            fprintf(stderr, "Error loading NPZ file %s: %s\\n", imce_filename.c_str(), e.what());
+            free(scan_data);
+            return -1;
+        }}
+
+        if (imce_npz.find("arr_0") == imce_npz.end()) {{
+            fprintf(stderr, "Error: 'arr_0' not found in NPZ file %s\\n", imce_filename.c_str());
+            free(scan_data);
+            return -1;
+        }}
+
+        cnpy::NpyArray imce_arr = imce_npz["arr_0"];
+        uint8_t* imce_bytes = imce_arr.data<uint8_t>();
+        size_t imce_bytes_size = imce_arr.num_bytes();
+
+        if (imce_bytes_size != bytes_per_imce) {{
+            fprintf(stderr, "Error: Expected %d bytes in NPZ file %s, got %zu bytes\\n", 
+                    bytes_per_imce, imce_filename.c_str(), imce_bytes_size);
+            free(scan_data);
+            return -1;
+        }}
+        
+        // Step 1: Convert 64 bytes to 512-bit string
+        char bit_str[513];  // 512 bits + null terminator
+        for (int i = 0; i < bytes_per_imce; i++) {{
+            for (int b = 0; b < 8; b++) {{
+                bit_str[i * 8 + b] = ((imce_bytes[i] >> (7 - b)) & 1) ? '1' : '0';
+            }}
+        }}
+        bit_str[512] = '\\0';
+        
+        // Step 2: Reverse the entire bit string
+        char rev_bit_str[513];
+        for (int i = 0; i < 512; i++) {{
+            rev_bit_str[i] = bit_str[511 - i];
+        }}
+        rev_bit_str[512] = '\\0';
+        
+        // Step 3: Extract reg1 (bits 0-256) and reg0 (bits 256-512)
+        // reg1 corresponds to packet 1 (bytes 0-31 after reversal)
+        // reg0 corresponds to packet 0 (bytes 32-63 after reversal)
+        char reg1_bits[257], reg0_bits[257];
+        memcpy(reg1_bits, &rev_bit_str[0], 256);
+        reg1_bits[256] = '\\0';
+        memcpy(reg0_bits, &rev_bit_str[256], 256);
+        reg0_bits[256] = '\\0';
+        
+        // Step 4: Convert bit strings to int16 packets
+        // Each packet has 16 int16 values
+        int16_t* packet_0 = (int16_t*)&scan_data[(imce_idx * 2 + 0) * 8];  // 32 bytes = 8 uint32_t = 16 int16
+        int16_t* packet_1 = (int16_t*)&scan_data[(imce_idx * 2 + 1) * 8];
+        
+        // Convert reg0_bits to packet_0
+        for (int i = 0; i < 16; i++) {{
+            // Extract 16 bits for this int16
+            char bits_16[17];
+            memcpy(bits_16, &reg0_bits[i * 16], 16);
+            bits_16[16] = '\\0';
+            
+            // Reverse bits for little-endian int16 interpretation
+            char bits_16_rev[17];
+            for (int b = 0; b < 16; b++) {{
+                bits_16_rev[b] = bits_16[15 - b];
+            }}
+            bits_16_rev[16] = '\\0';
+            
+            // Convert binary string to int16 (treat leftmost char as MSB)
+            int32_t val = 0;
+            for (int b = 0; b < 16; b++) {{
+                if (bits_16_rev[b] == '1') {{
+                    val |= (1 << (15 - b));  // Leftmost char is MSB (bit 15)
+                }}
+            }}
+            
+            // Handle signed conversion (2's complement)
+            if (val >= 32768) {{
+                val -= 65536;
+            }}
+            packet_0[i] = (int16_t)val;
+        }}
+        
+        // Convert reg1_bits to packet_1
+        for (int i = 0; i < 16; i++) {{
+            // Extract 16 bits for this int16
+            char bits_16[17];
+            memcpy(bits_16, &reg1_bits[i * 16], 16);
+            bits_16[16] = '\\0';
+            
+            // Reverse bits for little-endian int16 interpretation
+            char bits_16_rev[17];
+            for (int b = 0; b < 16; b++) {{
+                bits_16_rev[b] = bits_16[15 - b];
+            }}
+            bits_16_rev[16] = '\\0';
+            
+            // Convert binary string to int16 (treat leftmost char as MSB)
+            int32_t val = 0;
+            for (int b = 0; b < 16; b++) {{
+                if (bits_16_rev[b] == '1') {{
+                    val |= (1 << (15 - b));  // Leftmost char is MSB (bit 15)
+                }}
+            }}
+            
+            // Handle signed conversion (2's complement)
+            if (val >= 32768) {{
+                val -= 65536;
+            }}
+            packet_1[i] = (int16_t)val;
+        }}
+    }}
+    
+    fprintf(stderr, "Loaded and converted %d scan packets from NPZ files\\n", num_packets);
+
+{device_setup}
 
 {self.generate_policy_and_imem_transfers()}
 
     // Transfer scan data to each INode's memory region
     fprintf(stderr, "Transferring scan data to NPU:\\n");
-    uint32_t* scan_data_ptr = (uint32_t*)&{self.func_name}_scan_data[0];
+    uint32_t* scan_data_ptr = scan_data;
     uint32_t* npu_scan_base;{transfer_code_str}
 
     // Set PC and execute policy update phase
-    fprintf(stderr, "Executing policy update phase\\n");
+    fprintf(stderr, "Set the inode pc to 0 and run.\\n");
     for (int i = 0; i < INODE_NUM; i++) {{
         npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_EXTERN_ENUM_VAL << 30);
     }}
-    enable_interrupt(npu_fd);
-    npu_ptr[STATE_REG_IDX] = SET_PROGRAM_CODE;
-    wait_interrupt(npu_fd);
-    generate_ack(int_ack_ptr);
-    npu_ptr[INTR_DONE_REG_IDX] = 1;
+    {enable_intr}    npu_ptr[STATE_REG_IDX] = SET_PROGRAM_CODE;
+    {wait_done}    npu_ptr[INTR_DONE_REG_IDX] = 1;
+    for (int i = 0; i < INODE_NUM; i++) {{
+        npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_P0_ENUM_VAL << 30);
+    }}
+    {enable_intr}    npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
+    {wait_done}    npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Execute scan register programming phase
     fprintf(stderr, "Executing scan register programming phase\\n");
     for (int i = 0; i < INODE_NUM; i++) {{
         npu_ptr[PC_REG_IDX + i] = (INODE_PC_START_P0_ENUM_VAL << 30);
     }}
-    enable_interrupt(npu_fd);
-    npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
-    wait_interrupt(npu_fd);
-    generate_ack(int_ack_ptr);
-    npu_ptr[INTR_DONE_REG_IDX] = 1;
+    {enable_intr}    npu_ptr[STATE_REG_IDX] = SET_RUN_CODE;
+    {wait_done}    npu_ptr[INTR_DONE_REG_IDX] = 1;
 
     // Cleanup
-    munmap(npu_ptr, IMCFLOW_LEN);
-    munmap(int_ack_ptr, 4096);
-    close(npu_fd);
-    close(int_fd);
+    free(scan_data);
+{device_cleanup}
 
-    fprintf(stderr, "{self.func_name} kernel completed\\n");
-}}
-
-int main(void) {{
-    {self.func_name}_kernel();
+    fprintf(stderr, "program_scan_reg completed successfully\\n");
     return 0;
 }}
 """
@@ -742,7 +1027,7 @@ int main(void) {{
             self.generate_base_addr_macros(),
             self.generate_extern_declarations(),
             self.generate_utilities(),
-            self.generate_scan_data_array(scan_values),
+            # self.generate_scan_data_array(scan_values),
             self.generate_kernel_function()
         ]
         return "\n".join(code_parts)
@@ -943,6 +1228,10 @@ __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
             generated_files["imce.cpp"] = imce_path
             print(f"   Written: {imce_path}")
 
+            DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
+                self.func_name, imce_builder.codeblocks
+            )
+
             # 2. Generate INode code
             print("\n[2/5] Generating INode code...")
             inode_builder = ScanInodeCodeBlockBuilder(self.func_name)
@@ -958,9 +1247,6 @@ __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
 
             # 3. Compile device code
             print("\n[3/5] Compiling device code...")
-            DeviceCodegen("imce", self.build_dir, self.host_isa).handle_code_generation(
-                self.func_name, imce_builder.codeblocks
-            )
             DeviceCodegen("inode", self.build_dir, self.host_isa).handle_code_generation(
                 self.func_name, inode_builder.codeblocks
             )
@@ -978,7 +1264,10 @@ __attribute__((noinline, used)) void __builtin_IMCE_STEP(void);
             # 5. Generate kernel wrapper
             print("\n[5/5] Generating kernel wrapper...")
             kernel_codegen = ScanKernelCodegen(
-                self.func_name, self.scan_packet_count
+                self.func_name,
+                self.scan_packet_count,
+                host_os=self.host_os,
+                use_polling=True,
             )
             kernel_code = kernel_codegen.generate(scan_values)
 
@@ -1191,8 +1480,8 @@ def main():
     )
     parser.add_argument(
         "--func-name",
-        default="scan_reg",
-        help="Function name (default: scan_reg)"
+        default="program_scan_reg",
+        help="Function name (default: program_scan_reg)"
     )
     parser.add_argument(
         "--build-dir",

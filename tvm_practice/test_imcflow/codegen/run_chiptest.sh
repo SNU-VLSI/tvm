@@ -10,7 +10,8 @@ show_help() {
     echo "Automated chip test workflow that:"
     echo "  1. Runs test.py to generate test folder"
     echo "  2. Transfers test folder to remote server"
-    echo "  3. Executes test on remote chip"
+    echo "  3. Transfers scan_reg_files to remote server"
+    echo "  4. Executes test on remote chip"
     echo ""
     echo "Options:"
     echo "  -r              Pass -r to main.py in step 1"
@@ -43,6 +44,7 @@ RERUN_FLAG=false
 SKIP_STEP1=false
 SKIP_STEP2=false
 SKIP_STEP3=false
+SKIP_STEP4=false
 SKIP_LIST=""
 
 while [[ $# -gt 0 ]]; do
@@ -74,6 +76,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_STEP3=true
             shift
             ;;
+        --skip4|--skip-4)
+            SKIP_STEP4=true
+            shift
+            ;;
         --)
             shift
             break
@@ -96,6 +102,7 @@ if [[ -n "$SKIP_LIST" ]]; then
             1) SKIP_STEP1=true ;;
             2) SKIP_STEP2=true ;;
             3) SKIP_STEP3=true ;;
+            4) SKIP_STEP4=true ;;
             "") ;;
             *)
                 echo "Error: Invalid step in skip list: $step"
@@ -120,6 +127,10 @@ REMOTE_PORT="1326"
 REMOTE_USER="root"
 REMOTE_PASSWORD="root"
 REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
+DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
+DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
+DEFAULT_RUNNER_NAME="chiptest"
+NPZ_FILE_PATH="scan_reg_files"
 
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"
@@ -147,7 +158,7 @@ else
     echo ""
 fi
 
-# Step 2: Transfer test folder to remote
+# Step 2: Transfer test folder and scan_reg_files to remote
 if [[ "$SKIP_STEP2" == true ]]; then
     echo "Step 2: Skipped."
     echo ""
@@ -162,14 +173,32 @@ else
     echo ""
 fi
 
-# Step 3: Execute on remote chip
+# Step 3: Transfer test folder and scan_reg_files to remote
 if [[ "$SKIP_STEP3" == true ]]; then
     echo "Step 3: Skipped."
     echo ""
 else
-    echo "Step 3: Executing on remote chip (timeout: 0.5s)..."
+    echo "Step 3: Transferring scan_reg_files to remote server..."
+    echo "y" | ./transfer_evl.sh --path "utils/$NPZ_FILE_PATH"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to transfer $NPZ_FILE_PATH"
+        exit 1
+    fi
     echo ""
-    sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup && cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && timeout -s INT 0.5s ./tvm_host_runner $TEST_FOLDER $REMOTE_BASE_PATH; tvm_status=\$?; exit \$tvm_status"
+fi
+
+# Step 4: Execute on remote chip
+if [[ "$SKIP_STEP4" == true ]]; then
+    echo "Step 4: Skipped."
+    echo ""
+else
+    echo "Step 4: Executing on remote chip (timeout: 0.5s)..."
+    echo ""
+    sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
+               "cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup && \
+                cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && timeout -s INT 0.5s ./tvm_host_runner \
+                $TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
+                tvm_status=\$?; exit \$tvm_status"
 
     if [ $? -eq 0 ]; then
         echo ""

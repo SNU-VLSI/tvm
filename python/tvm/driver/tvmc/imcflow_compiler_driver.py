@@ -271,6 +271,7 @@ def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modifie
         rebuild_modified_cpp: If True, just rebuild modified C++ files before simulation
         save_intermediate: If True, save intermediate files during codegen
     """
+    import sys
     config = DevConfig()
 
     CodegenSuite = imcflow_codegen.CodegenSuite(
@@ -285,12 +286,40 @@ def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_modifie
     if codegen_only:
       print("\n⏭️  Codegen only mode: exiting after rebuilding modified C++ files")
       # Exit the program entirely
-      import sys
       sys.exit(0)
       
 
     imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=rebuild_modified_cpp)
     print(f"data_blocks: {config.DataBlocks}")
+
+    # Generate scan register programming code
+    print("\n--- Generating Scan Register Programming Code ---")
+    try:
+        # Import scan register modules
+        sys.path.insert(0, os.path.join(os.path.dirname("/root/project/tvm/tvm_practice/test_imcflow/codegen/"), "utils"))
+        from scan_reg_policy_gen import ScanRegPolicyGenerator
+        from scan_codegen import generate_scan_code_from_policy_gen, generate_default_scan_values
+        
+        # Generate policy and allocate memory
+        policy_gen = ScanRegPolicyGenerator()
+        policy_gen.construct_noc_path()
+        policy_gen.gen_policy_table()
+        policy_gen.add_edge_info()
+        policy_gen.allocate()
+        
+        # Generate scan values (32 packets for 16 IMCEs × 2 packets each)
+        scan_values = generate_default_scan_values(32)
+        
+        # Generate scan register code
+        files = generate_scan_code_from_policy_gen(
+        scan_values=scan_values,
+        func_name="program_scan_reg",
+        build_dir=os.path.join(output_dir, "build")
+        )
+        print(f"Generated scan register code: {list(files.keys())}")
+    except Exception as e:
+        print(f"Warning: Failed to generate scan register code: {e}")
+        print("Continuing without scan register support...")
 
     # Update the DevConfig's DataBlocks state after codegen
     devconfig_state_path = os.path.join(output_dir, "devconfig_state.pkl")
