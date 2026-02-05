@@ -1044,8 +1044,21 @@ class JointPnRILP:
         """Create all ILP variables"""
         gi = self.graph_info
 
-        # All placeable nodes (call + split + concat)
-        placeable_nodes = gi.call_nodes + gi.split_nodes + gi.concat_nodes
+        # Identify splits whose producer is a VAR - these go to INODE, not IMCE
+        self.splits_preassigned_to_inode = {}  # split_id -> Coord (INODE coord)
+        splits_to_exclude = set()
+        for split_id in gi.split_nodes:
+            split_node = gi.nodes[split_id]
+            if split_node.producer and split_node.producer in gi.var_to_inode:
+                # Producer is a VAR -> split goes to the same INODE as VAR
+                var_inode_coord = gi.var_to_inode[split_node.producer]
+                self.splits_preassigned_to_inode[split_id] = var_inode_coord
+                splits_to_exclude.add(split_id)
+                debug_print(f"[JointPnRILP] Split {split_id} has VAR producer {split_node.producer}, "
+                           f"pre-assigning to INODE at ({var_inode_coord.row}, {var_inode_coord.col})")
+
+        # All placeable nodes (call + split + concat), excluding pre-assigned splits
+        placeable_nodes = gi.call_nodes + [s for s in gi.split_nodes if s not in splits_to_exclude] + gi.concat_nodes
 
         # p[n][v]: placement of call/split/concat node n at IMCE v
         self.p = {}
@@ -1117,8 +1130,10 @@ class JointPnRILP:
         """Add placement constraints P1, P2, P3, P4"""
         gi = self.graph_info
 
-        # P1: Each placeable node -> exactly one IMCE
+        # P1: Each placeable node -> exactly one IMCE (skip pre-assigned splits)
         for n in gi.call_nodes + gi.split_nodes + gi.concat_nodes:
+            if n in self.splits_preassigned_to_inode:
+                continue  # Skip pre-assigned splits (they go to INODE, not IMCE)
             self.prob += (
                 pulp.lpSum(self.p[n][v] for v in self.imce_nodes) == 1,
                 f"P1_one_location_{hash(n) % 100000}"
@@ -1133,8 +1148,10 @@ class JointPnRILP:
                     f"P2_one_call_per_imce_{v.row}_{v.col}"
                 )
 
-        # P3: Split same as producer
+        # P3: Split same as producer (skip pre-assigned splits with VAR producers)
         for split_id in gi.split_nodes:
+            if split_id in self.splits_preassigned_to_inode:
+                continue  # Skip pre-assigned splits (they go to INODE, not IMCE)
             split_node = gi.nodes[split_id]
             if split_node.producer and split_node.producer in self.p:
                 for v in self.imce_nodes:
@@ -1178,6 +1195,21 @@ class JointPnRILP:
                             self.src[k.id][v] == 0,
                             f"L1_src_not_inode_{k.id}_{v.row}_{v.col}"
                         )
+                elif k.source_node_id in self.splits_preassigned_to_inode:
+                    # L1b: Pre-assigned split source (fixed to INODE)
+                    split_inode = self.splits_preassigned_to_inode[k.source_node_id]
+                    debug_print(f"[L1b] Commodity {k.id}: Pre-assigned split {k.source_node_id} -> INODE ({split_inode.row}, {split_inode.col})")
+                    for v in self.all_nodes:
+                        if v == split_inode:
+                            self.prob += (
+                                self.src[k.id][v] == 1,
+                                f"L1b_preassigned_split_src_{k.id}_{v.row}_{v.col}"
+                            )
+                        else:
+                            self.prob += (
+                                self.src[k.id][v] == 0,
+                                f"L1b_preassigned_split_src_not_{k.id}_{v.row}_{v.col}"
+                            )
 
             # L2: Call dest -> placement linking
             if dst_node.node_type in [NodeType.CALL, NodeType.SPLIT, NodeType.CONCAT]:
@@ -1193,6 +1225,21 @@ class JointPnRILP:
                             self.dst[k.id][v] == 0,
                             f"L2_dst_not_inode_{k.id}_{v.row}_{v.col}"
                         )
+                elif k.dest_node_id in self.splits_preassigned_to_inode:
+                    # L2b: Pre-assigned split dest (fixed to INODE)
+                    split_inode = self.splits_preassigned_to_inode[k.dest_node_id]
+                    debug_print(f"[L2b] Commodity {k.id}: Pre-assigned split dest {k.dest_node_id} -> INODE ({split_inode.row}, {split_inode.col})")
+                    for v in self.all_nodes:
+                        if v == split_inode:
+                            self.prob += (
+                                self.dst[k.id][v] == 1,
+                                f"L2b_preassigned_split_dst_{k.id}_{v.row}_{v.col}"
+                            )
+                        else:
+                            self.prob += (
+                                self.dst[k.id][v] == 0,
+                                f"L2b_preassigned_split_dst_not_{k.id}_{v.row}_{v.col}"
+                            )
 
             # L3: Var source (fixed to inode from var_to_inode)
             if src_node.node_type == NodeType.VAR:
@@ -1412,7 +1459,15 @@ class JointPnRILP:
         mapping = {}
         gi = self.graph_info
 
+        # First, add pre-assigned splits (those with VAR producers -> INODE)
+        for split_id, inode_coord in self.splits_preassigned_to_inode.items():
+            mapping[split_id] = inode_coord
+            debug_print(f"[JointPnRILP] Pre-assigned split {split_id} -> INODE ({inode_coord.row}, {inode_coord.col})")
+
+        # Then, extract ILP-solved placements for other nodes
         for n in gi.call_nodes + gi.split_nodes + gi.concat_nodes:
+            if n in self.splits_preassigned_to_inode:
+                continue  # Already handled above
             for v in self.imce_nodes:
                 if pulp.value(self.p[n][v]) > 0.5:
                     mapping[n] = v
