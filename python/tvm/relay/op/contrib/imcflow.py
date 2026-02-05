@@ -486,14 +486,12 @@ def makeBNMulAddMinMaxQuantPattern():
   return mmq
 
 def _make_single_vec_op(inp):
-  """Single vec_op: unary ops or binary with constant."""
+  """Single vec_op: unary ops or binary with constant/wildcard."""
   # Unary ops
   unary = (makeBiasAddPattern(inp) | makeReluPattern(inp) |
            makeDivPattern(inp) | makeBNPattern(inp))
-  # Binary with constant
-  add_const = is_op("add")(inp, is_constant()) | is_op("add")(is_constant(), inp)
-  mul_const = is_op("multiply")(inp, is_constant()) | is_op("multiply")(is_constant(), inp)
-  return unary | add_const | mul_const
+  # Binary ops (with constant or wildcard, using existing patterns)
+  return unary | makeAddPattern(inp) | makeMulPattern(inp)
 
 def makeLinearVecOpChain(data, max_depth=5):
   """Build a linear chain of vec_ops (no converging, single path only).
@@ -509,26 +507,42 @@ def makeConvergingVecOpPattern():
   """Build a pattern that matches converging vec_op paths.
 
   Pattern structure:
-    data1 -> [0-3 vec_ops] -> ┐
+    data1 -> [1-3 vec_ops] -> ┐
                                add
     data2 -> [0-3 vec_ops] -> ┘
 
   Matches residual-like structures where two paths merge via add.
+  At least one path must have 1+ vec_ops to avoid matching bare add.
+
+  IMPORTANT: AltPattern uses short-circuit OR (left-to-right evaluation).
+  Longer patterns MUST come first to enable greedy matching.
   """
   data1 = wildcard()
   data2 = wildcard()
 
-  def make_path(data):
-    p0 = data  # no ops
+  def make_path_with_ops(data):
+    """Path with at least 1 vec_op (1-3 ops). Longest first for greedy matching."""
     p1 = _make_single_vec_op(data)
     p2 = _make_single_vec_op(p1)
     p3 = _make_single_vec_op(p2)
-    return p0 | p1 | p2 | p3
+    return p3 | p2 | p1  # Try 3-ops first, then 2, then 1
 
-  path1 = make_path(data1)
-  path2 = make_path(data2)
+  def make_path_optional(data):
+    """Path with 0-3 vec_ops. Longest first, fallback to no-ops."""
+    p1 = _make_single_vec_op(data)
+    p2 = _make_single_vec_op(p1)
+    p3 = _make_single_vec_op(p2)
+    p0 = data  # no ops - fallback (must be last!)
+    return p3 | p2 | p1 | p0  # Try 3, 2, 1, then 0
 
-  converged = is_op("add")(path1, path2)
+  # At least one path must have ops
+  path1_with_ops = make_path_with_ops(data1)
+  path2_optional = make_path_optional(data2)
+  path1_optional = make_path_optional(data1)
+  path2_with_ops = make_path_with_ops(data2)
+
+  # Either path1 has ops, or path2 has ops (or both)
+  converged = is_op("add")(path1_with_ops, path2_optional) | is_op("add")(path1_optional, path2_with_ops)
 
   return converged
 
@@ -559,6 +573,26 @@ def makeVecOpsPattern():
   greedy matching that prevents larger converging matches.
   """
   return makeConvergingVecOpPattern()
+
+def makeLinearVecOpCombPattern():
+  """Pattern for linear vec_op combinations (2+ ops, no converging).
+
+  Matches chains like: BN -> multiply -> add, or multiply -> add -> relu, etc.
+  Requires at least 2 ops to avoid matching single ops unnecessarily.
+
+  IMPORTANT: AltPattern uses short-circuit OR (left-to-right evaluation).
+  Longer patterns MUST come first to enable greedy matching.
+  """
+  data = wildcard()
+  # Build chain: require at least 2 ops
+  p1 = _make_single_vec_op(data)
+  p2 = _make_single_vec_op(p1)
+  p3 = _make_single_vec_op(p2)
+  p4 = _make_single_vec_op(p3)
+  p5 = _make_single_vec_op(p4)
+  # Match 2 to 5 ops (not 1, to avoid trivial matches)
+  # Longest first for greedy matching (5, 4, 3, 2)
+  return p5 | p4 | p3 | p2
 
 def makeNUQauntPattern(data):
   return is_op("qnn.imcflow_nu_quantize")(data, is_constant())
@@ -653,8 +687,10 @@ def pattern_table():
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),
         # Unified pattern for vec_ops + min_max_quant (converging + simple)
         ("imcflow.preop-minmax", makePreopMinMaxQuantPattern()),
-        # Vec_ops pattern - matches both converging paths and simple linear chains
+        # Vec_ops pattern - converging paths (two inputs merging via add)
         ("imcflow.vecops", makeVecOpsPattern()),
+        # Linear vec_op combinations (2+ ops in a chain, no converging)
+        ("imcflow.vecops", makeLinearVecOpCombPattern()),
       ]
     )
 
