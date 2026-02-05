@@ -242,7 +242,7 @@ class RecvConstBlock(ImceCodeBlock):
     SCAN = "SCAN"
     NORMAL = "NORMAL"
 
-  def __init__(self, in_edge: TensorEdge, type : ConstType, annotation: str = ""):
+  def __init__(self, in_edge: TensorEdge, type : ConstType, annotation: str = "", recv_count: int = None):
     super().__init__(annotation)
     self.in_edge = in_edge
     self.type = type
@@ -261,7 +261,11 @@ class RecvConstBlock(ImceCodeBlock):
     assert base_addr % 32 == 0, "Base address must be a multiple of 32"
 
     self.te_info = te_info
-    self.recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
+    # Use provided recv_count if given, otherwise calculate from size
+    if recv_count is not None:
+      self.recv_count = recv_count
+    else:
+      self.recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
   def _render(self) -> str:
     owner_edge = self.te_info.owner
@@ -1029,8 +1033,13 @@ class DWConvBlock(ImceCallCodeBlock):
     # Total weight registers: 8 bitplanes × num_channel_groups
     self.num_weight_regs = self.num_weight_bitplanes * self.num_channel_groups
 
-    # Weight variables will be filled by _build_weight_recv
+    # Weight variables - populated here to reference vars created by RecvConstBlock in INIT phase
+    # RecvConstBlock uses UniqueVar((edge, i)) so we use the same to get the same variable names
     self.weight_vars = []
+    if self.weight_edge is not None:
+      for i in range(self.num_weight_regs):
+        var = UniqueVar((self.weight_edge, i))
+        self.weight_vars.append(var)
 
     # Initialize ConvUtil for 2D pattern extraction (like ConvBlock)
     self.conv = ConvUtil(self.in_h, self.in_w,
@@ -1061,42 +1070,42 @@ class DWConvBlock(ImceCallCodeBlock):
     return self.num_channel_groups
     # return 4
 
-  def _build_weight_recv(self) -> CodeBlock:
-    """Receive DW conv weights into GPR registers.
+  # def _build_weight_recv(self) -> CodeBlock:
+  #   """Receive DW conv weights into GPR registers.
 
-    DW conv weights are sent via FIFO (unlike standard conv weights which
-    go to IMCU). Each weight register contains one bitplane of weights
-    for a channel group.
+  #   DW conv weights are sent via FIFO (unlike standard conv weights which
+  #   go to IMCU). Each weight register contains one bitplane of weights
+  #   for a channel group.
 
-    Returns:
-        CodeBlock with RECV instructions for all weight registers
-    """
-    if self.weight_edge is None:
-      raise ValueError("DWConvBlock: weight_edge is None, cannot generate weight RECV")
+  #   Returns:
+  #       CodeBlock with RECV instructions for all weight registers
+  #   """
+  #   if self.weight_edge is None:
+  #     raise ValueError("DWConvBlock: weight_edge is None, cannot generate weight RECV")
 
-    te_infos = DevConfig().get_tensor_edge_info_with_id_dir(
-        self.weight_edge.dst_id, "in")
+  #   te_infos = DevConfig().get_tensor_edge_info_with_id_dir(
+  #       self.weight_edge.dst_id, "in")
 
-    if not te_infos:
-      raise ValueError(f"DWConvBlock: No tensor edge info found for weight edge {self.weight_edge}")
+  #   if not te_infos:
+  #     raise ValueError(f"DWConvBlock: No tensor edge info found for weight edge {self.weight_edge}")
 
-    te_info = te_infos[0]
+  #   te_info = te_infos[0]
 
-    weight_code = TextBlock("")
-    self.weight_vars = []
+  #   weight_code = TextBlock("")
+  #   self.weight_vars = []
 
-    # Receive all weight registers
-    # Layout: for each channel group, receive 8 bitplane weights
-    for i in range(self.num_weight_regs):
-      var = UniqueVar((self.weight_edge, i))
-      var.set_static()  # Mark as static so it persists across loop iterations
-      weight_code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id}); // weight bitplane {i}"
-      self.weight_vars.append(var)
+  #   # Receive all weight registers
+  #   # Layout: for each channel group, receive 8 bitplane weights
+  #   for i in range(self.num_weight_regs):
+  #     var = UniqueVar((self.weight_edge, i))
+  #     var.set_static()  # Mark as static so it persists across loop iterations
+  #     weight_code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id}); // weight bitplane {i}"
+  #     self.weight_vars.append(var)
 
-    # Track recv count for validation
-    add_to_map(self.weight_edge, RecvSendNum("recv", self.num_weight_regs), is_send=False)
+  #   # Track recv count for validation
+  #   add_to_map(self.weight_edge, RecvSendNum("recv", self.num_weight_regs), is_send=False)
 
-    return weight_code
+  #   return weight_code
 
   def _build_dwconv_compute(self) -> CodeBlock:
     """Build DWCONV computation for one output pixel.
@@ -1261,10 +1270,10 @@ class DWConvBlock(ImceCallCodeBlock):
 
     root = SequentialBlock()
 
-    # 1. Receive weights into GPR (INIT phase - executed once)
-    root.add(self._build_weight_recv())
+    # Note: Weight reception moved to DwConvHandler (RecvConstBlock in INIT phase)
+    # Weight variables are referenced via self.weight_vars (populated in __init__)
 
-    # 2. Main loop using 2D pattern (same as ConvBlock)
+    # 1. Main loop using 2D pattern (same as ConvBlock)
     row_pattern = self.conv.extract_2d_pattern()
     pprint(f"[DWConvBlock] row pattern for node {getNodeID(self.call.call)}:")
     pprint(row_pattern)
@@ -1287,7 +1296,7 @@ class DWConvBlock(ImceCallCodeBlock):
                              f"{tag}_outer_loop(iterate row offset)")
       root.add(outer_loop)
 
-    # 3. Read remaining pixels if any (tail loop)
+    # 2. Read remaining pixels if any (tail loop)
     if self.remain > 0 and self.load_edge_info is not None:
       print(f"[DWConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
       tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")

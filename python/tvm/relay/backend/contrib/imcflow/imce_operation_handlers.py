@@ -6,6 +6,8 @@ that generate IMCE code blocks.
 All handlers receive a BuilderContext that wraps the relay.Call with helper methods.
 """
 
+import math
+
 from tvm import relay
 from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
@@ -187,7 +189,17 @@ class DwConvHandler(OperationHandler):
     IMCECodeBlockInfo().append_const_edge_info(config_edge, hid)
 
     # DW conv weight: received via FIFO (not loaded to IMCU like standard conv)
+    # Calculate number of weight registers: 8 bitplanes * num_channel_groups
+    conv_attrs = call.call.attrs
+    channels = conv_attrs.channels.value if hasattr(conv_attrs.channels, 'value') else conv_attrs.channels
+    num_channel_groups = math.ceil(channels / 16)
+    num_weight_regs = 8 * num_channel_groups
+
     weight_edge = call.get_tensor_edge_from_tag("weight")
+    # Create RecvConstBlock for weight reception in INIT phase
+    weight_block = RecvConstBlock(weight_edge, RecvConstBlock.ConstType.NORMAL,
+                                   f"{weight_edge}, dw weight recv", recv_count=num_weight_regs)
+    call.codeblocks.append(hid, weight_block, CodePhase.INIT)
     # Register weight edge so INODE knows to SEND it
     IMCECodeBlockInfo().append_const_edge_info(weight_edge, hid)
 
