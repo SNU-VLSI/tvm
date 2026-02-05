@@ -41,6 +41,10 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region2_main_9()
     for (int i1 = 0; i1 < 1024; i1++) { // generate : call_created_loop
       // generate: imcflow.preop-minmax_wrapper
 
+      __builtin_IMCE_SETFLAG(1); 
+      __builtin_IMCE_STANDBY(0, 1); 
+      __builtin_IMCE_STANDBY(5, 1); 
+      __builtin_IMCE_SETFLAG(0); 
       var7 = __builtin_IMCE_RECV(2); // TensorEdge((-27, odata), ((33, 30), lhs)), inode_0_0 -> imce_1_1
       var8 = __builtin_IMCE_RECV(3); // TensorEdge((-28, odata), ((33, 30), rhs)), inode_1_0 -> imce_1_1
       // generate: imcflow.preop-minmax_block
@@ -50,6 +54,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region2_main_9()
       // endgenerate: add
       // generate: min_max_quantize
 
+      __builtin_IMCE_STANDBY(11, 1); 
       __builtin_IMCE_MM_QUANT(var13, 0, 15, 0);
       var9 = __builtin_IMCE_GET_QREG(0);
       var10 = __builtin_IMCE_GET_QREG(1);
@@ -85,10 +90,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region2_main_9()
 
       // generate: load_block
       for (int i2 = 0; i2 < 34; i2++) { // generate : load_block
+        __builtin_IMCE_SETFLAG(1);
         for (int i3 = 0; i3 < 4; i3++) { // generate
           __builtin_IMCE_LOAD_LB(0); // TensorEdge(((33, 31), odata), (34, data)), imce_1_1 -> imce_2_1
 
         } // endgenerate
+        __builtin_IMCE_SETFLAG(0);
       } // endgenerate : load_block
       // endgenerate: load_block
       __builtin_IMCE_STEP();
@@ -109,10 +116,12 @@ void tvmgen_default_tvmgen_default_imcflow_main_0_round_imcflow_region2_main_9()
 
         // generate: load_block
         for (int i3 = 0; i3 < 2; i3++) { // generate : load_block
+          __builtin_IMCE_SETFLAG(1);
           for (int i4 = 0; i4 < 4; i4++) { // generate
             __builtin_IMCE_LOAD_LB(0); // TensorEdge(((33, 31), odata), (34, data)), imce_1_1 -> imce_2_1
 
           } // endgenerate
+          __builtin_IMCE_SETFLAG(0);
         } // endgenerate : load_block
         // endgenerate: load_block
         __builtin_IMCE_STEP();
