@@ -165,6 +165,35 @@ class VPUInput:
     timestamp: Optional[int] = None
 
 
+@dataclass
+class DWConvOp:
+    """Represents a DWCONV operation with input, weight, and output"""
+    imce_coord: Tuple[int, int]
+    bshr_sel: int
+    shift_amt: int
+    weights: List[int]  # 9 weights for 3x3 kernel
+    inputs: List[int]   # 16 input values (one channel group)
+    inner_product: List[int]  # MAC results before accumulation
+    acc_values: List[int]  # Accumulated values
+    result: List[int]   # Final result after shift
+    source: str = ""
+    timestamp: Optional[int] = None
+    op_index: int = 0   # Index within the DWCONV sequence
+
+
+@dataclass
+class DWConvBSHRInput:
+    """Represents DWCONV BSHR input data (3x3 kernel for all 16 channels)"""
+    imce_coord: Tuple[int, int]
+    bshr_sel: int
+    shift_amt: int
+    # bshr_data[ch] = [9 values for 3x3 kernel] for each channel 0-15
+    bshr_data: Dict[int, List[int]] = field(default_factory=dict)
+    source: str = ""
+    timestamp: Optional[int] = None
+    op_index: int = 0
+
+
 # =============================================================================
 # Python Log Parsers
 # =============================================================================
@@ -297,6 +326,234 @@ def parse_python_vpu_ops(log_path: str) -> Dict[Tuple[int, int], List[VPUOp]]:
         print(f"Python log not found: {log_path}")
 
     return dict(outputs)
+
+
+def parse_python_dwconv(log_path: str) -> Dict[Tuple[int, int], List[DWConvOp]]:
+    """Parse Python simulator log for DWCONV operations (input, weight, output)
+
+    Python log format (multi-line):
+    [AINST] IMCE.X.Y OP_DWCONV: shift_amt=X, dwresult_valid=X, rd=X, src_mask=X, bshr_sel=X
+    [AINST] IMCE.X.Y OP_DWCONV: reg_val_at_rs1 (raw)=[...]
+    [AINST] IMCE.X.Y OP_DWCONV: weights shape=(3, 3, 16), weights[0:src_mask+1]=[[[...]
+    [AINST] IMCE.X.Y OP_DWCONV: linebuffer inputs shape=(3, 3, 32)
+    [AINST] IMCE.X.Y OP_DWCONV: curr_inputs (bshr_sel=X) shape=(3, 3, 16), values=[[[...]
+    [AINST] IMCE.X.Y OP_DWCONV: inner_product result=[...]
+    [AINST] IMCE.X.Y OP_DWCONV: shift_amt=X, dwconv_reg = [...] (ACC step)
+    OR
+    [AINST] IMCE.X.Y OP_DWCONV: shift_amt=X, dwresult = [...] (RESULT step with dwresult_valid=1)
+    """
+    outputs = defaultdict(list)
+
+    # State machine to track multi-line DWCONV entries
+    current_imce = None
+    current_op = None
+    op_counter = defaultdict(int)  # Track op index per IMCE
+    dwresult_valid = 0
+
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                # Pattern: [AINST] IMCE.X.Y OP_DWCONV: shift_amt=X, dwresult_valid=X, rd=X, src_mask=X, bshr_sel=X
+                dwconv_match = re.search(r'\[AINST\]\s+IMCE\.(\d+)\.(\d+)\s+OP_DWCONV:\s+shift_amt=(\d+),\s*dwresult_valid=(\d+),.*bshr_sel=(\d+)', line)
+                if dwconv_match:
+                    # Save previous op if exists
+                    if current_op is not None and (current_op.inner_product or current_op.acc_values):
+                        outputs[current_imce].append(current_op)
+
+                    row = int(dwconv_match.group(1))
+                    col = int(dwconv_match.group(2))
+                    shift_amt = int(dwconv_match.group(3))
+                    dwresult_valid = int(dwconv_match.group(4))
+                    bshr_sel = int(dwconv_match.group(5))
+
+                    current_imce = (row, col)
+                    op_counter[current_imce] += 1
+                    current_op = DWConvOp(
+                        imce_coord=current_imce,
+                        bshr_sel=bshr_sel,
+                        shift_amt=shift_amt,
+                        weights=[],
+                        inputs=[],
+                        inner_product=[],
+                        acc_values=[],
+                        result=[],
+                        source="python",
+                        op_index=op_counter[current_imce]
+                    )
+                    continue
+
+                if current_op is not None:
+                    # Parse weights shape=(3, 3, 16), weights[...]=[[[ weight values per channel
+                    # We only care about the first 9 values (3x3 kernel for one channel)
+                    weights_match = re.search(r'OP_DWCONV:\s*weights\s+shape=.*weights\[.*\]=\[\[\[([^\]]+)', line)
+                    if weights_match:
+                        # Extract first row of weights (space-separated integers)
+                        weight_str = weights_match.group(1).strip()
+                        # Parse integers (may have spaces between them)
+                        current_op.weights = [int(x) for x in weight_str.split()]
+                        continue
+
+                    # Parse curr_inputs (bshr_sel=X) shape=(3, 3, 16), values=[[[...
+                    inputs_match = re.search(r'OP_DWCONV:\s*curr_inputs\s*\(bshr_sel=\d+\)\s*shape=.*values=\[\[\[([^\]]+)', line)
+                    if inputs_match:
+                        input_str = inputs_match.group(1).strip()
+                        current_op.inputs = [int(x) for x in input_str.split()]
+                        continue
+
+                    # Parse inner_product result=[...]
+                    ip_match = re.search(r'OP_DWCONV:\s*inner_product\s+result=\[([^\]]+)\]', line)
+                    if ip_match:
+                        current_op.inner_product = [int(x) for x in ip_match.group(1).split()]
+                        continue
+
+                    # Parse dwconv_reg accumulator (non-final result)
+                    # Format: shift_amt=X, dwconv_reg = [...] + [...] = [...] OR shift_amt=X, dwconv_reg = prod = [...]
+                    acc_match = re.search(r'OP_DWCONV:\s*shift_amt=\d+,\s*dwconv_reg\s*=.*=\s*\[([^\]]+)\]\s*$', line)
+                    if acc_match:
+                        current_op.acc_values = [int(x) for x in acc_match.group(1).split()]
+                        continue
+
+                    # Parse dwresult (final result with dwresult_valid=1)
+                    # Format: RESULT VALID! reg_file[X] = [...]
+                    result_match = re.search(r'OP_DWCONV:\s*RESULT VALID!\s*reg_file\[\d+\]\s*=\s*\[([^\]]+)\]', line)
+                    if result_match:
+                        current_op.result = [int(x) for x in result_match.group(1).split()]
+                        continue
+
+        # Save last op if exists
+        if current_op is not None and (current_op.inner_product or current_op.acc_values or current_op.result):
+            outputs[current_imce].append(current_op)
+
+    except FileNotFoundError:
+        print(f"Python log not found: {log_path}")
+
+    return dict(outputs)
+
+
+def parse_python_dwconv_bshr(log_path: str) -> Dict[Tuple[int, int], List[DWConvBSHRInput]]:
+    """Parse Python simulator log for DWCONV curr_inputs (BSHR input data)
+
+    Python log format:
+    [AINST] IMCE.X.Y OP_DWCONV: shift_amt=X, dwresult_valid=X, rd=X, src_mask=X, bshr_sel=X
+    [AINST] IMCE.X.Y OP_DWCONV: curr_inputs (bshr_sel=X) shape=(3, 3, 16), values=[[[...]
+
+    The values array is shape (3, 3, 16) - 3 rows, 3 cols, 16 channels.
+    We need to reshape it to match RTL format: per-channel [9 values] for 3x3 kernel.
+    """
+    outputs = defaultdict(list)
+    op_counter = defaultdict(int)
+
+    # State tracking
+    current_imce = None
+    current_shift_amt = 0
+    current_bshr_sel = 0
+
+    # Pattern for the header line
+    header_pattern = r'\[AINST\]\s+IMCE\.(\d+)\.(\d+)\s+OP_DWCONV:\s+shift_amt=(\d+),\s*dwresult_valid=\d+,.*bshr_sel=(\d+)'
+
+    # Pattern for curr_inputs line - capture the full values array
+    # values=[[[v v v ...] [v v v ...] [v v v ...]]
+    #         [[v v v ...] [v v v ...] [v v v ...]]
+    #         [[v v v ...] [v v v ...] [v v v ...]]]
+    # But this spans multiple lines sometimes, so we need to handle that
+    curr_inputs_start_pattern = r'OP_DWCONV:\s*curr_inputs\s*\(bshr_sel=(\d+)\)\s*shape=\(3,\s*3,\s*\d+\),\s*values=(\[.*)$'
+
+    try:
+        with open(log_path, 'r') as f:
+            lines = f.readlines()
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # Check for header line
+            header_match = re.search(header_pattern, line)
+            if header_match:
+                row = int(header_match.group(1))
+                col = int(header_match.group(2))
+                current_imce = (row, col)
+                current_shift_amt = int(header_match.group(3))
+                current_bshr_sel = int(header_match.group(4))
+                i += 1
+                continue
+
+            # Check for curr_inputs line
+            if current_imce and 'curr_inputs' in line:
+                curr_match = re.search(curr_inputs_start_pattern, line)
+                if curr_match:
+                    bshr_sel = int(curr_match.group(1))
+                    values_str = curr_match.group(2)
+
+                    # The array might span multiple lines - collect until we have balanced brackets
+                    bracket_count = values_str.count('[') - values_str.count(']')
+                    while bracket_count > 0 and i + 1 < len(lines):
+                        i += 1
+                        values_str += ' ' + lines[i].strip()
+                        bracket_count = values_str.count('[') - values_str.count(']')
+
+                    # Parse the 3D array
+                    bshr_data = parse_3d_array_to_bshr(values_str)
+
+                    if bshr_data:
+                        op_counter[current_imce] += 1
+                        outputs[current_imce].append(DWConvBSHRInput(
+                            imce_coord=current_imce,
+                            bshr_sel=bshr_sel,
+                            shift_amt=current_shift_amt,
+                            bshr_data=bshr_data,
+                            source="python",
+                            op_index=op_counter[current_imce]
+                        ))
+            i += 1
+
+    except FileNotFoundError:
+        print(f"Python log not found: {log_path}")
+
+    return dict(outputs)
+
+
+def parse_3d_array_to_bshr(array_str: str) -> Dict[int, List[int]]:
+    """Parse numpy 3D array string (3,3,16) to per-channel BSHR format
+
+    Input format: [[[v00 v01 ... v0_15] [v10 v11 ...] [v20 ...]]
+                   [[v30 ...] [v40 ...] [v50 ...]]
+                   [[v60 ...] [v70 ...] [v80 ...]]]
+
+    Output format: {ch: [v0, v1, ..., v8]} where v0-v8 are the 3x3 kernel values for channel ch
+    The mapping is: array[row][col][ch] -> bshr[ch][row*3 + col]
+    """
+    bshr_data = {}
+
+    # Remove outer brackets and split by inner array pattern
+    # Try to extract all numbers organized by position
+    try:
+        # Clean up the string
+        array_str = array_str.strip()
+
+        # Extract all numbers using regex
+        # The format is [[[a b c ...] [d e f ...] [g h i ...]] ...]
+        # We need to parse row by row, col by col
+
+        # Find all inner arrays (each contains 16 channel values)
+        inner_arrays = re.findall(r'\[([^\[\]]+)\]', array_str)
+
+        if len(inner_arrays) < 9:
+            return {}
+
+        # inner_arrays should have 9 elements for 3x3
+        # Each element has 16 values (for 16 channels)
+        for pos, arr_str in enumerate(inner_arrays[:9]):
+            values = [int(x) for x in arr_str.split()]
+            for ch, val in enumerate(values):
+                if ch not in bshr_data:
+                    bshr_data[ch] = [0] * 9
+                bshr_data[ch][pos] = val
+
+    except Exception as e:
+        print(f"Error parsing 3D array: {e}")
+        return {}
+
+    return bshr_data
 
 
 def parse_python_linebuffer_input(log_path: str) -> Dict[Tuple[int, int], List[LinebufferInput]]:
@@ -723,6 +980,166 @@ def parse_rtl_post_imcu(log_path: str, coord: Tuple[int, int]) -> Tuple[List[Pos
     return acc_steps, outputs, fifo_pushes, fifo_pops
 
 
+def parse_rtl_dwconv(log_path: str, coord: Tuple[int, int]) -> List[DWConvOp]:
+    """Parse RTL VPU log for DWCONV operations (input, weight, output)"""
+    outputs = []
+
+    # RTL log format (updated with mac_shift field):
+    # [timestamp] DWCONV ACC    | bshr_sel: X | shift_amt: X | opA_raw: [...] | weight[0]: [...] | mac: [...] | mac_shift: [...] | acc: [...]
+    # [timestamp] DWCONV RESULT | bshr_sel: X | shift_amt: X | opA_raw: [...] | weight[0]: [...] | mac: [...] | mac_shift: [...] | acc: [...] | result: [...]
+
+    # Pattern for DWCONV ACC (intermediate accumulation step)
+    acc_pattern = r'\[\s*(\d+)\]\s*DWCONV ACC\s+\|\s*bshr_sel:\s*(\d+)\s*\|\s*shift_amt:\s*(\d+)\s*\|\s*opA_raw:\s*\[([^\]]*)\]\s*\|\s*weight\[0\]:\s*\[([^\]]*)\]\s*\|\s*mac:\s*\[([^\]]*)\]\s*\|\s*mac_shift:\s*\[([^\]]*)\]\s*\|\s*acc:\s*\[([^\]]*)\]'
+
+    # Pattern for DWCONV RESULT (final result with shift)
+    result_pattern = r'\[\s*(\d+)\]\s*DWCONV RESULT\s*\|\s*bshr_sel:\s*(\d+)\s*\|\s*shift_amt:\s*(\d+)\s*\|\s*opA_raw:\s*\[([^\]]*)\]\s*\|\s*weight\[0\]:\s*\[([^\]]*)\]\s*\|\s*mac:\s*\[([^\]]*)\]\s*\|\s*mac_shift:\s*\[([^\]]*)\]\s*\|\s*acc:\s*\[([^\]]*)\]\s*\|\s*result:\s*\[([^\]]*)\]'
+
+    op_index = 0
+
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                # Try DWCONV RESULT pattern (has final result)
+                match = re.search(result_pattern, line)
+                if match:
+                    op_index += 1
+                    timestamp = int(match.group(1))
+                    bshr_sel = int(match.group(2))
+                    shift_amt = int(match.group(3))
+                    opA_raw = [int(x) for x in match.group(4).split()]
+                    weights = [int(x) for x in match.group(5).split()]
+                    mac = [int(x) for x in match.group(6).split()]
+                    mac_shift = [int(x) for x in match.group(7).split()]
+                    acc = [int(x) for x in match.group(8).split()]
+                    result = [int(x) for x in match.group(9).split()]
+
+                    outputs.append(DWConvOp(
+                        imce_coord=coord,
+                        bshr_sel=bshr_sel,
+                        shift_amt=shift_amt,
+                        weights=weights,
+                        inputs=opA_raw,  # Use opA_raw as inputs
+                        inner_product=mac,
+                        acc_values=acc,
+                        result=result,
+                        source="rtl",
+                        timestamp=timestamp,
+                        op_index=op_index
+                    ))
+                    continue
+
+                # Try DWCONV ACC pattern (intermediate step)
+                match = re.search(acc_pattern, line)
+                if match:
+                    op_index += 1
+                    timestamp = int(match.group(1))
+                    bshr_sel = int(match.group(2))
+                    shift_amt = int(match.group(3))
+                    opA_raw = [int(x) for x in match.group(4).split()]
+                    weights = [int(x) for x in match.group(5).split()]
+                    mac = [int(x) for x in match.group(6).split()]
+                    mac_shift = [int(x) for x in match.group(7).split()]
+                    acc = [int(x) for x in match.group(8).split()]
+
+                    outputs.append(DWConvOp(
+                        imce_coord=coord,
+                        bshr_sel=bshr_sel,
+                        shift_amt=shift_amt,
+                        weights=weights,
+                        inputs=opA_raw,  # Use opA_raw as inputs
+                        inner_product=mac,
+                        acc_values=acc,
+                        result=[],  # ACC entries don't have final result
+                        source="rtl",
+                        timestamp=timestamp,
+                        op_index=op_index
+                    ))
+    except FileNotFoundError:
+        pass
+
+    return outputs
+
+
+def parse_rtl_dwconv_bshr(log_path: str, coord: Tuple[int, int]) -> List[DWConvBSHRInput]:
+    """Parse RTL VPU log for DWCONV BSHR input data (bshr_reshaped per channel)
+
+    RTL log format:
+    [timestamp] DWCONV BSHR | ch: X | bshr: [v0 v1 v2 v3 v4 v5 v6 v7 v8]
+
+    The BSHR lines are logged for each channel (0-15) per DWCONV operation.
+    """
+    outputs = []
+
+    # Pattern for DWCONV BSHR line
+    bshr_pattern = r'\[\s*(\d+)\]\s*DWCONV BSHR\s*\|\s*ch:\s*(\d+)\s*\|\s*bshr:\s*\[([^\]]+)\]'
+
+    # Also capture shift_amt from the ACC/RESULT line that comes after all BSHR lines
+    acc_pattern = r'\[\s*(\d+)\]\s*DWCONV (?:ACC|RESULT)\s+\|\s*bshr_sel:\s*(\d+)\s*\|\s*shift_amt:\s*(\d+)'
+
+    current_bshr_data = {}
+    current_timestamp = None
+    op_index = 0
+
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                # Try BSHR pattern
+                match = re.search(bshr_pattern, line)
+                if match:
+                    timestamp = int(match.group(1))
+                    ch = int(match.group(2))
+                    bshr_values = [int(x) for x in match.group(3).split()]
+
+                    # Start new entry if this is channel 0 or timestamp changed significantly
+                    if ch == 0 and current_bshr_data:
+                        # Save previous entry (if we have data and ACC/RESULT was found)
+                        pass  # Will be saved when ACC/RESULT line is found
+
+                    if current_timestamp is None or abs(timestamp - current_timestamp) > 100:
+                        if current_bshr_data:
+                            # Save previous partial entry
+                            op_index += 1
+                            outputs.append(DWConvBSHRInput(
+                                imce_coord=coord,
+                                bshr_sel=0,  # Will be set by ACC/RESULT line
+                                shift_amt=0,
+                                bshr_data=dict(current_bshr_data),
+                                source="rtl",
+                                timestamp=current_timestamp,
+                                op_index=op_index
+                            ))
+                        current_bshr_data = {}
+                        current_timestamp = timestamp
+
+                    current_bshr_data[ch] = bshr_values
+                    continue
+
+                # Try ACC/RESULT pattern - this marks end of BSHR lines for one operation
+                match = re.search(acc_pattern, line)
+                if match and current_bshr_data:
+                    timestamp = int(match.group(1))
+                    bshr_sel = int(match.group(2))
+                    shift_amt = int(match.group(3))
+
+                    op_index += 1
+                    outputs.append(DWConvBSHRInput(
+                        imce_coord=coord,
+                        bshr_sel=bshr_sel,
+                        shift_amt=shift_amt,
+                        bshr_data=dict(current_bshr_data),
+                        source="rtl",
+                        timestamp=current_timestamp,
+                        op_index=op_index
+                    ))
+                    current_bshr_data = {}
+                    current_timestamp = None
+
+    except FileNotFoundError:
+        pass
+
+    return outputs
+
+
 def parse_rtl_vpu_input(log_path: str, coord: Tuple[int, int]) -> List[VPUInput]:
     """Parse RTL VPU log for MM_QUANT inputs (with thresholds)"""
     inputs = []
@@ -874,6 +1291,128 @@ def compare_linebuffer_inputs(py_inputs: List[LinebufferInput], rtl_inputs: List
     return match_count, mismatch_count, min_len
 
 
+def compare_dwconv_outputs(py_outputs: List[DWConvOp], rtl_outputs: List[DWConvOp],
+                           coord: Tuple[int, int], verbose: bool = False,
+                           compare_acc: bool = False) -> Tuple[int, int, int]:
+    """Compare Python and RTL DWCONV outputs. Returns (match, mismatch, total)
+
+    Args:
+        py_outputs: Python DWCONV operations
+        rtl_outputs: RTL DWCONV operations
+        coord: IMCE coordinate
+        verbose: Show all mismatches
+        compare_acc: If True, compare ACC entries too, otherwise only RESULT entries
+    """
+    match_count = 0
+    mismatch_count = 0
+
+    # Filter to only RESULT entries (those with non-empty result) unless compare_acc is True
+    if not compare_acc:
+        py_filtered = [op for op in py_outputs if op.result]
+        rtl_filtered = [op for op in rtl_outputs if op.result]
+    else:
+        py_filtered = py_outputs
+        rtl_filtered = rtl_outputs
+
+    min_len = min(len(py_filtered), len(rtl_filtered))
+
+    if len(py_filtered) != len(rtl_filtered):
+        print(f"  Warning: Entry count mismatch - Python: {len(py_filtered)}, RTL: {len(rtl_filtered)}")
+
+    for i in range(min_len):
+        py_op = py_filtered[i]
+        rtl_op = rtl_filtered[i]
+
+        # Compare results
+        results_match = py_op.result == rtl_op.result
+        weights_match = py_op.weights == rtl_op.weights
+        acc_match = py_op.acc_values == rtl_op.acc_values
+
+        if results_match and (not compare_acc or acc_match):
+            match_count += 1
+        else:
+            mismatch_count += 1
+            if verbose or mismatch_count <= 5:
+                print(f"  MISMATCH at index {i} (bshr_sel={py_op.bshr_sel}):")
+                if not weights_match:
+                    print(f"    Weight mismatch:")
+                    print(f"      Python: {py_op.weights}")
+                    print(f"      RTL:    {rtl_op.weights}")
+                if not acc_match:
+                    print(f"    Accumulator mismatch:")
+                    print(f"      Python: {py_op.acc_values}")
+                    print(f"      RTL:    {rtl_op.acc_values}")
+                if not results_match:
+                    print(f"    Result mismatch:")
+                    print(f"      Python: {py_op.result}")
+                    print(f"      RTL:    {rtl_op.result}")
+                    # Show difference
+                    if py_op.result and rtl_op.result:
+                        min_res_len = min(len(py_op.result), len(rtl_op.result))
+                        diff = [py_op.result[j] - rtl_op.result[j] for j in range(min_res_len)]
+                        print(f"      Diff:   {diff}")
+
+    return match_count, mismatch_count, min_len
+
+
+def compare_dwconv_bshr_inputs(py_inputs: List[DWConvBSHRInput], rtl_inputs: List[DWConvBSHRInput],
+                                coord: Tuple[int, int], verbose: bool = False) -> Tuple[int, int, int]:
+    """Compare Python and RTL DWCONV BSHR inputs (curr_inputs vs bshr_reshaped).
+    Returns (match, mismatch, total)
+    """
+    match_count = 0
+    mismatch_count = 0
+
+    min_len = min(len(py_inputs), len(rtl_inputs))
+
+    if len(py_inputs) != len(rtl_inputs):
+        print(f"  Warning: Entry count mismatch - Python: {len(py_inputs)}, RTL: {len(rtl_inputs)}")
+
+    for i in range(min_len):
+        py_inp = py_inputs[i]
+        rtl_inp = rtl_inputs[i]
+
+        # Compare bshr_sel and shift_amt
+        meta_match = (py_inp.bshr_sel == rtl_inp.bshr_sel and
+                      py_inp.shift_amt == rtl_inp.shift_amt)
+
+        # Compare bshr_data for all channels
+        data_match = True
+        mismatched_channels = []
+        for ch in range(16):
+            py_ch_data = py_inp.bshr_data.get(ch, [])
+            rtl_ch_data = rtl_inp.bshr_data.get(ch, [])
+
+            if py_ch_data != rtl_ch_data:
+                data_match = False
+                mismatched_channels.append(ch)
+
+        if meta_match and data_match:
+            match_count += 1
+        else:
+            mismatch_count += 1
+            if verbose or mismatch_count <= 5:
+                ts_str = f" @{rtl_inp.timestamp}" if rtl_inp.timestamp else ""
+                print(f"  MISMATCH at index {i} (bshr_sel={py_inp.bshr_sel} shift_amt={py_inp.shift_amt}){ts_str}:")
+
+                if not meta_match:
+                    print(f"    Metadata mismatch:")
+                    print(f"      Python: bshr_sel={py_inp.bshr_sel}, shift_amt={py_inp.shift_amt}")
+                    print(f"      RTL:    bshr_sel={rtl_inp.bshr_sel}, shift_amt={rtl_inp.shift_amt}")
+
+                if not data_match:
+                    print(f"    BSHR data mismatch in channels: {mismatched_channels}")
+                    for ch in mismatched_channels[:4]:  # Show first 4 mismatched channels
+                        py_ch_data = py_inp.bshr_data.get(ch, [])
+                        rtl_ch_data = rtl_inp.bshr_data.get(ch, [])
+                        print(f"      ch[{ch}] Python: {py_ch_data}")
+                        print(f"      ch[{ch}] RTL:    {rtl_ch_data}")
+                    if len(mismatched_channels) > 4:
+                        print(f"      ... and {len(mismatched_channels) - 4} more channels with differences")
+
+    return match_count, mismatch_count, min_len
+
+
 def compare_imcu_outputs(py_outputs: List[IMCUOutput], rtl_outputs: List[IMCUOutput],
                          coord: Tuple[int, int], verbose: bool = False) -> Tuple[int, int, int]:
     """Compare Python and RTL IMCU outputs. Returns (match, mismatch, total)"""
@@ -958,6 +1497,13 @@ def main():
     parser.add_argument('--parse-vpu', action='store_true', help='Parse VPU input/output')
     parser.add_argument('--parse-all', action='store_true', help='Parse all component data')
     parser.add_argument('--limit', type=int, default=10, help='Limit number of entries to show (default: 10)')
+    # DWCONV specific options
+    parser.add_argument('--compare-dwconv', action='store_true', help='Compare DWCONV operations (input, weight, output)')
+    parser.add_argument('--compare-dwconv-input', action='store_true', help='Compare DWCONV BSHR input data (bshr_reshaped vs curr_inputs)')
+    parser.add_argument('--parse-dwconv', action='store_true', help='Parse and display DWCONV data')
+    parser.add_argument('--parse-dwconv-input', action='store_true', help='Parse and display DWCONV BSHR input data')
+    parser.add_argument('--dwconv-acc', action='store_true', help='Include DWCONV ACC entries (not just RESULT)')
+    parser.add_argument('--dwconv-detail', action='store_true', help='Show detailed DWCONV data (weights, inputs, etc.)')
 
     args = parser.parse_args()
     base_dir = args.test_dir
@@ -983,10 +1529,24 @@ def main():
     py_vpu = parse_python_vpu_ops(py_log_path)
     py_linebuffer_in = parse_python_linebuffer_input(py_log_path)
 
+    # Parse DWCONV if requested
+    py_dwconv = {}
+    if args.compare_dwconv or args.parse_dwconv or args.compare_all:
+        py_dwconv = parse_python_dwconv(py_log_path)
+
+    # Parse DWCONV BSHR inputs if requested
+    py_dwconv_bshr = {}
+    if args.compare_dwconv_input or args.parse_dwconv_input or args.compare_all:
+        py_dwconv_bshr = parse_python_dwconv_bshr(py_log_path)
+
     print(f"  MM_QUANT: {sum(len(v) for v in py_mm_quant.values())} entries from {len(py_mm_quant)} IMCEs")
     print(f"  IMCU: {sum(len(v) for v in py_imcu.values())} entries from {len(py_imcu)} IMCEs")
     print(f"  VPU ops: {sum(len(v) for v in py_vpu.values())} entries from {len(py_vpu)} IMCEs")
     print(f"  Linebuffer IN: {sum(len(v) for v in py_linebuffer_in.values())} entries from {len(py_linebuffer_in)} IMCEs")
+    if py_dwconv:
+        print(f"  DWCONV: {sum(len(v) for v in py_dwconv.values())} entries from {len(py_dwconv)} IMCEs")
+    if py_dwconv_bshr:
+        print(f"  DWCONV BSHR: {sum(len(v) for v in py_dwconv_bshr.values())} entries from {len(py_dwconv_bshr)} IMCEs")
 
     # Parse RTL logs
     print("\nParsing RTL logs...")
@@ -1001,8 +1561,12 @@ def main():
     rtl_fifo_push = {}
     rtl_fifo_pop = {}
     rtl_vpu_in = {}
+    rtl_dwconv = {}
+    rtl_dwconv_bshr = {}
 
     parse_detailed = args.parse_linebuffer or args.parse_imcu or args.parse_post_imcu or args.parse_vpu or args.parse_all
+    parse_dwconv_needed = args.compare_dwconv or args.parse_dwconv or args.compare_all
+    parse_dwconv_bshr_needed = args.compare_dwconv_input or args.parse_dwconv_input or args.compare_all
     # Enable linebuffer parsing if comparison is requested
     parse_linebuffer_needed = parse_detailed or args.compare_linebuffer or args.compare_all
 
@@ -1024,6 +1588,18 @@ def main():
                 vpu_inputs = parse_rtl_vpu_input(logs['vpu'], coord)
                 if vpu_inputs:
                     rtl_vpu_in[coord] = vpu_inputs
+
+            # Parse DWCONV if requested
+            if parse_dwconv_needed:
+                dwconv_outputs = parse_rtl_dwconv(logs['vpu'], coord)
+                if dwconv_outputs:
+                    rtl_dwconv[coord] = dwconv_outputs
+
+            # Parse DWCONV BSHR inputs if requested
+            if parse_dwconv_bshr_needed:
+                dwconv_bshr = parse_rtl_dwconv_bshr(logs['vpu'], coord)
+                if dwconv_bshr:
+                    rtl_dwconv_bshr[coord] = dwconv_bshr
 
         if 'post_imcu' in logs:
             # Always parse IMCU outputs for comparison
@@ -1065,6 +1641,10 @@ def main():
         print(f"  FIFO PUSH: {sum(len(v) for v in rtl_fifo_push.values())} entries from {len(rtl_fifo_push)} IMCEs")
         print(f"  FIFO POP: {sum(len(v) for v in rtl_fifo_pop.values())} entries from {len(rtl_fifo_pop)} IMCEs")
         print(f"  VPU IN: {sum(len(v) for v in rtl_vpu_in.values())} entries from {len(rtl_vpu_in)} IMCEs")
+    if parse_dwconv_needed:
+        print(f"  DWCONV: {sum(len(v) for v in rtl_dwconv.values())} entries from {len(rtl_dwconv)} IMCEs")
+    if parse_dwconv_bshr_needed:
+        print(f"  DWCONV BSHR: {sum(len(v) for v in rtl_dwconv_bshr.values())} entries from {len(rtl_dwconv_bshr)} IMCEs")
 
     # Show data if requested
     if args.show_python:
@@ -1183,6 +1763,164 @@ def main():
                 print(f"  No RTL data")
 
         print(f"\nTotal: {total_match} match, {total_mismatch} mismatch")
+
+    # Compare DWCONV
+    if args.compare_dwconv or args.compare_all:
+        print(f"\n{'='*80}")
+        print("Comparing DWCONV operations (Python vs RTL)")
+        print(f"{'='*80}")
+
+        all_coords = set(py_dwconv.keys()) | set(rtl_dwconv.keys())
+        if filter_coord:
+            all_coords = {filter_coord} & all_coords
+
+        total_match = 0
+        total_mismatch = 0
+
+        for coord in sorted(all_coords):
+            py_out = py_dwconv.get(coord, [])
+            rtl_out = rtl_dwconv.get(coord, [])
+
+            print(f"\nIMCE ({coord[0]}, {coord[1]}): Python={len(py_out)}, RTL={len(rtl_out)}")
+
+            if py_out and rtl_out:
+                match, mismatch, total = compare_dwconv_outputs(
+                    py_out, rtl_out, coord, args.verbose, args.dwconv_acc)
+                total_match += match
+                total_mismatch += mismatch
+
+                if mismatch == 0:
+                    print(f"  ✓ All {total} outputs MATCH")
+                else:
+                    print(f"  ✗ {mismatch}/{total} outputs MISMATCH")
+            elif not py_out:
+                print(f"  No Python DWCONV data")
+            else:
+                print(f"  No RTL DWCONV data")
+
+        print(f"\nTotal: {total_match} match, {total_mismatch} mismatch")
+
+    # Compare DWCONV BSHR inputs
+    if args.compare_dwconv_input or args.compare_all:
+        print(f"\n{'='*80}")
+        print("Comparing DWCONV BSHR Inputs (Python curr_inputs vs RTL bshr_reshaped)")
+        print(f"{'='*80}")
+
+        all_coords = set(py_dwconv_bshr.keys()) | set(rtl_dwconv_bshr.keys())
+        if filter_coord:
+            all_coords = {filter_coord} & all_coords
+
+        total_match = 0
+        total_mismatch = 0
+
+        for coord in sorted(all_coords):
+            py_inp = py_dwconv_bshr.get(coord, [])
+            rtl_inp = rtl_dwconv_bshr.get(coord, [])
+
+            print(f"\nIMCE ({coord[0]}, {coord[1]}): Python={len(py_inp)}, RTL={len(rtl_inp)}")
+
+            if py_inp and rtl_inp:
+                match, mismatch, total = compare_dwconv_bshr_inputs(
+                    py_inp, rtl_inp, coord, args.verbose)
+                total_match += match
+                total_mismatch += mismatch
+
+                if mismatch == 0:
+                    print(f"  All {total} BSHR inputs MATCH")
+                else:
+                    print(f"  {mismatch}/{total} BSHR inputs MISMATCH")
+            elif not py_inp:
+                print(f"  No Python DWCONV BSHR data")
+            else:
+                print(f"  No RTL DWCONV BSHR data")
+
+        print(f"\nTotal: {total_match} match, {total_mismatch} mismatch")
+
+    # Display DWCONV data if requested
+    if args.parse_dwconv:
+        print(f"\n{'='*80}")
+        print("DWCONV Data (Python)")
+        print(f"{'='*80}")
+        for coord in sorted(py_dwconv.keys()):
+            items = py_dwconv[coord]
+            # Filter to RESULT entries unless --dwconv-acc is set
+            if not args.dwconv_acc:
+                items = [op for op in items if op.result]
+            print(f"\nIMCE ({coord[0]}, {coord[1]}): {len(items)} DWCONV entries")
+            for i, op in enumerate(items[:args.limit]):
+                print(f"  [{i}] bshr_sel={op.bshr_sel} shift_amt={op.shift_amt}")
+                if args.dwconv_detail:
+                    if op.weights:
+                        print(f"       weights: {op.weights}")
+                    if op.inputs:
+                        print(f"       inputs:  {op.inputs}")
+                    if op.inner_product:
+                        print(f"       mac:     {op.inner_product}")
+                    if op.acc_values:
+                        print(f"       acc:     {op.acc_values}")
+                if op.result:
+                    print(f"       result:  {op.result}")
+            if len(items) > args.limit:
+                print(f"  ... and {len(items) - args.limit} more")
+
+        print(f"\n{'='*80}")
+        print("DWCONV Data (RTL)")
+        print(f"{'='*80}")
+        for coord in sorted(rtl_dwconv.keys()):
+            items = rtl_dwconv[coord]
+            # Filter to RESULT entries unless --dwconv-acc is set
+            if not args.dwconv_acc:
+                items = [op for op in items if op.result]
+            print(f"\nIMCE ({coord[0]}, {coord[1]}): {len(items)} DWCONV entries")
+            for i, op in enumerate(items[:args.limit]):
+                ts_str = f" @{op.timestamp}" if op.timestamp else ""
+                print(f"  [{i}]{ts_str} bshr_sel={op.bshr_sel} shift_amt={op.shift_amt}")
+                if args.dwconv_detail:
+                    if op.weights:
+                        print(f"       weights: {op.weights}")
+                    if op.inner_product:
+                        print(f"       mac:     {op.inner_product}")
+                    if op.acc_values:
+                        print(f"       acc:     {op.acc_values}")
+                if op.result:
+                    print(f"       result:  {op.result}")
+            if len(items) > args.limit:
+                print(f"  ... and {len(items) - args.limit} more")
+
+    # Display DWCONV BSHR input data if requested
+    if args.parse_dwconv_input:
+        print(f"\n{'='*80}")
+        print("DWCONV BSHR Input Data (Python - curr_inputs)")
+        print(f"{'='*80}")
+        for coord in sorted(py_dwconv_bshr.keys()):
+            items = py_dwconv_bshr[coord]
+            print(f"\nIMCE ({coord[0]}, {coord[1]}): {len(items)} entries")
+            for i, inp in enumerate(items[:args.limit]):
+                print(f"  [{i}] bshr_sel={inp.bshr_sel} shift_amt={inp.shift_amt}")
+                if args.dwconv_detail:
+                    for ch in sorted(inp.bshr_data.keys())[:4]:  # Show first 4 channels
+                        print(f"       ch[{ch}]: {inp.bshr_data[ch]}")
+                    if len(inp.bshr_data) > 4:
+                        print(f"       ... and {len(inp.bshr_data) - 4} more channels")
+            if len(items) > args.limit:
+                print(f"  ... and {len(items) - args.limit} more")
+
+        print(f"\n{'='*80}")
+        print("DWCONV BSHR Input Data (RTL - bshr_reshaped)")
+        print(f"{'='*80}")
+        for coord in sorted(rtl_dwconv_bshr.keys()):
+            items = rtl_dwconv_bshr[coord]
+            print(f"\nIMCE ({coord[0]}, {coord[1]}): {len(items)} entries")
+            for i, inp in enumerate(items[:args.limit]):
+                ts_str = f" @{inp.timestamp}" if inp.timestamp else ""
+                print(f"  [{i}]{ts_str} bshr_sel={inp.bshr_sel} shift_amt={inp.shift_amt}")
+                if args.dwconv_detail:
+                    for ch in sorted(inp.bshr_data.keys())[:4]:  # Show first 4 channels
+                        print(f"       ch[{ch}]: {inp.bshr_data[ch]}")
+                    if len(inp.bshr_data) > 4:
+                        print(f"       ... and {len(inp.bshr_data) - 4} more channels")
+            if len(items) > args.limit:
+                print(f"  ... and {len(items) - args.limit} more")
 
     # Display detailed parsed data if requested
     if args.parse_linebuffer or args.parse_all:
@@ -1365,6 +2103,68 @@ def main():
                     for i, item in enumerate(rtl_vpu_in[coord]):
                         f.write(f"[{i}] input: {item.input_values}\n")
                         f.write(f"    thresholds: {item.thresholds}\n")
+                    f.write("\n")
+
+            # Write DWCONV data
+            if py_dwconv:
+                for coord in sorted(py_dwconv.keys()):
+                    items = py_dwconv[coord]
+                    if not args.dwconv_acc:
+                        items = [op for op in items if op.result]
+                    f.write(f"=== Python IMCE ({coord[0]}, {coord[1]}) DWCONV ===\n")
+                    for i, op in enumerate(items):
+                        f.write(f"[{i}] bshr_sel={op.bshr_sel} shift_amt={op.shift_amt}\n")
+                        if op.weights:
+                            f.write(f"    weights: {op.weights}\n")
+                        if op.inputs:
+                            f.write(f"    inputs:  {op.inputs}\n")
+                        if op.inner_product:
+                            f.write(f"    mac:     {op.inner_product}\n")
+                        if op.acc_values:
+                            f.write(f"    acc:     {op.acc_values}\n")
+                        if op.result:
+                            f.write(f"    result:  {op.result}\n")
+                    f.write("\n")
+
+            if rtl_dwconv:
+                for coord in sorted(rtl_dwconv.keys()):
+                    items = rtl_dwconv[coord]
+                    if not args.dwconv_acc:
+                        items = [op for op in items if op.result]
+                    f.write(f"=== RTL IMCE ({coord[0]}, {coord[1]}) DWCONV ===\n")
+                    for i, op in enumerate(items):
+                        ts_str = f" @{op.timestamp}" if op.timestamp else ""
+                        f.write(f"[{i}]{ts_str} bshr_sel={op.bshr_sel} shift_amt={op.shift_amt}\n")
+                        if op.weights:
+                            f.write(f"    weights: {op.weights}\n")
+                        if op.inner_product:
+                            f.write(f"    mac:     {op.inner_product}\n")
+                        if op.acc_values:
+                            f.write(f"    acc:     {op.acc_values}\n")
+                        if op.result:
+                            f.write(f"    result:  {op.result}\n")
+                    f.write("\n")
+
+            # Write DWCONV BSHR input data
+            if py_dwconv_bshr:
+                for coord in sorted(py_dwconv_bshr.keys()):
+                    items = py_dwconv_bshr[coord]
+                    f.write(f"=== Python IMCE ({coord[0]}, {coord[1]}) DWCONV BSHR ===\n")
+                    for i, inp in enumerate(items):
+                        f.write(f"[{i}] bshr_sel={inp.bshr_sel} shift_amt={inp.shift_amt}\n")
+                        for ch in sorted(inp.bshr_data.keys()):
+                            f.write(f"    ch[{ch}]: {inp.bshr_data[ch]}\n")
+                    f.write("\n")
+
+            if rtl_dwconv_bshr:
+                for coord in sorted(rtl_dwconv_bshr.keys()):
+                    items = rtl_dwconv_bshr[coord]
+                    f.write(f"=== RTL IMCE ({coord[0]}, {coord[1]}) DWCONV BSHR ===\n")
+                    for i, inp in enumerate(items):
+                        ts_str = f" @{inp.timestamp}" if inp.timestamp else ""
+                        f.write(f"[{i}]{ts_str} bshr_sel={inp.bshr_sel} shift_amt={inp.shift_amt}\n")
+                        for ch in sorted(inp.bshr_data.keys()):
+                            f.write(f"    ch[{ch}]: {inp.bshr_data[ch]}\n")
                     f.write("\n")
 
         print(f"\nSaved parsed data to {out_path}")

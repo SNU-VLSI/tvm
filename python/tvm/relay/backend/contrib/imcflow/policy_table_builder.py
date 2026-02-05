@@ -158,14 +158,16 @@ class PathTreeBuilder:
     generator to efficiently generate policy table entries with path sharing.
     """
 
-    def __init__(self, tensor_id_extractor=None):
+    def __init__(self, tensor_id_extractor=None, func_name: str = None):
         """Initialize the PathTreeBuilder.
 
         Args:
             tensor_id_extractor: Optional function to extract tensor_id from commodity metadata.
                                 If None, uses default extractor that looks for graph_node_id.
+            func_name: Name of the function being processed (for SplitInfo lookup).
         """
         self.tensor_id_extractor = tensor_id_extractor or self._default_tensor_id_extractor
+        self.func_name = func_name
 
     @staticmethod
     def _default_tensor_id_extractor(metadata: Any) -> Optional[Any]:
@@ -211,12 +213,33 @@ class PathTreeBuilder:
         self,
         routing_result: Any
     ) -> Dict[Tuple[Coord, Any], List[int]]:
-        """Group commodities by (source, tensor_id)."""
+        """Group commodities by (source, tensor_id).
+
+        For non-multicast splits (DW conv), includes split_idx in the tensor_id
+        so each split output gets its own tree with separate address.
+        """
         groups: Dict[Tuple[Coord, Any], List[int]] = {}
+
+        # Get SplitInfo for the current function
+        split_info = {}
+        if self.func_name:
+            split_info = ImcflowDeviceConfig().SplitInfo.get(self.func_name, {})
 
         for cid in routing_result.get_all_commodity_ids():
             commodity = routing_result.get_commodity(cid)
             tensor_id = self.tensor_id_extractor(commodity.metadata)
+
+            # Check if this is a non-multicast split (DW conv)
+            # If so, include split_idx in tensor_id to create separate trees
+            split_idx = self._get_split_idx_from_metadata(commodity.metadata)
+            if tensor_id is not None and split_idx is not None:
+                # Check if the source node is a split with is_multi_cast=False
+                src_node_id = self._get_src_node_id_from_metadata(commodity.metadata)
+                if src_node_id is not None and src_node_id in split_info:
+                    if not split_info[src_node_id].get('is_multi_cast', True):
+                        # Non-multicast: include split_idx in tensor_id
+                        tensor_id = (tensor_id, split_idx)
+                        debug_print(f"[PathTreeBuilder] Non-multicast split: tensor_id={tensor_id}, split_idx={split_idx}")
 
             key = (commodity.source, tensor_id)
             if key not in groups:
@@ -224,6 +247,34 @@ class PathTreeBuilder:
             groups[key].append(cid)
 
         return groups
+
+    def _get_split_idx_from_metadata(self, metadata: Any) -> Optional[int]:
+        """Extract split_idx from commodity metadata."""
+        if metadata is None:
+            return None
+        try:
+            edge, mapping_info = metadata
+            # mapping_info is (src_node, dst_node, split_idx)
+            if len(mapping_info) > 2:
+                return mapping_info[2]
+            # Also check edge.split_idx for TensorEdge
+            if hasattr(edge, 'split_idx'):
+                return edge.split_idx
+            return None
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _get_src_node_id_from_metadata(self, metadata: Any) -> Optional[int]:
+        """Extract source node custom_id from commodity metadata."""
+        if metadata is None:
+            return None
+        try:
+            edge, _ = metadata
+            if hasattr(edge, 'src_id') and hasattr(edge.src_id, 'graph_node_id'):
+                return edge.src_id.graph_node_id
+            return None
+        except (TypeError, ValueError, AttributeError):
+            return None
 
     def _build_tree_for_group(
         self,
@@ -240,7 +291,9 @@ class PathTreeBuilder:
         for cid in commodity_ids:
             path = routing_result.get_path(cid)
             commodity = routing_result.get_commodity(cid)
-            self._add_path_to_tree(root, path, cid, commodity)
+            # Get is_multicast from routing_result (ILP Commodity)
+            is_multicast = routing_result.is_multicast(cid) if hasattr(routing_result, 'is_multicast') else True
+            self._add_path_to_tree(root, path, cid, commodity, is_multicast)
 
         return MulticastTree(
             source=source,
@@ -254,7 +307,8 @@ class PathTreeBuilder:
         root: PathTreeNode,
         path: List[Coord],
         commodity_id: int,
-        commodity: HWCommodity
+        commodity: HWCommodity,
+        is_multicast: bool = True
     ) -> None:
         """Add a single commodity's path to the tree.
 
@@ -286,8 +340,8 @@ class PathTreeBuilder:
         # Mark the last node as destination
         current_node.is_destination = True
 
-        # Store destination metadata (e.g., split_idx, ksel)
-        dest_info = self._extract_destination_info(commodity)
+        # Store destination metadata (e.g., split_idx, ksel, is_multicast)
+        dest_info = self._extract_destination_info(commodity, is_multicast)
         if dest_info:
             current_node.destination_info[commodity_id] = dest_info
 
@@ -303,10 +357,10 @@ class PathTreeBuilder:
             return Direction.NORTH
         return Direction.LOCAL
 
-    def _extract_destination_info(self, commodity: HWCommodity) -> Optional[Dict[str, Any]]:
+    def _extract_destination_info(self, commodity: HWCommodity, is_multicast: bool = True) -> Optional[Dict[str, Any]]:
         """Extract destination-specific info from commodity metadata.
 
-        This includes split_idx (chunk_index) and ksel for the destination node.
+        This includes split_idx (chunk_index), is_multicast, and ksel for the destination node.
         """
         if commodity.metadata is None:
             return None
@@ -320,6 +374,7 @@ class PathTreeBuilder:
                 'split_idx': split_idx,
                 'edge': edge,
                 'mapping_info': mapping_info,
+                'is_multicast': is_multicast,
             }
         except (TypeError, ValueError, IndexError):
             return None
@@ -647,12 +702,20 @@ class PolicyTableGenerator:
         tree_node: PathTreeNode,
         dest_info_map: Dict[int, Dict[str, Any]]
     ) -> int:
-        """Get ksel value for a node based on destination info."""
+        """Get ksel value for a node based on destination info.
+
+        For non-multicast commodities (e.g., DW conv split outputs), ksel should be 0
+        to pass full data without chunk selection.
+        """
         # Use the first commodity's destination info for ksel
         for cid in tree_node.commodity_ids:
             if cid in dest_info_map:
                 info = dest_info_map[cid]
                 if info and 'edge' in info:
+                    # Check is_multicast: if False, don't apply chunk selection
+                    if not info.get('is_multicast', True):
+                        return 0
+
                     edge = info['edge']
                     mapping_info = info.get('mapping_info')
                     if mapping_info and mapping_info[2] is not None:
@@ -745,7 +808,7 @@ class PolicyTableBuilder:
             Dictionary mapping NodeID to list of policy table entries
         """
         # Phase 2: Build multicast trees from routing result
-        tree_builder = PathTreeBuilder()
+        tree_builder = PathTreeBuilder(func_name=func_name)
         tree_result = tree_builder.build(routing_result)
 
         # Phase 3a: Generate policy tables

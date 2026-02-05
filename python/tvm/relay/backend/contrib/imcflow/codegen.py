@@ -32,7 +32,9 @@ from tvm.relay.backend.contrib.imcflow.imce_operation_handlers import IMCECodeBl
 from tvm.relay.backend.contrib.imcflow.send_recv_sync import SendRecvPairManager
 
 CompositePat = wildcard().has_attr({"Composite": "imcflow.qconv2d-with-postop"})(None) | \
-               wildcard().has_attr({"Composite": "imcflow.qconv2d-split-concat"})(None)
+               wildcard().has_attr({"Composite": "imcflow.qconv2d-split-concat"})(None) | \
+               wildcard().has_attr({"Composite": "imcflow.qdwconv2d-with-postop"})(None) | \
+               wildcard().has_attr({"Composite": "imcflow.qdwconv2d-split-concat"})(None)
 TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
@@ -957,9 +959,21 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     if CustomIDToNode()[gid].op.name == "split":
       inner_node = CustomIDToNode()[gid]
-      for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
+      split_id = getNodeID(inner_node)
+
+      # Check is_multi_cast from SplitInfo
+      # - True (regular conv): multicast, policy table handles routing, process first edge only
+      # - False (DW conv): unicast, need to send to each split output individually
+      split_info = DevConfig().SplitInfo.get(self.func_name, {}).get(split_id, {})
+      is_multicast = split_info.get('is_multi_cast', True)
+
+      for inner_edge in self.get_output_edges_from_id(split_id):
         self.add_send_block(inner_edge, phase, db)
-        return
+        if is_multicast:
+          # multicast: policy table handles routing, only need first edge
+          return
+      # non-multicast (DW conv): all edges processed, return
+      return
 
     annotation = f"send - {edge}, {out_edge_info.policy_info[0].router_id.name} -> {out_edge_info.policy_info[-1].router_id.name}"
     block = SendBlock(self, db, out_edge_info, annotation)
@@ -989,9 +1003,18 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # split handling
       if CustomIDToNode()[gid].op.name == "split":
         inner_node = CustomIDToNode()[gid]
-        for inner_edge in self.get_output_edges_from_id(getNodeID(inner_node)):
+        split_id = getNodeID(inner_node)
+
+        # Check is_multi_cast from SplitInfo
+        split_info = DevConfig().SplitInfo.get(self.func_name, {}).get(split_id, {})
+        is_multicast = split_info.get('is_multi_cast', True)
+
+        for inner_edge in self.get_output_edges_from_id(split_id):
           annotation += append_edgeinfo_and_db(inner_edge, edge_infos, dbs)
-          break
+          if is_multicast:
+            # multicast: only need first edge
+            break
+        # non-multicast (DW conv): all edges processed
       else:
         annotation += append_edgeinfo_and_db(edge, edge_infos, dbs)
 

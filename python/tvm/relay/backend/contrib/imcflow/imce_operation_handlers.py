@@ -6,6 +6,8 @@ that generate IMCE code blocks.
 All handlers receive a BuilderContext that wraps the relay.Call with helper methods.
 """
 
+import math
+
 from tvm import relay
 from tvm.relay import op
 from tvm.relay.frontend.common import infer_shape
@@ -130,6 +132,12 @@ class CompositeHandler(OperationHandler):
     # Also set on builder so recursive visits see them
     self.builder.post_op_stack = call.post_op_stack
     self.builder.conv_pending_info = call.conv_pending_info
+
+    # map params to args
+    param_to_arg = {
+      param: arg for param, arg in zip(call.call.op.params, call.call.args)
+    }
+    call.conv_pending_info['param_to_arg'] = param_to_arg
 
     # Visit the body of the composite function using self.builder
     self.builder.visit(call.call.op.body)
@@ -260,7 +268,17 @@ class DwConvHandler(OperationHandler):
     IMCECodeBlockInfo().append_const_edge_info(config_edge, hid)
 
     # DW conv weight: received via FIFO (not loaded to IMCU like standard conv)
+    # Calculate number of weight registers: 8 bitplanes * num_channel_groups
+    conv_attrs = call.call.attrs
+    channels = conv_attrs.channels.value if hasattr(conv_attrs.channels, 'value') else conv_attrs.channels
+    num_channel_groups = math.ceil(channels / 16)
+    num_weight_regs = 8 * num_channel_groups
+
     weight_edge = call.get_tensor_edge_from_tag("weight")
+    # Create RecvConstBlock for weight reception in INIT phase
+    weight_block = RecvConstBlock(weight_edge, RecvConstBlock.ConstType.NORMAL,
+                                   f"{weight_edge}, dw weight recv", recv_count=num_weight_regs)
+    call.codeblocks.append(hid, weight_block, CodePhase.INIT)
     # Register weight edge so INODE knows to SEND it
     IMCECodeBlockInfo().append_const_edge_info(weight_edge, hid)
 
@@ -419,30 +437,7 @@ class ConcatHandler(OperationHandler):
     return call.op == op.get("concatenate")
 
   def handle(self, call: 'BuilderContext') -> None:
-    builder = call.builder
-    use_def_parser = builder.use_def_chains[builder.func_name]
-    producers = use_def_parser.get_uses(call.call, recursive=True, depth=-1, skip_tuple=True)
-    # producer_types = [p.op.name == "qnn.imcflow_min_max_quantize" for p in producers] 
-    # if any(x != producer_types[0] for x in producer_types):
-    #   raise RuntimeError(f"ConcatHandler: all producers must be of the same type, got: {producer_types}")
-    
-    layout = DevConfig().LayoutMap[producers[0]]
-    if layout.value == "NCHW16c":
-      channels = 16
-    elif layout.value == "NCHW64c":
-      channels = 64
-    else:
-      raise RuntimeError(f"ConcatHandler: unsupported layout {layout} for concatenate")
-    
     block = ConcatBlock(call, "concat")
-    # if producer_types[0] == 1:
-    #   # we need OR
-    #   block.set_type(or_concat=True)
-    # else:
-    #   # we need simple concat into regs
-    #   block.set_type(or_concat=False)
-    block.set_type(or_concat=False)
-    block.set_channel(channels)
 
     # Priority: vec_op_stack > post_op_stack > standalone
     if self.builder.vec_op_stack is not None:
@@ -493,6 +488,21 @@ class MinMaxQuantizeHandler(OperationHandler):
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("qnn.imcflow_min_max_quantize")
 
+  def consumer_is_non_multicast_split(self, call:'BuilderContext') -> tuple[bool, int, int]:
+    out_edges = call.get_output_edges()
+    assert len(out_edges) == 1, "Only one output edge is expected"
+    out_edge = out_edges[0]
+    dst_gid = out_edge.dst_id.graph_node_id
+    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
+      split_info = DevConfig().SplitInfo[call.func_name][getNodeID(dst_node)]
+      is_multicast = split_info["is_multi_cast"]
+      channels = split_info["channels"]
+      num_splits = split_info["num_splits"]
+      return (not is_multicast), channels, num_splits
+    else:
+      return False, None, None
+
   def handle(self, call: 'BuilderContext') -> None:
     print(f"[IMCE CODE BUILDER] handle MinMaxQuantize: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
     hid = call.get_hid()
@@ -513,6 +523,8 @@ class MinMaxQuantizeHandler(OperationHandler):
     # block = RecvConstBlock(_edge, f"qreg reset")
     # call.codeblocks.append(hid, block, CodePhase.INIT)
 
+    is_non_multicast_split, channels, num_splits = self.consumer_is_non_multicast_split(call)
+
     # set o_split_idx to 0 when last_tuple_idx is None
     block = MinmaxQuantBlock(call, call.last_tuple_idx or 0, "min_max_quantize")
     # Priority: vec_op_stack > post_op_stack > standalone
@@ -520,10 +532,12 @@ class MinMaxQuantizeHandler(OperationHandler):
       self.builder.vec_op_stack.append(block)
     elif call.curr_composite_id is not None and call.post_op_stack is not None:
       call.post_op_stack.append(block)
-    else:
+    elif not is_non_multicast_split:
       # Standalone minmax quantize needs RECV/SEND wrapper
       wrapped_block = RecvSendWrapper.from_codeblock(block, "min_max_quantize_standalone", builder=call.builder).create_loop_from_call(call)
       call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
+    else:
+      call.codeblocks.append(hid, block.build_mmquant_for_dwconv(), CodePhase.EXEC)
 
 
 @register_operation_handler

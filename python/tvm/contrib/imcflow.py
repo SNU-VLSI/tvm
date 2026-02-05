@@ -121,7 +121,7 @@ class TensorID:
 
   def __new__(cls, graph_node_id: Union[int, Tuple], tensor_type: str):
     key = (graph_node_id, tensor_type)
-    valid_pattern = r"^(data|odata|weight|bias|fused_scale|fused_bias|lhs|rhs|min|max|threshold|zero|config|var|func_out.*)$"
+    valid_pattern = r"^(data|odata|weight|scale|bias|fused_scale|fused_bias|lhs|rhs|min|max|threshold|zero|config|var|func_out.*)$"
     if not re.match(valid_pattern, tensor_type):
       print(f"Invalid tensor type: {tensor_type}")
     if key not in cls._instances:
@@ -607,8 +607,18 @@ class TensorEdgeInfo(EdgeInfo):
     return []
 
   def __str__(self):
-    policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"
-    return f"TensorEdgeInfo([{policy_info_str}], {self.data_block}, {self.fifo_id})"
+    # policy_info_str = ", ".join(str(entry) for entry in self.policy_info) if self.policy_info else "[]"
+    policy_info_str = "router entries:\n"
+    for entry in self.policy_info:
+      policy_info_str += f"  {str(entry)}"
+    
+    data = "TensorEdgeInfo(\n"
+    data += f"  {policy_info_str}\n"
+    data += f"  data_block={self.data_block}\n"
+    data += f"  fifo_id={self.fifo_id}\n"
+    data += ")"
+
+    return data
 
   def __repr__(self):
     return self.__str__()
@@ -735,6 +745,7 @@ class ImcflowDeviceConfig:
     self.LayoutMap={}
     self.FIFOConflictTable = {}
     self.NoCDeadlockTable = {}
+    self.SplitInfo = {} # func_name : {split_node_id : split_info}. split_info = {'is_multi_cast':bool, channels : int, num_splits : int}
 
   def clear(self):
     self._initialize()
@@ -767,6 +778,25 @@ class ImcflowDeviceConfig:
   def get_tensor_edge(self, tensor_id: TensorID):
     return self.TensorIDtoEdge.get(tensor_id, None)
 
+  def get_tensor_edges_from_graph_node_id(self, graph_node_id: Union[int, Tuple], dir="inout"):
+    edges = []
+    for tensor_edge in self.TensorEdgeList:
+      src_gid = tensor_edge.src_id.graph_node_id
+      dst_gid = tensor_edge.dst_id.graph_node_id
+      getInnerID = lambda gid: gid[1] if isinstance(gid, Tuple) else gid
+      if dir == "inout":
+        if getInnerID(src_gid) == getInnerID(graph_node_id) or getInnerID(dst_gid) == getInnerID(graph_node_id):
+          edges.append(tensor_edge)
+      elif dir == "in":
+        if getInnerID(dst_gid) == getInnerID(graph_node_id):
+          edges.append(tensor_edge)
+      elif dir == "out":
+        if getInnerID(src_gid) == getInnerID(graph_node_id):
+          edges.append(tensor_edge)
+      else:
+        raise ValueError("Invalid direction")
+    return edges
+
   def add_tensor_edge_info(self, tensor_edge: TensorEdge, tensor_edge_info: TensorEdgeInfo):
     tensor_edge_info.owner = tensor_edge
     self.TensorEdgetoInfo[tensor_edge] = tensor_edge_info
@@ -795,10 +825,6 @@ class ImcflowDeviceConfig:
       if tid.graph_node_id == graph_node_id:
         tids.append(tid)
     return tids
-
-  def get_tensor_edges_from_graph_node_id(self, graph_node_id: Union[int, Tuple]):
-    for tid in self.get_tensor_edges_from_graph_node_id(graph_node_id):
-      yield self.get_tensor_edge(tid)
 
   def add_inst_edge_info(self, func_name: str, imce_id: NodeID, inst_edge_info: InstEdgeInfo):
     assert imce_id.is_imce(), "Only imce nodes have inst edge info"
