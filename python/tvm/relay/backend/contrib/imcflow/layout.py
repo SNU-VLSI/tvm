@@ -173,6 +173,18 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW64C,
     ),
+    (
+      [
+        [LayoutType.NHWC16C, LayoutType.C, LayoutType.C],
+      ],
+      LayoutType.NHWC16C,
+    ),
+    (
+      [
+        [LayoutType.NHWC64C, LayoutType.C, LayoutType.C],
+      ],
+      LayoutType.NHWC64C,
+    ),
   ],
   "add": [
     (
