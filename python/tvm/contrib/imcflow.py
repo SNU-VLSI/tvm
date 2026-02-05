@@ -121,7 +121,7 @@ class TensorID:
 
   def __new__(cls, graph_node_id: Union[int, Tuple], tensor_type: str):
     key = (graph_node_id, tensor_type)
-    valid_pattern = r"^(data|odata|weight|bias|fused_scale|fused_bias|lhs|rhs|min|max|threshold|zero|config|var|func_out.*)$"
+    valid_pattern = r"^(data|odata|weight|scale|bias|fused_scale|fused_bias|lhs|rhs|min|max|threshold|zero|config|var|func_out.*)$"
     if not re.match(valid_pattern, tensor_type):
       print(f"Invalid tensor type: {tensor_type}")
     if key not in cls._instances:
