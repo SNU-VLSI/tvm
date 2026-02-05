@@ -1,0 +1,54 @@
+bn_beta: shape=(16,), dtype=float32
+bn_gamma: shape=(16,), dtype=float32
+bn_moving_mean: shape=(16,), dtype=float32
+bn_moving_var: shape=(16,), dtype=float32
+bn_out_f_0: shape=(32, 1, 1), dtype=int16
+bn_out_f_1: shape=(32, 1, 1), dtype=int16
+bn_out_f_2: shape=(64, 1, 1), dtype=int16
+bn_out_f_3: shape=(64, 1, 1), dtype=int16
+dense_bias: shape=(10,), dtype=float32
+dense_weight: shape=(10, 64), dtype=float32
+fused_bias1: shape=(16,), dtype=int16
+fused_bias2: shape=(16,), dtype=int16
+fused_bias3: shape=(32,), dtype=int16
+fused_bias4: shape=(32,), dtype=int16
+fused_bias4_2: shape=(32,), dtype=int16
+fused_bias5: shape=(64,), dtype=int16
+fused_bias6: shape=(64,), dtype=int16
+fused_bias6_2: shape=(64,), dtype=int16
+fused_scale1: shape=(16,), dtype=int16
+fused_scale2: shape=(16,), dtype=int16
+fused_scale3: shape=(32,), dtype=int16
+fused_scale4: shape=(32,), dtype=int16
+fused_scale4_2: shape=(32,), dtype=int16
+fused_scale5: shape=(64,), dtype=int16
+fused_scale6: shape=(64,), dtype=int16
+fused_scale6_2: shape=(64,), dtype=int16
+post_f_inv: shape=(1,), dtype=float32
+quant_max_1: shape=(), dtype=int16
+quant_max_2: shape=(), dtype=int16
+quant_max_3: shape=(), dtype=int16
+quant_max_4: shape=(), dtype=int16
+quant_max_4_2: shape=(), dtype=int16
+quant_max_5: shape=(), dtype=int16
+quant_max_6: shape=(), dtype=int16
+quant_max_6_2: shape=(), dtype=int16
+quant_min_1: shape=(), dtype=int16
+quant_min_2: shape=(), dtype=int16
+quant_min_3: shape=(), dtype=int16
+quant_min_4: shape=(), dtype=int16
+quant_min_4_2: shape=(), dtype=int16
+quant_min_5: shape=(), dtype=int16
+quant_min_6: shape=(), dtype=int16
+quant_min_6_2: shape=(), dtype=int16
+weight1: shape=(16, 3, 3, 3), dtype=float32
+weight2_1: shape=(16, 16, 3, 3), dtype=int8
+weight2_2: shape=(16, 16, 3, 3), dtype=int8
+weight3_0: shape=(32, 16, 1, 1), dtype=int8
+weight3_1: shape=(32, 16, 3, 3), dtype=int8
+weight3_2: shape=(32, 32, 3, 3), dtype=int8
+weight4_0: shape=(64, 32, 1, 1), dtype=int8
+weight4_1: shape=(64, 32, 3, 3), dtype=int8
+weight4_2: shape=(64, 64, 3, 3), dtype=int8
+x_f_1: shape=(1,), dtype=float32
+y_f_1: shape=(16, 1, 1), dtype=int16

@@ -1,0 +1,451 @@
+========================================
+Validating recv/send consistency for function tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0
+✓ All edges have consistent send/recv counts
+========================================
+
+  Edge: TensorEdge(((39, -21), config), ((39, 35), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((39, -22), fused_scale), ((39, 36), fused_scale))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((39, -23), fused_bias), ((39, 36), fused_bias))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((39, 36), odata), (40, data))
+    IMCE  - Send: 4096, Recv: 4096
+    Inode - Send: 0, Recv: 0
+    Total - Send: 4096, Recv: 4096
+
+  Edge: TensorEdge(((41, -16), config), ((41, 32), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((41, -17), fused_scale), ((41, 33), fused_scale))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((41, -18), fused_bias), ((41, 33), fused_bias))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((41, 33), odata), (43, func_out0), 0)
+    IMCE  - Send: 4096, Recv: 0
+    Inode - Send: 0, Recv: 4096
+    Total - Send: 4096, Recv: 4096
+
+  Edge: TensorEdge((-13, odata), (38, data))
+    IMCE  - Send: 0, Recv: 1024
+    Inode - Send: 1024, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((-13, odata), (42, lhs))
+    IMCE  - Send: 0, Recv: 1024
+    Inode - Send: 1024, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((-24, min), (38, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-25, max), (38, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-26, min), (40, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-27, max), (40, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-28, odata), (42, rhs))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((38, odata), ((39, 35), data))
+    IMCE  - Send: 4096, Recv: 4096
+    Inode - Send: 0, Recv: 0
+    Total - Send: 4096, Recv: 4096
+
+  Edge: TensorEdge((40, odata), ((41, 32), data))
+    IMCE  - Send: 4096, Recv: 4096
+    Inode - Send: 0, Recv: 0
+    Total - Send: 4096, Recv: 4096
+
+  Edge: TensorEdge((42, odata), (43, func_out1), 1)
+    IMCE  - Send: 1024, Recv: 0
+    Inode - Send: 0, Recv: 1024
+    Total - Send: 1024, Recv: 1024
+========================================
+Validating recv/send consistency for function tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region2_main_5
+✓ All edges have consistent send/recv counts
+========================================
+
+  Edge: TensorEdge(((58, -41), config), ((58, 53), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((58, -42), fused_scale), ((58, 54), fused_scale))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((58, -43), fused_bias), ((58, 54), fused_bias))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((58, 54), odata), (59, data))
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge(((62, -36), config), ((62, 49), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((62, -37), fused_scale), ((62, 51), fused_scale))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((62, -38), fused_bias), ((62, 51), fused_bias))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((62, 51), odata), (70, func_out0), 0)
+    IMCE  - Send: 1024, Recv: 0
+    Inode - Send: 0, Recv: 1024
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge(((69, -51), odata), ((69, 65), lhs))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((69, -53), config), ((69, 63), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((69, -54), fused_scale), ((69, 64), fused_scale))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((69, -55), fused_bias), ((69, 64), fused_bias))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((69, -56), odata), ((69, 66), rhs))
+    IMCE  - Send: 0, Recv: 2
+    Inode - Send: 2, Recv: 0
+    Total - Send: 2, Recv: 2
+
+  Edge: TensorEdge(((69, 66), odata), (70, func_out1), 1)
+    IMCE  - Send: 1024, Recv: 0
+    Inode - Send: 0, Recv: 1024
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((-31, odata), (56, lhs))
+    IMCE  - Send: 0, Recv: 1024
+    Inode - Send: 1024, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((-32, odata), (56, rhs))
+    IMCE  - Send: 0, Recv: 1024
+    Inode - Send: 1024, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((-44, min), (57, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-45, max), (57, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-46, min), (59, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-47, max), (59, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-49, config), (61, config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-57, min), (68, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-58, max), (68, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((56, odata), (57, data))
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((56, odata), (68, data))
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((57, odata), ((58, 53), data))
+    IMCE  - Send: 4096, Recv: 4096
+    Inode - Send: 0, Recv: 0
+    Total - Send: 4096, Recv: 4096
+
+  Edge: TensorEdge((60, odata), ((62, 49), data), 0)
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((60, odata), (61, data), 1)
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((61, odata), ((62, 50), rhs))
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((68, odata), ((69, 63), data))
+    IMCE  - Send: 4096, Recv: 4096
+    Inode - Send: 0, Recv: 0
+    Total - Send: 4096, Recv: 4096
+========================================
+Validating recv/send consistency for function tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
+✓ All edges have consistent send/recv counts
+========================================
+
+  Edge: TensorEdge(((104, -88), odata), ((104, 100), lhs))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((104, -90), config), ((104, 98), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((104, -91), fused_scale), ((104, 99), fused_scale))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((104, -92), fused_bias), ((104, 99), fused_bias))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((104, -93), odata), ((104, 101), rhs))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((104, 101), odata), (105, func_out1), 1)
+    IMCE  - Send: 256, Recv: 0
+    Inode - Send: 0, Recv: 256
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge(((89, -72), config), ((89, 81), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((89, -73), fused_scale), ((89, 83), fused_scale))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((89, -74), fused_bias), ((89, 83), fused_bias))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((89, 83), odata), (90, data))
+    IMCE  - Send: 256, Recv: 256
+    Inode - Send: 0, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge(((96, -84), config), ((96, 92), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((96, 93), odata), ((97, 78), lhs))
+    IMCE  - Send: 256, Recv: 256
+    Inode - Send: 0, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge(((97, -66), config), ((97, 77), config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge(((97, -67), fused_scale), ((97, 79), fused_scale))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((97, -68), fused_bias), ((97, 79), fused_bias))
+    IMCE  - Send: 0, Recv: 4
+    Inode - Send: 4, Recv: 0
+    Total - Send: 4, Recv: 4
+
+  Edge: TensorEdge(((97, 79), odata), (105, func_out0), 0)
+    IMCE  - Send: 256, Recv: 0
+    Inode - Send: 0, Recv: 256
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge((-61, odata), (85, lhs))
+    IMCE  - Send: 0, Recv: 512
+    Inode - Send: 512, Recv: 0
+    Total - Send: 512, Recv: 512
+
+  Edge: TensorEdge((-62, odata), (85, rhs))
+    IMCE  - Send: 0, Recv: 512
+    Inode - Send: 512, Recv: 0
+    Total - Send: 512, Recv: 512
+
+  Edge: TensorEdge((-75, min), (86, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-76, max), (86, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-78, config), (88, config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-79, min), (90, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-80, max), (90, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-86, config), (95, config))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-94, min), (103, min))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((-95, max), (103, max))
+    IMCE  - Send: 0, Recv: 1
+    Inode - Send: 1, Recv: 0
+    Total - Send: 1, Recv: 1
+
+  Edge: TensorEdge((103, odata), ((104, 98), data))
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((85, odata), (103, data))
+    IMCE  - Send: 512, Recv: 512
+    Inode - Send: 0, Recv: 0
+    Total - Send: 512, Recv: 512
+
+  Edge: TensorEdge((85, odata), (86, data))
+    IMCE  - Send: 512, Recv: 512
+    Inode - Send: 0, Recv: 0
+    Total - Send: 512, Recv: 512
+
+  Edge: TensorEdge((87, odata), ((89, 81), data), 0)
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((87, odata), (88, data), 1)
+    IMCE  - Send: 1024, Recv: 1024
+    Inode - Send: 0, Recv: 0
+    Total - Send: 1024, Recv: 1024
+
+  Edge: TensorEdge((88, odata), ((89, 82), rhs))
+    IMCE  - Send: 256, Recv: 256
+    Inode - Send: 0, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge((91, odata), ((96, 92), data), 0)
+    IMCE  - Send: 256, Recv: 256
+    Inode - Send: 0, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge((91, odata), ((97, 77), data), 2)
+    IMCE  - Send: 256, Recv: 256
+    Inode - Send: 0, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge((91, odata), (95, data), 1)
+    IMCE  - Send: 256, Recv: 256
+    Inode - Send: 0, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge((95, odata), ((96, 93), rhs))
+    IMCE  - Send: 256, Recv: 256
+    Inode - Send: 0, Recv: 0
+    Total - Send: 256, Recv: 256
+========================================
+Validating recv/send consistency for function tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_20
+✓ All edges have consistent send/recv counts
+========================================
+
+  Edge: TensorEdge((-98, odata), (112, lhs))
+    IMCE  - Send: 0, Recv: 256
+    Inode - Send: 256, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge((-99, odata), (112, rhs))
+    IMCE  - Send: 0, Recv: 256
+    Inode - Send: 256, Recv: 0
+    Total - Send: 256, Recv: 256
+
+  Edge: TensorEdge((112, odata), (113, func_out0))
+    IMCE  - Send: 256, Recv: 0
+    Inode - Send: 0, Recv: 256
+    Total - Send: 256, Recv: 256

@@ -1,0 +1,3 @@
+shape: 32,1,1
+dtype: int16
+nbytes: 64

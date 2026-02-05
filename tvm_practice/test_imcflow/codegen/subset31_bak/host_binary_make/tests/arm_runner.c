@@ -1,0 +1,268 @@
+#include <stddef.h>
+#include <stdint.h>
+#include <stdarg.h>
+#ifdef TVM_ARM_LINUX
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#endif
+
+#include <dlpack/dlpack.h>
+#include <tvm/runtime/c_runtime_api.h>
+#include <tvm/runtime/crt/platform.h>
+#include <tvm/runtime/crt/graph_executor.h>
+#include <tvm/runtime/crt/internal/graph_executor/graph_executor.h>
+#include <tvm/runtime/c_backend_api.h>
+
+// System lib entry provided by the generated C
+extern const TVMModule* TVMSystemLibEntryPoint(void);
+
+// ---- User-provided (embed) graph JSON and params ----
+__attribute__((weak)) const char tvm_graph_json[] = "";
+__attribute__((weak)) const unsigned char tvm_params[] = {0};
+__attribute__((weak)) const unsigned int tvm_params_len = 0;
+
+// ---- Minimal platform hooks (page allocator) ----
+#include <tvm/runtime/crt/page_allocator.h>
+#ifndef TVM_WORKSPACE_SIZE_BYTES
+#define TVM_WORKSPACE_SIZE_BYTES (512 * 1024)
+#endif
+static uint8_t g_workspace[TVM_WORKSPACE_SIZE_BYTES];
+static MemoryManagerInterface* g_memory_manager = NULL;
+
+size_t TVMPlatformFormatMessage(char* out_buf, size_t out_buf_size_bytes, const char* fmt, va_list args) {
+  (void)out_buf; (void)out_buf_size_bytes; (void)fmt; (void)args; return 0;
+}
+
+void __attribute__((noreturn)) TVMPlatformAbort(tvm_crt_error_t code) {
+  (void)code;
+  while (1) { /* hang */ }
+}
+
+// CRT logging stub (avoid pulling host RPC server)
+void TVMLogf(const char* fmt, ...) { (void)fmt; }
+
+tvm_crt_error_t TVMPlatformMemoryAllocate(size_t num_bytes, DLDevice dev, void** out_ptr) {
+  return g_memory_manager->Allocate(g_memory_manager, num_bytes, dev, out_ptr);
+}
+
+tvm_crt_error_t TVMPlatformMemoryFree(void* ptr, DLDevice dev) {
+  return g_memory_manager->Free(g_memory_manager, ptr, dev);
+}
+
+tvm_crt_error_t TVMPlatformTimerStart() { return kTvmErrorNoError; }
+
+tvm_crt_error_t TVMPlatformTimerStop(double* elapsed_time_seconds) { (void)elapsed_time_seconds; return kTvmErrorNoError; }
+
+tvm_crt_error_t TVMPlatformBeforeMeasurement() { return kTvmErrorNoError; }
+
+tvm_crt_error_t TVMPlatformAfterMeasurement() { return kTvmErrorNoError; }
+
+tvm_crt_error_t TVMPlatformInitialize() {
+  int status = PageMemoryManagerCreate(&g_memory_manager, g_workspace, sizeof(g_workspace), 8);
+  if (status != 0) return kTvmErrorPlatformMemoryManagerInitialized;
+  return kTvmErrorNoError;
+}
+
+// ---- File I/O helpers (for Linux userland use) ----
+static char* read_entire_text(const char* path, size_t* out_size) {
+  FILE* f = fopen(path, "rb"); if (!f) return NULL;
+  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  char* buf = (char*)malloc(sz + 1); if (!buf) { fclose(f); return NULL; }
+  size_t n = fread(buf, 1, sz, f); fclose(f); buf[n] = '\0';
+  if (out_size) *out_size = n; return buf;
+}
+static unsigned char* read_entire_bin(const char* path, size_t* out_size) {
+  FILE* f = fopen(path, "rb"); if (!f) return NULL;
+  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  unsigned char* buf = (unsigned char*)malloc(sz); if (!buf) { fclose(f); return NULL; }
+  size_t n = fread(buf, 1, sz, f); fclose(f);
+  if (out_size) *out_size = n; return buf;
+}
+
+// ---- Utilities ----
+static void fill_tensor_linear_chw_index(DLTensor* t) {
+  float* data = (float*)t->data;
+  if (t->ndim != 4) return;
+  int64_t C = t->shape[1], H = t->shape[2], W = t->shape[3];
+  for (int64_t c = 0; c < C; ++c)
+    for (int64_t h = 0; h < H; ++h)
+      for (int64_t w = 0; w < W; ++w)
+        data[c * H * W + h * W + w] = (float)(c * H * W + h * W + w);
+}
+
+static size_t bytes_per_element(DLDataType dtype) {
+  size_t bytes = (dtype.bits + 7) / 8; if (dtype.lanes > 1) bytes *= dtype.lanes; return bytes;
+}
+
+static size_t num_elements(const DLTensor* t) {
+  size_t n = 1; for (int i = 0; i < t->ndim; ++i) n *= (size_t)t->shape[i]; return n;
+}
+
+static uint32_t checksum_fnv1a_u32(const float* data, size_t n) {
+  uint32_t c = 2166136261u; for (size_t i = 0; i < n; ++i) { union { float f; uint32_t u; } u; u.f = data[i]; c ^= u.u; c *= 16777619u; } return c;
+}
+
+int tvm_run_once(void) {
+  if (TVMPlatformInitialize() != kTvmErrorNoError) return -1;
+
+  const TVMModule* syslib = TVMSystemLibEntryPoint();
+  TVMModuleHandle mod;
+  if (TVMModCreateFromCModule(syslib, &mod) != 0) {
+    fprintf(stderr, "Failed to create module handle\n");
+    return -1;
+  }
+  DLDevice dev = {kDLCPU, 0};
+
+  // Load graph JSON
+  const char* graph_env = getenv("TVM_GRAPH_JSON");
+  const char* params_env = getenv("TVM_PARAMS_BIN");
+  const char* graph_path = graph_env ? graph_env : "mlf/executor-config/graph/default.graph";
+  const char* params_path = params_env ? params_env : "mlf/parameters/default.params";
+
+  size_t graph_len = 0; char* graph_json_buf = NULL;
+  if (tvm_graph_json[0] != '\0') {
+    graph_json_buf = (char*)tvm_graph_json;
+    graph_len = strlen(tvm_graph_json);
+  } else {
+    graph_json_buf = read_entire_text(graph_path, &graph_len);
+    if (!graph_json_buf) { fprintf(stderr, "failed to read graph: %s\n", graph_path); return -10; }
+  }
+
+  TVMGraphExecutor* exec = NULL;
+  if (TVMGraphExecutor_Create(graph_json_buf, mod, &dev, &exec) != 0) { fprintf(stderr, "Create failed\n"); return -2; }
+
+  // Load params
+  int have_embedded_params = (tvm_params_len > 0);
+  if (have_embedded_params) {
+    if (TVMGraphExecutor_LoadParams(exec, (const char*)tvm_params, (uint32_t)tvm_params_len) != 0) return -3;
+  } else {
+    size_t params_len = 0; unsigned char* params_buf = read_entire_bin(params_path, &params_len);
+    if (!params_buf || params_len == 0) { fprintf(stderr, "failed to read params: %s\n", params_path); return -11; }
+    if (TVMGraphExecutor_LoadParams(exec, (const char*)params_buf, (uint32_t)params_len) != 0) return -3;
+    free(params_buf);
+  }
+
+  // Prepare inputs dynamically
+  int num_inputs = TVMGraphExecutor_GetNumInputs(exec);
+  printf("Graph has %d inputs\n", num_inputs);
+
+  // We'll store input data pointers to free them later
+  void* input_data_ptrs[2] = {NULL, NULL}; // Assuming max 2 inputs for this example
+
+  for (int i = 0; i < num_inputs && i < 2; ++i) {
+    // Get the node ID and entry ID for this input
+    uint32_t nid = exec->input_nodes[i];
+    uint32_t eid = TVMGraphExecutor_GetEntryId(exec, nid, 0);
+    DLTensor* input_tensor = &(exec->data_entry[eid].dl_tensor);
+
+    printf("Input %d (%s): ndim=%d, shape=[", i, exec->nodes[nid].name, input_tensor->ndim);
+    size_t total_elements = 1;
+    for (int d = 0; d < input_tensor->ndim; ++d) {
+      printf("%lld", input_tensor->shape[d]);
+      if (d < input_tensor->ndim - 1) printf(", ");
+      total_elements *= input_tensor->shape[d];
+    }
+    printf("], dtype bits=%d\n", input_tensor->dtype.bits);
+
+    // Allocate memory for this input
+    size_t nbytes = total_elements * bytes_per_element(input_tensor->dtype);
+    DLTensor user_input = {0};
+    user_input.device = dev;
+    user_input.ndim = input_tensor->ndim;
+    user_input.shape = input_tensor->shape; // Use the same shape pointer
+    user_input.dtype = input_tensor->dtype;
+
+    void* input_data = NULL;
+    TVMPlatformMemoryAllocate(nbytes, dev, &input_data);
+    user_input.data = input_data;
+    input_data_ptrs[i] = input_data;
+
+    // Fill with test data
+    fill_tensor_linear_chw_index(&user_input);
+
+    // Set the input
+    TVMGraphExecutor_SetInput(exec, exec->nodes[nid].name, &user_input);
+  }
+
+  // Execute graph via direct calls
+  TVMGraphExecutor_Run(exec);
+
+  // Get output dynamically
+  int num_outputs = TVMGraphExecutor_GetNumOutputs(exec);
+  printf("Graph has %d outputs\n", num_outputs);
+
+  if (num_outputs > 0) {
+    // Get output shape from the graph
+    uint32_t out_nid = exec->outputs[0].node_id;
+    uint32_t out_index = exec->outputs[0].index;
+    uint32_t out_eid = TVMGraphExecutor_GetEntryId(exec, out_nid, out_index);
+    DLTensor* output_tensor = &(exec->data_entry[out_eid].dl_tensor);
+
+    printf("Output 0: ndim=%d, shape=[", output_tensor->ndim);
+    size_t total_out_elements = 1;
+    for (int d = 0; d < output_tensor->ndim; ++d) {
+      printf("%lld", output_tensor->shape[d]);
+      if (d < output_tensor->ndim - 1) printf(", ");
+      total_out_elements *= output_tensor->shape[d];
+    }
+    printf("], dtype bits=%d\n", output_tensor->dtype.bits);
+
+    // Allocate output tensor with correct shape
+    size_t out_nbytes = total_out_elements * bytes_per_element(output_tensor->dtype);
+    DLTensor out = {0};
+    out.device = dev;
+    out.ndim = output_tensor->ndim;
+    out.shape = output_tensor->shape; // Use the same shape pointer
+    out.dtype = output_tensor->dtype;
+
+    void* out_data = NULL;
+    TVMPlatformMemoryAllocate(out_nbytes, dev, &out_data);
+    out.data = out_data;
+
+    if (TVMGraphExecutor_GetOutput(exec, 0, &out) != 0) return -6;
+
+    // Print first 16 values and checksum (concise verification)
+    float* out_f = (float*)out.data;
+    size_t to_print = (total_out_elements < 16) ? total_out_elements : 16;
+    printf("first16:");
+    for (size_t i = 0; i < to_print; ++i) printf(" %f", out_f[i]);
+    printf("\n");
+    uint32_t csum = checksum_fnv1a_u32(out_f, total_out_elements);
+    printf("checksum=0x%08x\n", csum);
+
+    // Cleanup output
+    TVMPlatformMemoryFree(out_data, dev);
+  }
+
+  // Cleanup
+  if (graph_json_buf && graph_json_buf != tvm_graph_json) free(graph_json_buf);
+  for (int i = 0; i < num_inputs && i < 2; ++i) {
+    if (input_data_ptrs[i]) TVMPlatformMemoryFree(input_data_ptrs[i], dev);
+  }
+  TVMGraphExecutor_Release(&exec);
+  return 0;
+}
+
+// Optional Linux entry: accept paths via env vars TVM_GRAPH_JSON / TVM_PARAMS_BIN
+int main(void) {
+  int rc = tvm_run_once();
+  if (rc != 0) {
+    fprintf(stderr, "runner failed rc=%d\n", rc);
+    return 1;
+  }
+  return 0;
+}
+
+// ---- Minimal syscalls stubs for newlib (bare metal) ----
+#include <sys/stat.h>
+int _write(int fd, const void* buf, size_t cnt) { (void)fd; (void)buf; return (int)cnt; }
+int _read(int fd, void* buf, size_t cnt) { (void)fd; (void)buf; (void)cnt; return 0; }
+int _close(int fd) { (void)fd; return 0; }
+int _fstat(int fd, struct stat* st) { (void)fd; if (st) { st->st_mode = S_IFCHR; } return 0; }
+int _isatty(int fd) { (void)fd; return 1; }
+int _lseek(int fd, int ptr, int dir) { (void)fd; (void)ptr; (void)dir; return 0; }
+int _getpid(void) { return 1; }
+int _kill(int pid, int sig) { (void)pid; (void)sig; return -1; }
+void _exit(int status) { (void)status; while (1) {} }
+void* _sbrk(ptrdiff_t incr) { (void)incr; return (void*)-1; }

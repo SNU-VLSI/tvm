@@ -1,0 +1,277 @@
+----------------------- TensorIDtoEdge ------------------------
+'TensorID((97, 79), odata) : TensorEdge(((97, 79), odata), (105, func_out0), 0)'
+'TensorID(105, func_out0) : TensorEdge(((97, 79), odata), (105, func_out0), 0)'
+('TensorID((104, 101), odata) : TensorEdge(((104, 101), odata), (105, '
+ 'func_out1), 1)')
+('TensorID(105, func_out1) : TensorEdge(((104, 101), odata), (105, func_out1), '
+ '1)')
+('TensorID((97, -67), fused_scale) : TensorEdge(((97, -67), fused_scale), '
+ '((97, 79), fused_scale))')
+('TensorID((97, 79), fused_scale) : TensorEdge(((97, -67), fused_scale), ((97, '
+ '79), fused_scale))')
+('TensorID((97, -68), fused_bias) : TensorEdge(((97, -68), fused_bias), ((97, '
+ '79), fused_bias))')
+('TensorID((97, 79), fused_bias) : TensorEdge(((97, -68), fused_bias), ((97, '
+ '79), fused_bias))')
+('TensorID((97, -65), weight) : TensorEdge(((97, -65), weight), ((97, 77), '
+ 'weight))')
+('TensorID((97, 77), weight) : TensorEdge(((97, -65), weight), ((97, 77), '
+ 'weight))')
+('TensorID((97, -66), config) : TensorEdge(((97, -66), config), ((97, 77), '
+ 'config))')
+('TensorID((97, 77), config) : TensorEdge(((97, -66), config), ((97, 77), '
+ 'config))')
+('TensorID(91, odata) : [TensorEdge((91, odata), ((97, 77), data), 2), '
+ 'TensorEdge((91, odata), ((96, 92), data), 0), TensorEdge((91, odata), (95, '
+ 'data), 1)]')
+'TensorID((97, 77), data) : TensorEdge((91, odata), ((97, 77), data), 2)'
+'TensorID((96, 93), odata) : TensorEdge(((96, 93), odata), ((97, 78), lhs))'
+'TensorID((97, 78), lhs) : TensorEdge(((96, 93), odata), ((97, 78), lhs))'
+'TensorID(90, odata) : TensorEdge((90, odata), (91, data))'
+'TensorID(91, data) : TensorEdge((90, odata), (91, data))'
+'TensorID((89, 83), odata) : TensorEdge(((89, 83), odata), (90, data))'
+'TensorID(90, data) : TensorEdge(((89, 83), odata), (90, data))'
+'TensorID(-79, min) : TensorEdge((-79, min), (90, min))'
+'TensorID(90, min) : TensorEdge((-79, min), (90, min))'
+'TensorID(-80, max) : TensorEdge((-80, max), (90, max))'
+'TensorID(90, max) : TensorEdge((-80, max), (90, max))'
+('TensorID((89, -73), fused_scale) : TensorEdge(((89, -73), fused_scale), '
+ '((89, 83), fused_scale))')
+('TensorID((89, 83), fused_scale) : TensorEdge(((89, -73), fused_scale), ((89, '
+ '83), fused_scale))')
+('TensorID((89, -74), fused_bias) : TensorEdge(((89, -74), fused_bias), ((89, '
+ '83), fused_bias))')
+('TensorID((89, 83), fused_bias) : TensorEdge(((89, -74), fused_bias), ((89, '
+ '83), fused_bias))')
+('TensorID((89, -71), weight) : TensorEdge(((89, -71), weight), ((89, 81), '
+ 'weight))')
+('TensorID((89, 81), weight) : TensorEdge(((89, -71), weight), ((89, 81), '
+ 'weight))')
+('TensorID((89, -72), config) : TensorEdge(((89, -72), config), ((89, 81), '
+ 'config))')
+('TensorID((89, 81), config) : TensorEdge(((89, -72), config), ((89, 81), '
+ 'config))')
+('TensorID(87, odata) : [TensorEdge((87, odata), ((89, 81), data), 0), '
+ 'TensorEdge((87, odata), (88, data), 1)]')
+'TensorID((89, 81), data) : TensorEdge((87, odata), ((89, 81), data), 0)'
+'TensorID(88, odata) : TensorEdge((88, odata), ((89, 82), rhs))'
+'TensorID((89, 82), rhs) : TensorEdge((88, odata), ((89, 82), rhs))'
+'TensorID(86, odata) : TensorEdge((86, odata), (87, data))'
+'TensorID(87, data) : TensorEdge((86, odata), (87, data))'
+('TensorID(85, odata) : [TensorEdge((85, odata), (86, data)), TensorEdge((85, '
+ 'odata), (103, data))]')
+'TensorID(86, data) : TensorEdge((85, odata), (86, data))'
+'TensorID(-75, min) : TensorEdge((-75, min), (86, min))'
+'TensorID(86, min) : TensorEdge((-75, min), (86, min))'
+'TensorID(-76, max) : TensorEdge((-76, max), (86, max))'
+'TensorID(86, max) : TensorEdge((-76, max), (86, max))'
+'TensorID(-61, odata) : TensorEdge((-61, odata), (85, lhs))'
+'TensorID(85, lhs) : TensorEdge((-61, odata), (85, lhs))'
+'TensorID(-62, odata) : TensorEdge((-62, odata), (85, rhs))'
+'TensorID(85, rhs) : TensorEdge((-62, odata), (85, rhs))'
+'TensorID(88, data) : TensorEdge((87, odata), (88, data), 1)'
+'TensorID(-77, weight) : TensorEdge((-77, weight), (88, weight))'
+'TensorID(88, weight) : TensorEdge((-77, weight), (88, weight))'
+'TensorID(-78, config) : TensorEdge((-78, config), (88, config))'
+'TensorID(88, config) : TensorEdge((-78, config), (88, config))'
+('TensorID((96, -83), weight) : TensorEdge(((96, -83), weight), ((96, 92), '
+ 'weight))')
+('TensorID((96, 92), weight) : TensorEdge(((96, -83), weight), ((96, 92), '
+ 'weight))')
+('TensorID((96, -84), config) : TensorEdge(((96, -84), config), ((96, 92), '
+ 'config))')
+('TensorID((96, 92), config) : TensorEdge(((96, -84), config), ((96, 92), '
+ 'config))')
+'TensorID((96, 92), data) : TensorEdge((91, odata), ((96, 92), data), 0)'
+'TensorID(95, odata) : TensorEdge((95, odata), ((96, 93), rhs))'
+'TensorID((96, 93), rhs) : TensorEdge((95, odata), ((96, 93), rhs))'
+'TensorID(95, data) : TensorEdge((91, odata), (95, data), 1)'
+'TensorID(-85, weight) : TensorEdge((-85, weight), (95, weight))'
+'TensorID(95, weight) : TensorEdge((-85, weight), (95, weight))'
+'TensorID(-86, config) : TensorEdge((-86, config), (95, config))'
+'TensorID(95, config) : TensorEdge((-86, config), (95, config))'
+('TensorID((104, -93), odata) : TensorEdge(((104, -93), odata), ((104, 101), '
+ 'rhs))')
+'TensorID((104, 101), rhs) : TensorEdge(((104, -93), odata), ((104, 101), rhs))'
+('TensorID((104, -88), odata) : TensorEdge(((104, -88), odata), ((104, 100), '
+ 'lhs))')
+'TensorID((104, 100), lhs) : TensorEdge(((104, -88), odata), ((104, 100), lhs))'
+('TensorID((104, -91), fused_scale) : TensorEdge(((104, -91), fused_scale), '
+ '((104, 99), fused_scale))')
+('TensorID((104, 99), fused_scale) : TensorEdge(((104, -91), fused_scale), '
+ '((104, 99), fused_scale))')
+('TensorID((104, -92), fused_bias) : TensorEdge(((104, -92), fused_bias), '
+ '((104, 99), fused_bias))')
+('TensorID((104, 99), fused_bias) : TensorEdge(((104, -92), fused_bias), '
+ '((104, 99), fused_bias))')
+('TensorID((104, -89), weight) : TensorEdge(((104, -89), weight), ((104, 98), '
+ 'weight))')
+('TensorID((104, 98), weight) : TensorEdge(((104, -89), weight), ((104, 98), '
+ 'weight))')
+('TensorID((104, -90), config) : TensorEdge(((104, -90), config), ((104, 98), '
+ 'config))')
+('TensorID((104, 98), config) : TensorEdge(((104, -90), config), ((104, 98), '
+ 'config))')
+'TensorID(103, odata) : TensorEdge((103, odata), ((104, 98), data))'
+'TensorID((104, 98), data) : TensorEdge((103, odata), ((104, 98), data))'
+'TensorID(103, data) : TensorEdge((85, odata), (103, data))'
+'TensorID(-94, min) : TensorEdge((-94, min), (103, min))'
+'TensorID(103, min) : TensorEdge((-94, min), (103, min))'
+'TensorID(-95, max) : TensorEdge((-95, max), (103, max))'
+'TensorID(103, max) : TensorEdge((-95, max), (103, max))'
+'TensorID((62, 51), odata) : TensorEdge(((62, 51), odata), (70, func_out0), 0)'
+'TensorID(70, func_out0) : TensorEdge(((62, 51), odata), (70, func_out0), 0)'
+'TensorID((69, 66), odata) : TensorEdge(((69, 66), odata), (70, func_out1), 1)'
+'TensorID(70, func_out1) : TensorEdge(((69, 66), odata), (70, func_out1), 1)'
+('TensorID((62, -37), fused_scale) : TensorEdge(((62, -37), fused_scale), '
+ '((62, 51), fused_scale))')
+('TensorID((62, 51), fused_scale) : TensorEdge(((62, -37), fused_scale), ((62, '
+ '51), fused_scale))')
+('TensorID((62, -38), fused_bias) : TensorEdge(((62, -38), fused_bias), ((62, '
+ '51), fused_bias))')
+('TensorID((62, 51), fused_bias) : TensorEdge(((62, -38), fused_bias), ((62, '
+ '51), fused_bias))')
+('TensorID((62, -35), weight) : TensorEdge(((62, -35), weight), ((62, 49), '
+ 'weight))')
+('TensorID((62, 49), weight) : TensorEdge(((62, -35), weight), ((62, 49), '
+ 'weight))')
+('TensorID((62, -36), config) : TensorEdge(((62, -36), config), ((62, 49), '
+ 'config))')
+('TensorID((62, 49), config) : TensorEdge(((62, -36), config), ((62, 49), '
+ 'config))')
+('TensorID(60, odata) : [TensorEdge((60, odata), ((62, 49), data), 0), '
+ 'TensorEdge((60, odata), (61, data), 1)]')
+'TensorID((62, 49), data) : TensorEdge((60, odata), ((62, 49), data), 0)'
+'TensorID(61, odata) : TensorEdge((61, odata), ((62, 50), rhs))'
+'TensorID((62, 50), rhs) : TensorEdge((61, odata), ((62, 50), rhs))'
+'TensorID(59, odata) : TensorEdge((59, odata), (60, data))'
+'TensorID(60, data) : TensorEdge((59, odata), (60, data))'
+'TensorID((58, 54), odata) : TensorEdge(((58, 54), odata), (59, data))'
+'TensorID(59, data) : TensorEdge(((58, 54), odata), (59, data))'
+'TensorID(-46, min) : TensorEdge((-46, min), (59, min))'
+'TensorID(59, min) : TensorEdge((-46, min), (59, min))'
+'TensorID(-47, max) : TensorEdge((-47, max), (59, max))'
+'TensorID(59, max) : TensorEdge((-47, max), (59, max))'
+('TensorID((58, -42), fused_scale) : TensorEdge(((58, -42), fused_scale), '
+ '((58, 54), fused_scale))')
+('TensorID((58, 54), fused_scale) : TensorEdge(((58, -42), fused_scale), ((58, '
+ '54), fused_scale))')
+('TensorID((58, -43), fused_bias) : TensorEdge(((58, -43), fused_bias), ((58, '
+ '54), fused_bias))')
+('TensorID((58, 54), fused_bias) : TensorEdge(((58, -43), fused_bias), ((58, '
+ '54), fused_bias))')
+('TensorID((58, -40), weight) : TensorEdge(((58, -40), weight), ((58, 53), '
+ 'weight))')
+('TensorID((58, 53), weight) : TensorEdge(((58, -40), weight), ((58, 53), '
+ 'weight))')
+('TensorID((58, -41), config) : TensorEdge(((58, -41), config), ((58, 53), '
+ 'config))')
+('TensorID((58, 53), config) : TensorEdge(((58, -41), config), ((58, 53), '
+ 'config))')
+'TensorID(57, odata) : TensorEdge((57, odata), ((58, 53), data))'
+'TensorID((58, 53), data) : TensorEdge((57, odata), ((58, 53), data))'
+('TensorID(56, odata) : [TensorEdge((56, odata), (57, data)), TensorEdge((56, '
+ 'odata), (68, data))]')
+'TensorID(57, data) : TensorEdge((56, odata), (57, data))'
+'TensorID(-44, min) : TensorEdge((-44, min), (57, min))'
+'TensorID(57, min) : TensorEdge((-44, min), (57, min))'
+'TensorID(-45, max) : TensorEdge((-45, max), (57, max))'
+'TensorID(57, max) : TensorEdge((-45, max), (57, max))'
+'TensorID(-31, odata) : TensorEdge((-31, odata), (56, lhs))'
+'TensorID(56, lhs) : TensorEdge((-31, odata), (56, lhs))'
+'TensorID(-32, odata) : TensorEdge((-32, odata), (56, rhs))'
+'TensorID(56, rhs) : TensorEdge((-32, odata), (56, rhs))'
+'TensorID(61, data) : TensorEdge((60, odata), (61, data), 1)'
+'TensorID(-48, weight) : TensorEdge((-48, weight), (61, weight))'
+'TensorID(61, weight) : TensorEdge((-48, weight), (61, weight))'
+'TensorID(-49, config) : TensorEdge((-49, config), (61, config))'
+'TensorID(61, config) : TensorEdge((-49, config), (61, config))'
+'TensorID((69, -56), odata) : TensorEdge(((69, -56), odata), ((69, 66), rhs))'
+'TensorID((69, 66), rhs) : TensorEdge(((69, -56), odata), ((69, 66), rhs))'
+'TensorID((69, -51), odata) : TensorEdge(((69, -51), odata), ((69, 65), lhs))'
+'TensorID((69, 65), lhs) : TensorEdge(((69, -51), odata), ((69, 65), lhs))'
+('TensorID((69, -54), fused_scale) : TensorEdge(((69, -54), fused_scale), '
+ '((69, 64), fused_scale))')
+('TensorID((69, 64), fused_scale) : TensorEdge(((69, -54), fused_scale), ((69, '
+ '64), fused_scale))')
+('TensorID((69, -55), fused_bias) : TensorEdge(((69, -55), fused_bias), ((69, '
+ '64), fused_bias))')
+('TensorID((69, 64), fused_bias) : TensorEdge(((69, -55), fused_bias), ((69, '
+ '64), fused_bias))')
+('TensorID((69, -52), weight) : TensorEdge(((69, -52), weight), ((69, 63), '
+ 'weight))')
+('TensorID((69, 63), weight) : TensorEdge(((69, -52), weight), ((69, 63), '
+ 'weight))')
+('TensorID((69, -53), config) : TensorEdge(((69, -53), config), ((69, 63), '
+ 'config))')
+('TensorID((69, 63), config) : TensorEdge(((69, -53), config), ((69, 63), '
+ 'config))')
+'TensorID(68, odata) : TensorEdge((68, odata), ((69, 63), data))'
+'TensorID((69, 63), data) : TensorEdge((68, odata), ((69, 63), data))'
+'TensorID(68, data) : TensorEdge((56, odata), (68, data))'
+'TensorID(-57, min) : TensorEdge((-57, min), (68, min))'
+'TensorID(68, min) : TensorEdge((-57, min), (68, min))'
+'TensorID(-58, max) : TensorEdge((-58, max), (68, max))'
+'TensorID(68, max) : TensorEdge((-58, max), (68, max))'
+'TensorID(112, odata) : TensorEdge((112, odata), (113, func_out0))'
+'TensorID(113, func_out0) : TensorEdge((112, odata), (113, func_out0))'
+'TensorID(-98, odata) : TensorEdge((-98, odata), (112, lhs))'
+'TensorID(112, lhs) : TensorEdge((-98, odata), (112, lhs))'
+'TensorID(-99, odata) : TensorEdge((-99, odata), (112, rhs))'
+'TensorID(112, rhs) : TensorEdge((-99, odata), (112, rhs))'
+'TensorID((41, 33), odata) : TensorEdge(((41, 33), odata), (43, func_out0), 0)'
+'TensorID(43, func_out0) : TensorEdge(((41, 33), odata), (43, func_out0), 0)'
+'TensorID(42, odata) : TensorEdge((42, odata), (43, func_out1), 1)'
+'TensorID(43, func_out1) : TensorEdge((42, odata), (43, func_out1), 1)'
+('TensorID((41, -17), fused_scale) : TensorEdge(((41, -17), fused_scale), '
+ '((41, 33), fused_scale))')
+('TensorID((41, 33), fused_scale) : TensorEdge(((41, -17), fused_scale), ((41, '
+ '33), fused_scale))')
+('TensorID((41, -18), fused_bias) : TensorEdge(((41, -18), fused_bias), ((41, '
+ '33), fused_bias))')
+('TensorID((41, 33), fused_bias) : TensorEdge(((41, -18), fused_bias), ((41, '
+ '33), fused_bias))')
+('TensorID((41, -15), weight) : TensorEdge(((41, -15), weight), ((41, 32), '
+ 'weight))')
+('TensorID((41, 32), weight) : TensorEdge(((41, -15), weight), ((41, 32), '
+ 'weight))')
+('TensorID((41, -16), config) : TensorEdge(((41, -16), config), ((41, 32), '
+ 'config))')
+('TensorID((41, 32), config) : TensorEdge(((41, -16), config), ((41, 32), '
+ 'config))')
+'TensorID(40, odata) : TensorEdge((40, odata), ((41, 32), data))'
+'TensorID((41, 32), data) : TensorEdge((40, odata), ((41, 32), data))'
+'TensorID((39, 36), odata) : TensorEdge(((39, 36), odata), (40, data))'
+'TensorID(40, data) : TensorEdge(((39, 36), odata), (40, data))'
+'TensorID(-26, min) : TensorEdge((-26, min), (40, min))'
+'TensorID(40, min) : TensorEdge((-26, min), (40, min))'
+'TensorID(-27, max) : TensorEdge((-27, max), (40, max))'
+'TensorID(40, max) : TensorEdge((-27, max), (40, max))'
+('TensorID((39, -22), fused_scale) : TensorEdge(((39, -22), fused_scale), '
+ '((39, 36), fused_scale))')
+('TensorID((39, 36), fused_scale) : TensorEdge(((39, -22), fused_scale), ((39, '
+ '36), fused_scale))')
+('TensorID((39, -23), fused_bias) : TensorEdge(((39, -23), fused_bias), ((39, '
+ '36), fused_bias))')
+('TensorID((39, 36), fused_bias) : TensorEdge(((39, -23), fused_bias), ((39, '
+ '36), fused_bias))')
+('TensorID((39, -20), weight) : TensorEdge(((39, -20), weight), ((39, 35), '
+ 'weight))')
+('TensorID((39, 35), weight) : TensorEdge(((39, -20), weight), ((39, 35), '
+ 'weight))')
+('TensorID((39, -21), config) : TensorEdge(((39, -21), config), ((39, 35), '
+ 'config))')
+('TensorID((39, 35), config) : TensorEdge(((39, -21), config), ((39, 35), '
+ 'config))')
+'TensorID(38, odata) : TensorEdge((38, odata), ((39, 35), data))'
+'TensorID((39, 35), data) : TensorEdge((38, odata), ((39, 35), data))'
+('TensorID(-13, odata) : [TensorEdge((-13, odata), (38, data)), '
+ 'TensorEdge((-13, odata), (42, lhs))]')
+'TensorID(38, data) : TensorEdge((-13, odata), (38, data))'
+'TensorID(-24, min) : TensorEdge((-24, min), (38, min))'
+'TensorID(38, min) : TensorEdge((-24, min), (38, min))'
+'TensorID(-25, max) : TensorEdge((-25, max), (38, max))'
+'TensorID(38, max) : TensorEdge((-25, max), (38, max))'
+'TensorID(42, lhs) : TensorEdge((-13, odata), (42, lhs))'
+'TensorID(-28, odata) : TensorEdge((-28, odata), (42, rhs))'
+'TensorID(42, rhs) : TensorEdge((-28, odata), (42, rhs))'

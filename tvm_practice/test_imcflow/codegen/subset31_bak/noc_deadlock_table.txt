@@ -1,0 +1,182 @@
+================================================================================
+NoC Deadlock Detection Report
+================================================================================
+
+Total potential deadlocks detected: 6
+
+WARNING: Circular dependencies detected in NoC transfers!
+These cycles could potentially lead to deadlock situations.
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
+  Number of cycles: 1
+
+  Cycle #1:
+    Path: NodeID.imce_2_1 -> NodeID.inode_3_0 -> NodeID.imce_3_1 -> NodeID.imce_2_4 -> NodeID.imce_2_1
+    Number of nodes in cycle: 4
+    Transfers involved:
+
+      Transfer #1:
+        Source Node: NodeID.imce_2_1
+        Destination Node: NodeID.inode_3_0
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge(((97, 79), odata), (105, func_out0), 0)
+
+      Transfer #2:
+        Source Node: NodeID.inode_3_0
+        Destination Node: NodeID.imce_3_1
+        Number of tensor edges: 4
+        Edges:
+          TensorEdge(((89, -73), fused_scale), ((89, 83), fused_scale))
+          TensorEdge(((89, -74), fused_bias), ((89, 83), fused_bias))
+          TensorEdge(((89, -71), weight), ((89, 81), weight))
+          TensorEdge(((89, -72), config), ((89, 81), config))
+
+      Transfer #3:
+        Source Node: NodeID.imce_3_1
+        Destination Node: NodeID.imce_2_4
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge(((89, 83), odata), (90, data))
+
+      Transfer #4:
+        Source Node: NodeID.imce_2_4
+        Destination Node: NodeID.imce_2_1
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge((91, odata), ((97, 77), data), 2)
+
+--------------------------------------------------------------------------------
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region2_main_5
+  Number of cycles: 3
+
+  Cycle #1:
+    Path: NodeID.imce_2_3 -> NodeID.inode_3_0 -> NodeID.imce_3_1 -> NodeID.imce_2_3
+    Number of nodes in cycle: 3
+    Transfers involved:
+
+      Transfer #1:
+        Source Node: NodeID.imce_2_3
+        Destination Node: NodeID.inode_3_0
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge(((62, 51), odata), (70, func_out0), 0)
+
+      Transfer #2:
+        Source Node: NodeID.inode_3_0
+        Destination Node: NodeID.imce_3_1
+        Number of tensor edges: 2
+        Edges:
+          TensorEdge((-46, min), (59, min))
+          TensorEdge((-47, max), (59, max))
+
+      Transfer #3:
+        Source Node: NodeID.imce_3_1
+        Destination Node: NodeID.imce_2_3
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge((60, odata), ((62, 49), data), 0)
+
+  Cycle #2:
+    Path: NodeID.inode_2_0 -> NodeID.imce_2_1 -> NodeID.inode_2_0
+    Number of nodes in cycle: 2
+    Transfers involved:
+
+      Transfer #1:
+        Source Node: NodeID.inode_2_0
+        Destination Node: NodeID.imce_2_1
+        Number of tensor edges: 6
+        Edges:
+          TensorEdge(((69, -56), odata), ((69, 66), rhs))
+          TensorEdge(((69, -51), odata), ((69, 65), lhs))
+          TensorEdge(((69, -54), fused_scale), ((69, 64), fused_scale))
+          TensorEdge(((69, -55), fused_bias), ((69, 64), fused_bias))
+          TensorEdge(((69, -52), weight), ((69, 63), weight))
+          TensorEdge(((69, -53), config), ((69, 63), config))
+
+      Transfer #2:
+        Source Node: NodeID.imce_2_1
+        Destination Node: NodeID.inode_2_0
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge(((69, 66), odata), (70, func_out1), 1)
+
+  Cycle #3:
+    Path: NodeID.inode_2_0 -> NodeID.imce_2_2 -> NodeID.imce_2_1 -> NodeID.inode_2_0
+    Number of nodes in cycle: 3
+    Transfers involved:
+
+      Transfer #1:
+        Source Node: NodeID.inode_2_0
+        Destination Node: NodeID.imce_2_2
+        Number of tensor edges: 2
+        Edges:
+          TensorEdge((-57, min), (68, min))
+          TensorEdge((-58, max), (68, max))
+
+      Transfer #2:
+        Source Node: NodeID.imce_2_2
+        Destination Node: NodeID.imce_2_1
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge((68, odata), ((69, 63), data))
+
+      Transfer #3:
+        Source Node: NodeID.imce_2_1
+        Destination Node: NodeID.inode_2_0
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge(((69, 66), odata), (70, func_out1), 1)
+
+--------------------------------------------------------------------------------
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_20
+  No deadlocks detected
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0
+  Number of cycles: 2
+
+  Cycle #1:
+    Path: NodeID.inode_3_0 -> NodeID.imce_3_1 -> NodeID.inode_3_0
+    Number of nodes in cycle: 2
+    Transfers involved:
+
+      Transfer #1:
+        Source Node: NodeID.inode_3_0
+        Destination Node: NodeID.imce_3_1
+        Number of tensor edges: 4
+        Edges:
+          TensorEdge(((41, -17), fused_scale), ((41, 33), fused_scale))
+          TensorEdge(((41, -18), fused_bias), ((41, 33), fused_bias))
+          TensorEdge(((41, -15), weight), ((41, 32), weight))
+          TensorEdge(((41, -16), config), ((41, 32), config))
+
+      Transfer #2:
+        Source Node: NodeID.imce_3_1
+        Destination Node: NodeID.inode_3_0
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge(((41, 33), odata), (43, func_out0), 0)
+
+  Cycle #2:
+    Path: NodeID.inode_2_0 -> NodeID.imce_2_4 -> NodeID.inode_2_0
+    Number of nodes in cycle: 2
+    Transfers involved:
+
+      Transfer #1:
+        Source Node: NodeID.inode_2_0
+        Destination Node: NodeID.imce_2_4
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge((-28, odata), (42, rhs))
+
+      Transfer #2:
+        Source Node: NodeID.imce_2_4
+        Destination Node: NodeID.inode_2_0
+        Number of tensor edges: 1
+        Edges:
+          TensorEdge((42, odata), (43, func_out1), 1)
+
+--------------------------------------------------------------------------------
+

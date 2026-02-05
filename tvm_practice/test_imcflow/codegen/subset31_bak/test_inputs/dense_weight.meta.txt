@@ -1,0 +1,3 @@
+shape: 10,64
+dtype: float32
+nbytes: 2560

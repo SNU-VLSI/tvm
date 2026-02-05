@@ -1,0 +1,582 @@
+================================================================================
+FIFO Conflict Monitor Report
+================================================================================
+
+Total conflicts detected: 31
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_12
+  Number of conflicts: 13
+
+  Conflict #1:
+    Destination Node: Function (CustomID: 105)
+    HW Node: (<NodeID.inode_3_0: 15>, <NodeID.inode_2_0: 10>)
+    Destination Tensor ID: TensorID(105, func_out0)
+    FIFO ID: 2
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. imcflow.fused_batch_norm
+         CustomID: 79
+         HW Node: NodeID.imce_2_1
+         Tensor Type: odata
+         Edge: TensorEdge(((97, 79), odata), (105, func_out0), 0)
+      2. add
+         CustomID: 101
+         HW Node: NodeID.imce_1_3
+         Tensor Type: odata
+         Edge: TensorEdge(((104, 101), odata), (105, func_out1), 1)
+
+  Conflict #2:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 79)
+    HW Node: NodeID.imce_2_1
+    Destination Tensor ID: TensorID((97, 79), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -67
+         HW Node: NodeID.inode_2_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((97, -67), fused_scale), ((97, 79), fused_scale))
+      2. Const
+         CustomID: -68
+         HW Node: NodeID.inode_2_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((97, -68), fused_bias), ((97, 79), fused_bias))
+
+  Conflict #3:
+    Destination Node: nn.imcflow_qconv (CustomID: 77)
+    HW Node: NodeID.imce_2_1
+    Destination Tensor ID: TensorID((97, 77), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -65
+         HW Node: NodeID.inode_2_0
+         Tensor Type: weight
+         Edge: TensorEdge(((97, -65), weight), ((97, 77), weight))
+      2. Const
+         CustomID: -66
+         HW Node: NodeID.inode_2_0
+         Tensor Type: config
+         Edge: TensorEdge(((97, -66), config), ((97, 77), config))
+
+  Conflict #4:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 90)
+    HW Node: NodeID.imce_2_4
+    Destination Tensor ID: TensorID(90, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -79
+         HW Node: NodeID.inode_2_0
+         Tensor Type: min
+         Edge: TensorEdge((-79, min), (90, min))
+      2. Const
+         CustomID: -80
+         HW Node: NodeID.inode_2_0
+         Tensor Type: max
+         Edge: TensorEdge((-80, max), (90, max))
+
+  Conflict #5:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 83)
+    HW Node: NodeID.imce_3_1
+    Destination Tensor ID: TensorID((89, 83), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -73
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((89, -73), fused_scale), ((89, 83), fused_scale))
+      2. Const
+         CustomID: -74
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((89, -74), fused_bias), ((89, 83), fused_bias))
+
+  Conflict #6:
+    Destination Node: nn.imcflow_qconv (CustomID: 81)
+    HW Node: NodeID.imce_3_1
+    Destination Tensor ID: TensorID((89, 81), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -71
+         HW Node: NodeID.inode_3_0
+         Tensor Type: weight
+         Edge: TensorEdge(((89, -71), weight), ((89, 81), weight))
+      2. Const
+         CustomID: -72
+         HW Node: NodeID.inode_3_0
+         Tensor Type: config
+         Edge: TensorEdge(((89, -72), config), ((89, 81), config))
+
+  Conflict #7:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 86)
+    HW Node: NodeID.imce_3_3
+    Destination Tensor ID: TensorID(86, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -75
+         HW Node: NodeID.inode_3_0
+         Tensor Type: min
+         Edge: TensorEdge((-75, min), (86, min))
+      2. Const
+         CustomID: -76
+         HW Node: NodeID.inode_3_0
+         Tensor Type: max
+         Edge: TensorEdge((-76, max), (86, max))
+
+  Conflict #8:
+    Destination Node: nn.imcflow_qconv (CustomID: 88)
+    HW Node: NodeID.imce_3_2
+    Destination Tensor ID: TensorID(88, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -77
+         HW Node: NodeID.inode_3_0
+         Tensor Type: weight
+         Edge: TensorEdge((-77, weight), (88, weight))
+      2. Const
+         CustomID: -78
+         HW Node: NodeID.inode_3_0
+         Tensor Type: config
+         Edge: TensorEdge((-78, config), (88, config))
+
+  Conflict #9:
+    Destination Node: nn.imcflow_qconv (CustomID: 92)
+    HW Node: NodeID.imce_2_2
+    Destination Tensor ID: TensorID((96, 92), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -83
+         HW Node: NodeID.inode_2_0
+         Tensor Type: weight
+         Edge: TensorEdge(((96, -83), weight), ((96, 92), weight))
+      2. Const
+         CustomID: -84
+         HW Node: NodeID.inode_2_0
+         Tensor Type: config
+         Edge: TensorEdge(((96, -84), config), ((96, 92), config))
+
+  Conflict #10:
+    Destination Node: nn.imcflow_qconv (CustomID: 95)
+    HW Node: NodeID.imce_2_3
+    Destination Tensor ID: TensorID(95, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -85
+         HW Node: NodeID.inode_2_0
+         Tensor Type: weight
+         Edge: TensorEdge((-85, weight), (95, weight))
+      2. Const
+         CustomID: -86
+         HW Node: NodeID.inode_2_0
+         Tensor Type: config
+         Edge: TensorEdge((-86, config), (95, config))
+
+  Conflict #11:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 99)
+    HW Node: NodeID.imce_1_3
+    Destination Tensor ID: TensorID((104, 99), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -91
+         HW Node: NodeID.inode_1_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((104, -91), fused_scale), ((104, 99), fused_scale))
+      2. Const
+         CustomID: -92
+         HW Node: NodeID.inode_1_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((104, -92), fused_bias), ((104, 99), fused_bias))
+
+  Conflict #12:
+    Destination Node: nn.imcflow_qconv (CustomID: 98)
+    HW Node: NodeID.imce_1_3
+    Destination Tensor ID: TensorID((104, 98), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -89
+         HW Node: NodeID.inode_1_0
+         Tensor Type: weight
+         Edge: TensorEdge(((104, -89), weight), ((104, 98), weight))
+      2. Const
+         CustomID: -90
+         HW Node: NodeID.inode_1_0
+         Tensor Type: config
+         Edge: TensorEdge(((104, -90), config), ((104, 98), config))
+
+  Conflict #13:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 103)
+    HW Node: NodeID.imce_1_4
+    Destination Tensor ID: TensorID(103, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -94
+         HW Node: NodeID.inode_1_0
+         Tensor Type: min
+         Edge: TensorEdge((-94, min), (103, min))
+      2. Const
+         CustomID: -95
+         HW Node: NodeID.inode_1_0
+         Tensor Type: max
+         Edge: TensorEdge((-95, max), (103, max))
+
+--------------------------------------------------------------------------------
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region2_main_5
+  Number of conflicts: 11
+
+  Conflict #1:
+    Destination Node: Function (CustomID: 70)
+    HW Node: (<NodeID.inode_3_0: 15>, <NodeID.inode_2_0: 10>)
+    Destination Tensor ID: TensorID(70, func_out0)
+    FIFO ID: 2
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. imcflow.fused_batch_norm
+         CustomID: 51
+         HW Node: NodeID.imce_2_3
+         Tensor Type: odata
+         Edge: TensorEdge(((62, 51), odata), (70, func_out0), 0)
+      2. add
+         CustomID: 66
+         HW Node: NodeID.imce_2_1
+         Tensor Type: odata
+         Edge: TensorEdge(((69, 66), odata), (70, func_out1), 1)
+
+  Conflict #2:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 51)
+    HW Node: NodeID.imce_2_3
+    Destination Tensor ID: TensorID((62, 51), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -37
+         HW Node: NodeID.inode_2_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((62, -37), fused_scale), ((62, 51), fused_scale))
+      2. Const
+         CustomID: -38
+         HW Node: NodeID.inode_2_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((62, -38), fused_bias), ((62, 51), fused_bias))
+
+  Conflict #3:
+    Destination Node: nn.imcflow_qconv (CustomID: 49)
+    HW Node: NodeID.imce_2_3
+    Destination Tensor ID: TensorID((62, 49), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -35
+         HW Node: NodeID.inode_2_0
+         Tensor Type: weight
+         Edge: TensorEdge(((62, -35), weight), ((62, 49), weight))
+      2. Const
+         CustomID: -36
+         HW Node: NodeID.inode_2_0
+         Tensor Type: config
+         Edge: TensorEdge(((62, -36), config), ((62, 49), config))
+
+  Conflict #4:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 59)
+    HW Node: NodeID.imce_3_1
+    Destination Tensor ID: TensorID(59, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -46
+         HW Node: NodeID.inode_3_0
+         Tensor Type: min
+         Edge: TensorEdge((-46, min), (59, min))
+      2. Const
+         CustomID: -47
+         HW Node: NodeID.inode_3_0
+         Tensor Type: max
+         Edge: TensorEdge((-47, max), (59, max))
+
+  Conflict #5:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 54)
+    HW Node: NodeID.imce_3_2
+    Destination Tensor ID: TensorID((58, 54), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -42
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((58, -42), fused_scale), ((58, 54), fused_scale))
+      2. Const
+         CustomID: -43
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((58, -43), fused_bias), ((58, 54), fused_bias))
+
+  Conflict #6:
+    Destination Node: nn.imcflow_qconv (CustomID: 53)
+    HW Node: NodeID.imce_3_2
+    Destination Tensor ID: TensorID((58, 53), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -40
+         HW Node: NodeID.inode_3_0
+         Tensor Type: weight
+         Edge: TensorEdge(((58, -40), weight), ((58, 53), weight))
+      2. Const
+         CustomID: -41
+         HW Node: NodeID.inode_3_0
+         Tensor Type: config
+         Edge: TensorEdge(((58, -41), config), ((58, 53), config))
+
+  Conflict #7:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 57)
+    HW Node: NodeID.imce_3_3
+    Destination Tensor ID: TensorID(57, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -44
+         HW Node: NodeID.inode_3_0
+         Tensor Type: min
+         Edge: TensorEdge((-44, min), (57, min))
+      2. Const
+         CustomID: -45
+         HW Node: NodeID.inode_3_0
+         Tensor Type: max
+         Edge: TensorEdge((-45, max), (57, max))
+
+  Conflict #8:
+    Destination Node: nn.imcflow_qconv (CustomID: 61)
+    HW Node: NodeID.imce_2_4
+    Destination Tensor ID: TensorID(61, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -48
+         HW Node: NodeID.inode_2_0
+         Tensor Type: weight
+         Edge: TensorEdge((-48, weight), (61, weight))
+      2. Const
+         CustomID: -49
+         HW Node: NodeID.inode_2_0
+         Tensor Type: config
+         Edge: TensorEdge((-49, config), (61, config))
+
+  Conflict #9:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 64)
+    HW Node: NodeID.imce_2_1
+    Destination Tensor ID: TensorID((69, 64), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -54
+         HW Node: NodeID.inode_2_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((69, -54), fused_scale), ((69, 64), fused_scale))
+      2. Const
+         CustomID: -55
+         HW Node: NodeID.inode_2_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((69, -55), fused_bias), ((69, 64), fused_bias))
+
+  Conflict #10:
+    Destination Node: nn.imcflow_qconv (CustomID: 63)
+    HW Node: NodeID.imce_2_1
+    Destination Tensor ID: TensorID((69, 63), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -52
+         HW Node: NodeID.inode_2_0
+         Tensor Type: weight
+         Edge: TensorEdge(((69, -52), weight), ((69, 63), weight))
+      2. Const
+         CustomID: -53
+         HW Node: NodeID.inode_2_0
+         Tensor Type: config
+         Edge: TensorEdge(((69, -53), config), ((69, 63), config))
+
+  Conflict #11:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 68)
+    HW Node: NodeID.imce_2_2
+    Destination Tensor ID: TensorID(68, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -57
+         HW Node: NodeID.inode_2_0
+         Tensor Type: min
+         Edge: TensorEdge((-57, min), (68, min))
+      2. Const
+         CustomID: -58
+         HW Node: NodeID.inode_2_0
+         Tensor Type: max
+         Edge: TensorEdge((-58, max), (68, max))
+
+--------------------------------------------------------------------------------
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_20
+  No conflicts
+
+Function: tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0
+  Number of conflicts: 7
+
+  Conflict #1:
+    Destination Node: Function (CustomID: 43)
+    HW Node: (<NodeID.inode_3_0: 15>, <NodeID.inode_2_0: 10>)
+    Destination Tensor ID: TensorID(43, func_out0)
+    FIFO ID: 2
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. imcflow.fused_batch_norm
+         CustomID: 33
+         HW Node: NodeID.imce_3_1
+         Tensor Type: odata
+         Edge: TensorEdge(((41, 33), odata), (43, func_out0), 0)
+      2. multiply
+         CustomID: 42
+         HW Node: NodeID.imce_2_4
+         Tensor Type: odata
+         Edge: TensorEdge((42, odata), (43, func_out1), 1)
+
+  Conflict #2:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 33)
+    HW Node: NodeID.imce_3_1
+    Destination Tensor ID: TensorID((41, 33), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -17
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((41, -17), fused_scale), ((41, 33), fused_scale))
+      2. Const
+         CustomID: -18
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((41, -18), fused_bias), ((41, 33), fused_bias))
+
+  Conflict #3:
+    Destination Node: nn.imcflow_qconv (CustomID: 32)
+    HW Node: NodeID.imce_3_1
+    Destination Tensor ID: TensorID((41, 32), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -15
+         HW Node: NodeID.inode_3_0
+         Tensor Type: weight
+         Edge: TensorEdge(((41, -15), weight), ((41, 32), weight))
+      2. Const
+         CustomID: -16
+         HW Node: NodeID.inode_3_0
+         Tensor Type: config
+         Edge: TensorEdge(((41, -16), config), ((41, 32), config))
+
+  Conflict #4:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 40)
+    HW Node: NodeID.imce_3_2
+    Destination Tensor ID: TensorID(40, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -26
+         HW Node: NodeID.inode_3_0
+         Tensor Type: min
+         Edge: TensorEdge((-26, min), (40, min))
+      2. Const
+         CustomID: -27
+         HW Node: NodeID.inode_3_0
+         Tensor Type: max
+         Edge: TensorEdge((-27, max), (40, max))
+
+  Conflict #5:
+    Destination Node: imcflow.fused_batch_norm (CustomID: 36)
+    HW Node: NodeID.imce_3_3
+    Destination Tensor ID: TensorID((39, 36), fused_scale)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -22
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_scale
+         Edge: TensorEdge(((39, -22), fused_scale), ((39, 36), fused_scale))
+      2. Const
+         CustomID: -23
+         HW Node: NodeID.inode_3_0
+         Tensor Type: fused_bias
+         Edge: TensorEdge(((39, -23), fused_bias), ((39, 36), fused_bias))
+
+  Conflict #6:
+    Destination Node: nn.imcflow_qconv (CustomID: 35)
+    HW Node: NodeID.imce_3_3
+    Destination Tensor ID: TensorID((39, 35), weight)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -20
+         HW Node: NodeID.inode_3_0
+         Tensor Type: weight
+         Edge: TensorEdge(((39, -20), weight), ((39, 35), weight))
+      2. Const
+         CustomID: -21
+         HW Node: NodeID.inode_3_0
+         Tensor Type: config
+         Edge: TensorEdge(((39, -21), config), ((39, 35), config))
+
+  Conflict #7:
+    Destination Node: qnn.imcflow_min_max_quantize (CustomID: 38)
+    HW Node: NodeID.imce_3_4
+    Destination Tensor ID: TensorID(38, data)
+    FIFO ID: 1
+    Number of overlapping edges: 2
+    Conflicting sources:
+      1. Const
+         CustomID: -24
+         HW Node: NodeID.inode_3_0
+         Tensor Type: min
+         Edge: TensorEdge((-24, min), (38, min))
+      2. Const
+         CustomID: -25
+         HW Node: NodeID.inode_3_0
+         Tensor Type: max
+         Edge: TensorEdge((-25, max), (38, max))
+
+--------------------------------------------------------------------------------
+

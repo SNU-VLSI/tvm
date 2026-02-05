@@ -1,0 +1,3 @@
+shape: 64,32,1,1
+dtype: int8
+nbytes: 2048
