@@ -352,6 +352,19 @@ class VecBlock(ImceCallCodeBlock):
     super().__init__(call, annotation)
     self.op_name = self._op_name()
     self.imm_value = self._get_imm_value()
+    # Constant operand info (set by handler when one operand is constant)
+    self.const_edge = None  # TensorEdge for RecvConstBlock
+    self.const_arg_idx = None  # Argument index where constant appears (0 or 1)
+
+  def set_const_info(self, const_edge: TensorEdge, arg_idx: int):
+    """Set constant operand information.
+
+    Args:
+        const_edge: The TensorEdge for the constant operand (used by RecvConstBlock)
+        arg_idx: The argument index where the constant appears (0 or 1)
+    """
+    self.const_edge = const_edge
+    self.const_arg_idx = arg_idx
 
   @abstractmethod
   def _get_imm_value(self) -> int:
@@ -361,14 +374,44 @@ class VecBlock(ImceCallCodeBlock):
   def _op_name(self) -> str:
     pass
 
+  def _build_var_ins(self, i: int) -> list:
+    """Build input variable list for block iteration i, handling constants.
+
+    Handles three cases:
+    1. Both operands from in_edges (no constant)
+    2. One operand from in_edges, one constant
+    3. One operand from prev_op (VecOpBlock chaining), one constant
+    """
+    # Build variables from non-constant edges only
+    non_const_edges = [edge for edge in self.in_edges if edge != self.const_edge]
+    var_ins_from_edges = [self._make_unique_input_var_for_post_op(
+        edge, i) for edge in non_const_edges]
+
+    if self.const_edge is not None:
+      const_var = UniqueVar((self.const_edge, i))
+      # Determine the non-constant operand variable
+      if var_ins_from_edges:
+        # Case 2: One operand from non-constant in_edges
+        non_const_var = var_ins_from_edges[0]
+      elif self.prev_op is not None:
+        # Case 3: No non-constant in_edges but prev_op exists (VecOpBlock chaining)
+        non_const_var = UniqueVar((self.prev_op, i))
+      else:
+        # Should not happen - no input source available
+        raise ValueError(f"VecBlock {self} has const_edge but no input source")
+
+      if self.const_arg_idx == 0:
+        return [const_var, non_const_var]
+      else:
+        return [non_const_var, const_var]
+    return var_ins_from_edges
+
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
 
     for i in range(self.num_blocks):
-      # put a tuple of (tensor edge, block index) as the key, giving a unique variable name
-      var_ins = [self._make_unique_input_var_for_post_op(
-          edge, i) for edge in self.in_edges]
+      var_ins = self._build_var_ins(i)
       var_o = UniqueVar((self, i))
       var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
       # e.g. __builtin_IMCE_ADD(a, b, 15);
@@ -393,34 +436,32 @@ class DivBlock(VecBlock):
     return "DIV"
 
 
-class MultlBlock(ImceCallCodeBlock):
+class MultlBlock(VecBlock):
   """MULTL operation block with optional SW fix for hardware overflow bug.
 
   If IMCFLOW_BUGFIX_OVERFLOW_SW=1, uses MultlSWFixOp for overflow bug fix.
-  Otherwise, uses simple MULTL instruction.
+  Otherwise, uses simple MULTL instruction (inherited from VecBlock).
   """
-  num_in_edges = 2
 
-  def __init__(self, call: 'BuilderContext', annotation: str = ""):
-    super().__init__(call, annotation)
-    self.imm_value = 15  # src_mask
+  def _get_imm_value(self) -> int:
+    return 15  # src_mask
+
+  def _op_name(self) -> str:
+    return "MULTL"
 
   def _render(self) -> str:
-    """Generate only computation, no RECV/SEND."""
+    """Generate MULTL with optional SW fix for overflow bug."""
+    if not _is_multl_swfix_enabled():
+      # Use standard VecBlock rendering
+      return super()._render()
+
+    # SW fix enabled: use MultlSWFixOp
     code = TextBlock("")
 
     for i in range(self.num_blocks):
-      var_ins = [self._make_unique_input_var_for_post_op(
-          edge, i) for edge in self.in_edges]
-      var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
+      var_ins = self._build_var_ins(i)
       var_o = UniqueVar((self, i))
-
-      if _is_multl_swfix_enabled():
-        # Use composable MultlSWFixOp for overflow bug fix
-        code += MultlSWFixOp(var_ins[0], var_ins[1], var_o, (self, i), self.imm_value)
-      else:
-        # Use simple MULTL instruction
-        code += f"{var_o} = __builtin_IMCE_MULTL({var_in_str}, {self.imm_value});"
+      code += MultlSWFixOp(var_ins[0], var_ins[1], var_o, (self, i), self.imm_value)
 
     return code.render()
 

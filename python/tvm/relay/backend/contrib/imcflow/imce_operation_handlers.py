@@ -19,9 +19,109 @@ from tvm.relay.backend.contrib.imcflow.transform import getNodeID, getNodeDebugI
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from typing import TYPE_CHECKING
+from abc import abstractmethod
 
 if TYPE_CHECKING:
   from .builder_context import BuilderContext
+
+
+class VecOpHandler(OperationHandler):
+  """Base class for vector operation handlers (Add, Mult, Div).
+
+  Provides common logic for:
+  - Finding constant argument index from call args
+  - Processing input edges and separating const/non-const edges
+  - Creating RecvConstBlock for constants
+  - Setting const_info on VecBlock
+  - Dispatching to vec_op_stack, post_op_stack, or standalone wrapper
+  """
+
+  @property
+  def priority(self) -> int:
+    return 10
+
+  @abstractmethod
+  def _create_block(self, call: 'BuilderContext') -> 'VecBlock':
+    """Create the specific VecBlock subclass.
+
+    Args:
+        call: The BuilderContext for the current call
+
+    Returns:
+        The appropriate VecBlock subclass instance (AddBlock, MultlBlock, DivBlock)
+    """
+    pass
+
+  @abstractmethod
+  def _const_annotation(self) -> str:
+    """Return annotation string for RecvConstBlock (e.g., 'add const')."""
+    pass
+
+  @abstractmethod
+  def _standalone_annotation(self) -> str:
+    """Return annotation string for standalone wrapper (e.g., 'add standalone')."""
+    pass
+
+  def _process_const_edges(self, call: 'BuilderContext') -> tuple:
+    """Process input edges and extract constant info.
+
+    Creates RecvConstBlock for constant operands and tracks the constant
+    edge and argument index for proper operand ordering in VecBlock.
+
+    Args:
+        call: The BuilderContext for the current call
+
+    Returns:
+        Tuple of (to_process_in_edges, const_edge, const_arg_idx)
+        - to_process_in_edges: List of non-constant input edges
+        - const_edge: The TensorEdge for the constant operand, or None
+        - const_arg_idx: The argument index (0 or 1) where constant appears, or None
+    """
+    hid = call.get_hid()
+    to_process_in_edges = []
+    const_edge = None
+    const_arg_idx = None
+
+    # Process input edges, separating const from non-const
+    # Also track the argument index where the constant appears
+    input_edges = call.get_input_edges()
+    for idx, in_edge in enumerate(input_edges):
+      arg_gid = in_edge.src_id.graph_node_id
+      try:
+        node = CustomIDToNode()[arg_gid]
+        is_const = ConstPat.match(node)
+      except KeyError:
+        is_const = False
+      if is_const:
+        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, self._const_annotation())
+        call.codeblocks.append(hid, block, CodePhase.INIT)
+        IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
+        const_edge = in_edge
+        const_arg_idx = idx
+      else:
+        to_process_in_edges.append(in_edge)
+
+    return to_process_in_edges, const_edge, const_arg_idx
+
+  def handle(self, call: 'BuilderContext') -> None:
+    """Handle vector operation with common const processing logic."""
+    hid = call.get_hid()
+    to_process_in_edges, const_edge, const_arg_idx = self._process_const_edges(call)
+
+    block = self._create_block(call)
+    if const_edge is not None and const_arg_idx is not None:
+      block.set_const_info(const_edge, const_arg_idx)
+
+    # Priority: vec_op_stack > post_op_stack > standalone
+    if self.builder.vec_op_stack is not None:
+      self.builder.vec_op_stack.append(block)
+    elif call.curr_composite_id is not None and call.post_op_stack is not None:
+      call.post_op_stack.append(block)
+    else:
+      wrapped_block = RecvSendWrapper.from_codeblock(
+          block, self._standalone_annotation(), builder=self.builder
+      ).create_loop_from_call(call, to_process_in_edges)
+      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
 
 
 @register_operation_handler
@@ -302,125 +402,64 @@ class DwConvHandler(OperationHandler):
 
 
 @register_operation_handler
-class AddHandler(OperationHandler):
+class AddHandler(VecOpHandler):
   """Handles add operations.
 
   Adds as a post-op to the current convolution block when inside a composite.
   """
 
-  @property
-  def priority(self) -> int:
-    return 10
-
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("add")
 
-  def handle(self, call: 'BuilderContext') -> None:
-    # assert call.curr_composite_id, "Add must be inside a composite function"
-    hid = call.get_hid()
+  def _create_block(self, call: 'BuilderContext') -> 'VecBlock':
+    return AddBlock(call, "add")
 
-    to_process_in_edges = []
-    for in_edge in call.get_input_edges():
-      arg_gid = in_edge.src_id.graph_node_id
-      arg_node = CustomIDToNode()[arg_gid]
-      if ConstPat.match(arg_node):
-        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"add const")
-        call.codeblocks.append(hid, block, CodePhase.INIT)
-        # add constedge info to codeblock info
-        IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
-      else:
-        to_process_in_edges.append(in_edge)
-      
-    block = AddBlock(call, "add")
-    # Priority: vec_op_stack > post_op_stack > standalone
-    if self.builder.vec_op_stack is not None:
-      self.builder.vec_op_stack.append(block)
-    elif call.curr_composite_id is not None and call.post_op_stack is not None:
-      call.post_op_stack.append(block)
-    else:
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "add standalone").create_loop_from_call(call, to_process_in_edges)
-      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
+  def _const_annotation(self) -> str:
+    return "add const"
+
+  def _standalone_annotation(self) -> str:
+    return "add standalone"
 
 
 @register_operation_handler
-class MultHandler(OperationHandler):
+class MultHandler(VecOpHandler):
   """Handles multiply operations.
   FIXME: uses MULTL for now
 
   Adds as a post-op to the current convolution block when inside a composite.
   """
 
-  @property
-  def priority(self) -> int:
-    return 10
-
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("multiply")
 
-  def handle(self, call: 'BuilderContext') -> None:
-    hid = call.get_hid()
+  def _create_block(self, call: 'BuilderContext') -> 'VecBlock':
+    return MultlBlock(call, "multl")
 
-    to_process_in_edges = []
-    for in_edge in call.get_input_edges():
-      arg_gid = in_edge.src_id.graph_node_id
-      if ConstPat.match(CustomIDToNode()[arg_gid]):
-        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"mult const")
-        call.codeblocks.append(hid, block, CodePhase.INIT)
-        # add constedge info to codeblock info
-        IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
-      else:
-        to_process_in_edges.append(in_edge)
+  def _const_annotation(self) -> str:
+    return "mult const"
 
-    block = MultlBlock(call, "multl")
-    # Priority: vec_op_stack > post_op_stack > standalone
-    if self.builder.vec_op_stack is not None:
-      self.builder.vec_op_stack.append(block)
-    elif call.curr_composite_id is not None and call.post_op_stack is not None:
-      call.post_op_stack.append(block)
-    else:
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "multiply standalone", builder=call.builder).create_loop_from_call(call, to_process_in_edges)
-      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
+  def _standalone_annotation(self) -> str:
+    return "multiply standalone"
 
 
 @register_operation_handler
-class DivideHandler(OperationHandler):
+class DivideHandler(VecOpHandler):
   """Handles divide operations.
 
   Adds as a post-op to the current convolution block when inside a composite.
   """
 
-  @property
-  def priority(self) -> int:
-    return 10
-
   def can_handle(self, call: relay.Call) -> bool:
     return call.op == op.get("divide")
 
-  def handle(self, call: 'BuilderContext') -> None:
-    # TODO: divide block should be replaced later
-    # assert call.curr_composite_id, "Divide must be inside a composite function"
-    hid= call.get_hid()
+  def _create_block(self, call: 'BuilderContext') -> 'VecBlock':
+    return DivBlock(call, "div")
 
-    to_process_in_edges = []
-    for in_edge in call.get_input_edges():
-      arg_gid = in_edge.src_id.graph_node_id
-      if ConstPat.match(CustomIDToNode()[arg_gid]):
-        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, f"div const")
-        call.codeblocks.append(hid, block, CodePhase.INIT)
-        # add constedge info to codeblock info
-        IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
-      else:
-        to_process_in_edges.append(in_edge)
-    block = DivBlock(call, "div")
+  def _const_annotation(self) -> str:
+    return "div const"
 
-    # Priority: vec_op_stack > post_op_stack > standalone
-    if self.builder.vec_op_stack is not None:
-      self.builder.vec_op_stack.append(block)
-    elif call.curr_composite_id is not None and call.post_op_stack is not None:
-      call.post_op_stack.append(block)
-    else:
-      wrapped_block = RecvSendWrapper.from_codeblock(block, "divide standalone").create_loop_from_call(call, to_process_in_edges)
-      call.codeblocks.append(hid, wrapped_block, CodePhase.EXEC)
+  def _standalone_annotation(self) -> str:
+    return "divide standalone"
 
 @register_operation_handler
 class ConcatHandler(OperationHandler):
