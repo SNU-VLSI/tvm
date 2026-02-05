@@ -733,6 +733,12 @@ class ConcatBlock(ImceCallCodeBlock):
     for arg in self.call.call.args[0].fields:
       if isinstance(arg, relay.Var):
         arg = self.call.conv_pending_info["param_to_arg"][arg]
+        if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op): # normal call
+          pass
+        elif isinstance(arg, relay.Call) and isinstance(arg.op, relay.Function): # composite call
+          arg = arg.op.body
+        else:
+          raise RuntimeError("unexpected arg type in concat")
       for e in self.in_edges:
         if getInnerNodeID(e.src_id.graph_node_id) == getNodeID(arg):
           in_edges_sorted.append(e)

@@ -2673,6 +2673,69 @@ class AnnotGenerator:
         def isNoCostCall(self, call):
           return isinstance(call.op, tvm.ir.Op) and call.op.name in ImcflowDeviceConfig.NO_COST_OPS
 
+        def _is_mmquant_node(self, node):
+          """Check if node is mm_quant (standalone or composite ending with mm_quant).
+
+          Handles 4 cases:
+          - Case 1,2: standalone mm_quant op
+          - Case 3,4: composite whose body ends with mm_quant
+          """
+          if isinstance(node, Call):
+            # Case 1,2: standalone mm_quant
+            if isinstance(node.op, tvm.ir.Op) and node.op.name == "qnn.imcflow_min_max_quantize":
+              return True
+            # Case 3,4: composite ending with mm_quant
+            if isinstance(node.op, relay.Function) and "Composite" in node.op.attrs:
+              # Check if body ends with mm_quant
+              body = node.op.body
+              if isinstance(body, Call) and isinstance(body.op, tvm.ir.Op):
+                return body.op.name == "qnn.imcflow_min_max_quantize"
+          return False
+
+        def _is_dwconv_node(self, node):
+          """Check if node is DW conv (standalone or composite).
+
+          Handles 4 cases:
+          - Case 1,3: standalone imcflow_qdwconv op
+          - Case 2,4: composite with "qdwconv" in Composite name
+          """
+          if isinstance(node, Call):
+            # Standalone DW conv
+            if isinstance(node.op, tvm.ir.Op) and node.op.name == "nn.imcflow_qdwconv":
+              return True
+            # Composite with DW conv
+            if isinstance(node.op, relay.Function) and "Composite" in node.op.attrs:
+              return "qdwconv" in node.op.attrs["Composite"]
+          return False
+
+        def _check_mmquant_dwconv_pattern(self, node, edges):
+          """Check if node is mm_quant with DW conv consumer pattern.
+
+          If detected, mm_quant should start a new region so that it stays
+          in the same region as the DW conv. This avoids the case where
+          INODE needs to route mm_quant output to multiple DW conv
+          destinations through a non-multicast split (added later).
+
+          Handles all 4 combinations:
+          1. mm_quant standalone -> DW conv standalone
+          2. mm_quant standalone -> DW conv in composite
+          3. mm_quant in composite -> DW conv standalone
+          4. mm_quant in composite -> DW conv in composite
+
+          Returns:
+            True if the pattern is detected and a new region should be forced.
+          """
+          if not self._is_mmquant_node(node):
+            return False
+
+          # Get consumers of mm_quant
+          consumers = edges.get(node, [])
+          for consumer in consumers:
+            if self._is_dwconv_node(consumer):
+              debug_print(f"[MMQuantDWConvCheck] Detected mm_quant -> DW conv pattern for node {getNodeDebugID(node)}")
+              return True
+          return False
+
         def getCost(self, call):
           """
           Calculate cost for a call node based on conv IC/OC dimensions.
@@ -3269,6 +3332,17 @@ class AnnotGenerator:
                     node, rev_edges, branch_analyzer, lat_calc,
                     IsComposite, candidate_regions
                   )
+
+                # ====================================================
+                # mm_quant -> DW conv pattern check
+                # If mm_quant's consumer is DW conv, force mm_quant to start
+                # a new region (so it stays with the DW conv). This avoids
+                # INODE routing issues when split is added later.
+                # ====================================================
+                if not force_new_region and not needs_split:
+                  if self._check_mmquant_dwconv_pattern(node, edges):
+                    force_new_region = True
+                    debug_print(f"[MMQuantDWConvCheck] Forcing new region for mm_quant -> DW conv pattern")
 
                 # ====================================================
                 # Selection policy with converge point handling
