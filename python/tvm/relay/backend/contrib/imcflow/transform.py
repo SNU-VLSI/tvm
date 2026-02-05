@@ -1145,17 +1145,22 @@ def merge_composite_for_partition(mod):
     """
     Merge composite ops before partitionRound for simpler converge point detection.
 
-    This function merges ops into composites using the imcflow pattern table,
-    making the graph simpler for region partitioning.
+    This function merges ops into composites using a LINEAR-ONLY pattern table
+    (pattern_table_for_partition), which excludes converging patterns. This is
+    important because converging patterns can cause operations like 'pre_converge',
+    'multiply', 'post_converge' to be left in the main function body instead of
+    being included in region functions during partitionRound.
 
-    After partitionRound, use unmerge_composite to inline the composites back.
+    After partitionRound, use merge_composite_ops() with the full pattern_table()
+    to merge converging patterns.
     """
     for global_var, func in mod.functions.items():
         if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
             attr_record = func.attrs
             func_no_attr = relay.Function(func.params, func.body)
             target_mod = tvm.IRModule.from_expr(func_no_attr)
-            transformed = transform.MergeComposite(imcflow.pattern_table())(target_mod)
+            # Use pattern_table_for_partition() which excludes converging patterns
+            transformed = transform.MergeComposite(imcflow.pattern_table_for_partition())(target_mod)
             _, transformed_func = transformed.functions.items()[0]
             transformed_func = relay.Function(transformed_func.params, transformed_func.body,
                                               ret_type=transformed_func.ret_type, attrs=attr_record)

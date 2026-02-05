@@ -485,6 +485,14 @@ def makeBNMulAddMinMaxQuantPattern():
   mmq = makeMinMaxQauntPattern(add_out)
   return mmq
 
+def _makeLinearAddPattern(data):
+  """Add pattern for linear chains only - no wildcard second operand."""
+  return is_op("add")(data, is_constant()) | is_op("add")(is_constant(), data)
+
+def _makeLinearMulPattern(data):
+  """Multiply pattern for linear chains only - no wildcard second operand."""
+  return is_op("multiply")(data, is_constant()) | is_op("multiply")(is_constant(), data)
+
 def _make_single_vec_op(inp):
   """Single vec_op: unary ops or binary with constant/wildcard."""
   # Unary ops
@@ -493,14 +501,27 @@ def _make_single_vec_op(inp):
   # Binary ops (with constant or wildcard, using existing patterns)
   return unary | makeAddPattern(inp) | makeMulPattern(inp)
 
+def _make_single_linear_vec_op(inp):
+  """Single vec_op for LINEAR chains only - no wildcard second operand.
+
+  This prevents converging patterns from being matched when building
+  linear chains for partition.
+  """
+  # Unary ops
+  unary = (makeBiasAddPattern(inp) | makeReluPattern(inp) |
+           makeDivPattern(inp) | makeBNPattern(inp))
+  # Binary ops with CONSTANT only (no wildcard - prevents converging)
+  return unary | _makeLinearAddPattern(inp) | _makeLinearMulPattern(inp)
+
 def makeLinearVecOpChain(data, max_depth=5):
   """Build a linear chain of vec_ops (no converging, single path only).
 
   Returns a pattern that matches 1 to max_depth vec_ops applied to data.
+  Uses _make_single_linear_vec_op to prevent converging patterns.
   """
-  out = _make_single_vec_op(data)
+  out = _make_single_linear_vec_op(data)
   for _ in range(1, max_depth):
-    out = out | _make_single_vec_op(out)
+    out = out | _make_single_linear_vec_op(out)
   return out
 
 def makeConvergingVecOpPattern():
@@ -565,6 +586,19 @@ def makePreopMinMaxQuantPattern():
 
   return converging_mmq | simple_mmq
 
+def makeLinearPreopMinMaxQuantPattern():
+  """Pattern for linear vec_ops chain followed by min_max_quant.
+
+  NO converging patterns - only simple linear chains.
+  Matches: data -> [1-5 vec_ops] -> minmax
+
+  Used for pre-partition merge to avoid creating composites with
+  converging patterns that cause issues during partitionRound.
+  """
+  data = wildcard()
+  simple = makeLinearVecOpChain(data, max_depth=5)
+  return makeMinMaxQauntPattern(simple)
+
 def makeVecOpsPattern():
   """Pattern for converging vec_ops NOT followed by min_max_quant.
 
@@ -579,17 +613,19 @@ def makeLinearVecOpCombPattern():
 
   Matches chains like: BN -> multiply -> add, or multiply -> add -> relu, etc.
   Requires at least 2 ops to avoid matching single ops unnecessarily.
+  Uses _make_single_linear_vec_op to prevent converging patterns.
 
   IMPORTANT: AltPattern uses short-circuit OR (left-to-right evaluation).
   Longer patterns MUST come first to enable greedy matching.
   """
   data = wildcard()
   # Build chain: require at least 2 ops
-  p1 = _make_single_vec_op(data)
-  p2 = _make_single_vec_op(p1)
-  p3 = _make_single_vec_op(p2)
-  p4 = _make_single_vec_op(p3)
-  p5 = _make_single_vec_op(p4)
+  # Use _make_single_linear_vec_op to prevent converging patterns
+  p1 = _make_single_linear_vec_op(data)
+  p2 = _make_single_linear_vec_op(p1)
+  p3 = _make_single_linear_vec_op(p2)
+  p4 = _make_single_linear_vec_op(p3)
+  p5 = _make_single_linear_vec_op(p4)
   # Match 2 to 5 ops (not 1, to avoid trivial matches)
   # Longest first for greedy matching (5, 4, 3, 2)
   return p5 | p4 | p3 | p2
@@ -690,6 +726,85 @@ def pattern_table():
         # Vec_ops pattern - converging paths (two inputs merging via add)
         ("imcflow.vecops", makeVecOpsPattern()),
         # Linear vec_op combinations (2+ ops in a chain, no converging)
+        ("imcflow.vecops", makeLinearVecOpCombPattern()),
+      ]
+    )
+
+    return imcflow_patterns
+
+
+@register_pattern_table("imcflow_partition")
+def pattern_table_for_partition():
+    """Pattern table for pre-partition merge (no converging patterns).
+
+    This pattern table is used in merge_composite_for_partition() to create
+    composites that won't cause issues during partitionRound. Converging
+    patterns are excluded because they can cause operations to be left in
+    the main function body instead of being included in region functions.
+
+    After partitionRound, the full pattern_table() with converging patterns
+    is used in merge_composite_ops() for final merge.
+
+    Returns
+    -------
+    imcflow_patterns : List[imcflow_pattern]
+        Created patterns (linear only, no converging).
+    """
+    imcflow_patterns = []
+
+    def imcflow_concat(data):
+      out = makeConcatPattern(data)
+      for i in range(1, 10):
+        out = out | makeConcatPattern(out)
+      return out
+
+    def imcflow_conv_split_concat(conv_type, preop=None):
+      if preop is None:
+        data1, weight = wildcard(), is_constant()
+      else:
+        data1, weight = preop, is_constant()
+
+      if conv_type == "nn.imcflow_qconv" or conv_type == "nn.imcflow_qdwconv":
+        cfg = is_constant()
+        data = is_op(conv_type)(data1, weight, cfg)
+      else:
+        data = is_op(conv_type)(data1, weight)
+
+      out = makeSplitPatern(data) | imcflow_concat(data)
+
+      return out
+
+    def make_postop_pattern_start_with(conv_type, preop=None):
+      if preop is None:
+        data1, weight = wildcard(), is_constant()
+      else:
+        data1, weight = preop, is_constant()
+
+      if conv_type == "nn.imcflow_qconv" or conv_type == "nn.imcflow_qdwconv":
+        cfg = is_constant()
+        data = is_op(conv_type)(data1, weight, cfg)
+      else:
+        data = is_op(conv_type)(data1, weight)
+
+      # BN is separated from Conv composite and integrated with min_max_quant as imcflow.bn-minmax
+      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeMulPattern(data)
+      for i in range(1, 10):
+        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeMulPattern(out)
+
+      out = out | makeSplitPatern(out) | imcflow_concat(out)
+
+      return out
+
+    imcflow_patterns.extend(
+      [
+        ("imcflow.qconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qconv")),
+        ("imcflow.qdwconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qdwconv")),
+        ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
+        ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
+        ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),
+        # Linear only - no converging patterns
+        ("imcflow.preop-minmax", makeLinearPreopMinMaxQuantPattern()),
+        # Linear vec_op combinations only (2+ ops in a chain, no converging)
         ("imcflow.vecops", makeLinearVecOpCombPattern()),
       ]
     )
