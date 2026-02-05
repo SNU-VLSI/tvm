@@ -54,14 +54,21 @@ class RecvSendNum:
             self.total_num == other.total_num)
 
 def add_to_map(edge, count, is_send=True):
+  if edge.dst_id.graph_node_id == 8:
+    pass
+  print(f"[add_recv_send_map] edge: {edge}, count: {count}, is_send: {is_send}")
+  print(f"    loop count stack: {SimpleFor.count_stack}")
   outer_loop_count = 1 if len(SimpleFor.count_stack) == 0 else int(math.prod(SimpleFor.count_stack))
   target_map = send_num_map if is_send else recv_num_map
   count.set_iter(outer_loop_count)
+  print(f"    adjusted count with outer loops ({outer_loop_count}): {count.total_num}")
   if edge in target_map:
+    print(f"    previous count: {target_map[edge].total_num}, adding {count.total_num}")
     target_map[edge].total_num += count.total_num
+    print(f"    new count: {target_map[edge].total_num}")
   else:
     target_map[edge] = count
-
+    print(f"    new count: {target_map[edge].total_num}")
 
 class ImceCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
@@ -152,6 +159,24 @@ class ImceCallCodeBlock(ImceCodeBlock):
   def __repr__(self):
     return f"{self.__class__.__name__}(gid: {self.call.get_gid()})"
 
+# ======================================================
+# helper functions
+# ======================================================
+def get_total_bytes(ttype):
+    elem_count = math.prod(list(ttype.shape))
+    if isinstance(elem_count, tvm.tir.expr.IntImm):
+      elem_count = elem_count.value
+    dtype = ttype.dtype
+    if "int8" in dtype or "uint8" in dtype:
+      bytes_per_elem = 1
+    elif "int16" in dtype or "uint16" in dtype:
+      bytes_per_elem = 2
+    elif "int32" in dtype or "uint32" in dtype or "float32" in dtype:
+      bytes_per_elem = 4
+    else:
+      raise RuntimeError(f"Unsupported dtype {dtype} in create_loop_from_call")
+    total_bytes = elem_count * bytes_per_elem
+    return total_bytes
 
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
@@ -232,7 +257,7 @@ class RecvConstBlock(ImceCodeBlock):
     SCAN = "SCAN"
     NORMAL = "NORMAL"
 
-  def __init__(self, in_edge: TensorEdge, type : ConstType, annotation: str = ""):
+  def __init__(self, in_edge: TensorEdge, type : ConstType, annotation: str = "", recv_count: int = None):
     super().__init__(annotation)
     self.in_edge = in_edge
     self.type = type
@@ -251,7 +276,11 @@ class RecvConstBlock(ImceCodeBlock):
     assert base_addr % 32 == 0, "Base address must be a multiple of 32"
 
     self.te_info = te_info
-    self.recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
+    # Use provided recv_count if given, otherwise calculate from size
+    if recv_count is not None:
+      self.recv_count = recv_count
+    else:
+      self.recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
   def _render(self) -> str:
     owner_edge = self.te_info.owner
@@ -292,6 +321,24 @@ class IMCERecvBlock(ImceCodeBlock):
     add_to_map(self.owner_edge, RecvSendNum("recv", 1), is_send=False)
     return f"{self.var_name} = __builtin_IMCE_RECV({self.fifo_id}); // {self.annotation}"
 
+class IMCESendBlock(ImceCodeBlock):
+  """
+  Code block for sending data to a fifo.
+  Calls add_to_map during _render() so that count_stack is properly populated.
+  """
+  def __init__(self, var_name: str, fifo_id: int, policy_addr : int, owner_edges: TensorEdge, annotation: str = ""):
+    super().__init__(annotation)
+    self.var_name = var_name
+    self.fifo_id = fifo_id
+    self.policy_addr = policy_addr
+    # list if multicast
+    self.owner_edges = owner_edges if isinstance(owner_edges, list) else [owner_edges]
+
+  def _render(self) -> str:
+    # Call add_to_map at render time when count_stack is properly populated
+    for owner_edge in self.owner_edges:
+      add_to_map(owner_edge, RecvSendNum("send", 1), is_send=True)
+    return f"__builtin_IMCE_SEND({self.policy_addr}, {self.var_name}, {self.fifo_id}, 0); // {self.annotation}"
 
 class VecBlock(ImceCallCodeBlock):
   """
@@ -490,6 +537,97 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
   def num_out_blocks(self) -> int:
     return 4  # FIXED in MinmaxQuantBlock
 
+  def consumer_is_non_multicast_split(self):
+    assert len(self.out_edges) == 1, "Only one output edge is expected"
+    out_edge = self.out_edges[0]
+    dst_gid = out_edge.dst_id.graph_node_id
+    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
+      split_info = DevConfig().SplitInfo[self.call.func_name][getNodeID(dst_node)]
+      is_multicast = split_info["is_multi_cast"]
+      channels = split_info["channels"]
+      num_splits = split_info["num_splits"]
+      return (not is_multicast), channels, num_splits
+    else:
+      return False, None, None
+  
+  def get_split_consumer_edge_info(self):
+    assert len(self.out_edges) == 1, "Only one output edge is expected"
+    out_edge = self.out_edges[0]
+    dst_gid = out_edge.dst_id.graph_node_id
+    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    assert isinstance(dst_node, relay.Call) and dst_node.op.name == "split", "Output consumer must be a split"
+
+    split_out_edges = DevConfig().get_tensor_edges_from_graph_node_id(
+      graph_node_id=dst_gid,
+      dir="out"
+    )
+
+    split_out_edge_infos = [
+      DevConfig().get_tensor_edge_info(out_edge) for out_edge in split_out_edges
+    ]
+
+    return split_out_edges, split_out_edge_infos
+  
+  def build_mmquant_for_dwconv(self):
+    code = SequentialBlock()
+    is_non_multicast_split, channels, num_splits = self.consumer_is_non_multicast_split()
+    ch_group_nums = math.ceil(channels / 32)
+
+    call_node = self.call.call
+    arg = call_node.args[0]
+    layout = DevConfig().LayoutMap[arg]
+    vir_ttype = get_type(self.call.module, arg)
+    N, C, H, W = vir_ttype.shape
+    assert channels == C.value, "Channel size mismatch"
+    
+    for in_edge in self.in_edges:
+      if in_edge.dst_id.tensor_type == "data":
+        break
+    in_edge_info = DevConfig().get_tensor_edge_info(in_edge)
+    out_edge = self.out_edges[0]
+    split_out_edges, split_out_edge_infos = self.get_split_consumer_edge_info()
+    out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
+    loop_cnt = N * H * W
+
+    for ch_group_idx in range(ch_group_nums):
+      # recv
+      for i in range(2): # 32 -> 16 x 2
+        code += IMCERecvBlock(
+          var_name=UniqueVar((in_edge, 2*ch_group_idx+i)),
+          fifo_id=in_edge_info.fifo_id,
+          owner_edge=in_edge,
+          annotation=f"dwconv minmaxquant recv ch_group {ch_group_idx}, part {i}"
+        )
+
+      # compute
+      src_mask = 15
+      for i in range(2):
+        qreg_idx = i
+        var_i = UniqueVar((in_edge, 2*ch_group_idx+i))
+        var_o = UniqueVar((self, 2*ch_group_idx+i))
+        code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_idx});"
+      
+      # get_qreg
+      for i in range(4):
+        var_o = UniqueVar((self, i))
+        code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
+
+      # send
+      for i in range(4):
+        split_out_edge_info = split_out_edge_infos[ch_group_idx]
+        code += IMCESendBlock(
+          var_name=UniqueVar((self, i)),
+          fifo_id=split_out_edge_info.fifo_id,
+          policy_addr=split_out_edge_info.policy_info[0].address,
+          owner_edges=split_out_edges[ch_group_idx],
+          annotation=f"dwconv minmaxquant send ch_group {ch_group_idx}, part {i}"
+        )
+
+    for_code = SimpleFor(loop_cnt, code, "dwconv_minmaxquant_loop")
+
+    return for_code
+
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
     # Find data edge from in_edges or use prev_op if inside composite
@@ -503,9 +641,8 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
 
     code = TextBlock("")
 
-    # arg = CustomIDToNode()[getInnerNodeID(data_edge.src_id.graph_node_id)]
-    # arg_shape = get_type(call.module, arg).shape
-    # arg_layout = DevConfig().LayoutMap[arg]
+    is_non_multicast_split, _, _ = self.consumer_is_non_multicast_split()
+    assert is_non_multicast_split==False, "MinmaxQuantBlock for non-multicast split is handled separately."
 
     # Determine channels: from explicit setting, prev_op, or default to 64
     channels = self.channels
@@ -556,24 +693,61 @@ class ConcatBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for min/max quantization """
     super().__init__(call, annotation)
-    self.or_concat = False
-    self.channel = 0
+    self.or_concat=None
+    self.channel=None
+    self.channel_block_size=None
+    self.set_type()
+    self.set_channel()
+    self.set_channel_block_size()
     assert len(
         self.in_edges) >= self.min_in_edges, "At least two input edges are required"
   
-  def set_type(self, or_concat):
-    self.or_concat = or_concat  # "OR" or "CONCAT"
+  def set_type(self):
+    """
+      If input type is C16 vector, CONCAT.
+      If conv_input, OR_CONCAT
+    """
+    fisrt_arg = self.call.call.args[0].fields[0]
+    assert isinstance(fisrt_arg, relay.Call), "First argument must be a relay.Call"
+    if fisrt_arg.op.name == "qnn.imcflow_min_max_quantize":
+      self.or_concat = 1
+    else:
+      self.or_concat = 0
+    print(f"[ConcatBlock] or_concat: {self.or_concat}")
   
-  def set_channel(self, channel):
-    self.channel = channel
+  def set_channel(self):
+    call_node = self.call.call
+    vir_ttype = get_type(self.call.module, call_node)
+    N, C, H, W= vir_ttype.shape
+    self.channel = C.value
+    print(f"[ConcatBlock] channel: {self.channel}")
+  
+  def set_channel_block_size(self):
+    fisrt_arg = self.call.call.args[0].fields[0]
+    layout = DevConfig().LayoutMap[fisrt_arg]
+    if layout.value == "NCHW16c":
+      self.channel_block_size = 16
+    elif layout.value == "NCHW64c":
+      self.channel_block_size = 64
+    elif layout.value == "NHWC16c":
+      self.channel_block_size = 16
+    elif layout.value == "NHWC64c":
+      self.channel_block_size = 64
+
   
   @property
   def num_blocks(self) -> int:
-    return self.channel//16
+    if self.or_concat:
+      return 4 * len(self.in_edges)  # input bitplanes : 4
+    else:
+      return math.ceil(self.channel/16) // len(self.in_edges)
   
   @property
   def num_out_blocks(self) -> int:
-    return len(self.in_edges) * (self.channel//16)
+    if self.or_concat:
+      return 4 # input bitplanes : 4
+    else:
+      return math.ceil(self.channel/16)
 
   def _render(self) -> str:
     num_bitplanes = 4
@@ -583,35 +757,41 @@ class ConcatBlock(ImceCallCodeBlock):
 
     external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
     internal_in_edge = (set(self.in_edges) - set(external_in_edges))
+    in_edges_sorted = []
+    for arg in self.call.call.args[0].fields:
+      if isinstance(arg, relay.Var):
+        arg = self.call.conv_pending_info["param_to_arg"][arg]
+        if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op): # normal call
+          pass
+        elif isinstance(arg, relay.Call) and isinstance(arg.op, relay.Function): # composite call
+          arg = arg.op.body
+        else:
+          raise RuntimeError("unexpected arg type in concat")
+      for e in self.in_edges:
+        if getInnerNodeID(e.src_id.graph_node_id) == getNodeID(arg):
+          in_edges_sorted.append(e)
+          break
 
-    if self.call.curr_composite_id:
-      for in_edge in self.in_edges:
+    assert self.call.curr_composite_id is not None, "standalone concat will be handled at handler"
+    if not self.or_concat: # input is vector form
+      for in_edge in in_edges_sorted:
         for b in range(self.num_blocks):
           var_i = self._make_unique_input_var_for_post_op(in_edge, b)
-          var_o = UniqueVar((self, b + self.num_blocks * self.in_edges.index(in_edge)))
+          var_o = UniqueVar((self, b + self.num_blocks * in_edges_sorted.index(in_edge)))
           code += f"{var_o} = {var_i};"
-    else: 
-      raise NotImplementedError("concat is not implemented yet")
-
-    # if self.or_concat:
-    #   # external_in_edges = [
-    #   #     e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
-    #   # internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
-    #   # for i in range(num_bitplanes):
-    #   #   var_i = UniqueVar((internal_in_edge, i))
-    #   #   var_o = UniqueVar((self, i))
-    #   #   for ext_edge in external_in_edges:
-    #   #     var_e = UniqueVar((ext_edge, i))
-    #   #     fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
-
-    #   #     code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
-    #   #     code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
-    #   raise NotImplementedError("OR concat is not implemented yet")
-    # else:
-    #   code = TextBlock("// just forward")
+    else: # input is bitplane form
+      external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
+      internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
+      assert len(internal_in_edge) == 0, "no internal edge is expected in OR concat"
+      for i in range(num_bitplanes):
+        var_o = UniqueVar((self, i))
+        for ext_edge in external_in_edges:
+          var_e = UniqueVar((ext_edge, i))
+          fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
+          code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
+          code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
 
     return code.render()
-
 
 class SplitBlock(ImceCallCodeBlock):
   num_in_edges = 1
@@ -887,8 +1067,13 @@ class DWConvBlock(ImceCallCodeBlock):
     # Total weight registers: 8 bitplanes × num_channel_groups
     self.num_weight_regs = self.num_weight_bitplanes * self.num_channel_groups
 
-    # Weight variables will be filled by _build_weight_recv
+    # Weight variables - populated here to reference vars created by RecvConstBlock in INIT phase
+    # RecvConstBlock uses UniqueVar((edge, i)) so we use the same to get the same variable names
     self.weight_vars = []
+    if self.weight_edge is not None:
+      for i in range(self.num_weight_regs):
+        var = UniqueVar((self.weight_edge, i))
+        self.weight_vars.append(var)
 
     # Initialize ConvUtil for 2D pattern extraction (like ConvBlock)
     self.conv = ConvUtil(self.in_h, self.in_w,
@@ -916,46 +1101,45 @@ class DWConvBlock(ImceCallCodeBlock):
 
   @property
   def num_out_blocks(self) -> int:
-    # Output layout is always NCHW64C (64 channels = 4 groups × 16 channels)
-    # Must match ConvBlock's num_out_blocks for consistent output format
-    return 4
+    return self.num_channel_groups
+    # return 4
 
-  def _build_weight_recv(self) -> CodeBlock:
-    """Receive DW conv weights into GPR registers.
+  # def _build_weight_recv(self) -> CodeBlock:
+  #   """Receive DW conv weights into GPR registers.
 
-    DW conv weights are sent via FIFO (unlike standard conv weights which
-    go to IMCU). Each weight register contains one bitplane of weights
-    for a channel group.
+  #   DW conv weights are sent via FIFO (unlike standard conv weights which
+  #   go to IMCU). Each weight register contains one bitplane of weights
+  #   for a channel group.
 
-    Returns:
-        CodeBlock with RECV instructions for all weight registers
-    """
-    if self.weight_edge is None:
-      raise ValueError("DWConvBlock: weight_edge is None, cannot generate weight RECV")
+  #   Returns:
+  #       CodeBlock with RECV instructions for all weight registers
+  #   """
+  #   if self.weight_edge is None:
+  #     raise ValueError("DWConvBlock: weight_edge is None, cannot generate weight RECV")
 
-    te_infos = DevConfig().get_tensor_edge_info_with_id_dir(
-        self.weight_edge.dst_id, "in")
+  #   te_infos = DevConfig().get_tensor_edge_info_with_id_dir(
+  #       self.weight_edge.dst_id, "in")
 
-    if not te_infos:
-      raise ValueError(f"DWConvBlock: No tensor edge info found for weight edge {self.weight_edge}")
+  #   if not te_infos:
+  #     raise ValueError(f"DWConvBlock: No tensor edge info found for weight edge {self.weight_edge}")
 
-    te_info = te_infos[0]
+  #   te_info = te_infos[0]
 
-    weight_code = TextBlock("")
-    self.weight_vars = []
+  #   weight_code = TextBlock("")
+  #   self.weight_vars = []
 
-    # Receive all weight registers
-    # Layout: for each channel group, receive 8 bitplane weights
-    for i in range(self.num_weight_regs):
-      var = UniqueVar((self.weight_edge, i))
-      var.set_static()  # Mark as static so it persists across loop iterations
-      weight_code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id}); // weight bitplane {i}"
-      self.weight_vars.append(var)
+  #   # Receive all weight registers
+  #   # Layout: for each channel group, receive 8 bitplane weights
+  #   for i in range(self.num_weight_regs):
+  #     var = UniqueVar((self.weight_edge, i))
+  #     var.set_static()  # Mark as static so it persists across loop iterations
+  #     weight_code += f"{var} = __builtin_IMCE_RECV({te_info.fifo_id}); // weight bitplane {i}"
+  #     self.weight_vars.append(var)
 
-    # Track recv count for validation
-    add_to_map(self.weight_edge, RecvSendNum("recv", self.num_weight_regs), is_send=False)
+  #   # Track recv count for validation
+  #   add_to_map(self.weight_edge, RecvSendNum("recv", self.num_weight_regs), is_send=False)
 
-    return weight_code
+  #   return weight_code
 
   def _build_dwconv_compute(self) -> CodeBlock:
     """Build DWCONV computation for one output pixel.
@@ -1001,15 +1185,15 @@ class DWConvBlock(ImceCallCodeBlock):
           # Intermediate bitplane: no result capture, accumulates internally
           comp.add(TextBlock(f"__builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel});\n"))
     
-    for bshr_sel in range(self.num_channel_groups, 2):
-      out_var = UniqueVar((self, bshr_sel))
-      comp.add(TextBlock(f"{out_var} = __builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel}); // this is dummy \n"))
+    # for bshr_sel in range(self.num_channel_groups, 2):
+    #   out_var = UniqueVar((self, bshr_sel))
+    #   comp.add(TextBlock(f"{out_var} = __builtin_IMCE_DWCONV({weight_var}, {shift_amt}, {dwresult_valid}, {src_mask}, {bshr_sel}); // this is dummy \n"))
 
     # Initialize zero outputs for unused channel groups (padding to 64 channels for NCHW64C layout)
     # num_out_blocks is always 4 (64 channels), but actual channels may be less
-    for bshr_sel in range(2, 4):
-      out_var = UniqueVar((self, bshr_sel))
-      comp.add(TextBlock(f"{out_var} = (short16)0; // padding for NCHW64C layout\n"))
+    # for bshr_sel in range(2, 4):
+    #   out_var = UniqueVar((self, bshr_sel))
+    #   comp.add(TextBlock(f"{out_var} = (short16)0; // padding for NCHW64C layout\n"))
 
     return comp
 
@@ -1120,10 +1304,10 @@ class DWConvBlock(ImceCallCodeBlock):
 
     root = SequentialBlock()
 
-    # 1. Receive weights into GPR (INIT phase - executed once)
-    root.add(self._build_weight_recv())
+    # Note: Weight reception moved to DwConvHandler (RecvConstBlock in INIT phase)
+    # Weight variables are referenced via self.weight_vars (populated in __init__)
 
-    # 2. Main loop using 2D pattern (same as ConvBlock)
+    # 1. Main loop using 2D pattern (same as ConvBlock)
     row_pattern = self.conv.extract_2d_pattern()
     pprint(f"[DWConvBlock] row pattern for node {getNodeID(self.call.call)}:")
     pprint(row_pattern)
@@ -1146,7 +1330,7 @@ class DWConvBlock(ImceCallCodeBlock):
                              f"{tag}_outer_loop(iterate row offset)")
       root.add(outer_loop)
 
-    # 3. Read remaining pixels if any (tail loop)
+    # 2. Read remaining pixels if any (tail loop)
     if self.remain > 0 and self.load_edge_info is not None:
       print(f"[DWConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
       tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")
@@ -1775,7 +1959,6 @@ class RecvSendWrapper(ImceCodeBlock):
                             self.send_block, self.in_edges, self.out_edges, self.annotation, builder=self.builder)
 
     return SimpleFor(count, inner, f"call_created_loop")
-
 
 class ImceCodeBlockManager(NodeCodeBlockManager):
   """A class that manages and generates code blocks for imces."""

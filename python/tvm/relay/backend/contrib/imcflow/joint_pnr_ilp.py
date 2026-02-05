@@ -250,6 +250,7 @@ class Commodity:
     tensor_type: str        # e.g., 'data', 'weight', 'config'
     split_idx: Optional[int] = None
     metadata: Any = None    # Original TensorEdge for reference
+    is_multicast: bool = True  # False for split outputs that need individual routing
 
     def get_congestion_group(self) -> str:
         """Get congestion group for this commodity"""
@@ -490,7 +491,7 @@ class GraphExtractor:
               debug_print(f"  Name : {CustomIDToName()[getInnerNodeID(node_id)]}")
 
         # Extract graph_commodities (data flows)
-        self._extract_graph_commodities_from_tensor_edge_list(tensor_edge_list)
+        self._extract_graph_commodities_from_tensor_edge_list(tensor_edge_list, func_name)
 
         # Collect nodes by type
         call_nodes = []
@@ -719,7 +720,7 @@ class GraphExtractor:
         if is_composite:
             self._visit(call.op, in_composite=True, composite_node_id=node_id)
 
-    def _extract_graph_commodities_from_tensor_edge_list(self, tensor_edge_list: List):
+    def _extract_graph_commodities_from_tensor_edge_list(self, tensor_edge_list: List, func_name: str):
         """Extract commodities from TensorEdgeList.
 
         Uses validated TensorEdgeList instead of parsing relay function.
@@ -733,9 +734,14 @@ class GraphExtractor:
 
         Args:
             tensor_edge_list: List of TensorEdge from constructTensorEdgeList()
+            func_name: Function name for SplitInfo lookup
         """
         # CustomIDToNode is imported at module level
         id_to_node = CustomIDToNode()
+
+        # Get SplitInfo for this function to determine multicast vs unicast for split outputs
+        from tvm.contrib.imcflow import ImcflowDeviceConfig
+        split_info_dict = ImcflowDeviceConfig().SplitInfo.get(func_name, {})
 
         for edge in tensor_edge_list:
             src_graph_id = edge.src_id.graph_node_id
@@ -816,13 +822,25 @@ class GraphExtractor:
                 if src_node_id == dst_node_id:
                     continue
 
+                # Determine multicast flag for split outputs
+                is_multicast = True
+                if src_node.node_type == NodeType.SPLIT:
+                    debug_print(f"[GraphExtractor.split_multicast] Checking edge {edge} for multicast enable at split node {src_node_id}")
+                    split_inner_id = getInnerNodeID(src_node_id)
+                    if split_inner_id in split_info_dict:
+                        is_multicast = split_info_dict[split_inner_id].get('is_multi_cast', True)
+                        debug_print(f"  edge {edge}: is_multicast={is_multicast} from SplitInfo")
+                    else:
+                        debug_print(f"  edge {edge}: No SplitInfo found for split node {split_inner_id}, defaulting to multicast")
+
                 # Add commodity with validated tensor_type from TensorEdgeList
                 self.add_commodity(
                     src_node_id, dst_node_id,
                     src_node.node_type, dst_node.node_type,
                     tensor_type=tensor_type,
                     split_idx=edge.split_idx,
-                    metadata=edge
+                    metadata=edge,
+                    is_multicast=is_multicast,
                 )
 
         debug_print(f"[_extract_commodities_from_tensor_edge_list] "
@@ -843,7 +861,7 @@ class GraphExtractor:
     def add_commodity(self, src_node_id: Any, dst_node_id: Any,
                       src_type: NodeType, dst_type: NodeType,
                       tensor_type: str, split_idx: Optional[int] = None,
-                      metadata: Any = None):
+                      metadata: Any = None, is_multicast: bool = True):
         """Add a commodity (data flow) between nodes"""
         commodity = Commodity(
             id=self.commodity_id,
@@ -854,6 +872,7 @@ class GraphExtractor:
             tensor_type=tensor_type,
             split_idx=split_idx,
             metadata=metadata,
+            is_multicast=is_multicast,
         )
         self.commodities.append(commodity)
         self.commodity_id += 1
@@ -1025,8 +1044,21 @@ class JointPnRILP:
         """Create all ILP variables"""
         gi = self.graph_info
 
-        # All placeable nodes (call + split + concat)
-        placeable_nodes = gi.call_nodes + gi.split_nodes + gi.concat_nodes
+        # Identify splits whose producer is a VAR - these go to INODE, not IMCE
+        self.splits_preassigned_to_inode = {}  # split_id -> Coord (INODE coord)
+        splits_to_exclude = set()
+        for split_id in gi.split_nodes:
+            split_node = gi.nodes[split_id]
+            if split_node.producer and split_node.producer in gi.var_to_inode:
+                # Producer is a VAR -> split goes to the same INODE as VAR
+                var_inode_coord = gi.var_to_inode[split_node.producer]
+                self.splits_preassigned_to_inode[split_id] = var_inode_coord
+                splits_to_exclude.add(split_id)
+                debug_print(f"[JointPnRILP] Split {split_id} has VAR producer {split_node.producer}, "
+                           f"pre-assigning to INODE at ({var_inode_coord.row}, {var_inode_coord.col})")
+
+        # All placeable nodes (call + split + concat), excluding pre-assigned splits
+        placeable_nodes = gi.call_nodes + [s for s in gi.split_nodes if s not in splits_to_exclude] + gi.concat_nodes
 
         # p[n][v]: placement of call/split/concat node n at IMCE v
         self.p = {}
@@ -1066,9 +1098,16 @@ class JointPnRILP:
 
         # Multicast grouping: y[g][e] for commodities with same source
         # Group by (source_node_id, tensor_type) for multicast
+        # Non-multicast split outputs get individual groups (unicast routing)
         self.multicast_groups = {}  # group_key -> [commodity_ids]
         for k in gi.commodities:
-            key = (k.source_node_id, k.tensor_type)
+            if not k.is_multicast and k.split_idx is not None:
+                # Non-multicast split output: each goes to separate group for individual routing
+                key = (k.source_node_id, k.tensor_type, k.split_idx)
+                debug_print(f"[JointPnRILP.multicast] Commodity {k.id} non-multicast split output, separate group key: {key}")
+                debug_print(f"  Source node: {k.source_node_id}, tensor_type: {k.tensor_type}, split_idx: {k.split_idx}")
+            else:
+                key = (k.source_node_id, k.tensor_type)
             if key not in self.multicast_groups:
                 self.multicast_groups[key] = []
             self.multicast_groups[key].append(k.id)
@@ -1091,8 +1130,10 @@ class JointPnRILP:
         """Add placement constraints P1, P2, P3, P4"""
         gi = self.graph_info
 
-        # P1: Each placeable node -> exactly one IMCE
+        # P1: Each placeable node -> exactly one IMCE (skip pre-assigned splits)
         for n in gi.call_nodes + gi.split_nodes + gi.concat_nodes:
+            if n in self.splits_preassigned_to_inode:
+                continue  # Skip pre-assigned splits (they go to INODE, not IMCE)
             self.prob += (
                 pulp.lpSum(self.p[n][v] for v in self.imce_nodes) == 1,
                 f"P1_one_location_{hash(n) % 100000}"
@@ -1107,8 +1148,10 @@ class JointPnRILP:
                     f"P2_one_call_per_imce_{v.row}_{v.col}"
                 )
 
-        # P3: Split same as producer
+        # P3: Split same as producer (skip pre-assigned splits with VAR producers)
         for split_id in gi.split_nodes:
+            if split_id in self.splits_preassigned_to_inode:
+                continue  # Skip pre-assigned splits (they go to INODE, not IMCE)
             split_node = gi.nodes[split_id]
             if split_node.producer and split_node.producer in self.p:
                 for v in self.imce_nodes:
@@ -1152,6 +1195,21 @@ class JointPnRILP:
                             self.src[k.id][v] == 0,
                             f"L1_src_not_inode_{k.id}_{v.row}_{v.col}"
                         )
+                elif k.source_node_id in self.splits_preassigned_to_inode:
+                    # L1b: Pre-assigned split source (fixed to INODE)
+                    split_inode = self.splits_preassigned_to_inode[k.source_node_id]
+                    debug_print(f"[L1b] Commodity {k.id}: Pre-assigned split {k.source_node_id} -> INODE ({split_inode.row}, {split_inode.col})")
+                    for v in self.all_nodes:
+                        if v == split_inode:
+                            self.prob += (
+                                self.src[k.id][v] == 1,
+                                f"L1b_preassigned_split_src_{k.id}_{v.row}_{v.col}"
+                            )
+                        else:
+                            self.prob += (
+                                self.src[k.id][v] == 0,
+                                f"L1b_preassigned_split_src_not_{k.id}_{v.row}_{v.col}"
+                            )
 
             # L2: Call dest -> placement linking
             if dst_node.node_type in [NodeType.CALL, NodeType.SPLIT, NodeType.CONCAT]:
@@ -1167,6 +1225,21 @@ class JointPnRILP:
                             self.dst[k.id][v] == 0,
                             f"L2_dst_not_inode_{k.id}_{v.row}_{v.col}"
                         )
+                elif k.dest_node_id in self.splits_preassigned_to_inode:
+                    # L2b: Pre-assigned split dest (fixed to INODE)
+                    split_inode = self.splits_preassigned_to_inode[k.dest_node_id]
+                    debug_print(f"[L2b] Commodity {k.id}: Pre-assigned split dest {k.dest_node_id} -> INODE ({split_inode.row}, {split_inode.col})")
+                    for v in self.all_nodes:
+                        if v == split_inode:
+                            self.prob += (
+                                self.dst[k.id][v] == 1,
+                                f"L2b_preassigned_split_dst_{k.id}_{v.row}_{v.col}"
+                            )
+                        else:
+                            self.prob += (
+                                self.dst[k.id][v] == 0,
+                                f"L2b_preassigned_split_dst_not_{k.id}_{v.row}_{v.col}"
+                            )
 
             # L3: Var source (fixed to inode from var_to_inode)
             if src_node.node_type == NodeType.VAR:
@@ -1386,7 +1459,15 @@ class JointPnRILP:
         mapping = {}
         gi = self.graph_info
 
+        # First, add pre-assigned splits (those with VAR producers -> INODE)
+        for split_id, inode_coord in self.splits_preassigned_to_inode.items():
+            mapping[split_id] = inode_coord
+            debug_print(f"[JointPnRILP] Pre-assigned split {split_id} -> INODE ({inode_coord.row}, {inode_coord.col})")
+
+        # Then, extract ILP-solved placements for other nodes
         for n in gi.call_nodes + gi.split_nodes + gi.concat_nodes:
+            if n in self.splits_preassigned_to_inode:
+                continue  # Already handled above
             for v in self.imce_nodes:
                 if pulp.value(self.p[n][v]) > 0.5:
                     mapping[n] = v
@@ -1671,9 +1752,13 @@ class JointPnRRoutingResult:
         self._commodities = {}
         self._paths = {}
         self._noc_paths = noc_paths
+        self._hw_to_ilp_commodity = {}  # HWCommodity ID -> ILP Commodity map
 
         # Get TensorEdge -> ILP commodity_id map
         tensor_edge_to_commodity_id = pnr_result.tensor_edge_to_commodity_id or {}
+
+        # Build ILP commodity lookup by ID
+        ilp_commodities_by_id = {c.id: c for c in (pnr_result.commodities or [])}
 
         # Build commodity lookup by id
         for commodity in commodities:
@@ -1685,6 +1770,11 @@ class JointPnRRoutingResult:
             # TensorEdge commodities: use map to find ILP commodity_id and get route
             if edge is not None and edge in tensor_edge_to_commodity_id:
                 ilp_commodity_id = tensor_edge_to_commodity_id[edge]
+
+                # Store HW -> ILP commodity mapping
+                if ilp_commodity_id in ilp_commodities_by_id:
+                    self._hw_to_ilp_commodity[commodity.id] = ilp_commodities_by_id[ilp_commodity_id]
+
                 if pnr_result.routes and ilp_commodity_id in pnr_result.routes:
                     edges = pnr_result.routes[ilp_commodity_id]
                     path = self._edges_to_path(commodity.source, edges)
@@ -1795,6 +1885,32 @@ class JointPnRRoutingResult:
     def get_noc_paths(self) -> Dict:
         """Get NoCPaths dict"""
         return self._noc_paths
+
+    def get_ilp_commodity(self, hw_commodity_id: int):
+        """Get the original ILP Commodity for a HWCommodity ID.
+
+        Args:
+            hw_commodity_id: The HWCommodity ID
+
+        Returns:
+            The corresponding ILP Commodity, or None if not found
+        """
+        return self._hw_to_ilp_commodity.get(hw_commodity_id)
+
+    def is_multicast(self, hw_commodity_id: int) -> bool:
+        """Check if the commodity is multicast.
+
+        For non-multicast (e.g., DW conv split outputs), chunk selection (ksel)
+        should not be applied in routing.
+
+        Args:
+            hw_commodity_id: The HWCommodity ID
+
+        Returns:
+            True if multicast, False otherwise. Defaults to True if not found.
+        """
+        ilp_comm = self._hw_to_ilp_commodity.get(hw_commodity_id)
+        return ilp_comm.is_multicast if ilp_comm else True
 
 
 def convert_pnr_result_to_routing_result(
