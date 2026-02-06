@@ -139,14 +139,17 @@ class ImceCallCodeBlock(ImceCodeBlock):
   def num_blocks(self) -> int:
     if self.prev_op:
       return self.prev_op.num_out_blocks
-    else:
-      # Standalone BatchNorm: calculate from scale/bias edge size
-      scale_edge = next(
-          (e for e in self.in_edges if e.dst_id.tensor_type == "fused_scale"), None)
-      if scale_edge:
-        size = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(scale_edge).size
-        return math.ceil(size / 32.0)
-      return 1
+
+    # Calculate from relay call output shape (channel dimension / 16)
+    # Works for all standalone ops: BatchNorm, Add, Mult, etc.
+    from tvm.relay.frontend.common import infer_shape
+    out_shape = infer_shape(self.call.call)
+    # Handle tuple outputs (e.g., from batch_norm)
+    if isinstance(out_shape, list):
+      out_shape = out_shape[0]
+    # NCHW layout: channel is dim 1
+    channels = out_shape[1]
+    return math.ceil(channels / 16.0)
 
   @property
   def num_out_blocks(self) -> int:
@@ -355,6 +358,23 @@ class VecBlock(ImceCallCodeBlock):
     # Constant operand info (set by handler when one operand is constant)
     self.const_edge = None  # TensorEdge for RecvConstBlock
     self.const_arg_idx = None  # Argument index where constant appears (0 or 1)
+    # Overridable num_blocks for standalone wrapper (set by create_loop_from_call)
+    self._num_blocks = None
+    self._num_out_blocks = None
+
+  @property
+  def num_blocks(self) -> int:
+    """Return num_blocks, using override if set by wrapper."""
+    if self._num_blocks is not None:
+      return self._num_blocks
+    return super().num_blocks
+
+  @property
+  def num_out_blocks(self) -> int:
+    """Return num_out_blocks, using override if set by wrapper."""
+    if self._num_out_blocks is not None:
+      return self._num_out_blocks
+    return super().num_out_blocks
 
   def set_const_info(self, const_edge: TensorEdge, arg_idx: int):
     """Set constant operand information.
@@ -1808,11 +1828,8 @@ class RecvSendWrapper(ImceCodeBlock):
 
     Returns the updated code block with sync instructions appended
     """
-    print(f"[DEBUG _add_sync_after_send] Called with edge: {edge}")
     pair = self.builder.pair_manager.get_pair(edge)
-    print(f"[DEBUG _add_sync_after_send] pair={pair}")
     if pair is None:
-      print(f"[DEBUG _add_sync_after_send] pair is None, returning")
       return code
 
     # Get current node (sender)
@@ -1821,15 +1838,12 @@ class RecvSendWrapper(ImceCodeBlock):
       if isinstance(src_gid, tuple):
         src_gid = src_gid[-1]
       current_node = DevConfig().get_hw_node(src_gid)
-      print(f"[DEBUG _add_sync_after_send] current_node={current_node}, uuid={pair.uuid}")
-    except Exception as e:
-      print(f"[DEBUG _add_sync_after_send] Exception getting current_node: {e}")
+    except Exception:
       return code
 
     # Create a SequentialBlock for sync instructions
     # SENDER pattern: STANDBY(receiver, uuid) → SETFLAG(uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_annotation = f"sync after IMCE send: uuid={pair.uuid}, edge={edge}"
-    print(f"[DEBUG _add_sync_after_send] Adding sync code")
 
     sync_block = SequentialBlock()
     sync_block.add(f"// {sync_annotation}")
@@ -1994,6 +2008,18 @@ class RecvSendWrapper(ImceCodeBlock):
         count = count // ratio
         num_blocks = bn_num_blocks
         num_out_blocks = bn_num_blocks
+    elif isinstance(actual_send_block, VecBlock):
+      # For standalone VecBlock (Add, Mult, Div), use channel-based num_blocks
+      # The num_blocks should be channels / 16, not byte-ratio based
+      vec_num_blocks = actual_send_block.num_blocks  # Already calculated from output shape
+      if vec_num_blocks > 1:
+        # Adjust count to account for more blocks
+        ratio = vec_num_blocks // num_blocks if num_blocks > 0 else vec_num_blocks
+        count = count // ratio if ratio > 1 else count
+        num_blocks = vec_num_blocks
+        num_out_blocks = vec_num_blocks
+      actual_send_block._num_blocks = num_blocks
+      actual_send_block._num_out_blocks = num_out_blocks
 
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks,
