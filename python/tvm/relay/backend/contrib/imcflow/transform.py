@@ -1123,22 +1123,211 @@ def split_conv_to_atomic(mod, OldParamDict):
     return mod, worker.NewParamDict
 
 def merge_composite_ops(mod):
+    compositer = MergeCompositer("imcflow")
     for global_var, func in mod.functions.items():
-        # if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
         if isinstance(func, relay.Function) and "global_symbol" in func.attrs and "imcflow" in func.attrs["global_symbol"]:
             attr_record = func.attrs
             func_no_attr = relay.Function(func.params, func.body) # no global_symbols attr
             target_mod = tvm.IRModule.from_expr(func_no_attr)
-            transformed = transform.MergeComposite(imcflow.pattern_table())(target_mod)
+            transformed = compositer.run(target_mod)
             _, transformed_func = transformed.functions.items()[0]
             transformed_func = relay.Function(transformed_func.params, transformed_func.body,
                                               ret_type=transformed_func.ret_type, attrs=attr_record)
             mod[global_var] = transformed_func
     return mod
 
-    # transformed = transform.MergeComposite(imcflow.pattern_table())(mod["tvmgen_default_imcflow_main_0"])
-    transformed = transform.MergeComposite(imcflow.pattern_table())(mod)
-    return transformed
+
+class ConsumerMapBuilder(ExprVisitor):
+    """Build a map from expr -> list of consumers (exprs that use it)."""
+
+    def __init__(self):
+        super().__init__()
+        self.consumer_map = {}
+
+    def visit_call(self, call):
+        for arg in call.args:
+            if arg not in self.consumer_map:
+                self.consumer_map[arg] = []
+            self.consumer_map[arg].append(call)
+        super().visit_call(call)
+
+
+class MmquantExtractor(ExprMutator):
+    """Extract mm_quant from composite when consumer is dw_conv."""
+
+    def __init__(self, consumer_map):
+        super().__init__()
+        self.consumer_map = consumer_map
+        self.did_extract = False
+
+    def visit_call(self, call):
+        # Save original call for consumer_map lookup (super() creates new objects)
+        original_call = call
+        call = super().visit_call(call)
+
+        if not self._should_extract(call, original_call):
+            return call
+
+        self.did_extract = True
+        return self._extract_mmquant(call)
+
+    def _is_composite_ending_with_mmquant(self, call):
+        """Check if call is to a composite function ending with mm_quant."""
+        if not isinstance(call.op, relay.Function):
+            return False
+        if "Composite" not in call.op.attrs:
+            return False
+
+        body = call.op.body
+        if isinstance(body, relay.Call) and isinstance(body.op, tvm.ir.Op):
+            return body.op.name == "qnn.imcflow_min_max_quantize"
+        return False
+
+    def _is_dwconv_call(self, call):
+        """Check if call is dw_conv (standalone or composite)."""
+        if isinstance(call.op, tvm.ir.Op):
+            return call.op.name == "nn.imcflow_qdwconv"
+        if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs:
+            composite_name = call.op.attrs["Composite"]
+            return "qdwconv" in composite_name
+        return False
+
+    def _should_extract(self, call, original_call):
+        """Check if mm_quant should be extracted from this composite."""
+        if not self._is_composite_ending_with_mmquant(call):
+            return False
+
+        # Use original_call for consumer_map lookup (keys are pre-mutation objects)
+        consumers = self.consumer_map.get(original_call, [])
+        return any(self._is_dwconv_call(c) for c in consumers)
+
+    def _extract_mmquant(self, call):
+        """
+        Transform:
+          Before: composite_call = Composite(... -> mm_quant)(args)
+          After:  mm_quant(new_composite_call, min, max)
+                  where new_composite_call = Composite(... without mm_quant)(filtered_args)
+
+        mm_quant's min/max may be composite function params (Var), so we must
+        resolve them to the corresponding external call args and remove those
+        params from the new composite.
+        """
+        old_func = call.op
+        old_body = old_func.body  # mm_quant Call
+
+        # mm_quant args within composite body: (data, min, max)
+        mmquant_data_input = old_body.args[0]
+        mmquant_min_inner = old_body.args[1]
+        mmquant_max_inner = old_body.args[2]
+
+        # Map composite params -> external call args
+        param_to_arg = {}
+        for p, a in zip(old_func.params, call.args):
+            param_to_arg[p] = a
+
+        # Resolve min/max: if they're function params, use external call args
+        mmquant_min = param_to_arg.get(mmquant_min_inner, mmquant_min_inner)
+        mmquant_max = param_to_arg.get(mmquant_max_inner, mmquant_max_inner)
+
+        # Remove min/max params from composite (no longer used in body)
+        params_to_remove = set()
+        if isinstance(mmquant_min_inner, Var):
+            params_to_remove.add(mmquant_min_inner)
+        if isinstance(mmquant_max_inner, Var):
+            params_to_remove.add(mmquant_max_inner)
+
+        new_params = []
+        new_call_args = []
+        for p, a in zip(old_func.params, call.args):
+            if p not in params_to_remove:
+                new_params.append(p)
+                new_call_args.append(a)
+
+        # Create new composite function (body = mm_quant's data input, no mm_quant)
+        new_func = relay.Function(
+            new_params,
+            mmquant_data_input,
+            ret_type=None,
+            type_params=old_func.type_params,
+            attrs=old_func.attrs,
+        )
+
+        # Call new composite with filtered args
+        new_composite_call = relay.Call(new_func, new_call_args)
+
+        # Call mm_quant externally with resolved min/max, preserving original call attrs
+        # (axis, out_dtype, param_dtype, channel, replicate_factor are required)
+        mmquant_op = tvm.ir.Op.get("qnn.imcflow_min_max_quantize")
+        extracted_mmquant = relay.Call(
+            mmquant_op,
+            [new_composite_call, mmquant_min, mmquant_max],
+            attrs=old_body.attrs,
+        )
+
+        return extracted_mmquant
+
+
+class MergeCompositer:
+    """MergeComposite + extract mm_quant when consumer is dw_conv.
+
+    This class performs:
+    1. Standard MergeComposite pass to create composite functions
+    2. Post-processing to extract mm_quant from composites when the
+       consumer is dw_conv (requires special build_mmquant_for_dwconv handling)
+    """
+
+    def __init__(self, pattern_table_name="imcflow"):
+        self.pattern_table_name = pattern_table_name
+
+    def run(self, mod):
+        """Top-level method to run the transformation."""
+        # Step 1: Run standard MergeComposite
+        mod = self._run_merge_composite(mod)
+
+        # Step 2: Extract mm_quant from composites where consumer is dw_conv
+        mod, changed = self._extract_mmquant_for_dwconv(mod)
+
+        # Step 3: InferType only if extraction modified the graph
+        if changed:
+            mod = relay.transform.InferType()(mod)
+
+        return mod
+
+    def _run_merge_composite(self, mod):
+        """Run the standard MergeComposite pass."""
+        pattern_table = relay.op.contrib.get_pattern_table(self.pattern_table_name)
+        return transform.MergeComposite(pattern_table)(mod)
+
+    def _extract_mmquant_for_dwconv(self, mod):
+        """Extract mm_quant from composites when consumer is dw_conv.
+
+        Returns (mod, changed) where changed indicates if any extraction occurred.
+        """
+        changed = False
+        for gv in mod.get_global_vars():
+            func = mod[gv]
+
+            # Build consumer map for this function
+            builder = ConsumerMapBuilder()
+            builder.visit(func)
+            consumer_map = builder.consumer_map
+
+            # Apply extraction
+            extractor = MmquantExtractor(consumer_map)
+            new_body = extractor.visit(func.body)
+
+            if extractor.did_extract:
+                changed = True
+                new_func = relay.Function(
+                    func.params,
+                    new_body,
+                    func.ret_type,
+                    func.type_params,
+                    func.attrs,
+                )
+                mod.update_func(gv, new_func)
+
+        return mod, changed
 
 
 def merge_composite_for_partition(mod):
@@ -1154,18 +1343,17 @@ def merge_composite_for_partition(mod):
     After partitionRound, use merge_composite_ops() with the full pattern_table()
     to merge converging patterns.
     """
+    compositer = MergeCompositer("imcflow_partition")
     for global_var, func in mod.functions.items():
         if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
             attr_record = func.attrs
             func_no_attr = relay.Function(func.params, func.body)
             target_mod = tvm.IRModule.from_expr(func_no_attr)
-            # Use pattern_table_for_partition() which excludes converging patterns
-            transformed = transform.MergeComposite(imcflow.pattern_table_for_partition())(target_mod)
+            transformed = compositer.run(target_mod)
             _, transformed_func = transformed.functions.items()[0]
             transformed_func = relay.Function(transformed_func.params, transformed_func.body,
                                               ret_type=transformed_func.ret_type, attrs=attr_record)
             mod[global_var] = transformed_func
-    mod = relay.transform.InferType()(mod)
     return mod
 
 
