@@ -129,7 +129,7 @@ REMOTE_PASSWORD="root"
 REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
-DEFAULT_RUNNER_NAME="chiptest"
+DEFAULT_RUNNER_NAME="."
 NPZ_FILE_PATH="scan_reg_files"
 
 echo "=========================================="
