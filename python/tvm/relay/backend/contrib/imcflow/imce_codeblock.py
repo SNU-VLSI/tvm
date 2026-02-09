@@ -624,6 +624,9 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
       dir="out"
     )
 
+    # Sort by split_idx so that edges[i] corresponds to split.i (ch_group i)
+    split_out_edges.sort(key=lambda e: e.split_idx if e.split_idx is not None else 0)
+
     split_out_edge_infos = [
       DevConfig().get_tensor_edge_info(out_edge) for out_edge in split_out_edges
     ]
@@ -768,9 +771,9 @@ class ConcatBlock(ImceCallCodeBlock):
       If input type is C16 vector, CONCAT.
       If conv_input, OR_CONCAT
     """
-    fisrt_arg = self.call.call.args[0].fields[0]
-    assert isinstance(fisrt_arg, relay.Call), "First argument must be a relay.Call"
-    if fisrt_arg.op.name == "qnn.imcflow_min_max_quantize":
+    last_arg = self.call.call.args[0].fields[-1]
+    assert isinstance(last_arg, relay.Call), "Last argument must be a relay.Call"
+    if last_arg.op.name == "qnn.imcflow_min_max_quantize":
       self.or_concat = 1
     else:
       self.or_concat = 0
@@ -784,8 +787,8 @@ class ConcatBlock(ImceCallCodeBlock):
     print(f"[ConcatBlock] channel: {self.channel}")
   
   def set_channel_block_size(self):
-    fisrt_arg = self.call.call.args[0].fields[0]
-    layout = DevConfig().LayoutMap[fisrt_arg]
+    last_arg = self.call.call.args[0].fields[-1]
+    layout = DevConfig().LayoutMap[last_arg]
     if layout.value == "NCHW16c":
       self.channel_block_size = 16
     elif layout.value == "NCHW64c":
