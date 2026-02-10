@@ -1151,6 +1151,12 @@ class ConsumerMapBuilder(ExprVisitor):
             self.consumer_map[arg].append(call)
         super().visit_call(call)
 
+    def visit_tuple_getitem(self, tgi):
+        if tgi.tuple_value not in self.consumer_map:
+            self.consumer_map[tgi.tuple_value] = []
+        self.consumer_map[tgi.tuple_value].append(tgi)
+        super().visit_tuple_getitem(tgi)
+
 
 class MmquantExtractor(ExprMutator):
     """Extract mm_quant from composite when consumer is dw_conv."""
@@ -1185,11 +1191,32 @@ class MmquantExtractor(ExprMutator):
 
     def _is_dwconv_call(self, call):
         """Check if call is dw_conv (standalone or composite)."""
+        if not isinstance(call, Call):
+            return False
         if isinstance(call.op, tvm.ir.Op):
             return call.op.name == "nn.imcflow_qdwconv"
         if isinstance(call.op, relay.Function) and "Composite" in call.op.attrs:
             composite_name = call.op.attrs["Composite"]
             return "qdwconv" in composite_name
+        return False
+
+    def _has_dwconv_consumer(self, expr):
+        """Check if expr is dw_conv, or if it's split/TupleGetItem leading to dw_conv.
+
+        Traces through split -> TupleGetItem chain to find actual consumers.
+        """
+        if self._is_dwconv_call(expr):
+            return True
+
+        # If it's a split call, check its TupleGetItem consumers
+        if isinstance(expr, Call) and isinstance(expr.op, tvm.ir.Op) and expr.op.name == "split":
+            split_consumers = self.consumer_map.get(expr, [])
+            for sc in split_consumers:
+                # TupleGetItem from split
+                if isinstance(sc, TupleGetItem):
+                    tgi_consumers = self.consumer_map.get(sc, [])
+                    if any(self._is_dwconv_call(c) for c in tgi_consumers):
+                        return True
         return False
 
     def _should_extract(self, call, original_call):
@@ -1199,7 +1226,8 @@ class MmquantExtractor(ExprMutator):
 
         # Use original_call for consumer_map lookup (keys are pre-mutation objects)
         consumers = self.consumer_map.get(original_call, [])
-        return any(self._is_dwconv_call(c) for c in consumers)
+        # Trace through split/TupleGetItem to find actual consumers
+        return any(self._has_dwconv_consumer(c) for c in consumers)
 
     def _extract_mmquant(self, call):
         """
@@ -2904,6 +2932,27 @@ class AnnotGenerator:
               return "qdwconv" in node.op.attrs["Composite"]
           return False
 
+        def _has_dwconv_consumer(self, node, edges):
+          """Check if node is dw_conv, or if it's split/TupleGetItem leading to dw_conv.
+
+          Traces through split -> TupleGetItem chain to find actual consumers.
+          Returns (found, dwconv_node) where dwconv_node is the first dw_conv found.
+          """
+          if self._is_dwconv_node(node):
+            return True, node
+
+          # If it's a split call, check its TupleGetItem consumers
+          if isinstance(node, Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == "split":
+            split_consumers = edges.get(node, [])
+            for sc in split_consumers:
+              # TupleGetItem from split
+              if isinstance(sc, TupleGetItem):
+                tgi_consumers = edges.get(sc, [])
+                for c in tgi_consumers:
+                  if self._is_dwconv_node(c):
+                    return True, c
+          return False, None
+
         def _check_mmquant_dwconv_pattern(self, node, edges):
           """Check if node is mm_quant with DW conv consumer pattern.
 
@@ -2918,19 +2967,23 @@ class AnnotGenerator:
           3. mm_quant in composite -> DW conv standalone
           4. mm_quant in composite -> DW conv in composite
 
+          Also handles split in between:
+          5. mm_quant -> split -> TupleGetItem -> DW conv
+
           Returns:
             True if the pattern is detected and a new region should be forced.
           """
           if not self._is_mmquant_node(node):
-            return False
+            return False, None
 
-          # Get consumers of mm_quant
+          # Get consumers of mm_quant and trace through split/TupleGetItem
           consumers = edges.get(node, [])
           for consumer in consumers:
-            if self._is_dwconv_node(consumer):
+            found, dwconv_node = self._has_dwconv_consumer(consumer, edges)
+            if found:
               debug_print(f"[MMQuantDWConvCheck] Detected mm_quant -> DW conv pattern for node {getNodeDebugID(node)}")
-              return True
-          return False
+              return True, dwconv_node
+          return False, None
 
         def getCost(self, call):
           """
@@ -3536,9 +3589,11 @@ class AnnotGenerator:
                 # INODE routing issues when split is added later.
                 # ====================================================
                 if not force_new_region and not needs_split:
-                  if self._check_mmquant_dwconv_pattern(node, edges):
-                    force_new_region = True
-                    debug_print(f"[MMQuantDWConvCheck] Forcing new region for mm_quant -> DW conv pattern")
+                  match, dwconv = self._check_mmquant_dwconv_pattern(node, edges)
+                  if match:
+                    if len(candidate_regions) > 0 and (self.getRegionSize(candidate_regions[0]) + self.getCost(dwconv) + self.getCost(node)) >= ImcflowDeviceConfig.IMCE_NUM:
+                      force_new_region = True
+                      debug_print(f"[MMQuantDWConvCheck] Forcing new region for mm_quant -> DW conv pattern")
 
                 # ====================================================
                 # Selection policy with converge point handling

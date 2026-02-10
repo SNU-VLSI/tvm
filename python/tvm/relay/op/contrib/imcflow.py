@@ -640,7 +640,7 @@ def makeSplitPatern(data):
   return is_op("split")(data)
 
 def makeConcatPattern(data):
-  return is_op("concatenate")(is_tuple([data, wildcard()]))
+  return is_op("concatenate")(is_tuple([wildcard(), data]))
 
 def make_conv_with_postop_pattern(conv_type, postop):
     data1, weight = wildcard(), is_constant()
