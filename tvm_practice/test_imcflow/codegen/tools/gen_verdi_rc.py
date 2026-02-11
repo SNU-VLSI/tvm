@@ -634,6 +634,240 @@ def signals_router(tb, row, col, is_inode=False):
     return [("router", signals)]
 
 
+# ============================================================================
+# Inode signal groups
+# ============================================================================
+
+def signals_inode_fsm(tb, row, col):
+    """Inode FSM signals (intf_node_fsm.sv).
+    Hierarchy: inode/u_intf_node/u_intf_node_fsm
+    """
+    base = f"{inode_path(tb, row, col)}/u_intf_node_fsm"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("fsm_state"),
+        _sig("pc_reg_i[31:0]"),
+        _sig("run_req_i"),
+        _sig("halt_i"),
+        _sig("run_ack_o"),
+        _sig("start_o"),
+        _sig("inode_state_o"),
+        _sig("start_pc_o[31:0]"),
+        _sig("is_active_o"),
+    ]
+    return [("inode_fsm", signals)]
+
+
+def signals_inode_if_stage(tb, row, col):
+    """Inode IF stage signals (IF_stage.sv).
+    Hierarchy: inode/u_intf_node/if_stage
+    Submodules: u_pc_gen_intf_node, u_imem_intf_node
+    """
+    base = f"{inode_path(tb, row, col)}/if_stage"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("start_i"),
+        _sig("start_pc_i[31:0]"),
+        _sig("is_active_i"),
+        _sig("pc_sel_i"),
+        _sig("stall_i"),
+        _sig("flush_i"),
+        _sig("inst_o[31:0]"),
+        _sig("pc_o[31:0]"),
+        _sig("last_pc[31:0]"),
+        _sig("flush_q"),
+    ]
+    return [("inode_if_stage", signals)]
+
+
+def signals_inode_id_stage(tb, row, col):
+    """Inode ID stage signals (ID_stage.sv).
+    Hierarchy: inode/u_intf_node/id_stage
+    Submodules: u_decoder_intf_node, u_reg_file_intf_node, u_ctrl_generator
+    """
+    base = f"{inode_path(tb, row, col)}/id_stage"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("inst_i[31:0]"),
+        _sig("opcode_o"),
+        _sig("rs1_o"),
+        _sig("rs2_o"),
+        _sig("rd_o"),
+        _sig("imm_o"),
+        _sig("dmem_ren_o"),
+        _sig("dmem_wen_o"),
+        _sig("packet_en_o"),
+        _sig("srf_wen_o"),
+        _sig("srf_of_rs1_o"),
+        _sig("srf_of_rs2_o"),
+        _sig("fifo_id_o"),
+        _sig("node_col_id_o"),
+        _sig("interrupt_id_o"),
+        _sig("pc_br_target_o[31:0]"),
+        _sig("pc_p4_o[31:0]"),
+        _sig("is_flush"),
+        _sig("rs1_forward_i"),
+        _sig("rs2_forward_i"),
+    ]
+    return [("inode_id_stage", signals)]
+
+
+def signals_inode_ex_stage(tb, row, col):
+    """Inode EX stage signals (EX_stage.sv).
+    Hierarchy: inode/u_intf_node/ex_stage
+    Submodules: u_recv_fifo
+    """
+    base = f"{inode_path(tb, row, col)}/ex_stage"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("opcode_i"),
+        _sig("operand1_sel_i[1:0]"),
+        _sig("operand2_sel_i[1:0]"),
+        _sig("srf_of_rs1_i"),
+        _sig("srf_of_rs2_i"),
+        _sig("imm_i"),
+        _sig("no_true_dep_i"),
+        _sig("alu_result_o"),
+        _sig("is_branch_taken_o"),
+        _sig("pc_i[31:0]"),
+        _sig("pc_p4_o[31:0]"),
+        _sig("forwarded_srf_of_rs2_o"),
+        _sub("recv_fifo"),
+        _sig("recv_fifo_pop_valid_o"),
+        _sig("recv_fifo_pop_ready_o"),
+        _sig("recv_fifo_data_o"),
+        _endsub("recv_fifo"),
+        _sub("sync_reg"),
+        _sig("syn_reg_req_o"),
+        _sig("sync_reg_req_data_o"),
+        _endsub("sync_reg"),
+    ]
+    return [("inode_ex_stage", signals)]
+
+
+def signals_inode_mem_stage(tb, row, col):
+    """Inode MEM stage signals (MEM_stage.sv).
+    Hierarchy: inode/u_intf_node/mem_stage
+    Submodules: u_mem (tc_sram)
+    """
+    base = f"{inode_path(tb, row, col)}/mem_stage"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("opcode_i"),
+        _sig("dmem_ren_i"),
+        _sig("dmem_wen_i"),
+        _sig("addr_i"),
+        _sig("data_i"),
+        _sig("reg_data_i"),
+        _sig("is_active_i"),
+        _sig("data_o"),
+        _sig("reg_data_o"),
+        _sub("sram_internal"),
+        _sig("csn"),
+        _sig("we"),
+        _sig("addr"),
+        _sig("wdata"),
+        _sig("rdata"),
+        _endsub("sram_internal"),
+    ]
+    return [("inode_mem_stage", signals)]
+
+
+def signals_inode_wb_stage(tb, row, col):
+    """Inode WB stage signals (WB_stage.sv).
+    Hierarchy: inode/u_intf_node/wb_stage
+    Submodules: u_packet_packer, u_send_fifo_block
+    """
+    base = f"{inode_path(tb, row, col)}/wb_stage"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("opcode_i"),
+        _sig("packet_en_i"),
+        _sig("alu_result_i"),
+        _sig("data_i"),
+        _sig("reg_data_i"),
+        _sig("halt_o"),
+        _sig("interrupt_valid_o"),
+        _sig("interrupt_id_o"),
+        _sig("rd_reg_data_o"),
+        _sub("packet_tx"),
+        _sig("packet_tx_req_o"),
+        _sig("packet_tx_gnt_o"),
+        _sig("node_col_id_i"),
+        _sig("next_policy_addr_i"),
+        _sig("imm_i"),
+        _sig("fifo_id_i"),
+        _sig("forwarded_rs2_i"),
+        _endsub("packet_tx"),
+    ]
+    return [("inode_wb_stage", signals)]
+
+
+def signals_inode_hazard(tb, row, col):
+    """Inode hazard + forward control signals.
+    Hierarchy: inode/u_intf_node/u_hazard_control, u_forward_control
+    """
+    base = f"{inode_path(tb, row, col)}"
+    hzd = f"{base}/u_hazard_control"
+    fwd = f"{base}/u_forward_control"
+    signals = [
+        _sub("hazard_control"),
+        _fsig(f"{hzd}/clk_i"),
+        _sig("rstn_i"),
+        _sig("is_active_i"),
+        _sig("start_i"),
+        _sig("if_pc_sel_o"),
+        _sig("if_stall_o"),
+        _sig("if_flush_o"),
+        _sig("id_opcode_i"),
+        _sig("id_stall_o"),
+        _sig("id_flush_o"),
+        _sig("ex_opcode_i"),
+        _sig("ex_no_true_dep_o"),
+        _sig("ex_stall_o"),
+        _sig("ex_flush_o"),
+        _sig("ex_recv_fifo_req_i"),
+        _sig("ex_recv_fifo_gnt_i"),
+        _sig("ex_branch_not_taken_i"),
+        _sig("mem_stall_o"),
+        _sig("mem_flush_o"),
+        _sig("wb_packet_en_i"),
+        _sig("wb_send_fifo_req_i"),
+        _sig("wb_send_fifo_gnt_i"),
+        _sig("wb_interrupt_req_i"),
+        _sig("wb_interrupt_ack_i"),
+        _sig("wb_stall_o"),
+        _sig("wb_flush_o"),
+        _sig("id_is_br"),
+        _sig("ex_is_br"),
+        _sig("id_is_halt"),
+        _endsub("hazard_control"),
+        _sub("forward_control"),
+        _fsig(f"{fwd}/clk_i"),
+        _sig("rstn_i"),
+        _sig("id_rs1_i"),
+        _sig("id_rs2_i"),
+        _sig("id_rs1_forward_o"),
+        _sig("id_rs2_forward_o"),
+        _sig("ex_rs1_i"),
+        _sig("ex_rs2_i"),
+        _sig("mem_rd_i"),
+        _sig("mem_reg_we_i"),
+        _sig("wb_rd_i"),
+        _sig("wb_reg_we_i"),
+        _sig("operand1_sel_o"),
+        _sig("operand2_sel_o"),
+        _endsub("forward_control"),
+    ]
+    return [("inode_hazard", signals)]
+
+
 def signals_fifo_block(tb, row, col):
     """FIFO block signals."""
     base = f"{imce_path(tb, row, col)}/u_fifo_block"
@@ -785,13 +1019,21 @@ SIGNAL_GROUPS: Dict[str, callable] = {
     "fifo":      signals_fifo_block,
     # cross-module groups
     "op_step":   signals_op_step,
+    # inode groups
+    "inode_fsm":       signals_inode_fsm,
+    "inode_if":        signals_inode_if_stage,
+    "inode_id":        signals_inode_id_stage,
+    "inode_ex":        signals_inode_ex_stage,
+    "inode_mem":       signals_inode_mem_stage,
+    "inode_wb":        signals_inode_wb_stage,
+    "inode_hazard":    signals_inode_hazard,
 }
 
 # Default groups for IMCE nodes
 DEFAULT_IMCE_GROUPS = ["ctrl", "hazard", "datapath", "vpu", "linebuffer", "erf", "imcu", "imcu_unit", "post_imcu", "imcu_ctrl", "router", "fifo", "op_step"]
 
-# Default groups for inode (col=0) - router only
-DEFAULT_INODE_GROUPS = ["router"]
+# Default groups for inode (col=0)
+DEFAULT_INODE_GROUPS = ["router", "inode_fsm", "inode_if", "inode_id", "inode_ex", "inode_mem", "inode_wb", "inode_hazard"]
 
 
 # ============================================================================
@@ -901,9 +1143,6 @@ def generate_rc(
             if grp_name == "router":
                 group_entries = gen_fn(tb, row, col, is_inode=is_inode)
             else:
-                # Skip non-router IMCE groups for inodes
-                if is_inode:
-                    continue
                 group_entries = gen_fn(tb, row, col)
 
             # Wrap each signal group as a subGroup inside the node group
