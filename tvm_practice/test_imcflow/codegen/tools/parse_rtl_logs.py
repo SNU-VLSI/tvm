@@ -183,7 +183,7 @@ def print_imce_ctrl_sorted(entries: List[IMCECtrlLogEntry], limit: int = 100,
 def find_final_stalls(entries_by_node: Dict[Tuple[int, int], List[IMCECtrlLogEntry]]) -> List[IMCECtrlLogEntry]:
     """
     Find the last STALL for each node, only if no other operation was executed after.
-    Excludes stalls where the previous operation was in state=S_IDLE (indicating work is done).
+    Excludes stalls where the node completed its compute cycle and returned to S_IDLE.
     Returns list of final stall entries sorted by timestamp.
     """
     final_stalls = []
@@ -200,12 +200,19 @@ def find_final_stalls(entries_by_node: Dict[Tuple[int, int], List[IMCECtrlLogEnt
 
         # Check if it's a STALL_START (meaning node is still stalled)
         if last_entry.log_type == 'STALL_START':
-            # Check if the previous entry was in S_IDLE state
-            # If so, the node finished its work and is just waiting - not a real stall
-            if len(sorted_entries) >= 2:
+            # Check if node ever entered S_COMPUTE (actually started doing work)
+            ever_computed = any(
+                'state=S_COMPUTE' in e.content
+                for e in sorted_entries
+                if e.log_type == 'EXECUTE'
+            )
+
+            # Only filter out if the node completed a compute cycle and returned to S_IDLE.
+            # Nodes that never entered S_COMPUTE are genuinely stuck (data never arrived).
+            if ever_computed and len(sorted_entries) >= 2:
                 prev_entry = sorted_entries[-2]
                 if 'state=S_IDLE' in prev_entry.content:
-                    continue  # Skip this - node is done, just waiting
+                    continue  # Node finished compute and is waiting for next task
 
             final_stalls.append(last_entry)
 
@@ -482,6 +489,10 @@ def main():
     args = parser.parse_args()
 
     base_dir = args.test_dir
+
+    # --final-stall implies --ctrl mode
+    if args.final_stall:
+        args.ctrl = True
 
     # Handle --ctrl mode: show IMCE ctrl_pl logs sorted by timestamp
     if args.ctrl:
