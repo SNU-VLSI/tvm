@@ -673,7 +673,38 @@ def signals_op_step(tb, row, col):
     return [("op_step", signals)]
 
 
-# Registry of all available signal groups
+# ============================================================================
+# Top-level signal groups (not per-node, generated once at the impl level)
+# ============================================================================
+
+def signals_imcflow_impl(tb):
+    """IMCFlow impl top-level signals."""
+    base = TB_PREFIXES[tb]
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("io_req_i"),
+        _sig("io_gnt_o"),
+        _sig("io_addr_i"),
+        _sig("io_wen_i"),
+        _sig("io_be_i"),
+        _sig("io_data_i"),
+        _sig("io_r_data_o"),
+        _sig("io_r_valid_o"),
+    ]
+    return [("imcflow_impl", signals)]
+
+
+# Top-level groups: function takes (tb) only, not (tb, row, col)
+TOP_LEVEL_GROUPS: Dict[str, callable] = {
+    "impl": signals_imcflow_impl,
+}
+
+# Which top-level groups to include by default
+DEFAULT_TOP_LEVEL_GROUPS = ["impl"]
+
+
+# Registry of all available signal groups (per-node)
 SIGNAL_GROUPS: Dict[str, callable] = {
     "ctrl":      signals_imce_ctrl,
     "hazard":    signals_hazard_detector,
@@ -766,6 +797,18 @@ def generate_rc(
     # Active file
     lines.append(f'activeDirFile "" "{fsdb_path}"')
     lines.append("")
+
+    # Generate top-level signal groups (once, not per-node)
+    top_groups = [g for g in (groups or DEFAULT_TOP_LEVEL_GROUPS) if g in TOP_LEVEL_GROUPS]
+    for grp_name in top_groups:
+        gen_fn = TOP_LEVEL_GROUPS[grp_name]
+        group_entries = gen_fn(tb)
+        for sub_name, signals in group_entries:
+            collapse_flag = " -e FALSE" if collapsed else ""
+            lines.append(f'addGroup "{sub_name}" -c ID_WHITE{collapse_flag}')
+            for sig in signals:
+                lines.append(format_signal_line(sig))
+        lines.append("")
 
     # Generate signal groups for each node, sorted by (row, col)
     for row, col in sorted(nodes):
@@ -899,7 +942,7 @@ Examples:
   # Standalone testbench (not gem5)
   python gen_verdi_rc.py --nodes 0,1 --tb standalone --fsdb inter.fsdb -o signals.rc
 
-Available signal groups: """ + ", ".join(sorted(SIGNAL_GROUPS.keys()))
+Available signal groups: """ + ", ".join(sorted({**SIGNAL_GROUPS, **TOP_LEVEL_GROUPS}.keys()))
     )
 
     parser.add_argument("-o", "--output", required=True, help="Output .rc file path")
@@ -915,7 +958,8 @@ Available signal groups: """ + ", ".join(sorted(SIGNAL_GROUPS.keys()))
     node_group.add_argument("--grid", metavar="RxC",
                             help="Generate for full RxC grid (e.g., 4x5)")
 
-    parser.add_argument("--groups", nargs="+", choices=sorted(SIGNAL_GROUPS.keys()),
+    all_groups = sorted({**SIGNAL_GROUPS, **TOP_LEVEL_GROUPS}.keys())
+    parser.add_argument("--groups", nargs="+", choices=all_groups,
                         help="Signal groups to include (default: all)")
     parser.add_argument("--expanded", action="store_true",
                         help="Start groups expanded (default: collapsed)")
