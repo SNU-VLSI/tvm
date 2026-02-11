@@ -74,7 +74,7 @@ addSignal -h 15 -holdScope pc_sel_i
 addSignal -h 15 -holdScope stall_i
 addSignal -h 15 -holdScope flush_i
 addSignal -h 15 -holdScope inst_o[31:0]
-addSignal -h 15 -holdScope pc_o[31:0]
+addSignal -h 15 -holdScope pc_o[7:0]
 addSignal -h 15 -holdScope last_pc[31:0]
 addSignal -h 15 -holdScope flush_q
 endSubGroup "inode_if_stage"
@@ -96,8 +96,8 @@ addSignal -h 15 -holdScope srf_of_rs2_o
 addSignal -h 15 -holdScope fifo_id_o
 addSignal -h 15 -holdScope node_col_id_o
 addSignal -h 15 -holdScope interrupt_id_o
-addSignal -h 15 -holdScope pc_br_target_o[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_br_target_o[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope is_flush
 addSignal -h 15 -holdScope rs1_forward_i
 addSignal -h 15 -holdScope rs2_forward_i
@@ -114,8 +114,8 @@ addSignal -h 15 -holdScope imm_i
 addSignal -h 15 -holdScope no_true_dep_i
 addSignal -h 15 -holdScope alu_result_o
 addSignal -h 15 -holdScope is_branch_taken_o
-addSignal -h 15 -holdScope pc_i[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_i[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope forwarded_srf_of_rs2_o
 addSubGroup "recv_fifo" -e FALSE
 addSignal -h 15 -holdScope recv_fifo_pop_valid_o
@@ -417,7 +417,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -752,7 +752,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -1087,7 +1087,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -1422,7 +1422,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -1599,7 +1599,7 @@ addSignal -h 15 -holdScope pc_sel_i
 addSignal -h 15 -holdScope stall_i
 addSignal -h 15 -holdScope flush_i
 addSignal -h 15 -holdScope inst_o[31:0]
-addSignal -h 15 -holdScope pc_o[31:0]
+addSignal -h 15 -holdScope pc_o[7:0]
 addSignal -h 15 -holdScope last_pc[31:0]
 addSignal -h 15 -holdScope flush_q
 endSubGroup "inode_if_stage"
@@ -1621,8 +1621,8 @@ addSignal -h 15 -holdScope srf_of_rs2_o
 addSignal -h 15 -holdScope fifo_id_o
 addSignal -h 15 -holdScope node_col_id_o
 addSignal -h 15 -holdScope interrupt_id_o
-addSignal -h 15 -holdScope pc_br_target_o[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_br_target_o[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope is_flush
 addSignal -h 15 -holdScope rs1_forward_i
 addSignal -h 15 -holdScope rs2_forward_i
@@ -1639,8 +1639,8 @@ addSignal -h 15 -holdScope imm_i
 addSignal -h 15 -holdScope no_true_dep_i
 addSignal -h 15 -holdScope alu_result_o
 addSignal -h 15 -holdScope is_branch_taken_o
-addSignal -h 15 -holdScope pc_i[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_i[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope forwarded_srf_of_rs2_o
 addSubGroup "recv_fifo" -e FALSE
 addSignal -h 15 -holdScope recv_fifo_pop_valid_o
@@ -1942,7 +1942,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -2277,7 +2277,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -2612,7 +2612,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -2947,7 +2947,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -3124,7 +3124,7 @@ addSignal -h 15 -holdScope pc_sel_i
 addSignal -h 15 -holdScope stall_i
 addSignal -h 15 -holdScope flush_i
 addSignal -h 15 -holdScope inst_o[31:0]
-addSignal -h 15 -holdScope pc_o[31:0]
+addSignal -h 15 -holdScope pc_o[7:0]
 addSignal -h 15 -holdScope last_pc[31:0]
 addSignal -h 15 -holdScope flush_q
 endSubGroup "inode_if_stage"
@@ -3146,8 +3146,8 @@ addSignal -h 15 -holdScope srf_of_rs2_o
 addSignal -h 15 -holdScope fifo_id_o
 addSignal -h 15 -holdScope node_col_id_o
 addSignal -h 15 -holdScope interrupt_id_o
-addSignal -h 15 -holdScope pc_br_target_o[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_br_target_o[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope is_flush
 addSignal -h 15 -holdScope rs1_forward_i
 addSignal -h 15 -holdScope rs2_forward_i
@@ -3164,8 +3164,8 @@ addSignal -h 15 -holdScope imm_i
 addSignal -h 15 -holdScope no_true_dep_i
 addSignal -h 15 -holdScope alu_result_o
 addSignal -h 15 -holdScope is_branch_taken_o
-addSignal -h 15 -holdScope pc_i[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_i[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope forwarded_srf_of_rs2_o
 addSubGroup "recv_fifo" -e FALSE
 addSignal -h 15 -holdScope recv_fifo_pop_valid_o
@@ -3467,7 +3467,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -3802,7 +3802,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -4137,7 +4137,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -4472,7 +4472,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -4649,7 +4649,7 @@ addSignal -h 15 -holdScope pc_sel_i
 addSignal -h 15 -holdScope stall_i
 addSignal -h 15 -holdScope flush_i
 addSignal -h 15 -holdScope inst_o[31:0]
-addSignal -h 15 -holdScope pc_o[31:0]
+addSignal -h 15 -holdScope pc_o[7:0]
 addSignal -h 15 -holdScope last_pc[31:0]
 addSignal -h 15 -holdScope flush_q
 endSubGroup "inode_if_stage"
@@ -4671,8 +4671,8 @@ addSignal -h 15 -holdScope srf_of_rs2_o
 addSignal -h 15 -holdScope fifo_id_o
 addSignal -h 15 -holdScope node_col_id_o
 addSignal -h 15 -holdScope interrupt_id_o
-addSignal -h 15 -holdScope pc_br_target_o[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_br_target_o[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope is_flush
 addSignal -h 15 -holdScope rs1_forward_i
 addSignal -h 15 -holdScope rs2_forward_i
@@ -4689,8 +4689,8 @@ addSignal -h 15 -holdScope imm_i
 addSignal -h 15 -holdScope no_true_dep_i
 addSignal -h 15 -holdScope alu_result_o
 addSignal -h 15 -holdScope is_branch_taken_o
-addSignal -h 15 -holdScope pc_i[31:0]
-addSignal -h 15 -holdScope pc_p4_o[31:0]
+addSignal -h 15 -holdScope pc_i[7:0]
+addSignal -h 15 -holdScope pc_p4_o[7:0]
 addSignal -h 15 -holdScope forwarded_srf_of_rs2_o
 addSubGroup "recv_fifo" -e FALSE
 addSignal -h 15 -holdScope recv_fifo_pop_valid_o
@@ -4992,7 +4992,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -5327,7 +5327,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -5662,7 +5662,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
@@ -5997,7 +5997,7 @@ addSignal -h 15 -holdScope rst_i
 addSignal -h 15 -holdScope sram_c_en_i
 addSignal -h 15 -holdScope cim_c_en_i
 addSignal -h 15 -holdScope valid_o
-addSignal -h 15 -holdScope phase_cnt[7:0]
+addSignal -h 15 -holdScope phase_cnt
 addSignal -h 15 -holdScope adc_ready
 addSignal -h 15 -holdScope adc_ready_q
 addSignal -h 15 -holdScope in_phase
