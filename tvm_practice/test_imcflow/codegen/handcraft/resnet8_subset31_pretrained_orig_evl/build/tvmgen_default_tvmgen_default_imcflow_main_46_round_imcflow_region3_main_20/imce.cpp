@@ -1379,7 +1379,8 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_20
     // endgenerate : conv exec10_row_group0_col_group0
     // endgenerate: conv exec10_row_group0_col_group0
     // generate: conv exec10_row_group0_col_group1
-    for (int i1 = 0; i1 < 6; i1++) { // generate : conv exec10_row_group0_col_group1
+    //! we split 6 loop into 5 and 1 loop because next is padding. we should optimize timing
+    for (int i1 = 0; i1 < 5; i1++) { // generate : conv exec10_row_group0_col_group1
 
       // generate: load_block
       // generate : load_block. loop count == 1
@@ -1426,9 +1427,56 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_20
     // generate: conv exec10_row_group0_col_group2
     // generate : conv exec10_row_group0_col_group2. loop count == 1
 
+    //! this is last iteration before padding
+    //! just do 3 load_lb
+    for (int i2 = 0; i2 < 3; i2++) { // generate
+      __builtin_IMCE_LOAD_LB(0); // TensorEdge((90, odata), ((96, 75), data), 2), imce_2_2 -> imce_3_2
+    } // endgenerate
+
+    //! we wait IMCE node that send psum into this node
+    __builtin_IMCE_SETFLAG(1);
+    __builtin_IMCE_STANDBY(18, 5);
+    __builtin_IMCE_LOAD_LB(0); // TensorEdge((90, odata), ((96, 75), data), 2), imce_2_2 -> imce_3_2
+    // endgenerate : load_block
+    // endgenerate: load_block
+    __builtin_IMCE_STEP();
+
+
+    var25 = __builtin_IMCE_GET_CREG((short)0);
+    var26 = __builtin_IMCE_GET_CREG((short)1);
+    var27 = __builtin_IMCE_GET_CREG((short)2);
+    var28 = __builtin_IMCE_GET_CREG((short)3);
+    //! move SET_FLAG(1) above due to approve imce 3.3 send psum fast
+    // generate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    var29 = __builtin_IMCE_RECV(2); // TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    // endgenerate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    // generate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    var30 = __builtin_IMCE_RECV(2); // TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    // endgenerate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    // generate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    var31 = __builtin_IMCE_RECV(2); // TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    // endgenerate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    // generate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    var32 = __builtin_IMCE_RECV(2); // TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    __builtin_IMCE_SETFLAG(0);
+    // endgenerate: TensorEdge(((95, 92), odata), ((96, 76), lhs)), imce_3_3 -> imce_3_2
+    // generate: add
+
+    var338 = __builtin_IMCE_ADD(var29, var25, 15);
+    var339 = __builtin_IMCE_ADD(var30, var26, 15);
+    var340 = __builtin_IMCE_ADD(var31, var27, 15);
+    var341 = __builtin_IMCE_ADD(var32, var28, 15);
+    // endgenerate: add
+    __builtin_IMCE_SEND(1, var338, 2, 0); // TensorEdge(((96, 76), odata), (97, data)), imce_3_2 -> imce_3_1
+    __builtin_IMCE_SEND(1, var339, 2, 0); // TensorEdge(((96, 76), odata), (97, data)), imce_3_2 -> imce_3_1
+    __builtin_IMCE_SEND(1, var340, 2, 0); // TensorEdge(((96, 76), odata), (97, data)), imce_3_2 -> imce_3_1
+    __builtin_IMCE_SEND(1, var341, 2, 0); // TensorEdge(((96, 76), odata), (97, data)), imce_3_2 -> imce_3_1
+
     // generate: load_block
     // loop ignored with loop count == 0 : load_block
     // endgenerate: load_block
+    //! problem point!!. step_hs arrived here before this inst -> stall
+    // PC addr = b4
     __builtin_IMCE_STEP();
 
 
@@ -1737,6 +1785,9 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region3_main_20
     // endgenerate: conv exec9_row_group0_col_group1
     // generate: conv exec9_row_group0_col_group2
     // generate : conv exec9_row_group0_col_group2. loop count == 1
+
+    //! here we notify psum send event to IMCE 3.2
+    __builtin_IMCE_SETFLAG(5);
 
     // generate: load_block
     // loop ignored with loop count == 0 : load_block
