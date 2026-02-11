@@ -277,6 +277,7 @@ def signals_imce_ctrl(tb, row, col):
         # ctrl_ex
         _sub("ctrl_ex"),
         _fsig(f"{base}/ctrl_ex/opcode[5:0]"),
+        _sig("pc[7:0]"),
         _sig("rd[5:0]"),
         _sig("rs1[5:0]"),
         _sig("we"),
@@ -364,19 +365,40 @@ def signals_ctrl_pl(tb, row, col):
         _sub("ctrl_ex"),
         _fsig(f"{base}/ctrl_ex/opcode[5:0]"),
         _sig("rd[5:0]"),
+        _sig("rs1[5:0]"),
         _sig("we"),
         _sig("fifo_id[5:0]"),
         _sig("shift_amt[2:0]"),
         _sig("blk_strobe[3:0]"),
         _sig("dwresult_valid"),
         _sig("bshr_sel[1:0]"),
+        _sig("ksel"),
+        _sig("imm1[13:0]"),
+        _sig("imm2[13:0]"),
+        _sig("is_imm"),
+        _sig("qreg_start_idx[3:0]"),
+        _sig("qreg_we"),
+        _sig("recv_rd_is_zero"),
+        _sig("recv_addr_is_zero"),
+        _sig("layer_update"),
+        _sig("fifo2rf"),
+        _sig("fifo2lbuf"),
+        _sig("is_cmd_rf_write"),
+        _sig("mem_en"),
+        _sig("mem_we"),
         _endsub("ctrl_ex"),
         _sub("ctrl_id"),
         _fsig(f"{base}/ctrl_id/opcode[5:0]"),
+        _sig("inst_type[3:0]", "UNSIGNED"),
         _sig("rs1[5:0]"),
         _sig("rs2[5:0]"),
         _sig("re1"),
         _sig("re2"),
+        _sig("imm1[13:0]"),
+        _sig("imm2[13:0]"),
+        _sig("imm3[13:0]"),
+        _sig("fifo_id[5:0]"),
+        _sig("flag_value"),
         _sig("is_branch_taken"),
         _sig("is_jump"),
         _endsub("ctrl_id"),
@@ -503,7 +525,7 @@ def signals_linebuffer(tb, row, col):
 
 
 def signals_imcu(tb, row, col):
-    """IMCU core / post_imcu signals."""
+    """IMCU core top-level signals."""
     base = f"{imce_path(tb, row, col)}/u_imce_datapath/u_imcu_core"
     signals = [
         _sub("core_rx"),
@@ -516,11 +538,53 @@ def signals_imcu(tb, row, col):
         _sig("ready"),
         _sig("data[63:0]"),
         _endsub("core_tx"),
-        _fsig(f"{base}/u_post_imcu/clk_i"),
-        _sig("rstn_i"),
-        _sig("pimc_valid"),
     ]
     return [("imcu_core", signals)]
+
+
+def signals_imcu_unit(tb, row, col):
+    """IMCU compute unit signals (imcu.sv).
+    Hierarchy: u_imce_datapath/u_imcu_core/u_imcu
+    """
+    base = f"{imce_path(tb, row, col)}/u_imce_datapath/u_imcu_core/u_imcu"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rst_i"),
+        _sig("sram_c_en_i"),
+        _sig("cim_c_en_i"),
+        _sig("valid_o"),
+        _sig("phase_cnt[7:0]"),
+        _sig("adc_ready"),
+        _sig("adc_ready_q"),
+        _sig("in_phase"),
+        _sig("phase_end"),
+        _sig("cnt[2:0]"),
+        _sig("bitpos[2:0]"),
+        _sig("cnt_q[2:0]"),
+    ]
+    return [("imcu_unit", signals)]
+
+
+def signals_post_imcu(tb, row, col):
+    """Post-IMCU processing signals (post_imcu.sv).
+    Hierarchy: u_imce_datapath/u_imcu_core/u_post_imcu
+    """
+    base = f"{imce_path(tb, row, col)}/u_imce_datapath/u_imcu_core/u_post_imcu"
+    serial = f"{base}/u_serializer"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sig("en_i"),
+        _sig("imcu_valid_i"),
+        _sig("pimc_valid"),
+        _sub("u_serializer"),
+        _fsig(f"{serial}/valid_i"),
+        _fsig(f"{serial}/valid_o"),
+        _sig("v_cnt[2:0]"),
+        _sig("v_cnt_q[2:0]"),
+        _endsub("u_serializer"),
+    ]
+    return [("post_imcu", signals)]
 
 
 def signals_imcu_ctrl(tb, row, col):
@@ -713,8 +777,10 @@ SIGNAL_GROUPS: Dict[str, callable] = {
     "erf":       signals_erf,
     "vpu":       signals_vpu,
     "linebuffer": signals_linebuffer,
-    "imcu":      signals_imcu,
-    "imcu_ctrl": signals_imcu_ctrl,
+    "imcu":       signals_imcu,
+    "imcu_unit":  signals_imcu_unit,
+    "post_imcu":  signals_post_imcu,
+    "imcu_ctrl":  signals_imcu_ctrl,
     "router":    signals_router,
     "fifo":      signals_fifo_block,
     # cross-module groups
@@ -722,7 +788,7 @@ SIGNAL_GROUPS: Dict[str, callable] = {
 }
 
 # Default groups for IMCE nodes
-DEFAULT_IMCE_GROUPS = ["ctrl", "hazard", "datapath", "vpu", "linebuffer", "erf", "imcu", "imcu_ctrl", "router", "fifo", "op_step"]
+DEFAULT_IMCE_GROUPS = ["ctrl", "hazard", "datapath", "vpu", "linebuffer", "erf", "imcu", "imcu_unit", "post_imcu", "imcu_ctrl", "router", "fifo", "op_step"]
 
 # Default groups for inode (col=0) - router only
 DEFAULT_INODE_GROUPS = ["router"]
