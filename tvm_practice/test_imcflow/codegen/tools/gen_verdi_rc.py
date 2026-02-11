@@ -458,6 +458,7 @@ def signals_vpu(tb, row, col):
 def signals_linebuffer(tb, row, col):
     """Linebuffer signals."""
     base = f"{imce_path(tb, row, col)}/u_imce_datapath/u_linebuffer"
+    ctrl = f"{base}/ctrl"
     signals = [
         _fsig(f"{base}/clk_i"),
         _sig("rstn_i"),
@@ -470,6 +471,33 @@ def signals_linebuffer(tb, row, col):
         _fsig(f"{base}/bshr_tx/valid"),
         _sig("ready"),
         _endsub("bshr_tx"),
+        _sub("bshr_set_tx"),
+        _fsig(f"{base}/bshr_set_tx/valid"),
+        _sig("ready"),
+        _endsub("bshr_set_tx"),
+        # addr_shfl_gen — signals for debugging in_ready_o
+        _sub("ready_debug"),
+        _fsig(f"{ctrl}/in_ready_o"),
+        _sig("pipeline_filled"),
+        _sig("S0_lbuf_filled"),
+        _sig("S0_bshr_filled"),
+        _sig("S0_is_right_pad"),
+        _sig("S0_is_bottom_pad"),
+        _sig("S0_out_valid"),
+        _sig("S1_out_valid"),
+        _sig("S2_out_valid"),
+        _sig("S3_out_valid"),
+        _sig("S3_ready_i"),
+        _sig("S0_in_transfer"),
+        _sig("S0_right_pad_transfer"),
+        _sig("S0_bottom_pad_transfer"),
+        _sig("S0_in_pad_transfer"),
+        _sig("all_recived"),
+        _sig("S0_row[9:0]", "UNSIGNED"),
+        _sig("S0_col[9:0]", "UNSIGNED"),
+        _sig("S0_bitpos[1:0]", "UNSIGNED"),
+        _sig("S3_bitpos[1:0]", "UNSIGNED"),
+        _endsub("ready_debug"),
     ]
     return [("linebuffer", signals)]
 
@@ -490,9 +518,34 @@ def signals_imcu(tb, row, col):
         _endsub("core_tx"),
         _fsig(f"{base}/u_post_imcu/clk_i"),
         _sig("rstn_i"),
-        _sig("compute_reg_valid"),
+        _sig("pimc_valid"),
     ]
     return [("imcu_core", signals)]
+
+
+def signals_imcu_ctrl(tb, row, col):
+    """IMCU controller signals."""
+    base = f"{imce_path(tb, row, col)}/u_imce_datapath/u_imcu_core/u_imcu_ctrl"
+    signals = [
+        _fsig(f"{base}/clk_i"),
+        _sig("rstn_i"),
+        _sub("lbuf_ready_part"),
+        _sub("core_rx"),
+        _fsig(f"{base}/core_rx/valid"),
+        _fsig(f"{base}/core_rx/ready"),
+        _endsub("core_rx"),
+        _sub("core_tx"),
+        _fsig(f"{base}/core_tx/valid"),
+        _fsig(f"{base}/core_tx/ready"),
+        _endsub("core_tx"),
+        _fsig(f"{base}/en_i"),
+        _sig("is_imcu_mode"),
+        _sig("cim_c_en_o"),
+        _sig("core_ready"),
+        _sig("cim_cnt"),
+        _endsub("lbuf_ready_part"),
+    ]
+    return [("imcu_ctrl", signals)]
 
 
 def signals_router(tb, row, col, is_inode=False):
@@ -533,6 +586,93 @@ def signals_fifo_block(tb, row, col):
     return [("fifo_block", signals)]
 
 
+# ============================================================================
+# Cross-module signal groups (grouped by semantic meaning, not by module)
+# ============================================================================
+
+def signals_op_step(tb, row, col):
+    """OP_STEP related signals across modules."""
+    imcu_ctrl = f"{imce_path(tb, row, col)}/u_imce_datapath/u_imcu_core/u_imcu_ctrl"
+    imce_ctrl = f"{imce_path(tb, row, col)}/u_imce_ctrl"
+    hazard = f"{imce_ctrl}/u_hazard_detector"
+    lbuf = f"{imce_path(tb, row, col)}/u_imce_datapath/u_linebuffer"
+    lbuf_ctrl = f"{lbuf}/ctrl"
+    dp = f"{imce_path(tb, row, col)}/u_imce_datapath"
+    signals = [
+        _sub("imcu_ctrl"),
+        _fsig(f"{imcu_ctrl}/clk_i"),
+        _sub("core_rx"),
+        _fsig(f"{imcu_ctrl}/core_rx/valid"),
+        _fsig(f"{imcu_ctrl}/core_rx/ready"),
+        _endsub("core_rx"),
+        _sub("core_tx"),
+        _fsig(f"{imcu_ctrl}/core_tx/valid"),
+        _fsig(f"{imcu_ctrl}/core_tx/ready"),
+        _endsub("core_tx"),
+        _fsig(f"{imcu_ctrl}/en_i"),
+        _sig("is_imcu_mode"),
+        _sig("cim_c_en_o"),
+        _sig("core_ready"),
+        _sig("cim_cnt"),
+        _endsub("imcu_ctrl"),
+
+        _sub("imce_ctrl"),
+        _fsig(f"{imce_ctrl}/clk_i"),
+        _sig("state[1:0]", "UNSIGNED"),
+        _sig("pc[7:0]"),
+        _sig("step_hs"),
+        _sig("ex_stall"),
+        _sig("id_stall"),
+        _sig("if_stall"),
+        # compute_if
+        _sub("compute_if"),
+        _fsig(f"{imce_ctrl}/compute_if/valid"),
+        _sig("ready"),
+        _endsub("compute_if"),
+        _sub("ctrl_ex"),
+        _fsig(f"{imce_ctrl}/ctrl_ex/opcode[5:0]"),
+        _sig("layer_update"),
+        _endsub("ctrl_ex"),
+        _endsub("imce_ctrl"),
+
+        _sub("lbuf"),
+        _fsig(f"{lbuf}/clk_i"),
+        _sub("input_rx"),
+        _fsig(f"{lbuf}/input_rx/valid"),
+        _sig("ready"),
+        _sig("data[255:0]"),
+        _endsub("input_rx"),
+        _sub("bshr_tx"),
+        _fsig(f"{lbuf}/bshr_tx/valid"),
+        _sig("ready"),
+        _endsub("bshr_tx"),
+        _sub("ready_debug"),
+        _fsig(f"{lbuf_ctrl}/in_ready_o"),
+        _sig("pipeline_filled"),
+        _sig("S0_lbuf_filled"),
+        _sig("S0_bshr_filled"),
+        _sig("S0_is_right_pad"),
+        _sig("S0_is_bottom_pad"),
+        _sig("S0_out_valid"),
+        _sig("S1_out_valid"),
+        _sig("S2_out_valid"),
+        _sig("S3_out_valid"),
+        _sig("S3_ready_i"),
+        _sig("S0_in_transfer"),
+        _sig("S0_right_pad_transfer"),
+        _sig("S0_bottom_pad_transfer"),
+        _sig("S0_in_pad_transfer"),
+        _sig("all_recived"),
+        _sig("S0_row[9:0]", "UNSIGNED"),
+        _sig("S0_col[9:0]", "UNSIGNED"),
+        _sig("S0_bitpos[1:0]", "UNSIGNED"),
+        _sig("S3_bitpos[1:0]", "UNSIGNED"),
+        _endsub("ready_debug"),
+        _endsub("lbuf"),
+    ]
+    return [("op_step", signals)]
+
+
 # Registry of all available signal groups
 SIGNAL_GROUPS: Dict[str, callable] = {
     "ctrl":      signals_imce_ctrl,
@@ -543,12 +683,15 @@ SIGNAL_GROUPS: Dict[str, callable] = {
     "vpu":       signals_vpu,
     "linebuffer": signals_linebuffer,
     "imcu":      signals_imcu,
+    "imcu_ctrl": signals_imcu_ctrl,
     "router":    signals_router,
     "fifo":      signals_fifo_block,
+    # cross-module groups
+    "op_step":   signals_op_step,
 }
 
 # Default groups for IMCE nodes
-DEFAULT_IMCE_GROUPS = ["ctrl", "hazard", "datapath", "vpu", "linebuffer", "erf", "router", "fifo"]
+DEFAULT_IMCE_GROUPS = ["ctrl", "hazard", "datapath", "vpu", "linebuffer", "erf", "imcu", "imcu_ctrl", "router", "fifo", "op_step"]
 
 # Default groups for inode (col=0) - router only
 DEFAULT_INODE_GROUPS = ["router"]
@@ -569,7 +712,7 @@ def format_signal_line(sig_tuple, height=15):
     name, fmt = sig_tuple
 
     if name == "__subgroup__":
-        return f'addSubGroup "{fmt}"'
+        return f'addSubGroup "{fmt}" -e FALSE'
     if name == "__endsubgroup__":
         return f'endSubGroup "{fmt}"'
 
@@ -656,7 +799,7 @@ def generate_rc(
 
             # Wrap each signal group as a subGroup inside the node group
             for sub_name, signals in group_entries:
-                lines.append(f'addSubGroup "{sub_name}"')
+                lines.append(f'addSubGroup "{sub_name}" -e FALSE')
                 for sig in signals:
                     lines.append(format_signal_line(sig))
                 lines.append(f'endSubGroup "{sub_name}"')
