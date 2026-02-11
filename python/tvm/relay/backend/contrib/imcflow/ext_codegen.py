@@ -18,12 +18,18 @@ if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
   INT_ACK_GEN_ADDR = 0
   INT_ACK_GEN_LEN = 0
+  big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
+  if big_imem:
+    RESET_GEN_ADDR = 0x80000000 + 270464 + 4 
+  else:
+    RESET_GEN_ADDR = 0x80000000 + 266368 + 4 
 elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   print("IMCFLOW_HOST_OS: linux")
   IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
   IMCFLOW_LEN = os.environ["IMCFLOW_LEN"]
   INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
   INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
+  RESET_GEN_ADDR = 0xa0130000 
 else:
   raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
 
@@ -248,6 +254,7 @@ class KernelCodeGenerator:
         "IMCFLOW_ADDR": IMCFLOW_ADDR,
         "IMCFLOW_LEN": IMCFLOW_LEN,
         "INT_ACK_GEN_ADDR": INT_ACK_GEN_ADDR,
+        "RESET_GEN_ADDR": RESET_GEN_ADDR,
         "INT_ACK_GEN_LEN": INT_ACK_GEN_LEN,
         "IMCFLOW_DEVICE": f'"{IMCFLOW_DEVICE}"',
         "INT_ACK_GEN_DEVICE": f'"{INT_ACK_GEN_DEVICE}"',
@@ -359,6 +366,10 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 }
 """)
 
+  def emitReset(self):
+    """Generate code to reset the NPU state."""
+    return f"reset_gen_pointer[0] = 1;\n"
+
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
     if self.os == "linux":
@@ -399,6 +410,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       return (f"""
     uint32_t* npu_pointer = (uint32_t*)IMCFLOW_ADDR;
     uint32_t* int_ack_gen_pointer = (uint32_t*)INT_ACK_GEN_ADDR;
+    uint32_t* reset_gen_pointer = (uint32_t*)RESET_GEN_ADDR;
 """)
     else:
       raise ValueError("Unsupported OS type for device pointer setup!")
@@ -624,6 +636,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code.nextIndent()
     code += f"fprintf(stderr,\"{self.func_name}_kernel called\\n\");\n"
     code += self.generateDevicePointerSetup()
+    code += self.emitReset()
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt

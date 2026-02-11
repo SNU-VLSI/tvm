@@ -388,7 +388,9 @@ class RTLRunner(ImcFlowRunner):
 
             # Determine imc_size based on IMCFLOW_BIG_IMEM environment variable
             big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
-            imc_size = "270464" if big_imem else "266368"
+            imc_size = 270464 if big_imem else 266368 # 0x42080 or 0x41080
+            imc_size += 32
+            imc_size = str(imc_size)
 
             # Build command with socket port as 7th argument
             sim_command = [
