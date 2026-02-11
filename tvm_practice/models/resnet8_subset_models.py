@@ -83,7 +83,7 @@ def getModel_(input_shape, until_relay: int = None):
     y = c.check(relay.cast(y, dtype="int16"))
 
     # basic block 1
-    residual = y
+    residual = relay.nn.relu(y)
     y = c.check(imcflow_min_max_quantize(y, relay.var("quant_min_1", shape=(), dtype="int16"), relay.var("quant_max_1", shape=(), dtype="int16"), axis=1, out_dtype="uint8", channel=16))
     y = c.check(imcflow_qconv2d(
       y,
