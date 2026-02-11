@@ -766,13 +766,6 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
     print("\n⏭️  Compile only mode: skipping CPU validation and simulation")
     return None
 
-  # Run CPU validation if input data is provided and stage should run
-  cpu_output = None
-  if input_data_dict is not None and options.should_run(PipelineStage.CPU_VALIDATION):
-    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup, rebuild_cpp_only)
-    if cpu_output is not None:
-      print("✅ CPU validation completed successfully")
-
   # Skip simulation if not needed
   if not options.should_run(PipelineStage.SIMULATION):
     print("\n⏭️  Skipping simulation stage")
@@ -794,6 +787,13 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
   if input_data_dict is not None and options.should_run(PipelineStage.COMPARISON):
     if imcflow_output is None:
       pytest.fail(f"IMCFLOW output file missing, cannot compare outputs")
+
+    # Run CPU validation if input data is provided and stage should run
+    cpu_output = None
+    if input_data_dict is not None and options.should_run(PipelineStage.CPU_VALIDATION):
+      cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup, rebuild_cpp_only)
+      if cpu_output is not None:
+        print("✅ CPU validation completed successfully")
 
     compare_outputs(cpu_output, imcflow_output)
 
