@@ -147,18 +147,18 @@ IMCFLOW_REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW64C,
     ),
-    # (
-    #   [
-    #     [LayoutType.NCHW],
-    #   ],
-    #   LayoutType.NCHW,
-    # ),
-    # (
-    #   [
-    #     [LayoutType.MK],
-    #   ],
-    #   LayoutType.MK,
-    # )
+    (
+      [
+        [LayoutType.NHWC16C],
+      ],
+      LayoutType.NHWC16C,
+    ),
+    (
+      [
+        [LayoutType.NHWC64C],
+      ],
+      LayoutType.NHWC64C,
+    ),
   ],
   "imcflow.fused_batch_norm": [
     (
