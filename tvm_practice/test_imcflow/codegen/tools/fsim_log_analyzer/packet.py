@@ -6,19 +6,16 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+from .log_format import parse_file, LogEntry
 from .models import PacketEvent, PacketTrace
+
+
+# Events relevant for packet analysis
+PACKET_EVENTS = {"RX_TRANSFER", "TX_TRANSFER"}
 
 
 class PacketAnalyzer:
     """Analyzes packet traces from FSIM log files."""
-
-    # Regex patterns for parsing log lines
-    ROUTER_PATTERN = re.compile(
-        r"\[\s*(\d+)\]\s+(RX|TX)\s+TRANSFER\s+(from|to)\s+(\w+)\s+\|\s+UUID:\s*(\d+)\s+\|\s+fifo_id:\s*(\d+)\s+\|\s+cmd:\s*(\S+)\s+\|\s+addr:\s*(\d+)\s+\|\s+word:\s*(\d+)"
-    )
-    NOC_TX_PATTERN = re.compile(
-        r"\[\s*(\d+)\]\s+TX\s+to\s+NoC\s+\|\s+UUID:\s*(\d+)\s+\|\s+fifo_id:\s*(\d+)"
-    )
 
     def __init__(self, log_dir: Path, verbose: bool = False):
         """
@@ -44,52 +41,6 @@ class PacketAnalyzer:
             return match.group(1)
         return filename
 
-    def _parse_router_log_line(
-        self, line: str, node: str
-    ) -> Optional[PacketEvent]:
-        """Parse a router log line into a PacketEvent."""
-        match = self.ROUTER_PATTERN.match(line)
-        if not match:
-            return None
-
-        timestamp, event_type, _, direction, uuid, fifo_id, cmd, addr, word = (
-            match.groups()
-        )
-
-        return PacketEvent(
-            timestamp=int(timestamp),
-            uuid=int(uuid),
-            event_type=event_type,
-            direction=direction,
-            node=node,
-            fifo_id=int(fifo_id),
-            cmd=cmd,
-            addr=int(addr),
-            word=int(word),
-            raw_line=line.strip(),
-        )
-
-    def _parse_noc_tx_line(self, line: str, node: str) -> Optional[PacketEvent]:
-        """Parse a NoC TX log line into a PacketEvent."""
-        match = self.NOC_TX_PATTERN.match(line)
-        if not match:
-            return None
-
-        timestamp, uuid, fifo_id = match.groups()
-
-        return PacketEvent(
-            timestamp=int(timestamp),
-            uuid=int(uuid),
-            event_type="TX",
-            direction="NoC",
-            node=node,
-            fifo_id=int(fifo_id),
-            cmd="",
-            addr=0,
-            word=0,
-            raw_line=line.strip(),
-        )
-
     def parse_log_file(self, log_file: Path):
         """Parse a single log file and extract packet events."""
         if not log_file.exists():
@@ -101,61 +52,76 @@ class PacketAnalyzer:
             print(f"Parsing {log_file.name}...", file=sys.stderr)
 
         try:
-            with open(log_file, "r") as f:
-                for line in f:
-                    if "UUID:" not in line:
-                        continue
-
-                    # Try parsing as router log
-                    event = self._parse_router_log_line(line, node)
-
-                    # If not router log, try NoC TX pattern
-                    if event is None:
-                        event = self._parse_noc_tx_line(line, node)
-
-                    if event is None:
-                        continue
-
-                    # Add event to packet trace
-                    uuid = event.uuid
-                    if uuid not in self.packets:
-                        self.packets[uuid] = PacketTrace(uuid=uuid)
-
-                    trace = self.packets[uuid]
-                    trace.events.append(event)
-
-                    # Track issued time and node
-                    if (
-                        event.direction == "NoC"
-                        or (
-                            event.event_type == "TX" and event.direction == "LOCAL"
-                        )
-                    ) and trace.issued_time is None:
-                        trace.issued_time = event.timestamp
-                        trace.issued_node = node
-
-                    # Track delivered time and node
-                    if (
-                        event.event_type == "RX" and event.direction == "LOCAL"
-                    ):
-                        if (
-                            trace.delivered_time is None
-                            or event.timestamp > trace.delivered_time
-                        ):
-                            trace.delivered_time = event.timestamp
-                            trace.delivered_node = node
-
-                    # Update node statistics
-                    if event.event_type == "RX":
-                        self.node_stats[node]["rx_count"] += 1
-                    else:
-                        self.node_stats[node]["tx_count"] += 1
-                    self.node_stats[node]["packets"].add(uuid)
-
+            entries = parse_file(log_file, events=PACKET_EVENTS)
         except Exception as e:
-            print(
-                f"Error parsing {log_file.name}: {e}", file=sys.stderr
+            print(f"Error parsing {log_file.name}: {e}", file=sys.stderr)
+            return
+
+        for entry in entries:
+            p = entry.payload if isinstance(entry.payload, dict) else {}
+
+            # Determine event type from the structured event name
+            if entry.event == "RX_TRANSFER":
+                event_type = "RX"
+            elif entry.event == "TX_TRANSFER":
+                event_type = "TX"
+            else:
+                continue
+
+            uuid = p.get("uuid", 0)
+            if isinstance(uuid, str):
+                try:
+                    uuid = int(uuid)
+                except ValueError:
+                    uuid = 0
+
+            event = PacketEvent(
+                timestamp=entry.time,
+                uuid=uuid,
+                event_type=event_type,
+                direction=str(p.get("dir", "")),
+                node=node,
+                fifo_id=int(p.get("fifo_id", 0)),
+                cmd=str(p.get("cmd", "")),
+                addr=int(p.get("addr", 0)),
+                word=int(p.get("word", 0)),
+                raw_line=entry.raw,
             )
+
+            # Add event to packet trace
+            if uuid not in self.packets:
+                self.packets[uuid] = PacketTrace(uuid=uuid)
+
+            trace = self.packets[uuid]
+            trace.events.append(event)
+
+            # Track issued time and node:
+            #   RX LOCAL = router receives from local node = packet INJECTION
+            if (
+                event.event_type == "RX" and event.direction == "LOCAL"
+                and trace.issued_time is None
+            ):
+                trace.issued_time = event.timestamp
+                trace.issued_node = node
+
+            # Track delivered time and node:
+            #   TX LOCAL = router sends to local node = packet DELIVERY
+            if (
+                event.event_type == "TX" and event.direction == "LOCAL"
+            ):
+                if (
+                    trace.delivered_time is None
+                    or event.timestamp > trace.delivered_time
+                ):
+                    trace.delivered_time = event.timestamp
+                    trace.delivered_node = node
+
+            # Update node statistics
+            if event.event_type == "RX":
+                self.node_stats[node]["rx_count"] += 1
+            else:
+                self.node_stats[node]["tx_count"] += 1
+            self.node_stats[node]["packets"].add(uuid)
 
     def parse_all_logs(self):
         """Parse all log files in the log directory."""
@@ -175,6 +141,76 @@ class PacketAnalyzer:
                 f"Parsed {len(self.packets)} unique packets",
                 file=sys.stderr,
             )
+
+    def sanity_check(self) -> dict:
+        """Run sanity checks on parsed packet data.
+
+        Checks:
+        1. UUID=0 default (no UUID field in logs → non-DEBUG build)
+        2. Duplicate RX LOCAL per UUID (injection should be unique)
+        3. Negative latency (should never happen after fix)
+
+        Returns dict with:
+            ok: bool - True if all checks pass
+            warnings: list[str] - warning messages
+            errors: list[str] - error messages
+            duplicate_rx_local: dict[int, list] - UUID → list of (node, timestamp) for duplicates
+        """
+        warnings: list[str] = []
+        errors: list[str] = []
+        duplicate_rx_local: dict[int, list] = {}
+
+        # Check 1: UUID=0 means no UUID in log (non-DEBUG build)
+        if 0 in self.packets and len(self.packets[0].events) > 1:
+            errors.append(
+                f"UUID=0 has {len(self.packets[0].events)} events. "
+                f"Logs likely built without DEBUG flag — UUID field is missing. "
+                f"Packet tracing requires DEBUG-enabled FSIM logs."
+            )
+
+        # Check 2: Each UUID should have at most 1 RX LOCAL (injection point)
+        for uuid, trace in self.packets.items():
+            rx_locals = [
+                (e.node, e.timestamp) for e in trace.events
+                if e.event_type == "RX" and e.direction == "LOCAL"
+            ]
+            if len(rx_locals) > 1:
+                duplicate_rx_local[uuid] = rx_locals
+                errors.append(
+                    f"UUID {uuid}: {len(rx_locals)} RX LOCAL events "
+                    f"(expected 1). Nodes: {[n for n, _ in rx_locals]}"
+                )
+
+        # Check 3: Negative latency
+        neg_latency_count = 0
+        for trace in self.packets.values():
+            lat = trace.latency
+            if lat is not None and lat < 0:
+                neg_latency_count += 1
+        if neg_latency_count > 0:
+            errors.append(
+                f"{neg_latency_count} packets have negative latency. "
+                f"This indicates issued/delivered time tracking is wrong."
+            )
+
+        # Check 4: Packets with events but no issued_time
+        no_issued = sum(
+            1 for t in self.packets.values()
+            if t.issued_time is None and len(t.events) > 0
+        )
+        if no_issued > 0:
+            warnings.append(
+                f"{no_issued} packets have events but no injection point "
+                f"(no RX LOCAL found)."
+            )
+
+        ok = len(errors) == 0
+        return {
+            "ok": ok,
+            "warnings": warnings,
+            "errors": errors,
+            "duplicate_rx_local": duplicate_rx_local,
+        }
 
     def get_undelivered_packets(self) -> list[PacketTrace]:
         """Get packets that were issued but not delivered to destination."""

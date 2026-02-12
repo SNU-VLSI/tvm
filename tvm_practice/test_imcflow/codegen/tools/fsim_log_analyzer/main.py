@@ -157,10 +157,41 @@ def cmd_list(args):
     print("=" * 70)
 
 
+def _run_packet_sanity_check(analyzer: PacketAnalyzer) -> bool:
+    """Run sanity check and print results. Returns True if OK."""
+    result = analyzer.sanity_check()
+
+    if not result["ok"] or result["warnings"]:
+        print("=" * 70)
+        print("  Packet Log Sanity Check")
+        print("=" * 70)
+
+        for msg in result["errors"]:
+            print(f"  [ERROR] {msg}")
+        for msg in result["warnings"]:
+            print(f"  [WARN]  {msg}")
+
+        if result["duplicate_rx_local"]:
+            print()
+            print("  Duplicate RX LOCAL events (first 10):")
+            for i, (uuid, locations) in enumerate(result["duplicate_rx_local"].items()):
+                if i >= 10:
+                    print(f"  ... and {len(result['duplicate_rx_local']) - 10} more")
+                    break
+                locs = ", ".join(f"{node}@{ts}" for node, ts in locations)
+                print(f"    UUID {uuid}: {locs}")
+
+        print("=" * 70)
+        print()
+
+    return result["ok"]
+
+
 def cmd_packet_stats(args):
     """Handle the packet statistics command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
     analyzer.parse_all_logs()
+    _run_packet_sanity_check(analyzer)
 
     total_packets = len(analyzer.packets)
     delivered = analyzer.get_delivered_packets()
@@ -193,6 +224,7 @@ def cmd_packet_undelivered(args):
     """Handle the undelivered packets command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
     analyzer.parse_all_logs()
+    _run_packet_sanity_check(analyzer)
 
     undelivered = analyzer.get_undelivered_packets()
 
@@ -233,6 +265,7 @@ def cmd_packet_trace(args):
     """Handle the packet trace command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
     analyzer.parse_all_logs()
+    _run_packet_sanity_check(analyzer)
 
     trace = analyzer.get_packet_by_uuid(args.uuid)
 
@@ -273,6 +306,7 @@ def cmd_packet_node_stats(args):
     """Handle the node traffic statistics command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
     analyzer.parse_all_logs()
+    _run_packet_sanity_check(analyzer)
 
     stats = analyzer.get_node_traffic_stats()
 
@@ -309,6 +343,7 @@ def cmd_packet_hotspots(args):
     """Handle the hotspot detection command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
     analyzer.parse_all_logs()
+    _run_packet_sanity_check(analyzer)
 
     hotspots = analyzer.get_hotspots(top_n=args.top_n, metric=args.metric)
 
@@ -333,6 +368,7 @@ def cmd_packet_cmd_stats(args):
     """Handle the command type statistics."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
     analyzer.parse_all_logs()
+    _run_packet_sanity_check(analyzer)
 
     cmd_stats = analyzer.get_cmd_type_stats()
 
@@ -526,9 +562,9 @@ def cmd_sync_trace(args):
         print("  " + "-" * 85)
 
         for event in display_events:
-            # Color coding for different event types
             node_short = event.node.replace("_", ".")
-            details_short = event.details[:40] + "..." if len(event.details) > 40 else event.details
+            payload_str = ", ".join(f"{k}={v}" for k, v in event.payload.items()) if event.payload else ""
+            details_short = payload_str[:40] + "..." if len(payload_str) > 40 else payload_str
             print(f"  {event.timestamp:>15,} {node_short:<15} {event.event_type:<20} {details_short}")
 
         if args.limit and len(events) > args.limit:
@@ -549,7 +585,8 @@ def cmd_sync_trace(args):
 
             for event in events:
                 node_short = event.node.replace("_", ".")
-                f.write(f"{event.timestamp:>15} | {node_short:<15} | {event.event_type:<20} | {event.details}\n")
+                payload_str = ", ".join(f"{k}={v}" for k, v in event.payload.items()) if event.payload else ""
+                f.write(f"{event.timestamp:>15} | {node_short:<15} | {event.event_type:<20} | {payload_str}\n")
 
         print(f"\n  Output written to: {output_path}")
 

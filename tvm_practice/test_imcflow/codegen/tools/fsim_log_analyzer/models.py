@@ -23,7 +23,7 @@ class PacketEvent:
     timestamp: int
     uuid: int
     event_type: str  # "TX" or "RX"
-    direction: str  # "LOCAL", "WEST", "EAST", "NORTH", "SOUTH", "NoC"
+    direction: str  # "LOCAL", "NORTH", "EAST", "SOUTH", "WEST"
     node: str  # node identifier from filename
     fifo_id: int
     cmd: str  # command type
@@ -45,22 +45,23 @@ class PacketTrace:
 
     @property
     def is_delivered(self) -> bool:
-        """Check if packet reached its destination (LOCAL RX)."""
+        """Check if packet reached its destination (TX LOCAL = router sends to local node)."""
         return any(
-            e.event_type == "RX" and e.direction == "LOCAL" for e in self.events
+            e.event_type == "TX" and e.direction == "LOCAL" for e in self.events
         )
 
     @property
     def latency(self) -> Optional[int]:
-        """Calculate packet latency if both issued and delivered."""
+        """Calculate packet latency (delivered - issued). Always >= 0 if correct."""
         if self.issued_time is not None and self.delivered_time is not None:
             return self.delivered_time - self.issued_time
         return None
 
     @property
     def hop_count(self) -> int:
-        """Count number of hops through routers."""
-        return len([e for e in self.events if e.event_type == "TX"])
+        """Count number of network hops (TX to non-LOCAL directions)."""
+        return len([e for e in self.events
+                    if e.event_type == "TX" and e.direction != "LOCAL"])
 
     def get_path(self) -> list[str]:
         """Get the path taken by the packet."""
@@ -73,6 +74,7 @@ class SyncEvent:
     timestamp: int
     node: str
     node_type: str  # "inode" or "imce"
-    event_type: str  # "STANDBY_STALL_START", "STANDBY_STALL_END", "SETFLAG", etc.
-    details: str
+    event_type: str  # "EX_STALL_START", "EXECUTE", "SEND_SUCCESS", etc.
+    payload: dict  # parsed structured payload
     raw_line: str
+    source_file: str = ""  # which log file this came from
