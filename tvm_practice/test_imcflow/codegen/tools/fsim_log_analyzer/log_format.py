@@ -238,6 +238,14 @@ def parse_file(
     Returns:
         List of ``LogEntry`` objects, in file order.
     """
+    # Fast path: use grep-based pre-filtering when events are specified
+    if events:
+        try:
+            from .fast_search import fast_parse_file
+            return fast_parse_file(path, events)
+        except ImportError:
+            pass
+
     entries: list[LogEntry] = []
     with open(path) as f:
         for line in f:

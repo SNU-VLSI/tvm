@@ -12,6 +12,7 @@ from .recv_analysis import (
     compare_recv_patterns,
 )
 from .log_format import LogEntry, ParseError, parse_payload, parse_line, parse_file
+from .fast_search import fast_parse_file, fast_parse_files, grep_file
 from .utils import parse_patterns, split_log_by_simulation
 
 __all__ = [
@@ -33,6 +34,9 @@ __all__ = [
     "parse_payload",
     "parse_line",
     "parse_file",
+    "fast_parse_file",
+    "fast_parse_files",
+    "grep_file",
     "parse_patterns",
     "split_log_by_simulation",
 ]

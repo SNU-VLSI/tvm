@@ -190,6 +190,7 @@ def _run_packet_sanity_check(analyzer: PacketAnalyzer) -> bool:
 def cmd_packet_stats(args):
     """Handle the packet statistics command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
+    analyzer._sequential = getattr(args, 'sequential', False)
     analyzer.parse_all_logs()
     _run_packet_sanity_check(analyzer)
 
@@ -223,6 +224,7 @@ def cmd_packet_stats(args):
 def cmd_packet_undelivered(args):
     """Handle the undelivered packets command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
+    analyzer._sequential = getattr(args, 'sequential', False)
     analyzer.parse_all_logs()
     _run_packet_sanity_check(analyzer)
 
@@ -264,6 +266,7 @@ def cmd_packet_undelivered(args):
 def cmd_packet_trace(args):
     """Handle the packet trace command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
+    analyzer._sequential = getattr(args, 'sequential', False)
     analyzer.parse_all_logs()
     _run_packet_sanity_check(analyzer)
 
@@ -305,6 +308,7 @@ def cmd_packet_trace(args):
 def cmd_packet_node_stats(args):
     """Handle the node traffic statistics command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
+    analyzer._sequential = getattr(args, 'sequential', False)
     analyzer.parse_all_logs()
     _run_packet_sanity_check(analyzer)
 
@@ -342,6 +346,7 @@ def cmd_packet_node_stats(args):
 def cmd_packet_hotspots(args):
     """Handle the hotspot detection command."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
+    analyzer._sequential = getattr(args, 'sequential', False)
     analyzer.parse_all_logs()
     _run_packet_sanity_check(analyzer)
 
@@ -367,6 +372,7 @@ def cmd_packet_hotspots(args):
 def cmd_packet_cmd_stats(args):
     """Handle the command type statistics."""
     analyzer = PacketAnalyzer(log_dir=args.log_dir, verbose=args.verbose)
+    analyzer._sequential = getattr(args, 'sequential', False)
     analyzer.parse_all_logs()
     _run_packet_sanity_check(analyzer)
 
@@ -524,6 +530,7 @@ def cmd_sync_trace(args):
         nodes=args.nodes,
         verbose=args.verbose,
     )
+    analyzer._sequential = getattr(args, 'sequential', False)
     analyzer.parse_all()
 
     # Apply time range filter
@@ -704,6 +711,11 @@ Examples:
         "-X",
         default=None,
         help="Comma-separated glob patterns to exclude (e.g., '*policy_table*')",
+    )
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Disable grep-based optimization and parallel parsing (for debugging)",
     )
 
     subparsers = parser.add_subparsers(
