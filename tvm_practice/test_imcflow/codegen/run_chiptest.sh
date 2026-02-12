@@ -47,6 +47,10 @@ REMOTE_PORT="1326"
 REMOTE_USER="root"
 REMOTE_PASSWORD="root"
 REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
+DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
+DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
+DEFAULT_RUNNER_NAME="chiptest"
+NPZ_FILE_PATH="scan_reg_files"
 
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"
@@ -75,20 +79,22 @@ if [ $? -ne 0 ]; then
 fi
 echo ""
 
-# Step 3: Transfer host_binary_make to remote
-echo "Step 3: Transferring host_binary_make to remote server..."
-echo ""
-echo "y" | ./transfer_evl.sh --path host_binary_make.template
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to transfer host_binary_make.template"
-    exit 1
-fi
-echo ""
+## Step 3: Transfer utils to remote
+#echo "Step 3: Transferring host_binary_make to remote server..."
+#echo ""
+#echo "y" | ./transfer_evl.sh --path utils/$NPZ_FILE_PATH
+#if [ $? -ne 0 ]; then
+#    echo "Error: Failed to transfer utils"
+#    exit 1
+#fi
+#echo ""
 
 # Step 4: Execute on remote chip
 echo "Step 4: Executing on remote chip..."
 echo ""
-sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "cd $REMOTE_BASE_PATH/host_binary_make/build && ./tvm_host_runner $TEST_FOLDER $REMOTE_BASE_PATH"
+sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
+           "cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && ./tvm_host_runner \
+            $TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH"
 
 if [ $? -eq 0 ]; then
     echo ""

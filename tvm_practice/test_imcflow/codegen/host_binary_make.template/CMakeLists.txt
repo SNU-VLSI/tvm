@@ -86,6 +86,50 @@ if(NOT EXISTS "${CRT_LIB_BASE}")
 endif()
 
 # ============================================================================
+# Build cnpy Library (from TVM 3rdparty)
+# ============================================================================
+# Find static zlib library for static linking
+set(ZLIB_USE_STATIC_LIBS ON)
+# find_package(ZLIB REQUIRED)
+
+# If dynamic zlib was found, try to find static version manually
+if(ISA STREQUAL "ARM")
+    find_library(ZLIB_STATIC_LIB 
+        NAMES libz.a 
+        PATHS /usr/lib/aarch64-linux-gnu 
+        NO_DEFAULT_PATH
+    )
+else()
+    # X86
+    find_library(ZLIB_STATIC_LIB 
+        NAMES libz.a 
+        PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/lib64
+    )
+endif()
+
+if(ZLIB_STATIC_LIB)
+    set(ZLIB_LIBRARIES ${ZLIB_STATIC_LIB})
+    message(STATUS "Found static zlib: ${ZLIB_LIBRARIES}")
+else()
+    message(WARNING "Static zlib manually not found. Trying find_package...")
+    find_package(ZLIB)
+endif()
+
+set(CNPY_DIR "${TVM_ROOT}/3rdparty/cnpy")
+if(NOT EXISTS "${CNPY_DIR}")
+  message(FATAL_ERROR "cnpy not found at: ${CNPY_DIR}\nEnsure TVM's 3rdparty/cnpy exists")
+endif()
+
+# Build cnpy as a static library
+add_library(cnpy STATIC "${CNPY_DIR}/cnpy.cpp")
+target_include_directories(cnpy PUBLIC "${CNPY_DIR}")
+target_link_libraries(cnpy PUBLIC ${ZLIB_LIBRARIES})
+target_compile_features(cnpy PUBLIC cxx_std_11)
+
+message(STATUS "Building cnpy from: ${CNPY_DIR}")
+message(STATUS "Using zlib: ${ZLIB_LIBRARIES}")
+
+# ============================================================================
 # Extract MLF
 # ============================================================================
 set(MLF_DIR "${CMAKE_BINARY_DIR}/mlf")
@@ -203,8 +247,32 @@ if(TVM_BUILD_HOST_RUNNER)
     message(FATAL_ERROR "No source file found for host runner: ${MAIN_SCRIPT}")
   endif() 
   
+  # Add program_scan_reg_kernel.cc if it exists
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc")
+    target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc)
+    message(STATUS "Adding program_scan_reg_kernel.cc to host runner")
+    
+    # Link the host object files that contain the binary data for program_scan_reg
+    # These files provide the _binary_program_scan_reg_*_bin_start/end symbols
+    if(HOST_OBJ_FILES)
+      # Filter HOST_OBJ_FILES to only include program_scan_reg related files
+      set(SCAN_REG_OBJ_FILES "")
+      foreach(obj_file ${HOST_OBJ_FILES})
+        if(obj_file MATCHES "program_scan_reg")
+          list(APPEND SCAN_REG_OBJ_FILES ${obj_file})
+        endif()
+      endforeach()
+      
+      if(SCAN_REG_OBJ_FILES)
+        target_sources(tvm_host_runner PRIVATE ${SCAN_REG_OBJ_FILES})
+        list(LENGTH SCAN_REG_OBJ_FILES SCAN_OBJ_COUNT)
+        message(STATUS "Linking ${SCAN_OBJ_COUNT} program_scan_reg object files to host runner")
+      endif()
+    endif()
+  endif()
+  
   # Common settings
-  target_link_libraries(tvm_host_runner PRIVATE ${TARGET_LIB_NAME} tvm_model ${CRT_LIBS} m stdc++)
+  target_link_libraries(tvm_host_runner PRIVATE ${TARGET_LIB_NAME} tvm_model ${CRT_LIBS} m stdc++ cnpy)
   target_include_directories(tvm_host_runner PRIVATE
     "${CRT_LIB_BASE}/include"
     "${TVM_ROOT}/include"
@@ -212,6 +280,7 @@ if(TVM_BUILD_HOST_RUNNER)
     "${TVM_ROOT}/3rdparty/dmlc-core/include"
     "${CRT_CONFIG_INCLUDE}"
     ${TVM_MODEL_INCLUDE}
+    "${CNPY_DIR}"
   )
   target_sources(tvm_host_runner PRIVATE "${TVM_ROOT}/src/runtime/crt/host/platform.cc")
   target_compile_definitions(tvm_host_runner PRIVATE
@@ -220,8 +289,9 @@ if(TVM_BUILD_HOST_RUNNER)
     TVM_CRT_LOG_LEVEL=3
   )
 
-  # Optimize for gem5 simulation: static linking + no PIE for faster initialization
+  # Optimize for gem5 simulation: static libgcc/libstdc++ + no PIE for faster initialization
   # This reduces dynamic linker overhead and mprotect syscalls in gem5
+  # Note: We don't use -static to allow dynamic linking of system libraries like zlib
   target_compile_options(tvm_host_runner PRIVATE -fno-pie)
   target_link_options(tvm_host_runner PRIVATE
     -no-pie
