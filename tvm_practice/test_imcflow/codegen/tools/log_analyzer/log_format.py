@@ -1,5 +1,5 @@
 """
-Structured RTL Log Format Parser
+Structured Log Format Parser
 
 Parses the IMCFlow structured log format:
 
@@ -10,13 +10,17 @@ The payload uses a relaxed JSON-like syntax (no quotes required):
     - Arrays:  [item1, item2, {nested=obj}]
     - Atoms:   integers (decimal/hex), identifiers, strings
 
-Examples:
-    [1234] | EXECUTE | {opcode=OP_ADD, rd=5, rs1=3}
-    [1234] | CYCLE | {requests=[{port=N, dst=S}, {port=E, dst=L}], grants=[N]}
-    [5678] | TRANSFER | {addr=0x1a, data=0x0064ff00, valid=1}
+Supports both RTL (fsim) and Python simulator (pysim) log formats:
+
+    RTL:   [1234] | EXECUTE | {opcode=OP_ADD, rd=5, rs1=3}
+    Pysim: 22:19:04:imcflow_sim.imcflow.imce:DEBUG   :[612] | IMCE_TRY_INST | {name=IMCE.2.1}
+
+The pysim format has a ``timestamp:module:level:`` prefix before the
+structured ``[step] | EVENT | {payload}`` core, which is automatically
+stripped by :func:`parse_line`.
 
 Usage:
-    from fsim_log_analyzer.log_format import parse_line, parse_file, parse_payload
+    from log_analyzer.log_format import parse_line, parse_file, parse_payload
 
     # Parse a single line
     entry = parse_line("[1234] | EXECUTE | {opcode=OP_ADD, rd=5}")
@@ -183,18 +187,27 @@ def parse_payload(text: str) -> Value:
 def parse_line(line: str) -> Optional[LogEntry]:
     """Parse a single structured log line.
 
-    Expected format::
+    Expected formats::
 
-        [<time>] | <EVENT> | <payload>
+        [<time>] | <EVENT> | <payload>                          (RTL)
+        HH:MM:SS:module:LEVEL   :[<time>] | <EVENT> | <payload>  (pysim)
+
+    For pysim logs the ``timestamp:module:level:`` prefix is stripped
+    automatically so downstream code sees the same ``LogEntry`` shape.
 
     Returns:
         A ``LogEntry``, or ``None`` if the line doesn't match the format.
     """
     line = line.rstrip("\n")
 
-    # Fast reject: must start with '['
+    # For pysim logs, strip "HH:MM:SS:module:LEVEL:" prefix.
+    # The structured part always starts with ":[step]", so find that.
     if not line.startswith("["):
-        return None
+        bracket_idx = line.find(":[")
+        if bracket_idx >= 0:
+            line = line[bracket_idx + 1:]  # keep "[step] | ..."
+        else:
+            return None
 
     parts = line.split(" | ", 2)
     if len(parts) < 2:

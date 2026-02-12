@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from .log_format import LogEntry, ParseError, parse_payload, parse_line, parse_file
+from log_analyzer.log_format import LogEntry, ParseError, parse_payload, parse_line, parse_file
 
 
 def test_parse_atom_int():

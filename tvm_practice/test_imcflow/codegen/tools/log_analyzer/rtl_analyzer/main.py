@@ -15,7 +15,7 @@ from .recv_analysis import (
     parse_expected_patterns_from_log,
     compare_recv_patterns,
 )
-from .utils import parse_patterns, split_log_by_simulation
+from log_analyzer.utils import parse_patterns, split_log_by_simulation
 
 
 def cmd_monitor(args):

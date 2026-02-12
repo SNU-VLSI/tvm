@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from .log_format import parse_file, LogEntry
-from .models import SyncEvent
+from log_analyzer.log_format import parse_file, LogEntry
+from log_analyzer.models import SyncEvent
 
 
 # Events relevant for sync trace analysis
@@ -136,7 +136,7 @@ class SyncTraceAnalyzer:
         This re-reads the entire file and is expensive — only called
         when both verbose and debug are enabled.
         """
-        from .log_format import parse_line as _parse_line
+        from log_analyzer.log_format import parse_line as _parse_line
 
         count = 0
         try:
@@ -163,7 +163,7 @@ class SyncTraceAnalyzer:
             True if parallel path was used, False if it should fall back.
         """
         try:
-            from .fast_search import fast_parse_file
+            from log_analyzer.fast_search import fast_parse_file
         except ImportError:
             return False
 

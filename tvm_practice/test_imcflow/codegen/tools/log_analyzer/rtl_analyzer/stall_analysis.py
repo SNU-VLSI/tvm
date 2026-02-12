@@ -11,8 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from .log_format import parse_file, LogEntry
-from .models import StallInfo
+from log_analyzer.log_format import parse_file, LogEntry
+from log_analyzer.models import StallInfo
 
 # Events we need to track stall state
 STALL_ANALYSIS_EVENTS = {

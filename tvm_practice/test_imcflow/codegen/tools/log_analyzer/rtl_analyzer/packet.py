@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from .log_format import parse_file, LogEntry
-from .models import PacketEvent, PacketTrace
+from log_analyzer.log_format import parse_file, LogEntry
+from log_analyzer.models import PacketEvent, PacketTrace
 
 
 # Events relevant for packet analysis
@@ -139,7 +139,7 @@ class PacketAnalyzer:
         Phase 2 (sequential): Results accumulated into self.packets / self.node_stats.
         """
         try:
-            from .fast_search import fast_parse_file
+            from log_analyzer.fast_search import fast_parse_file
         except ImportError:
             return False
 

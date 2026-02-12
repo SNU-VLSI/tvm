@@ -69,8 +69,10 @@ def _build_event_pattern(events: set[str]) -> str:
     # Escape any regex-special characters in event names (unlikely but safe)
     escaped = [re.escape(e) for e in sorted(events)]
     alternatives = "|".join(escaped)
-    # Match: [<anything>] | <EVENT> | ...  OR  [<anything>] | <EVENT>$
-    return r"^\[.*\] \| (" + alternatives + r")( \||$)"
+    # Match both RTL and pysim formats:
+    #   RTL:   [<time>] | <EVENT> | ...   OR  [<time>] | <EVENT>$
+    #   Pysim: ...:<time>] | <EVENT> | ... (prefix before '[')
+    return r"\[.*\] \| (" + alternatives + r")( \||$)"
 
 
 def _python_grep_fallback(
@@ -86,7 +88,8 @@ def _python_grep_fallback(
 
     with open(path) as f:
         for line in f:
-            if not line.startswith("["):
+            # Quick reject: line must contain '[' somewhere (RTL or pysim)
+            if "[" not in line:
                 continue
             # Quick check: does line contain any event marker?
             for marker in event_markers:

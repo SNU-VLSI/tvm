@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .keyboard import KeyboardHandler
-from .models import FileStatus
+from log_analyzer.models import FileStatus
 
 
 class LogMonitor:
