@@ -4,13 +4,13 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_33
   int wid = 0;
   int var1; // policy_table_start_address
   int var2; // imem_start_address
-  int* var3; // sm101_d119lhs_send_data_base_address
-  int var4; // sm101_d119lhs_tile_loop_count
+  int* var3; // sm101_d115lhs_send_data_base_address
+  int var4; // sm101_d115lhs_tile_loop_count
   int var5; // send_data_base_address
-  int* var6; // sm102_d119rhs_send_data_base_address
-  int var7; // sm102_d119rhs_tile_loop_count
-  int* var8; // s119_d120func_out0_recv_data_base_address
-  int var9; // s119_d120func_out0_tile_loop_count
+  int* var6; // sm102_d115rhs_send_data_base_address
+  int var7; // sm102_d115rhs_tile_loop_count
+  int* var8; // s115_d116func_out0_recv_data_base_address
+  int var9; // s115_d116func_out0_tile_loop_count
   int var10; // recv_data_base_address
   if (hid == 0 && wid == 0) { // inode_0_0
     // generate: clear flag before policy update
@@ -105,7 +105,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_33
     // generate: halt for slave inodes
     __builtin_INODE_HALT();
     // endgenerate: halt for slave inodes
-    // generate: send - TensorEdge((-101, odata), (119, lhs)), inode_0_0 -> imce_1_1
+    // generate: send - TensorEdge((-101, odata), (115, lhs)), inode_0_0 -> imce_1_1
     var3 = (int*)(8192);
     var5 = 0;
     var4 = var3[0];
@@ -114,7 +114,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_33
       __builtin_INODE_SEND(var5 + i1*32, 0, 1, 2);
 
     } // endgenerate
-    // endgenerate: send - TensorEdge((-101, odata), (119, lhs)), inode_0_0 -> imce_1_1
+    // endgenerate: send - TensorEdge((-101, odata), (115, lhs)), inode_0_0 -> imce_1_1
     // generate: sync all inodes
     __builtin_INODE_SET_FLAG(255);
     __builtin_INODE_STANDBY(5, 255);
@@ -223,7 +223,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_33
     // generate: halt for slave inodes
     __builtin_INODE_HALT();
     // endgenerate: halt for slave inodes
-    // generate: send - TensorEdge((-102, odata), (119, rhs)), inode_1_0 -> imce_1_1
+    // generate: send - TensorEdge((-102, odata), (115, rhs)), inode_1_0 -> imce_1_1
     var6 = (int*)(8192);
     var5 = 0;
     var7 = var6[0];
@@ -232,7 +232,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_33
       __builtin_INODE_SEND(var5 + i1*32, 0, 1, 3);
 
     } // endgenerate
-    // endgenerate: send - TensorEdge((-102, odata), (119, rhs)), inode_1_0 -> imce_1_1
+    // endgenerate: send - TensorEdge((-102, odata), (115, rhs)), inode_1_0 -> imce_1_1
     // generate: sync all inodes
     __builtin_INODE_SET_FLAG(255);
     __builtin_INODE_STANDBY(0, 255);
@@ -453,7 +453,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_33
     // generate: halt for master inode after done and intrt
     __builtin_INODE_HALT();
     // endgenerate: halt for master inode after done and intrt
-    // generate: recv: TensorID(120, func_out0)
+    // generate: recv: TensorID(116, func_out0)
     var8 = (int*)(8192);
     var10 = 0;
     var9 = var8[0];
@@ -462,7 +462,7 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region4_main_33
       __builtin_INODE_RECV(var10 + i1*32, 0, 0, 2);
 
     } // endgenerate
-    // endgenerate: recv: TensorID(120, func_out0)
+    // endgenerate: recv: TensorID(116, func_out0)
     // generate: sync all inodes
     __builtin_INODE_SET_FLAG(255);
     __builtin_INODE_STANDBY(0, 255);
