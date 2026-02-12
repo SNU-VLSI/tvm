@@ -78,3 +78,17 @@ class SyncEvent:
     payload: dict  # parsed structured payload
     raw_line: str
     source_file: str = ""  # which log file this came from
+
+
+@dataclass
+class StallInfo:
+    """Represents an active stall at end of simulation."""
+    node: str           # "imce_3_2" or "inode_0_0"
+    node_type: str      # "inode" or "imce"
+    row: int
+    col: int
+    stall_type: str     # "EX_STALL", "WB_STALL", "IF_STALL"
+    reason: str         # "RECV_FIFO", "STANDBY", etc.
+    start_time: int     # timestamp of STALL_START
+    payload: dict       # full payload from the START event
+    source_file: str    # which log file

@@ -9,6 +9,7 @@ from pathlib import Path
 from .monitor import LogMonitor, DebugTestDirectory
 from .packet import PacketAnalyzer
 from .sync_trace import SyncTraceAnalyzer
+from .stall_analysis import StallAnalyzer
 from .recv_analysis import (
     count_recv_before_step,
     parse_expected_patterns_from_log,
@@ -637,6 +638,69 @@ def cmd_split_log(args):
     print("=" * 70)
 
 
+def cmd_find_stalls(args):
+    """Handle the find-stalls command."""
+    log_dir = args.log_dir or LogMonitor.DEFAULT_LOG_DIR
+
+    if not Path(log_dir).exists():
+        print(f"Error: Log directory not found: {log_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    analyzer = StallAnalyzer(log_dir=log_dir, verbose=args.verbose)
+    analyzer._sequential = getattr(args, 'sequential', False)
+    analyzer.parse_all()
+
+    # Filter by node type if specified
+    stalls = analyzer.stalls
+    if args.node_type:
+        stalls = [s for s in stalls if s.node_type == args.node_type]
+
+    summary = analyzer.get_stall_summary()
+
+    print("=" * 90)
+    print("  Find Stalls: Nodes stalled at end of simulation")
+    print("=" * 90)
+    print(f"  Log directory: {log_dir}")
+    print(f"  Total nodes:   {summary['total_nodes']}")
+    print(f"  Stalled nodes: {summary['stalled_nodes']}")
+    print(f"  Active stalls: {len(stalls)}")
+    if args.node_type:
+        print(f"  Filter:        {args.node_type} only")
+    print("-" * 90)
+
+    if not stalls:
+        print("  No nodes are stalled at the end of simulation.")
+    else:
+        print(f"\n  {'Time':>15}  {'Node':<15} {'Stall Type':<12} {'Reason':<20} {'Extra'}")
+        print("  " + "-" * 85)
+
+        for s in stalls:
+            node_label = f"{s.node_type}({s.row},{s.col})"
+            # Build extra payload string (exclude 'reason' since it's shown separately)
+            extra_parts = []
+            for k, v in s.payload.items():
+                if k != "reason":
+                    extra_parts.append(f"{k}={v}")
+            extra = ", ".join(extra_parts) if extra_parts else ""
+
+            print(f"  {s.start_time:>15,}  {node_label:<15} {s.stall_type:<12} {s.reason:<20} {extra}")
+
+    # Summary by reason
+    if summary["by_reason"]:
+        print()
+        print("  Summary by reason:")
+        for reason, count in summary["by_reason"].items():
+            print(f"    {reason:<25} {count} stall(s)")
+
+    if summary["by_node_type"]:
+        print()
+        print("  Summary by node type:")
+        for nt, count in summary["by_node_type"].items():
+            print(f"    {nt:<25} {count} stall(s)")
+
+    print("=" * 90)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="FSIM Log Analyzer Tool",
@@ -684,6 +748,11 @@ Examples:
   %(prog)s sync-trace -n inode.0.0 imce.3.4 -s 430000000 -e 440000000  # With time range
   %(prog)s sync-trace -n inode_0_0 imce_3_4 -t STANDBY,SETFLAG  # Filter event types
   %(prog)s sync-trace -n inode_0_0 imce_3_4 -o sync_trace.txt  # Save to file
+
+  # Find stalled nodes at end of simulation
+  %(prog)s find-stalls -d <log_dir>  # All stalled nodes
+  %(prog)s find-stalls -d <log_dir> --node-type imce  # Only IMCE nodes
+  %(prog)s find-stalls -d <log_dir> -v  # Verbose output
 """,
     )
 
@@ -1050,6 +1119,25 @@ Examples:
         help="Output directory for split files (default: same as input file)",
     )
     split_log_parser.set_defaults(func=cmd_split_log)
+
+    # Find stalls command
+    find_stalls_parser = subparsers.add_parser(
+        "find-stalls",
+        help="Find nodes that are stalled at end of simulation",
+    )
+    find_stalls_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show detailed parsing information",
+    )
+    find_stalls_parser.add_argument(
+        "--node-type",
+        choices=["inode", "imce"],
+        default=None,
+        help="Filter by node type (inode or imce)",
+    )
+    find_stalls_parser.set_defaults(func=cmd_find_stalls)
 
     args = parser.parse_args()
 
