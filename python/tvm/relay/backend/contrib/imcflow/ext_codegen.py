@@ -299,6 +299,7 @@ class KernelCodeGenerator:
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/select.h>
 #include <unistd.h>
 """)
 
@@ -319,7 +320,29 @@ static inline void enable_imcflow_interrupt(int fd)
 static inline void wait_imcflow_interrupt(int fd)
 {
   uint32_t info;
+  fd_set readfds;
+  struct timeval timeout;
+
+  FD_ZERO(&readfds);
+  FD_SET(fd, &readfds);
+
+  timeout.tv_sec = 1;
+  timeout.tv_usec = 0;
+
+  int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
+  if (ret == 0) {
+    fprintf(stderr, "ERROR: Interrupt timeout (1s) - IMCFlow not responding\\n");
+    exit(1);
+  } else if (ret < 0) {
+    perror("select failed");
+    exit(1);
+  }
+
   ssize_t nb = read(fd, &info, sizeof(info));
+  if (nb != (ssize_t)sizeof(info)) {
+    perror("read interrupt failed");
+    exit(1);
+  }
 }
 
 static inline void generate_ack(uint32_t* int_ack_gen)
