@@ -817,22 +817,22 @@ static void wait_for_idle(volatile uint32_t* npu_pointer)
 #ifdef __cplusplus
 extern "C"
 #endif
-int32_t program_scan_reg(const char* file_name) {{
-    // Check if file_name is provided
-    if (file_name == NULL || file_name[0] == '\\0') {{
+int32_t program_scan_reg(const char* scan_file_path) {{
+    // Check if scan_file_path is provided
+    if (scan_file_path == NULL || scan_file_path[0] == '\\0') {{
         fprintf(stderr, "Error: NPZ directory path is required for program_scan_reg\\n");
         fprintf(stderr, "Usage: program_scan_reg <npz_directory_path>\\n");
         return -1;
     }}
 
-    // Strip surrounding quotes from file_name if present
-    std::string file_name_str(file_name);
-    if (file_name_str.size() >= 2 && file_name_str.front() == '"' && file_name_str.back() == '"') {{
-        file_name_str = file_name_str.substr(1, file_name_str.size() - 2);
+    // Strip surrounding quotes from scan_file_path if present
+    std::string scan_file_path_str(scan_file_path);
+    if (scan_file_path_str.size() >= 2 && scan_file_path_str.front() == '"' && scan_file_path_str.back() == '"') {{
+        scan_file_path_str = scan_file_path_str.substr(1, scan_file_path_str.size() - 2);
     }}
-    const char* actual_file_name = file_name_str.c_str();
+    const char* actual_scan_file_path = scan_file_path_str.c_str();
 
-    fprintf(stderr, "Starting program_scan_reg from directory: %s\\n", actual_file_name);
+    fprintf(stderr, "Starting program_scan_reg from directory: %s\\n", actual_scan_file_path);
 
     // Allocate memory for scan data (32 packets × 32 bytes = 1024 bytes)
     const int num_packets = {self.scan_packet_count};
@@ -857,7 +857,7 @@ int32_t program_scan_reg(const char* file_name) {{
         // Calculate IMCE coordinates: h=0-3, w=1-4
         int h = imce_idx / 4;
         int w = imce_idx % 4 + 1;
-        std::string imce_filename = std::string(actual_file_name) + "/imce_" + std::to_string(h) + "_" + std::to_string(w) + ".npz";
+        std::string imce_filename = std::string(actual_scan_file_path) + "/imce_" + std::to_string(h) + "_" + std::to_string(w) + ".npz";
         
         // Load IMCE NPZ file
         cnpy::npz_t imce_npz;
@@ -1012,6 +1012,20 @@ int32_t program_scan_reg(const char* file_name) {{
 {device_cleanup}
 
     fprintf(stderr, "program_scan_reg completed successfully\\n");
+    return 0;
+}}
+
+int main(int argc, char* argv[]) {{
+    if (argc != 2) {{
+        fprintf(stderr, "Usage: %s <scan_file_path>\\n", argv[0]);
+        fprintf(stderr, "  scan_file_path: Directory containing NPZ files (imce_<h>_<w>.npz)\\n");
+        return 1;
+    }}
+
+    const char* scan_file_path = argv[1];
+
+    program_scan_reg(scan_file_path);
+
     return 0;
 }}
 """
@@ -1574,6 +1588,46 @@ def main():
     print("\nGenerated files:")
     for name, path in sorted(files.items()):
         print(f"  {name:20s} -> {path}")
+
+    # Automatically build the executable
+    print("\n" + "="*60)
+    print("BUILDING EXECUTABLE")
+    print("="*60)
+
+    import subprocess
+
+    # Get the host ISA from environment
+    host_isa = os.getenv("IMCFLOW_HOST_ISA", "arm").lower()
+
+    # Path to scan_executable_make directory
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    scan_executable_make_dir = os.path.join(current_dir, "scan_executable_make")
+    build_script = os.path.join(scan_executable_make_dir, "build.sh")
+
+    if not os.path.exists(build_script):
+        print(f"Warning: Build script not found at {build_script}")
+        print("Skipping executable build")
+        return 0
+
+    # Run build.sh with the host ISA
+    print(f"Running build script for {host_isa.upper()} architecture...")
+    try:
+        result = subprocess.run(
+            [build_script, host_isa],
+            cwd=scan_executable_make_dir,
+            check=True,
+            capture_output=False
+        )
+        print("\n" + "="*60)
+        print("EXECUTABLE BUILD COMPLETE")
+        print("="*60)
+        print(f"Executable: scan_executable_make/build/program_scan_reg")
+    except subprocess.CalledProcessError as e:
+        print(f"\nError: Build failed with exit code {e.returncode}")
+        print("You can manually build by running:")
+        print(f"  cd {scan_executable_make_dir}")
+        print(f"  ./build.sh {host_isa}")
+        return 1
 
     return 0
 
