@@ -279,7 +279,7 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
   out, var_dict = getModel_([1, 3, iH, iW], until_relay=until_relay)
 
   # Load checkpoint
-  checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/2025-Nov-20-18-05-24/imcflow/2026-Jan-30-14-15-34/checkpoint.pth.tar'
+  checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/2025-Nov-20-18-05-24/imcflow/2026-Feb-13-10-40-47/checkpoint.pth.tar'
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']
