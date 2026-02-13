@@ -405,6 +405,30 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     close(int_ack_gen_fd);
     exit(1);
   }
+
+  int reset_gen_fd = open("/dev/mem", O_RDWR | O_SYNC);
+  if (reset_gen_fd < 0) {
+    perror("Cannot open /dev/mem for reset generator");
+    munmap(npu_pointer, npu_len);
+    close(npu_fd);
+    munmap(int_ack_gen_pointer, int_ack_gen_len);
+    close(int_ack_gen_fd);
+    exit(1);
+  }
+
+  off_t reset_gen_page_offset = RESET_GEN_ADDR & ~(sysconf(_SC_PAGE_SIZE) - 1);
+  size_t reset_gen_map_size = sysconf(_SC_PAGE_SIZE);
+  void* reset_gen_map_base = mmap(NULL, reset_gen_map_size, PROT_READ | PROT_WRITE, MAP_SHARED, reset_gen_fd, reset_gen_page_offset);
+  if (reset_gen_map_base == MAP_FAILED) {
+    perror("reset_gen mmap error");
+    munmap(npu_pointer, npu_len);
+    close(npu_fd);
+    munmap(int_ack_gen_pointer, int_ack_gen_len);
+    close(int_ack_gen_fd);
+    close(reset_gen_fd);
+    exit(1);
+  }
+  volatile uint32_t* reset_gen_pointer = (volatile uint32_t*)((char*)reset_gen_map_base + (RESET_GEN_ADDR - reset_gen_page_offset));
   """)
     elif self.os == "baremetal":
       return (f"""
@@ -453,6 +477,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
   close(npu_fd);
   munmap(int_ack_gen_pointer, int_ack_gen_len);
   close(int_ack_gen_fd);
+  munmap(reset_gen_map_base, reset_gen_map_size);
+  close(reset_gen_fd);
   """)
     else:
       return ""
