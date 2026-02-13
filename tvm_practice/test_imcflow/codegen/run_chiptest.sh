@@ -160,7 +160,7 @@ if [[ "$SKIP_STEP1" == true ]]; then
 else
     echo "Step 1: Running main.py to generate $TEST_FOLDER..."
     echo ""
-    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME")
+    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME" --patch-inode)
     if [[ "$RERUN_FLAG" == true ]]; then
         CMD+=("-r")
     fi
@@ -247,10 +247,10 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
-    echo "Step 6: Executing on remote chip (timeout: 0.5s)..."
+    echo "Step 6: Executing on remote chip (timeout: 10s)..."
     echo ""
     sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && timeout -s INT 0.5s ./tvm_host_runner \
+               "cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && timeout 10 ./execute_graph \
                 $TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"

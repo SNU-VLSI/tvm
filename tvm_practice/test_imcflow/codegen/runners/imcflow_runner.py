@@ -6,7 +6,7 @@ simulation backends (py_runner and rtl_runner).
 Usage:
     runner = get_runner("py")  # or "rtl"
     runner.setup()
-    runner.run(binary_name="tvm_host_runner", gdb_mode="no", test_name="my_test", eval_dir="/path/to/eval")
+    runner.run(binary_name="execute_graph", gdb_mode="no", test_name="my_test", eval_dir="/path/to/eval")
     # Logs are automatically written to eval_dir/logs/runner_name/ during run()
 """
 
@@ -169,7 +169,7 @@ class ImcFlowRunner(ABC):
         """Run the simulation
 
         Args:
-            binary_name: Name of the binary to execute (e.g., "tvm_host_runner")
+            binary_name: Name of the binary to execute (e.g., "execute_graph")
             gdb_mode: "yes" or "no" to enable/disable GDB
             test_name: Name of the test for output directory
             eval_dir: Evaluation directory containing the model

@@ -572,7 +572,7 @@ def run_simulation(eval_dir, HOST_ISA="x86"):
     simul_err = False
     try:
       runner.run(
-        binary_name="tvm_host_runner",
+        binary_name="execute_graph",
         gdb_mode="no",
         test_name=eval_dir,
         eval_dir=eval_dir
