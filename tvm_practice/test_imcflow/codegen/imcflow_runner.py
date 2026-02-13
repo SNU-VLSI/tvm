@@ -369,7 +369,7 @@ class RTLRunner(ImcFlowRunner):
     def main_log_filename(self) -> str:
         return "gem5_rtl.log"
 
-    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str) -> None:
+    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str, npz_file: str = "") -> None:
         """Run the RTL simulation with automatic port allocation.
 
         Allocates a unique socket port for VCS-gem5 communication to enable
@@ -403,7 +403,7 @@ class RTLRunner(ImcFlowRunner):
             sim_command = [
                 "direnv", "exec", ".", "./run.sh",
                 binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size,
-                "",  # npz_dir (empty)
+                "" if npz_file == "" else os.path.abspath(npz_file),
                 str(self._allocated_port)
             ]
 

@@ -9,6 +9,8 @@ experimenting with different inputs on an already-compiled model.
 
 import argparse
 import sys
+import subprocess
+import os
 from test import MODEL_REGISTRY, INPUT_PATTERNS, run_test_pipeline
 from pipeline_options import PipelineOptions, PipelineStage, parse_stop_at
 
@@ -134,8 +136,6 @@ Examples:
 
   # If rebuild_cpp_only, copy modified C++ files from handcraft to evl
   if options.rebuild_cpp_only:
-    import subprocess
-    import os
     script_dir = os.path.dirname(os.path.abspath(__file__))
     handcraft_dir = os.path.join(script_dir, "handcraft")
     copy_cpp_cmd = [
@@ -150,7 +150,8 @@ Examples:
       return result.returncode
 
   # Run the test
-  run_test_pipeline(test_name=args.model, options=options)
+  npz_file_path = os.environ.get('NPZ_FILE', '/root/project/tvm/tvm_practice/test_imcflow/codegen/utils/scan_reg_files')
+  run_test_pipeline(test_name=args.model, options=options, npz_file=npz_file_path)
   return 0
 
 

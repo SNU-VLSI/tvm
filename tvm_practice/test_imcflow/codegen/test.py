@@ -21,6 +21,7 @@ import glob
 import pickle
 import sys
 from contextlib import contextmanager
+import os
 
 # Import IMCFlow compiler driver
 from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild_imcflow_cpp_only
@@ -36,12 +37,6 @@ from models import models_for_test
 
 # Import shared input generator
 from input_generator import InputGenerator
-
-# Import NPZ file path from environment variable
-import os
-# npz_file_path = os.environ.get('NPZ_FILE', 'utils/09_08_05_07_05_08_06_07_0e_0d_0e_0c_0f_0f_0f_0c_0f_0f_0e_0e_0d_0d_0f_0c_0f_0d_0f_0f_0f_0f_0e_0f_08_09_08_04_08_08_08_05_09_0e_0e_0d_0e_05_01_0f_01_01_0a_07_01_0f_01_03_0b_0d_0f_09_09_07_01_05.npz')
-npz_file_path = os.environ.get('NPZ_FILE', '/root/project/tvm/tvm_practice/test_imcflow/codegen/utils/scan_reg_files')
-
 
 # Import ImcFlow runner abstraction
 from imcflow_runner import get_runner
@@ -480,7 +475,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
   return output
 
 
-def run_simulation(eval_dir, HOST_ISA="x86"):
+def run_simulation(eval_dir, HOST_ISA="x86", npz_file=""):
   """Run simulation by building and executing the graph with proper output streaming
 
   Args:
@@ -968,7 +963,7 @@ def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_
     options = PipelineOptions.reuse_compiled(input_pattern=input_pattern)
 
   # Get npz_file from environment variable
-  npz_file = npz_file_path
+  npz_file = os.environ.get('NPZ_FILE', '/root/project/tvm/tvm_practice/test_imcflow/codegen/utils/scan_reg_files')
   
   # Debug: Print what we got from the environment variable
   if npz_file:
