@@ -1,7 +1,7 @@
 # inputs
 set(ISA "X86" CACHE STRING "Target ISA")
 set(MAIN_TEST_FOLDER "one_relu_evl" CACHE STRING "Path to main script (not needed for x86)")
-set(MAIN_SCRIPT "relu.c" CACHE STRING "Path to main script (not needed for x86)")
+set(MAIN_SCRIPT "execute_graph.c" CACHE STRING "Path to main script")
 
 set(TVM_BUILD_HOST_RUNNER ON CACHE BOOL "Build host runner")
 # Paths are relative to the test directory (when host_binary_make is copied to {test}_evl/host_binary_make/)

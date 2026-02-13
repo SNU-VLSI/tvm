@@ -237,21 +237,24 @@ target_compile_definitions(${TARGET_LIB_NAME} PUBLIC DMLC_LOG_STACK_TRACE=0)
 option(TVM_BUILD_HOST_RUNNER "Build a host runner executable" OFF)
 
 if(TVM_BUILD_HOST_RUNNER)
-  add_executable(tvm_host_runner)
-  
+  # Derive executable name from MAIN_SCRIPT (remove .c or .cc extension)
+  string(REGEX REPLACE "\\.(c|cc|cpp)$" "" HOST_RUNNER_NAME "${MAIN_SCRIPT}")
+
+  add_executable(${HOST_RUNNER_NAME})
+
   # Select source file
-  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tests/${MAIN_SCRIPT}")
-    target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/${MAIN_SCRIPT})
-    message(STATUS "Using ${MAIN_SCRIPT} for host runner")
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/${MAIN_SCRIPT}")
+    target_sources(${HOST_RUNNER_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/${MAIN_SCRIPT})
+    message(STATUS "Using ${MAIN_SCRIPT} for host runner -> ${HOST_RUNNER_NAME}")
   else()
     message(FATAL_ERROR "No source file found for host runner: ${MAIN_SCRIPT}")
-  endif() 
-  
+  endif()
+
   # Add program_scan_reg_kernel.cc if it exists
-  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc")
-    target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc)
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/program_scan_reg_kernel.cc")
+    target_sources(${HOST_RUNNER_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/program_scan_reg_kernel.cc)
     message(STATUS "Adding program_scan_reg_kernel.cc to host runner")
-    
+
     # Link the host object files that contain the binary data for program_scan_reg
     # These files provide the _binary_program_scan_reg_*_bin_start/end symbols
     if(HOST_OBJ_FILES)
@@ -262,18 +265,18 @@ if(TVM_BUILD_HOST_RUNNER)
           list(APPEND SCAN_REG_OBJ_FILES ${obj_file})
         endif()
       endforeach()
-      
+
       if(SCAN_REG_OBJ_FILES)
-        target_sources(tvm_host_runner PRIVATE ${SCAN_REG_OBJ_FILES})
+        target_sources(${HOST_RUNNER_NAME} PRIVATE ${SCAN_REG_OBJ_FILES})
         list(LENGTH SCAN_REG_OBJ_FILES SCAN_OBJ_COUNT)
         message(STATUS "Linking ${SCAN_OBJ_COUNT} program_scan_reg object files to host runner")
       endif()
     endif()
   endif()
-  
+
   # Common settings
-  target_link_libraries(tvm_host_runner PRIVATE ${TARGET_LIB_NAME} tvm_model ${CRT_LIBS} m stdc++ cnpy)
-  target_include_directories(tvm_host_runner PRIVATE
+  target_link_libraries(${HOST_RUNNER_NAME} PRIVATE ${TARGET_LIB_NAME} tvm_model ${CRT_LIBS} m stdc++ cnpy)
+  target_include_directories(${HOST_RUNNER_NAME} PRIVATE
     "${CRT_LIB_BASE}/include"
     "${TVM_ROOT}/include"
     "${TVM_ROOT}/3rdparty/dlpack/include"
@@ -282,8 +285,8 @@ if(TVM_BUILD_HOST_RUNNER)
     ${TVM_MODEL_INCLUDE}
     "${CNPY_DIR}"
   )
-  target_sources(tvm_host_runner PRIVATE "${TVM_ROOT}/src/runtime/crt/host/platform.cc")
-  target_compile_definitions(tvm_host_runner PRIVATE
+  target_sources(${HOST_RUNNER_NAME} PRIVATE "${TVM_ROOT}/src/runtime/crt/host/platform.cc")
+  target_compile_definitions(${HOST_RUNNER_NAME} PRIVATE
     DMLC_LOG_STACK_TRACE=0
     TVM_WORKSPACE_SIZE_BYTES=8388608
     TVM_CRT_LOG_LEVEL=3
@@ -292,15 +295,15 @@ if(TVM_BUILD_HOST_RUNNER)
   # Optimize for gem5 simulation: static libgcc/libstdc++ + no PIE for faster initialization
   # This reduces dynamic linker overhead and mprotect syscalls in gem5
   # Note: We don't use -static to allow dynamic linking of system libraries like zlib
-  target_compile_options(tvm_host_runner PRIVATE -fno-pie)
-  target_link_options(tvm_host_runner PRIVATE
+  target_compile_options(${HOST_RUNNER_NAME} PRIVATE -fno-pie)
+  target_link_options(${HOST_RUNNER_NAME} PRIVATE
     -no-pie
     -static
     -static-libgcc
     -static-libstdc++
   )
-  
-  message(STATUS "Host runner executable will be built")
+
+  message(STATUS "Host runner executable: ${HOST_RUNNER_NAME}")
 endif()
 
 # ============================================================================
@@ -310,8 +313,8 @@ if(ISA STREQUAL "ARM")
   option(TVM_BUILD_ARM_RUNNER "Build ARM-Cortex runner executable (bare metal)" OFF)
   
   if(TVM_BUILD_ARM_RUNNER AND CMAKE_CROSSCOMPILING)
-    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/arm_runner.c")
-      add_executable(tvm_arm_runner ${CMAKE_CURRENT_LIST_DIR}/arm_runner.c)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/arm_runner.c")
+      add_executable(tvm_arm_runner ${CMAKE_CURRENT_LIST_DIR}/src/arm_runner.c)
       
       # Group static libraries to avoid order-sensitive resolution
       if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -343,7 +346,7 @@ if(ISA STREQUAL "ARM")
       
       message(STATUS "ARM bare-metal runner will be built")
     else()
-      message(WARNING "arm_runner.c not found, skipping ARM runner")
+      message(WARNING "src/arm_runner.c not found, skipping ARM runner")
     endif()
   elseif(TVM_BUILD_ARM_RUNNER AND NOT CMAKE_CROSSCOMPILING)
     message(WARNING "TVM_BUILD_ARM_RUNNER requested but not cross-compiling; skipping")
