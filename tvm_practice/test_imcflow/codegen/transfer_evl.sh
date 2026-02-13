@@ -143,12 +143,51 @@ for dir in "${MATCHING_DIRS[@]}"; do
     dir_name=$(basename "$dir")
     echo "Transferring $dir_name..."
 
-    if sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$dir" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH"; then
-        echo "  ✓ Successfully transferred $dir_name"
-        ((TRANSFER_COUNT++))
+    # Check if this is a test folder (_evl) and not a custom path
+    if [[ "$dir_name" == *_evl ]] && [[ -z "$CUSTOM_PATH" ]]; then
+        # For test folders, only transfer specific subdirectories
+        SUBDIRS_TO_TRANSFER=("host_binary_make" "test_inputs" "test_outputs" "test_references" "build")
+
+        # Remove existing directory on remote to ensure clean overwrite
+        echo "  - Cleaning old directory on remote..."
+        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "rm -rf $REMOTE_PATH/$dir_name"
+
+        # Create the remote directory
+        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "mkdir -p $REMOTE_PATH/$dir_name"
+
+        SUBDIR_SUCCESS=true
+        for subdir in "${SUBDIRS_TO_TRANSFER[@]}"; do
+            subdir_path="$dir/$subdir"
+            if [[ -e "$subdir_path" ]]; then
+                echo "  - Transferring $subdir..."
+                if ! sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$subdir_path" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH/$dir_name/"; then
+                    echo "    ✗ Failed to transfer $subdir"
+                    SUBDIR_SUCCESS=false
+                fi
+            else
+                echo "  - Skipping $subdir (not found)"
+            fi
+        done
+
+        if [[ "$SUBDIR_SUCCESS" == true ]]; then
+            echo "  ✓ Successfully transferred $dir_name (selective subdirectories)"
+            ((TRANSFER_COUNT++))
+        else
+            echo "  ✗ Failed to transfer some subdirectories in $dir_name"
+            ((FAILED_COUNT++))
+        fi
     else
-        echo "  ✗ Failed to transfer $dir_name"
-        ((FAILED_COUNT++))
+        # For custom paths or non-evl directories, transfer everything with clean overwrite
+        echo "  - Cleaning old directory on remote..."
+        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "rm -rf $REMOTE_PATH/$dir_name"
+
+        if sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$dir" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH"; then
+            echo "  ✓ Successfully transferred $dir_name"
+            ((TRANSFER_COUNT++))
+        else
+            echo "  ✗ Failed to transfer $dir_name"
+            ((FAILED_COUNT++))
+        fi
     fi
 done
 
