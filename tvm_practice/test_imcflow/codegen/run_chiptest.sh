@@ -13,7 +13,7 @@ show_help() {
     echo "  3. Transfers scan_reg_files to remote server"
     echo "  4. Transfers scan_executable to remote server"
     echo "  5. Programs scan registers on remote chip"
-    echo "  5. Executes test on remote chip"
+    echo "  6. Executes test on remote chip"
     echo ""
     echo "Options:"
     echo "  -r              Pass -r to main.py in step 1"
