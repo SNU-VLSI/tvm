@@ -38,6 +38,9 @@ Examples:
   # Stop at codegen to observe memlayout changes
   python main.py --model one_relu --stop-at codegen --rebuild-cpp-only
 
+  # Run with inode.cpp patching (auto-fix imem write sections based on mem_layout.txt)
+  python main.py --model resnet8_subset31_pretrained_orig --patch-inode
+
   # Skip setup (reuse existing compiled model)
   python main.py --model one_relu --pattern zeros --skip-setup
 
@@ -85,6 +88,12 @@ Examples:
     help="List available models and their default input patterns"
   )
 
+  parser.add_argument(
+    "--patch-inode",
+    action="store_true",
+    help="Patch inode.cpp files based on mem_layout.txt after codegen (auto-fix imem write sections)"
+  )
+
   args = parser.parse_args()
 
   # Handle list models
@@ -128,6 +137,7 @@ Examples:
       skip_stages=skip_stages,
       rebuild_cpp_only=args.rebuild_cpp_only,
       input_pattern=args.pattern if args.pattern else "default",
+      patch_inode=args.patch_inode,
     )
   except ValueError as e:
     parser.print_help()

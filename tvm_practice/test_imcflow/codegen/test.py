@@ -41,6 +41,9 @@ from runners.input_generator import InputGenerator
 # Import ImcFlow runner abstraction
 from runners.imcflow_runner import get_runner
 
+# Import patch_inode for inode.cpp patching
+from handcraft.patch_inode import patch_inode_for_eval_dir
+
 np.random.seed(1234)
 
 DEBUG_EXECUTOR=0
@@ -757,6 +760,12 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
     if options.stop_at == PipelineStage.TRANSFORM:
       print("\n⏭️  Frontend only mode: returning after model transformation")
       return None
+
+    # Patch inode.cpp files if requested (after codegen, before graph executor)
+    if options.patch_inode and options.should_run(PipelineStage.CODEGEN):
+      ret = patch_inode_for_eval_dir(eval_dir, verbose=False)
+      if ret != 0:
+        raise RuntimeError(f"patch_inode failed for {eval_dir}")
   else:
     # Skip setup: load previously transformed model
     print("\n⏭️  Skipping model transformation, codegen, and graph generation (skip_setup=True)")
@@ -765,6 +774,12 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
 
   if rebuild_cpp_only:
     mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=stop_at_codegen)
+
+    # Patch inode.cpp files if requested (after codegen, before graph executor)
+    if options.patch_inode:
+      ret = patch_inode_for_eval_dir(eval_dir, verbose=False)
+      if ret != 0:
+        raise RuntimeError(f"patch_inode failed for {eval_dir}")
 
     # If stopping at codegen, return after codegen
     if stop_at_codegen:

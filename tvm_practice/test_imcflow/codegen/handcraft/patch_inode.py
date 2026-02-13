@@ -256,6 +256,81 @@ def colorize_diff(diff_text: str) -> str:
     return '\n'.join(colored_lines)
 
 
+def patch_inode_for_eval_dir(eval_dir: str, verbose: bool = False) -> int:
+    """
+    Programmatic interface to patch inode.cpp files for an evaluation directory.
+
+    This function is called from main.py when --patch-inode is specified.
+
+    Args:
+        eval_dir: Path to the evaluation directory (e.g., "resnet8_subset31_pretrained_orig_evl")
+        verbose: If True, print detailed output
+
+    Returns:
+        0 on success, 1 on error
+    """
+    # Paths are relative to codegen directory (where main.py runs)
+    layout_path = os.path.join(eval_dir, 'mem_layout.txt')
+    build_dir = os.path.join(eval_dir, 'build')
+
+    if not os.path.exists(layout_path):
+        print(f"Error: mem_layout.txt not found at {layout_path}")
+        return 1
+
+    if not os.path.exists(build_dir):
+        print(f"Error: build directory not found at {build_dir}")
+        return 1
+
+    layout = parse_mem_layout(layout_path)
+
+    if verbose:
+        print(f"Parsed {len(layout)} regions from mem_layout.txt")
+
+    if not layout:
+        print(f"No regions found in mem_layout.txt")
+        return 1
+
+    print(f"🔧 Patching inode.cpp files ({len(layout)} region(s))...")
+
+    patched_count = 0
+    for region_name, imem_blocks in sorted(layout.items()):
+        cpp_path = os.path.join(build_dir, region_name, 'inode.cpp')
+
+        if not os.path.exists(cpp_path):
+            if verbose:
+                print(f"  Warning: {cpp_path} not found, skipping")
+            continue
+
+        if verbose:
+            print(f"\n  Region: {region_name}")
+            print(f"    imem blocks: {list(imem_blocks.keys())}")
+
+        # Read original content
+        with open(cpp_path, 'r') as f:
+            original = f.read()
+
+        # Patch the file
+        patched = patch_inode_cpp(cpp_path, imem_blocks, verbose)
+
+        if original == patched:
+            if verbose:
+                print(f"  {region_name}: No changes needed")
+            continue
+
+        # Write patched file
+        with open(cpp_path, 'w') as f:
+            f.write(patched)
+        print(f"  ✅ Patched: {region_name}/inode.cpp")
+        patched_count += 1
+
+    if patched_count > 0:
+        print(f"🔧 Patched {patched_count} inode.cpp file(s)")
+    else:
+        print(f"🔧 No inode.cpp files needed patching")
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Patch inode.cpp files based on mem_layout.txt'

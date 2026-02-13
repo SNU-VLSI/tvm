@@ -43,6 +43,7 @@ class PipelineOptions:
     skip_stages: Set[PipelineStage] = field(default_factory=set)
     rebuild_cpp_only: bool = False
     input_pattern: str = "default"
+    patch_inode: bool = False
 
     def __post_init__(self):
         """Validate options after initialization."""
