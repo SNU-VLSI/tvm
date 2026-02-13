@@ -27,7 +27,7 @@ import os
 from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild_imcflow_cpp_only
 
 # Import pipeline options
-from pipeline_options import PipelineOptions, PipelineStage
+from runners.pipeline_options import PipelineOptions, PipelineStage
 
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
@@ -36,10 +36,10 @@ from models import ds_cnn_subset_models
 from models import models_for_test
 
 # Import shared input generator
-from input_generator import InputGenerator
+from runners.input_generator import InputGenerator
 
 # Import ImcFlow runner abstraction
-from imcflow_runner import get_runner
+from runners.imcflow_runner import get_runner
 
 np.random.seed(1234)
 

@@ -12,7 +12,7 @@ import sys
 import subprocess
 import os
 from test import MODEL_REGISTRY, INPUT_PATTERNS, run_test_pipeline
-from pipeline_options import PipelineOptions, PipelineStage, parse_stop_at
+from runners.pipeline_options import PipelineOptions, PipelineStage, parse_stop_at
 
 
 def main():
