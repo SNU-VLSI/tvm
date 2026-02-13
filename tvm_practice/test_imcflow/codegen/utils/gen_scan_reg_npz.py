@@ -30,6 +30,7 @@ Common knobs:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from typing import Iterable, List, Tuple
@@ -128,6 +129,37 @@ def make_payload(
     raise ValueError(f"Unknown pattern: {pattern}")
 
 
+def load_scan_from_json(json_path: str) -> dict[ImceCoord, np.ndarray]:
+    """Load scan values from JSON file.
+
+    JSON format:
+      {
+        "0_1": {"h_id": 0, "w_id": 1, "pairs": {"0": val, "1": val, ...}},
+        ...
+      }
+
+    Returns:
+      dict mapping ImceCoord -> uint8[64] array
+    """
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+
+    result = {}
+    for key, entry in data.items():
+        h_id = entry["h_id"]
+        w_id = entry["w_id"]
+        coord = ImceCoord(h=h_id, w=w_id)
+
+        pairs = entry["pairs"]
+        payload = np.zeros(64, dtype=np.uint8)
+        for pair_idx, val in pairs.items():
+            payload[int(pair_idx)] = np.uint8(val)
+
+        result[coord] = payload
+
+    return result
+
+
 def write_npz(out_dir: str, coord: ImceCoord, payload: np.ndarray) -> str:
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{coord.name}.npz")
@@ -174,6 +206,12 @@ def main() -> None:
         default=0,
         help="Seed used for --pattern random (default: 0)",
     )
+    parser.add_argument(
+        "--json",
+        type=str,
+        default="",
+        help="JSON file containing per-IMCE scan values (overrides --pattern and --manual)",
+    )
 
     args = parser.parse_args()
 
@@ -184,13 +222,25 @@ def main() -> None:
         if not imces:
             raise SystemExit(f"Unknown --only-imce '{args.only_imce}' (expected like imce_0_1)")
 
+    json_payloads = None
+    if args.json:
+        json_payloads = load_scan_from_json(args.json)
+        # JSON에 있는 IMCE만 처리하도록 필터링 (--only-imce가 없을 때)
+        if not args.only_imce:
+            imces = [c for c in imces if c in json_payloads]
+
     manual_payload = None
     if args.manual:
         manual_payload = _parse_manual_nibbles(args.manual)
 
     written: List[str] = []
     for coord in imces:
-        payload = manual_payload if manual_payload is not None else make_payload(coord, pattern=args.pattern, seed=args.seed)
+        if json_payloads is not None:
+            payload = json_payloads[coord]
+        elif manual_payload is not None:
+            payload = manual_payload
+        else:
+            payload = make_payload(coord, pattern=args.pattern, seed=args.seed)
         if payload.shape != (64,) or payload.dtype != np.uint8:
             raise RuntimeError("Internal error: payload must be uint8[64]")
         written.append(write_npz(args.out_dir, coord, payload))
