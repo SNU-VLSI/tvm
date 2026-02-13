@@ -336,32 +336,6 @@ def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_cpp_onl
     devconfig_state_path = os.path.join(output_dir, "devconfig_state.pkl")
     config.update_datablocks_state(devconfig_state_path)
 
-    # Generate scan register programming code
-    print("\n--- Generating Scan Register Programming Code ---")
-
-    # Import scan register modules (they live next to the codegen output directory)
-    sys.path.insert(0, f"{output_dir}/../utils")
-    from scan_reg_policy_gen import ScanRegPolicyGenerator
-    from scan_codegen import generate_scan_code_from_policy_gen, generate_default_scan_values
-    
-    # Generate policy and allocate memory
-    policy_gen = ScanRegPolicyGenerator()
-    policy_gen.construct_noc_path()
-    policy_gen.gen_policy_table()
-    policy_gen.add_edge_info()
-    policy_gen.allocate()
-    
-    # Generate scan values (32 packets for 16 IMCEs × 2 packets each)
-    scan_values = generate_default_scan_values(32)
-    
-    # Generate scan register code
-    files = generate_scan_code_from_policy_gen(
-      scan_values=scan_values,
-      func_name="program_scan_reg",
-      build_dir=os.path.join(output_dir, "build")
-    )
-    print(f"Generated scan register code: {list(files.keys())}")
-
     return {"status": "complete"}
 
 

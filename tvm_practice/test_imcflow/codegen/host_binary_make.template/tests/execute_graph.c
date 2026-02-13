@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
   const char* runner_name = argc > 5 ? argv[5] : "";
   const char* scan_reg_file = argc > 6 ? argv[6] : "";
 
-  program_scan_reg(scan_reg_file);
+  // program_scan_reg(scan_reg_file);
 
   // Construct input and output directories based on test name
   char input_dir[256];
