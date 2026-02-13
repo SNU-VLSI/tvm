@@ -42,9 +42,9 @@ apt install zlib1g-dev:arm64
 ```bash
 mkdir -p build
 cd build
-../build.sh relu.c x86
+../build.sh execute_graph.c x86
 
 or
 
-../build.sh relu.c arm
+../build.sh execute_graph.c arm
 ```

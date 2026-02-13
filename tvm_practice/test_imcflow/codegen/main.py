@@ -150,8 +150,7 @@ Examples:
       return result.returncode
 
   # Run the test
-  npz_file_path = os.environ.get('NPZ_FILE', '/root/project/tvm/tvm_practice/test_imcflow/codegen/utils/scan_reg_files')
-  run_test_pipeline(test_name=args.model, options=options, npz_file=npz_file_path)
+  run_test_pipeline(test_name=args.model, options=options)
   return 0
 
 

@@ -50,7 +50,6 @@ REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
 DEFAULT_RUNNER_NAME="chiptest"
-NPZ_FILE_PATH="scan_reg_files"
 
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"
@@ -94,7 +93,7 @@ echo "Step 4: Executing on remote chip..."
 echo ""
 sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
            "cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && ./tvm_host_runner \
-            $TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH"
+            $TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME"
 
 if [ $? -eq 0 ]; then
     echo ""

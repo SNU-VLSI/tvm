@@ -240,16 +240,16 @@ if(TVM_BUILD_HOST_RUNNER)
   add_executable(tvm_host_runner)
   
   # Select source file
-  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tests/${MAIN_SCRIPT}")
-    target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/${MAIN_SCRIPT})
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/${MAIN_SCRIPT}")
+    target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/${MAIN_SCRIPT})
     message(STATUS "Using ${MAIN_SCRIPT} for host runner")
   else()
     message(FATAL_ERROR "No source file found for host runner: ${MAIN_SCRIPT}")
-  endif() 
-  
+  endif()
+
   # Add program_scan_reg_kernel.cc if it exists
-  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc")
-    target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/program_scan_reg_kernel.cc)
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/program_scan_reg_kernel.cc")
+    target_sources(tvm_host_runner PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/program_scan_reg_kernel.cc)
     message(STATUS "Adding program_scan_reg_kernel.cc to host runner")
     
     # Link the host object files that contain the binary data for program_scan_reg
@@ -310,8 +310,8 @@ if(ISA STREQUAL "ARM")
   option(TVM_BUILD_ARM_RUNNER "Build ARM-Cortex runner executable (bare metal)" OFF)
   
   if(TVM_BUILD_ARM_RUNNER AND CMAKE_CROSSCOMPILING)
-    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/arm_runner.c")
-      add_executable(tvm_arm_runner ${CMAKE_CURRENT_LIST_DIR}/arm_runner.c)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/arm_runner.c")
+      add_executable(tvm_arm_runner ${CMAKE_CURRENT_LIST_DIR}/src/arm_runner.c)
       
       # Group static libraries to avoid order-sensitive resolution
       if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -343,7 +343,7 @@ if(ISA STREQUAL "ARM")
       
       message(STATUS "ARM bare-metal runner will be built")
     else()
-      message(WARNING "arm_runner.c not found, skipping ARM runner")
+      message(WARNING "src/arm_runner.c not found, skipping ARM runner")
     endif()
   elseif(TVM_BUILD_ARM_RUNNER AND NOT CMAKE_CROSSCOMPILING)
     message(WARNING "TVM_BUILD_ARM_RUNNER requested but not cross-compiling; skipping")
