@@ -578,7 +578,10 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     """Generate base address macro definitions."""
     code = CodeWriter()
     for key, value in self.base_address_macros.items():
-      code += f"#define {key} {value}\n"
+      if isinstance(value, int):
+        code += f"#define {key} 0x{value:X}\n"
+      else:
+        code += f"#define {key} {value}\n"
     code += "\n"
     return code
 
