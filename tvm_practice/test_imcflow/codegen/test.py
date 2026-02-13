@@ -799,13 +799,15 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
   config = DevConfig()
 
   # Run simulation (build + gem5 execution)
+  # Note: run_simulation() internally skips gem5 for ARM but still builds the binary
   try:
     imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
   except KeyboardInterrupt:
     print("\n⚠️  Simulation interrupted - skipping output comparison")
     raise  # Re-raise to let pytest handle the interruption
 
-  if (config.HOST_ISA == "arm"):
+  # ARM target: skip comparison (simulation was skipped, no output to compare)
+  if config.HOST_ISA == "arm":
     return None
 
   # Compare the reference CPU output with IMCFLOW simulated output
