@@ -6,9 +6,19 @@ test pipeline, replacing scattered boolean parameters with a clean dataclass-bas
 approach.
 """
 
-from enum import IntEnum, auto
+from enum import IntEnum, Enum, auto
 from dataclasses import dataclass, field
 from typing import Set, Optional
+
+
+class RunMode(Enum):
+    """Execution mode for the pipeline.
+
+    Determines how the pipeline handles model compilation and reuse.
+    """
+    FULL = "full"      # Full pipeline: transform -> codegen -> compile -> simulate
+    REUSE = "reuse"    # Reuse compiled model: skip to simulation
+    PATCH = "patch"    # Apply handcraft patches: codegen -> patch -> compile -> simulate
 
 
 class PipelineStage(IntEnum):
@@ -35,18 +45,36 @@ class PipelineOptions:
 
     Attributes:
         stop_at: Pipeline stage to stop at (inclusive)
-        skip_stages: Set of stages to skip
-        rebuild_cpp_only: If True, only rebuild C++ files (skip TVM transforms)
+        start_at: Pipeline stage to start at (skips earlier stages)
+        skip_stages: Set of stages to skip (computed from start_at)
+        with_patch: If True, apply handcraft patches before codegen
         input_pattern: Input pattern for test data generation
+        run_mode: Computed execution mode (FULL, REUSE, or PATCH)
     """
     stop_at: PipelineStage = PipelineStage.COMPARISON
+    start_at: PipelineStage = PipelineStage.TRANSFORM
     skip_stages: Set[PipelineStage] = field(default_factory=set)
-    rebuild_cpp_only: bool = False
+    with_patch: bool = False
     input_pattern: str = "default"
-    patch_inode: bool = False
+    run_mode: RunMode = field(init=False)
 
     def __post_init__(self):
-        """Validate options after initialization."""
+        """Compute skip_stages and run_mode from options, then validate."""
+        # Compute skip_stages based on start_at
+        if self.start_at > PipelineStage.TRANSFORM:
+            # Skip all stages before start_at
+            for stage in PipelineStage:
+                if stage < self.start_at:
+                    self.skip_stages.add(stage)
+
+        # Compute run_mode based on with_patch and start_at
+        if self.with_patch:
+            self.run_mode = RunMode.PATCH
+        elif self.start_at >= PipelineStage.SIMULATION:
+            self.run_mode = RunMode.REUSE
+        else:
+            self.run_mode = RunMode.FULL
+
         self._validate()
 
     def _validate(self):
@@ -55,12 +83,12 @@ class PipelineOptions:
         Raises:
             ValueError: If options are incompatible
         """
-        # skip_setup (TRANSFORM in skip_stages) + rebuild_cpp_only conflict
-        if self.should_skip_transform() and self.rebuild_cpp_only:
+        # start_at must not be after stop_at
+        if self.start_at > self.stop_at:
             raise ValueError(
-                "Cannot use --skip-setup and --rebuild-cpp-only together. "
-                "--skip-setup reuses all previous outputs, "
-                "--rebuild-cpp-only reruns codegen with modified C++ files."
+                f"--start-at ({self.start_at.name.lower()}) cannot be after "
+                f"--stop-at ({self.stop_at.name.lower()}). "
+                f"Nothing would be executed."
             )
 
         # Can't skip transform if stopping at transform
@@ -145,20 +173,18 @@ class PipelineOptions:
     def codegen_only(cls, input_pattern: str = "default") -> "PipelineOptions":
         """Create options to stop after codegen (for C++ debugging).
 
-        Runs: transform -> codegen (with rebuild_cpp_only)
-        Skips: graph_executor, cpu_validation, simulation, comparison
-
-        Note: This implies rebuild_cpp_only=True for observing memlayout.
+        Runs: codegen only (skips transform)
+        Skips: transform, graph_executor, cpu_validation, simulation, comparison
         """
         return cls(
             stop_at=PipelineStage.CODEGEN,
-            rebuild_cpp_only=True,
+            start_at=PipelineStage.CODEGEN,
             input_pattern=input_pattern
         )
 
     @classmethod
     def reuse_compiled(cls, input_pattern: str = "default") -> "PipelineOptions":
-        """Create options to reuse previously compiled model (skip_setup).
+        """Create options to reuse previously compiled model.
 
         Skips: transform, codegen, graph_executor
         Runs: cpu_validation -> simulation -> comparison
@@ -167,26 +193,23 @@ class PipelineOptions:
         """
         return cls(
             stop_at=PipelineStage.COMPARISON,
-            skip_stages={
-                PipelineStage.TRANSFORM,
-                PipelineStage.CODEGEN,
-                PipelineStage.GRAPH_EXECUTOR
-            },
+            start_at=PipelineStage.SIMULATION,
             input_pattern=input_pattern
         )
 
     @classmethod
-    def rebuild_cpp(cls, input_pattern: str = "default") -> "PipelineOptions":
-        """Create options to rebuild C++ files only.
+    def with_patch_run(cls, input_pattern: str = "default") -> "PipelineOptions":
+        """Create options to run with handcraft patches.
 
-        Skips: transform (uses saved DevConfig state)
         Runs: codegen -> graph_executor -> cpu_validation -> simulation -> comparison
+        Skips: transform (uses saved DevConfig state)
 
         Used when C++ files in handcraft/ have been modified.
         """
         return cls(
             stop_at=PipelineStage.COMPARISON,
-            rebuild_cpp_only=True,
+            start_at=PipelineStage.CODEGEN,
+            with_patch=True,
             input_pattern=input_pattern
         )
 
@@ -194,17 +217,28 @@ class PipelineOptions:
         """Human-readable representation."""
         skip_names = [s.name for s in sorted(self.skip_stages)]
         return (
-            f"PipelineOptions(stop_at={self.stop_at.name}, "
-            f"skip={skip_names}, rebuild_cpp_only={self.rebuild_cpp_only}, "
-            f"pattern={self.input_pattern})"
+            f"PipelineOptions(start_at={self.start_at.name}, stop_at={self.stop_at.name}, "
+            f"skip={skip_names}, with_patch={self.with_patch}, "
+            f"pattern={self.input_pattern}, run_mode={self.run_mode.name})"
         )
+
+
+# Unified stage name mapping (verb-based, consistent across --start-at and --stop-at)
+STAGE_NAMES = {
+    "transform": PipelineStage.TRANSFORM,
+    "codegen": PipelineStage.CODEGEN,
+    "compile": PipelineStage.GRAPH_EXECUTOR,
+    "validate": PipelineStage.CPU_VALIDATION,
+    "simulate": PipelineStage.SIMULATION,
+    "compare": PipelineStage.COMPARISON,
+}
 
 
 def parse_stop_at(value: str) -> PipelineStage:
     """Parse --stop-at CLI argument to PipelineStage.
 
     Args:
-        value: CLI string value ("transform", "codegen", "compile", "full")
+        value: CLI string value (transform, codegen, compile, validate, simulate, compare)
 
     Returns:
         Corresponding PipelineStage
@@ -212,13 +246,39 @@ def parse_stop_at(value: str) -> PipelineStage:
     Raises:
         ValueError: If value is not recognized
     """
-    mapping = {
-        "transform": PipelineStage.TRANSFORM,
-        "codegen": PipelineStage.CODEGEN,
-        "compile": PipelineStage.GRAPH_EXECUTOR,
-        "full": PipelineStage.COMPARISON,
-    }
-    if value.lower() not in mapping:
-        valid = ", ".join(mapping.keys())
+    # Support legacy "full" as alias for "compare"
+    if value.lower() == "full":
+        value = "compare"
+    # Support legacy "simulation" as alias for "simulate"
+    if value.lower() == "simulation":
+        value = "simulate"
+
+    if value.lower() not in STAGE_NAMES:
+        valid = ", ".join(STAGE_NAMES.keys())
         raise ValueError(f"Invalid --stop-at value '{value}'. Valid options: {valid}")
-    return mapping[value.lower()]
+    return STAGE_NAMES[value.lower()]
+
+
+def parse_start_at(value: str) -> PipelineStage:
+    """Parse --start-at CLI argument to PipelineStage.
+
+    Args:
+        value: CLI string value (transform, codegen, compile, validate, simulate)
+
+    Returns:
+        Corresponding PipelineStage
+
+    Raises:
+        ValueError: If value is not recognized
+    """
+    # Support legacy "simulation" as alias for "simulate"
+    if value.lower() == "simulation":
+        value = "simulate"
+
+    # --start-at doesn't allow "compare" (nothing would execute)
+    valid_start_stages = {k: v for k, v in STAGE_NAMES.items() if k != "compare"}
+
+    if value.lower() not in valid_start_stages:
+        valid = ", ".join(valid_start_stages.keys())
+        raise ValueError(f"Invalid --start-at value '{value}'. Valid options: {valid}")
+    return valid_start_stages[value.lower()]

@@ -256,84 +256,65 @@ def colorize_diff(diff_text: str) -> str:
     return '\n'.join(colored_lines)
 
 
-def patch_inode_for_eval_dir(eval_dir: str, verbose: bool = False) -> int:
+def patch_inode_for_eval_dir(eval_dir: str, input_build_dir: str, output_build_dir: str, verbose: bool = False) -> int:
     """
-    Programmatic interface to patch inode.cpp files for an evaluation directory.
+    Patch inode.cpp files based on mem_layout.txt.
 
-    This function is called from main.py when --patch-inode is specified.
+    Reads inode.cpp from input_build_dir and writes inode.patched.cpp to output_build_dir.
 
     Args:
-        eval_dir: Path to the evaluation directory (e.g., "resnet8_subset31_pretrained_orig_evl")
+        eval_dir: Path to eval directory containing mem_layout.txt
+        input_build_dir: Directory containing source inode.cpp files
+        output_build_dir: Directory to write inode.patched.cpp files
         verbose: If True, print detailed output
 
     Returns:
         0 on success, 1 on error
     """
-    # Paths are relative to codegen directory (where main.py runs)
     layout_path = os.path.join(eval_dir, 'mem_layout.txt')
-    build_dir = os.path.join(eval_dir, 'build')
 
     if not os.path.exists(layout_path):
         print(f"Error: mem_layout.txt not found at {layout_path}")
         return 1
 
-    if not os.path.exists(build_dir):
-        print(f"Error: build directory not found at {build_dir}")
-        return 1
-
     layout = parse_mem_layout(layout_path)
-
-    if verbose:
-        print(f"Parsed {len(layout)} regions from mem_layout.txt")
-
     if not layout:
         print(f"No regions found in mem_layout.txt")
         return 1
 
-    print(f"🔧 Patching inode.cpp files ({len(layout)} region(s))...")
+    print(f"Patching inode.cpp -> inode.patched.cpp ({len(layout)} region(s))...")
 
     patched_count = 0
     for region_name, imem_blocks in sorted(layout.items()):
-        cpp_path = os.path.join(build_dir, region_name, 'inode.cpp')
+        cpp_path = os.path.join(input_build_dir, region_name, 'inode.cpp')
+        patched_cpp_path = os.path.join(output_build_dir, region_name, 'inode.patched.cpp')
 
         if not os.path.exists(cpp_path):
             if verbose:
                 print(f"  Warning: {cpp_path} not found, skipping")
             continue
 
-        if verbose:
-            print(f"\n  Region: {region_name}")
-            print(f"    imem blocks: {list(imem_blocks.keys())}")
-
-        # Read original content
-        with open(cpp_path, 'r') as f:
-            original = f.read()
-
-        # Patch the file
         patched = patch_inode_cpp(cpp_path, imem_blocks, verbose)
 
-        if original == patched:
-            if verbose:
-                print(f"  {region_name}: No changes needed")
-            continue
-
-        # Write patched file
-        with open(cpp_path, 'w') as f:
+        with open(patched_cpp_path, 'w') as f:
             f.write(patched)
-        print(f"  ✅ Patched: {region_name}/inode.cpp")
-        patched_count += 1
+
+        with open(cpp_path, 'r') as f:
+            if f.read() != patched:
+                print(f"  Patched: {region_name}/inode.patched.cpp")
+                patched_count += 1
 
     if patched_count > 0:
-        print(f"🔧 Patched {patched_count} inode.cpp file(s)")
+        print(f"Patched {patched_count} file(s)")
     else:
-        print(f"🔧 No inode.cpp files needed patching")
+        print(f"No changes needed (copied as inode.patched.cpp)")
 
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Patch inode.cpp files based on mem_layout.txt'
+        description='Patch inode.cpp files based on mem_layout.txt, output to inode.patched.cpp'
     )
     parser.add_argument('eval_dir', help='Evaluation directory (e.g., resnet8_subset31_pretrained_orig_evl)')
     parser.add_argument('--region', type=str, help='Filter to specific region (e.g., "region2")')
@@ -376,6 +357,7 @@ def main():
     # Process each region
     for region_name, imem_blocks in sorted(layout.items()):
         cpp_path = os.path.join(build_dir, region_name, 'inode.cpp')
+        patched_cpp_path = os.path.join(build_dir, region_name, 'inode.patched.cpp')
 
         if not os.path.exists(cpp_path):
             print(f"Warning: {cpp_path} not found, skipping")
@@ -394,6 +376,10 @@ def main():
 
         if original == patched:
             print(f"  {region_name}: No changes needed")
+            if not args.dry_run:
+                # Still write to patched file for consistency
+                with open(patched_cpp_path, 'w') as f:
+                    f.write(patched)
             continue
 
         if args.dry_run:
@@ -407,10 +393,10 @@ def main():
                 else:
                     print(colorize_diff(diff))
         else:
-            # Write patched file
-            with open(cpp_path, 'w') as f:
+            # Write patched file to inode.patched.cpp (preserves original)
+            with open(patched_cpp_path, 'w') as f:
                 f.write(patched)
-            print(f"  Patched: {cpp_path}")
+            print(f"  Patched: {patched_cpp_path}")
 
     return 0
 

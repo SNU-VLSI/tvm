@@ -12,7 +12,7 @@ import sys
 import subprocess
 import os
 from test import MODEL_REGISTRY, INPUT_PATTERNS, run_test_pipeline
-from runners.pipeline_options import PipelineOptions, PipelineStage, parse_stop_at
+from runners.pipeline_options import PipelineOptions, PipelineStage, parse_stop_at, parse_start_at
 
 
 def main():
@@ -30,19 +30,17 @@ Examples:
 
   # Stop at specific pipeline stage
   python main.py --model one_relu --stop-at transform   # Frontend only
-  python main.py --model one_relu --stop-at compile     # Compile only
+  python main.py --model one_relu --stop-at compile     # Compile only (no simulation)
 
-  # Rebuild modified C++ files only (skip TVM transform)
-  python main.py --model one_relu --rebuild-cpp-only
+  # Start at specific pipeline stage (skip earlier stages)
+  python main.py --model one_relu --start-at codegen    # Skip transform
+  python main.py --model one_relu --start-at simulate   # Skip transform, codegen, compile
 
-  # Stop at codegen to observe memlayout changes
-  python main.py --model one_relu --stop-at codegen --rebuild-cpp-only
+  # Run with handcraft patches (copy C++ from handcraft, codegen, patch inode, rebuild)
+  python main.py --model resnet8_subset31_pretrained_orig --with-patch
 
-  # Run with inode.cpp patching (auto-fix imem write sections based on mem_layout.txt)
-  python main.py --model resnet8_subset31_pretrained_orig --patch-inode
-
-  # Skip setup (reuse existing compiled model)
-  python main.py --model one_relu --pattern zeros --skip-setup
+  # Start at codegen and stop at codegen to observe memlayout changes
+  python main.py --model one_relu --start-at codegen --stop-at codegen
 
   # List available models
   python main.py --list-models
@@ -65,33 +63,29 @@ Examples:
   parser.add_argument(
     "--stop-at",
     type=str,
-    choices=["transform", "codegen", "compile", "full"],
-    default="full",
-    help="Pipeline stage to stop at: transform (frontend only), codegen, compile (skip simulation), full (default)"
+    choices=["transform", "codegen", "compile", "validate", "simulate", "compare"],
+    default="compare",
+    help="Pipeline stage to stop at: transform, codegen, compile, validate, simulate, compare (default)"
   )
 
   parser.add_argument(
-    "--skip-setup", "-s",
-    action="store_true",
-    help="Skip model transformation, codegen, and graph generation (reuse existing compiled model)"
+    "--start-at",
+    type=str,
+    choices=["transform", "codegen", "compile", "validate", "simulate"],
+    default=None,
+    help="Pipeline stage to start at (skips earlier stages): transform, codegen, compile, validate, simulate"
   )
 
   parser.add_argument(
-    "--rebuild-cpp-only", "-r",
+    "--with-patch",
     action="store_true",
-    help="Rebuild modified C++ files only (skip TVM transform, use saved DevConfig state)"
+    help="Apply handcraft patches: copy C++ from handcraft, run codegen, patch inode.cpp, rebuild"
   )
 
   parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
-  )
-
-  parser.add_argument(
-    "--patch-inode",
-    action="store_true",
-    help="Patch inode.cpp files based on mem_layout.txt after codegen (auto-fix imem write sections)"
   )
 
   args = parser.parse_args()
@@ -122,42 +116,40 @@ Examples:
   # Build PipelineOptions from CLI arguments
   try:
     stop_at = parse_stop_at(args.stop_at)
-    skip_stages = set()
+    start_at = PipelineStage.TRANSFORM  # default: start from beginning
 
-    if args.skip_setup:
-      # Skip transform, codegen, and graph executor stages
-      skip_stages = {
-        PipelineStage.TRANSFORM,
-        PipelineStage.CODEGEN,
-        PipelineStage.GRAPH_EXECUTOR,
-      }
+    if args.start_at:
+      start_at = parse_start_at(args.start_at)
+
+    # Validate --with-patch requirements
+    if args.with_patch:
+      script_dir = os.path.dirname(os.path.abspath(__file__))
+      handcraft_model_dir = os.path.join(script_dir, "handcraft", f"{args.model}_evl")
+      if not os.path.exists(handcraft_model_dir):
+        print(f"Error: --with-patch requires handcraft directory: {handcraft_model_dir}")
+        print(f"Run without --with-patch first to generate the model, then copy to handcraft.")
+        return 1
+      # --with-patch requires CODEGEN stage to be in the execution range
+      # (to generate mem_layout.txt and compile patched files)
+      if start_at > PipelineStage.CODEGEN:
+        print(f"Error: --with-patch requires CODEGEN stage to run (--start-at must be <= codegen)")
+        print(f"Current --start-at: {args.start_at}")
+        return 1
+      if stop_at < PipelineStage.CODEGEN:
+        print(f"Error: --with-patch requires CODEGEN stage to run (--stop-at must be >= codegen)")
+        print(f"Current --stop-at: {args.stop_at}")
+        return 1
 
     options = PipelineOptions(
       stop_at=stop_at,
-      skip_stages=skip_stages,
-      rebuild_cpp_only=args.rebuild_cpp_only,
+      start_at=start_at,
+      with_patch=args.with_patch,
       input_pattern=args.pattern if args.pattern else "default",
-      patch_inode=args.patch_inode,
     )
   except ValueError as e:
     parser.print_help()
-    print(f"\n❌ Error: {e}")
+    print(f"\nError: {e}")
     return 1
-
-  # If rebuild_cpp_only, copy modified C++ files from handcraft to evl
-  if options.rebuild_cpp_only:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    handcraft_dir = os.path.join(script_dir, "handcraft")
-    copy_cpp_cmd = [
-      "python", "copy_cpp.py",
-      "--model", f"{args.model}_evl",
-      "--to_evl"
-    ]
-    print(f"Copying modified C++ files by running: {' '.join(copy_cpp_cmd)} (in {handcraft_dir})")
-    result = subprocess.run(copy_cpp_cmd, cwd=handcraft_dir)
-    if result.returncode != 0:
-      print("❌ Error: Failed to copy modified C++ files from handcraft to evl")
-      return result.returncode
 
   # Run the test
   run_test_pipeline(test_name=args.model, options=options)

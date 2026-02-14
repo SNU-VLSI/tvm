@@ -60,6 +60,14 @@ class CodegenSuite:
     with open(f"{self.build_dir}/common_decl.h", "w") as file:
       file.write(common_decl)
 
+  def _select_cpp_file(self, func_dir, base):
+    """Select .patched.cpp if enabled and exists, otherwise .cpp"""
+    if DevConfig().use_patched_cpp:
+      patched = f"{base}.patched.cpp"
+      if os.path.exists(os.path.join(func_dir, patched)):
+        return patched
+    return f"{base}.cpp"
+
   def validate_recv_send_consistency(self, func_name, imce_builder, inode_builder, model_dir):
     """
     Validate that send and recv counts match for each edge.
@@ -183,10 +191,10 @@ class CodegenSuite:
             f"Please run full compilation (rebuild_modified_cpp=False) first to generate the state file."
           )
 
-      for file in ["imce.cpp", "inode.cpp"]:
-        target = "inode" if file == "inode.cpp" else "imce"
-        device_codegen = DeviceCodegen(target=target, build_dir=".", host_isa=self.host_isa)
+      for base in ["imce", "inode"]:
+        device_codegen = DeviceCodegen(target=base, build_dir=".", host_isa=self.host_isa)
         device_codegen.func_dir = os.path.join(self.build_dir, func_name)
+        file = self._select_cpp_file(device_codegen.func_dir, base)
         obj_map = device_codegen.compile_target_code(file)
         device_codegen.update_device_config_with_obj_info(func_name, obj_map)
 

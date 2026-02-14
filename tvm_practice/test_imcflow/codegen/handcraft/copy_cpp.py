@@ -1,7 +1,48 @@
 #!python
 import argparse
+import os
+import shutil
 
-# Argument parser
+
+def copy_cpp_as_patched(src_build_dir: str, dst_build_dir: str) -> int:
+    """
+    Copy .cpp files from src to dst as .patched.cpp files.
+
+    Args:
+        src_build_dir: Source build directory (e.g., handcraft/model_evl/build)
+        dst_build_dir: Destination build directory (e.g., model_evl/build)
+
+    Returns:
+        Number of files copied
+    """
+    if not os.path.exists(src_build_dir):
+        raise FileNotFoundError(f"Source directory not found: {src_build_dir}")
+    if not os.path.exists(dst_build_dir):
+        raise FileNotFoundError(f"Destination directory not found: {dst_build_dir}")
+
+    copied_count = 0
+    for root, dirs, files in os.walk(src_build_dir):
+        for f in files:
+            if f.endswith('.cpp'):
+                src_path = os.path.join(root, f)
+                rel_path = os.path.relpath(root, src_build_dir)
+                target_dir = os.path.join(dst_build_dir, rel_path)
+                os.makedirs(target_dir, exist_ok=True)
+                # foo.cpp -> foo.patched.cpp
+                patched_name = f"{f[:-4]}.patched.cpp"
+                dst_path = os.path.join(target_dir, patched_name)
+                shutil.copy2(src_path, dst_path)
+                print(f"  {os.path.join(rel_path, f)} -> {patched_name}")
+                copied_count += 1
+            elif f.endswith('.h'):
+                src_path = os.path.join(root, f)
+                rel_path = os.path.relpath(root, src_build_dir)
+                target_dir = os.path.join(dst_build_dir, rel_path)
+                os.makedirs(target_dir, exist_ok=True)
+                shutil.copy2(src_path, os.path.join(target_dir, f))
+
+    return copied_count
+
 
 def main():
   parser = argparse.ArgumentParser(
@@ -55,9 +96,6 @@ Note:
 
   # Copy from evl to handcraft with original preservation
   if args.from_evl:
-    import os
-    import shutil
-
     handcraft_model_dir = f"./{model_name}/"
     handcraft_build_dir = os.path.join(handcraft_model_dir, "build")
     handcraft_build_orig_dir = os.path.join(handcraft_model_dir, "build.orig")
@@ -91,41 +129,14 @@ Note:
       print(f"Skipping backup creation to preserve the original")
 
   elif args.to_evl:
-    import os
-    import shutil
-
-    # Use the modified build directory from handcraft/<model>/build
-    handcraft_model_dir = f"./{model_name}/"
-    handcraft_build_dir = os.path.join(handcraft_model_dir, "build")
-
-    # Check if the modified build directory exists
-    if not os.path.exists(handcraft_build_dir):
-      print(f"Error: Modified build directory {handcraft_build_dir} does not exist.")
-      print(f"Please run with --from_evl first to save the build directory.")
+    handcraft_build_dir = os.path.join(f"./{model_name}/", "build")
+    print(f"Copying *.cpp as *.patched.cpp from {handcraft_build_dir} to {build_dir}")
+    try:
+      copied_count = copy_cpp_as_patched(handcraft_build_dir, build_dir)
+      print(f"Successfully copied {copied_count} files")
+    except FileNotFoundError as e:
+      print(f"Error: {e}")
       return
-
-    # Check if target build directory exists
-    if not os.path.exists(build_dir):
-      print(f"Error: Target build directory {build_dir} does not exist.")
-      return
-
-    # Function to ignore all files except .cpp and .h (but keep all directories)
-    def ignore_non_cpp_h(dir, files):
-      ignored = []
-      for f in files:
-        full_path = os.path.join(dir, f)
-        # Keep directories and .cpp/.h files, ignore everything else
-        if os.path.isfile(full_path) and not (f.endswith('.cpp') or f.endswith('.h')):
-          ignored.append(f)
-      return ignored
-
-    # Copy only *.cpp and *.h files, preserving other files in the target directory
-    print(f"Copying modified *.cpp and *.h files from {handcraft_build_dir} to {build_dir}")
-    shutil.copytree(handcraft_build_dir, build_dir,
-                    dirs_exist_ok=True,  # Don't remove existing directory
-                    ignore=ignore_non_cpp_h)
-    print(f"Successfully updated *.cpp and *.h files in {build_dir}")
-    print(f"Other files (Makefiles, object files, etc.) were preserved")
     
 if __name__ == "__main__":
     main()

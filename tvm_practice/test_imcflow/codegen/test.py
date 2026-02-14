@@ -27,7 +27,7 @@ import os
 from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild_imcflow_cpp_only
 
 # Import pipeline options
-from runners.pipeline_options import PipelineOptions, PipelineStage
+from runners.pipeline_options import PipelineOptions, PipelineStage, RunMode
 
 from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
@@ -41,8 +41,9 @@ from runners.input_generator import InputGenerator
 # Import ImcFlow runner abstraction
 from runners.imcflow_runner import get_runner
 
-# Import patch_inode for inode.cpp patching
+# Import handcraft utilities
 from handcraft.patch_inode import patch_inode_for_eval_dir
+from handcraft.copy_cpp import copy_cpp_as_patched
 
 np.random.seed(1234)
 
@@ -347,6 +348,57 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
   return save_data["mod"], save_data["param_dict"]
 
 
+def save_build_metadata(eval_dir, use_patched: bool):
+  """Save build metadata to track whether patched cpp files were used
+
+  Args:
+    eval_dir: Directory to save metadata
+    use_patched: Whether .patched.cpp files were used for compilation
+  """
+  import json
+  from datetime import datetime
+
+  metadata = {
+    "use_patched_cpp": use_patched,
+    "build_timestamp": datetime.now().isoformat(),
+  }
+
+  metadata_path = os.path.join(eval_dir, "build_metadata.json")
+  with open(metadata_path, "w") as f:
+    json.dump(metadata, f, indent=2)
+
+
+def load_build_metadata(eval_dir):
+  """Load build metadata to check if patched cpp files were used
+
+  Args:
+    eval_dir: Directory containing metadata
+
+  Returns:
+    dict with build info, or None if not found
+  """
+  import json
+
+  metadata_path = os.path.join(eval_dir, "build_metadata.json")
+  if not os.path.exists(metadata_path):
+    return None
+
+  with open(metadata_path, "r") as f:
+    return json.load(f)
+
+
+def print_build_info(eval_dir):
+  """Print build information including whether patched files were used"""
+  metadata = load_build_metadata(eval_dir)
+  if metadata:
+    patched = metadata.get("use_patched_cpp", False)
+    timestamp = metadata.get("build_timestamp", "unknown")
+    status = "🔧 PATCHED" if patched else "📦 ORIGINAL"
+    print(f"  Build info: {status} (built at {timestamp})")
+  else:
+    print(f"  Build info: ⚠️  No metadata (unknown build type)")
+
+
 def setup_dir(test_name, suffix=""):
   def clean_dir_recursive(path):
     """Recursively clean all files but keep directory structure intact."""
@@ -399,7 +451,7 @@ def printModel(result_dir, mod, param_dict, mod_name):
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
 
-def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=False, rebuild_modified_cpp=False):
+def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, run_mode: RunMode = RunMode.FULL):
   """Run transformed model on CPU for validation
 
   Args:
@@ -407,8 +459,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
     param_dict: Model parameters
     input_data_dict: Dictionary of input name -> numpy array
     model_dir: Directory to save CPU outputs
-    skip_setup: If True, load from previously transformed CPU model
-    rebuild_modified_cpp: If True, rebuild modified C++ code only
+    run_mode: Execution mode (FULL transforms model, REUSE/PATCH loads from file)
 
   Returns:
     output: The CPU execution output as numpy array
@@ -420,7 +471,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
   target = "llvm"
   ctx = tvm.cpu(0)
 
-  if not skip_setup and not rebuild_modified_cpp:
+  if run_mode == RunMode.FULL:
     # Transform model to be CPU runnable
     # cpu_mod = copy.deepcopy(mod)
     cpu_mod = copy.copy(mod)
@@ -430,8 +481,8 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, skip_setup=F
     # Save the CPU runnable model
     save_transformed_model(cpu_mod, param_dict, model_dir, pkl_name="transformed_cpu_model.pkl")
   else:
-    # Load previously transformed CPU model
-    print("⏭️  Skipping CPU model transformation, loading from file...")
+    # REUSE or PATCH mode: load previously transformed CPU model
+    print("  Skipping CPU model transformation, loading from file...")
     cpu_mod, param_dict = load_transformed_model(model_dir, pkl_name="transformed_cpu_model.pkl")
 
   executor_ = Executor("graph")
@@ -744,56 +795,86 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
   print(f"Options: {options}")
   print(f"{'='*60}")
 
-  skip_setup = options.should_skip_transform()
-  rebuild_cpp_only = options.rebuild_cpp_only
   stop_at_codegen = options.stop_at == PipelineStage.CODEGEN
 
-  if not skip_setup and not rebuild_cpp_only:
-    # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
-    skip_codegen = not options.should_run(PipelineStage.CODEGEN)
-    mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
+  match options.run_mode:
+    case RunMode.FULL:
+      # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
+      skip_codegen = not options.should_run(PipelineStage.CODEGEN)
+      mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
 
-    # Save transformed model for future reuse
-    save_transformed_model(mod, param_dict, eval_dir)
+      # Save transformed model for future reuse
+      save_transformed_model(mod, param_dict, eval_dir)
 
-    # If stopping at transform, return after frontend transformation
-    if options.stop_at == PipelineStage.TRANSFORM:
-      print("\n⏭️  Frontend only mode: returning after model transformation")
-      return None
+      # Save build metadata (original, not patched)
+      if not skip_codegen:
+        save_build_metadata(eval_dir, use_patched=False)
 
-    # Patch inode.cpp files if requested (after codegen, before graph executor)
-    if options.patch_inode and options.should_run(PipelineStage.CODEGEN):
-      ret = patch_inode_for_eval_dir(eval_dir, verbose=False)
+      # If stopping at transform, return after frontend transformation
+      if options.stop_at == PipelineStage.TRANSFORM:
+        print("\n  Frontend only mode: returning after model transformation")
+        return None
+
+    case RunMode.REUSE:
+      # Skip setup: load previously transformed model (start_at >= SIMULATION)
+      print("\n  Skipping model transformation, codegen, and graph generation")
+      print_build_info(eval_dir)
+      print("   Loading previously transformed model from file...")
+      mod, param_dict = load_transformed_model(eval_dir)
+
+    case RunMode.PATCH:
+      # with_patch mode: copy C++ from handcraft as .patched.cpp, run codegen, patch inode, rebuild
+      print("\n  Running with handcraft patches...")
+
+      # Transform + codegen if needed, otherwise load previously transformed model
+      if options.should_run(PipelineStage.TRANSFORM):
+        print("\n--- Transforming Model + Codegen ---\n")
+        # Run full transform + codegen pipeline to generate original .cpp files
+        DevConfig().use_patched_cpp = False
+        mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=False)
+        save_transformed_model(mod, param_dict, eval_dir)
+      else:
+        print("\n  Loading previously transformed model...")
+        mod, param_dict = load_transformed_model(eval_dir)
+        # Run codegen to generate original .cpp files and mem_layout.txt
+        print(f"  Running codegen (builds original imce.cpp, generates mem_layout.txt)...")
+        DevConfig().use_patched_cpp = False
+        mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=True)
+
+      # Step 1: Copy modified C++ files from handcraft to evl as .patched.cpp
+      script_dir = os.path.dirname(os.path.abspath(__file__))
+      handcraft_build = os.path.join(script_dir, "handcraft", eval_dir, "build")
+      evl_build = os.path.join(eval_dir, "build")
+      print(f"  Step 1: Copying modified C++ files from handcraft as .patched.cpp...")
+      copy_cpp_as_patched(handcraft_build, evl_build)
+
+      # Step 2: Patch inode.cpp files based on mem_layout.txt, output to inode.patched.cpp
+      print(f"  Step 2: Patching inode.cpp -> inode.patched.cpp based on mem_layout.txt...")
+      ret = patch_inode_for_eval_dir(eval_dir, handcraft_build, evl_build, verbose=False)
       if ret != 0:
         raise RuntimeError(f"patch_inode failed for {eval_dir}")
-  else:
-    # Skip setup: load previously transformed model
-    print("\n⏭️  Skipping model transformation, codegen, and graph generation (skip_setup=True)")
-    print("   Loading previously transformed model from file...")
-    mod, param_dict = load_transformed_model(eval_dir)
 
-  if rebuild_cpp_only:
-    mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=stop_at_codegen)
+      # If stopping at codegen, return after patching
+      if stop_at_codegen:
+        print("\n  Codegen only mode: returning after patching inode.patched.cpp")
+        return None
 
-    # Patch inode.cpp files if requested (after codegen, before graph executor)
-    if options.patch_inode:
-      ret = patch_inode_for_eval_dir(eval_dir, verbose=False)
-      if ret != 0:
-        raise RuntimeError(f"patch_inode failed for {eval_dir}")
+      # Step 3: Rebuild with use_patched_cpp=True to compile .patched.cpp files
+      print(f"  Step 3: Rebuilding with .patched.cpp files (graph executor build)...")
+      DevConfig().use_patched_cpp = True
+      mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=False)
 
-    # If stopping at codegen, return after codegen
-    if stop_at_codegen:
-      print("\n⏭️  Codegen only mode: returning after rebuilding modified C++ files")
-      return None
+      # Save build metadata (patched)
+      save_build_metadata(eval_dir, use_patched=True)
 
   # If stopping at graph executor (compile_only), skip CPU validation and simulation
   if options.stop_at == PipelineStage.GRAPH_EXECUTOR:
-    print("\n⏭️  Compile only mode: skipping CPU validation and simulation")
+    print("\n  Compile only mode: skipping CPU validation and simulation")
     return None
 
   # Skip simulation if not needed
   if not options.should_run(PipelineStage.SIMULATION):
-    print("\n⏭️  Skipping simulation stage")
+    print("\n  Skipping simulation stage")
     return None
 
   config = DevConfig()
@@ -803,7 +884,7 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
   try:
     imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
   except KeyboardInterrupt:
-    print("\n⚠️  Simulation interrupted - skipping output comparison")
+    print("\n  Simulation interrupted - skipping output comparison")
     raise  # Re-raise to let pytest handle the interruption
 
   # ARM target: skip comparison (simulation was skipped, no output to compare)
@@ -818,9 +899,9 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
     # Run CPU validation if input data is provided and stage should run
     cpu_output = None
     if input_data_dict is not None and options.should_run(PipelineStage.CPU_VALIDATION):
-      cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, skip_setup, rebuild_cpp_only)
+      cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, options.run_mode)
       if cpu_output is not None:
-        print("✅ CPU validation completed successfully")
+        print("CPU validation completed successfully")
 
     compare_outputs(cpu_output, imcflow_output)
 
@@ -858,23 +939,23 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
 
   # Extract flags from options for directory setup logic
   skip_setup = options.should_skip_transform()
-  rebuild_cpp_only = options.rebuild_cpp_only
+  with_patch = options.with_patch
 
   # Setup directory: only clean/create if NOT skipping setup
-  if not skip_setup and not rebuild_cpp_only:
-    # Full setup: clean and recreate directory
+  if not skip_setup:
+    # Full setup (including --with-patch when start_at=TRANSFORM): clean and recreate directory
     setup_dir(dir_name)
   else:
     # Skip setup: directory must already exist, just ensure subdirs exist
     if not os.path.exists(dir_name):
       raise FileNotFoundError(
         f"Directory '{dir_name}' does not exist. "
-        f"Cannot use --skip-setup or --rebuild-cpp-only without a previous run. "
-        f"Run without these flags first to compile the model."
+        f"Cannot use --start-at with a stage after TRANSFORM without a previous run. "
+        f"Run without --start-at first to compile the model."
       )
     # Ensure test_inputs directory exists for new input files
     os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
-    print(f"⏭️  Reusing existing directory: {dir_name}")
+    print(f"  Reusing existing directory: {dir_name}")
 
   # Setup log file path in the test directory's logs folder
   log_dir = os.path.join(dir_name, "logs")
