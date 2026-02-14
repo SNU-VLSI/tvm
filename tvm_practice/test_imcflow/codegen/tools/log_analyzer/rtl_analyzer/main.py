@@ -10,6 +10,7 @@ from .monitor import LogMonitor, DebugTestDirectory
 from .packet import PacketAnalyzer
 from .sync_trace import SyncTraceAnalyzer
 from .stall_analysis import StallAnalyzer
+from .duration_profile import DurationProfiler, EventCondition, parse_match_expr
 from .recv_analysis import (
     count_recv_before_step,
     parse_expected_patterns_from_log,
@@ -638,6 +639,95 @@ def cmd_split_log(args):
     print("=" * 70)
 
 
+def cmd_duration_profile(args):
+    """Handle the duration-profile command."""
+    log_dir = args.log_dir or LogMonitor.DEFAULT_LOG_DIR
+
+    if not Path(log_dir).exists():
+        print(f"Error: Log directory not found: {log_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # Build conditions
+    start_constraints = parse_match_expr(args.start_match) if args.start_match else []
+    end_constraints = parse_match_expr(args.end_match) if args.end_match else []
+
+    start_cond = EventCondition(event=args.start_event, constraints=start_constraints)
+    end_cond = EventCondition(event=args.end_event, constraints=end_constraints)
+
+    profiler = DurationProfiler(
+        log_dir=log_dir,
+        start_cond=start_cond,
+        end_cond=end_cond,
+        file_pattern=args.file_pattern,
+        start_policy=args.start_policy,
+        verbose=args.verbose,
+    )
+    profiler._sequential = getattr(args, "sequential", False)
+    profiler.profile_all()
+
+    stats = profiler.get_stats()
+
+    print("=" * 90)
+    print("  Duration Profile")
+    print("=" * 90)
+    print(f"  Log directory:  {log_dir}")
+    print(f"  File pattern:   {args.file_pattern}")
+    print(f"  Start condition: {start_cond}")
+    print(f"  End condition:   {end_cond}")
+    print(f"  Start policy:   {args.start_policy}")
+    print(f"  Total files:    {stats['total_files']}")
+    print(f"  Files matched:  {stats['files_with_matches']}")
+    print(f"  Intervals:      {stats['count']}")
+    print("-" * 90)
+
+    if stats["count"] == 0:
+        print("  No matching start/end pairs found.")
+        print("=" * 90)
+        return
+
+    # Aggregate stats
+    print()
+    print("  Aggregate Statistics:")
+    print(f"    Count:   {stats['count']}")
+    print(f"    Min:     {stats['min']:,}")
+    print(f"    Max:     {stats['max']:,}")
+    print(f"    Avg:     {stats['avg']:,.1f}")
+    print(f"    Median:  {stats['median']:,}")
+    print(f"    Total:   {stats['total']:,}")
+
+    # Per-file breakdown
+    per_file = profiler.get_per_file_stats()
+    if per_file:
+        print()
+        print("  Per-file Breakdown:")
+        print(f"  {'File':<60} {'Count':>6} {'Min':>14} {'Max':>14} {'Avg':>14}")
+        print("  " + "-" * 110)
+        for pf in per_file:
+            fname = pf["file"]
+            # Shorten long filenames
+            if len(fname) > 58:
+                fname = "..." + fname[-55:]
+            print(
+                f"  {fname:<60} {pf['count']:>6} {pf['min']:>14,} {pf['max']:>14,} {pf['avg']:>14,.1f}"
+            )
+
+    # Detailed records (verbose mode)
+    if args.verbose:
+        print()
+        print("  All Intervals:")
+        print(f"  {'#':>4} {'Start':>14} {'End':>14} {'Duration':>14}  {'File'}")
+        print("  " + "-" * 90)
+        for i, rec in enumerate(sorted(profiler.records, key=lambda r: r.start_time)):
+            fname = rec.source_file
+            if len(fname) > 35:
+                fname = "..." + fname[-32:]
+            print(
+                f"  {i+1:>4} {rec.start_time:>14,} {rec.end_time:>14,} {rec.duration:>14,}  {fname}"
+            )
+
+    print("=" * 90)
+
+
 def cmd_find_stalls(args):
     """Handle the find-stalls command."""
     log_dir = args.log_dir or LogMonitor.DEFAULT_LOG_DIR
@@ -748,6 +838,10 @@ Examples:
   %(prog)s sync-trace -n inode.0.0 imce.3.4 -s 430000000 -e 440000000  # With time range
   %(prog)s sync-trace -n inode_0_0 imce_3_4 -t STANDBY,SETFLAG  # Filter event types
   %(prog)s sync-trace -n inode_0_0 imce_3_4 -o sync_trace.txt  # Save to file
+
+  # Duration profiling (measure time between event pairs)
+  %(prog)s duration-profile -d <log_dir> --start-event STATE_CHANGE --start-match "from=S_IDLE,to=S_COMPUTE" --end-event STATE_CHANGE --end-match "from=S_COMPUTE,to=S_IDLE" -f "*ctrl_pl*"
+  %(prog)s duration-profile -d <log_dir> --start-event STATE_CHANGE --start-match "from=S_IDLE,to=S_COMPUTE" --end-event STATE_CHANGE --end-match "from=S_COMPUTE,to=S_IDLE" -f "*ctrl_pl*" -v
 
   # Find stalled nodes at end of simulation
   %(prog)s find-stalls -d <log_dir>  # All stalled nodes
@@ -1119,6 +1213,58 @@ Examples:
         help="Output directory for split files (default: same as input file)",
     )
     split_log_parser.set_defaults(func=cmd_split_log)
+
+    # Duration profile command
+    duration_profile_parser = subparsers.add_parser(
+        "duration-profile",
+        help="Measure duration between start/end event conditions",
+        description=(
+            "Measure time intervals between pairs of structured log events.\n"
+            "Specify start/end conditions as event name + payload field matches."
+        ),
+    )
+    duration_profile_parser.add_argument(
+        "--start-event",
+        required=True,
+        help="Event name for start condition (e.g., STATE_CHANGE)",
+    )
+    duration_profile_parser.add_argument(
+        "--start-match",
+        default=None,
+        help="Payload field constraints for start. Operators: =, !=, >, >=, <, <= "
+             "(e.g., 'from=S_IDLE,to=S_COMPUTE' or 'addr!=0,count>=5')",
+    )
+    duration_profile_parser.add_argument(
+        "--end-event",
+        required=True,
+        help="Event name for end condition (e.g., STATE_CHANGE)",
+    )
+    duration_profile_parser.add_argument(
+        "--end-match",
+        default=None,
+        help="Payload field constraints for end. Operators: =, !=, >, >=, <, <= "
+             "(e.g., 'from=S_COMPUTE,to=S_IDLE')",
+    )
+    duration_profile_parser.add_argument(
+        "--file-pattern",
+        "-f",
+        default="*.log",
+        help="Glob pattern for log files to search (default: *.log)",
+    )
+    duration_profile_parser.add_argument(
+        "--start-policy",
+        choices=["first", "last"],
+        default="last",
+        help="When multiple start events occur before an end: "
+             "'first' keeps the earliest start, 'last' overwrites with the latest (default: last)",
+    )
+    duration_profile_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show all individual intervals",
+    )
+    duration_profile_parser.set_defaults(func=cmd_duration_profile)
 
     # Find stalls command
     find_stalls_parser = subparsers.add_parser(

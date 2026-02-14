@@ -92,3 +92,14 @@ class StallInfo:
     start_time: int     # timestamp of STALL_START
     payload: dict       # full payload from the START event
     source_file: str    # which log file
+
+
+@dataclass
+class DurationRecord:
+    """A measured duration between a start event and an end event."""
+    start_time: int     # timestamp of start event
+    end_time: int       # timestamp of end event
+    duration: int       # end_time - start_time
+    source_file: str    # which log file
+    start_payload: dict # full payload of the start event
+    end_payload: dict   # full payload of the end event
