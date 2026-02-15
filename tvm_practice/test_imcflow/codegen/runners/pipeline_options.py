@@ -110,7 +110,7 @@ class PipelineOptions:
         return stage <= self.stop_at and stage not in self.skip_stages
 
     def should_skip_transform(self) -> bool:
-        """Check if transform stage should be skipped (skip_setup mode)."""
+        """Check if transform stage should be skipped (start_at > TRANSFORM)."""
         return PipelineStage.TRANSFORM in self.skip_stages
 
     def should_skip_codegen(self) -> bool:

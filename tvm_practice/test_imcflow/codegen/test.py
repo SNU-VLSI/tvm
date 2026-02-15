@@ -337,8 +337,8 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
   if not os.path.exists(model_save_path):
     raise FileNotFoundError(
       f"Transformed model not found at: {model_save_path}\n"
-      f"Cannot use skip_setup=True without a previous run.\n"
-      f"Run without --skip-setup first to compile and save the model."
+      f"Cannot use --start-at with a stage after TRANSFORM without a previous run.\n"
+      f"Run without --start-at first to compile and save the model."
     )
 
   with open(model_save_path, "rb") as f:
@@ -471,9 +471,9 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, run_mode: Ru
   target = "llvm"
   ctx = tvm.cpu(0)
 
-  if run_mode == RunMode.FULL:
+  if run_mode == RunMode.FULL or run_mode == RunMode.PATCH:
     # Transform model to be CPU runnable
-    # cpu_mod = copy.deepcopy(mod)
+    # PATCH mode also needs to generate CPU model (patching only affects IMCFlow cpp, not CPU)
     cpu_mod = copy.copy(mod)
     cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
     printModel(model_dir, cpu_mod, param_dict, "cpu_runnable_model")
@@ -481,7 +481,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, run_mode: Ru
     # Save the CPU runnable model
     save_transformed_model(cpu_mod, param_dict, model_dir, pkl_name="transformed_cpu_model.pkl")
   else:
-    # REUSE or PATCH mode: load previously transformed CPU model
+    # REUSE mode: load previously transformed CPU model
     print("  Skipping CPU model transformation, loading from file...")
     cpu_mod, param_dict = load_transformed_model(model_dir, pkl_name="transformed_cpu_model.pkl")
 
@@ -823,33 +823,42 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       mod, param_dict = load_transformed_model(eval_dir)
 
     case RunMode.PATCH:
-      # with_patch mode: copy C++ from handcraft as .patched.cpp, run codegen, patch inode, rebuild
+      # with_patch mode: copy C++ from handcraft as .patched.cpp, run codegen with patched files,
+      # patch inode based on correct mem_layout, rebuild
       print("\n  Running with handcraft patches...")
 
-      # Transform + codegen if needed, otherwise load previously transformed model
+      script_dir = os.path.dirname(os.path.abspath(__file__))
+      handcraft_build = os.path.join(script_dir, "handcraft", eval_dir, "build")
+      evl_build = os.path.join(eval_dir, "build")
+
+      # Step 1: Transform model if needed (generates original .cpp files)
       if options.should_run(PipelineStage.TRANSFORM):
-        print("\n--- Transforming Model + Codegen ---\n")
+        print("\n--- Step 1: Transforming Model + Initial Codegen ---\n")
         # Run full transform + codegen pipeline to generate original .cpp files
         DevConfig().use_patched_cpp = False
         mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=False)
         save_transformed_model(mod, param_dict, eval_dir)
       else:
-        print("\n  Loading previously transformed model...")
+        print("\n  Step 1: Loading previously transformed model...")
         mod, param_dict = load_transformed_model(eval_dir)
-        # Run codegen to generate original .cpp files and mem_layout.txt
-        print(f"  Running codegen (builds original imce.cpp, generates mem_layout.txt)...")
+        # Run codegen to generate original .cpp files
+        print(f"  Running initial codegen (generates original .cpp files)...")
         DevConfig().use_patched_cpp = False
         mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=True)
 
-      # Step 1: Copy modified C++ files from handcraft to evl as .patched.cpp
-      script_dir = os.path.dirname(os.path.abspath(__file__))
-      handcraft_build = os.path.join(script_dir, "handcraft", eval_dir, "build")
-      evl_build = os.path.join(eval_dir, "build")
-      print(f"  Step 1: Copying modified C++ files from handcraft as .patched.cpp...")
+      # Step 2: Copy modified C++ files from handcraft to evl as .patched.cpp
+      # This must happen BEFORE the patched codegen so imce.patched.cpp is compiled
+      print(f"\n  Step 2: Copying modified C++ files from handcraft as .patched.cpp...")
       copy_cpp_as_patched(handcraft_build, evl_build)
 
-      # Step 2: Patch inode.cpp files based on mem_layout.txt, output to inode.patched.cpp
-      print(f"  Step 2: Patching inode.cpp -> inode.patched.cpp based on mem_layout.txt...")
+      # Step 3: Run codegen with patched cpp files to get correct mem_layout
+      # This compiles imce.patched.cpp and generates mem_layout.txt with correct sizes
+      print(f"\n  Step 3: Running codegen with .patched.cpp files (generates correct mem_layout.txt)...")
+      DevConfig().use_patched_cpp = True
+      mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=True)
+
+      # Step 4: Patch inode.cpp files based on the NEW mem_layout.txt (with correct offsets)
+      print(f"\n  Step 4: Patching inode.cpp -> inode.patched.cpp based on mem_layout.txt...")
       ret = patch_inode_for_eval_dir(eval_dir, handcraft_build, evl_build, verbose=False)
       if ret != 0:
         raise RuntimeError(f"patch_inode failed for {eval_dir}")
@@ -859,8 +868,8 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
         print("\n  Codegen only mode: returning after patching inode.patched.cpp")
         return None
 
-      # Step 3: Rebuild with use_patched_cpp=True to compile .patched.cpp files
-      print(f"  Step 3: Rebuilding with .patched.cpp files (graph executor build)...")
+      # Step 5: Final rebuild with use_patched_cpp=True to compile all .patched.cpp files
+      print(f"\n  Step 5: Final rebuild with .patched.cpp files (graph executor build)...")
       DevConfig().use_patched_cpp = True
       mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=False)
 
@@ -986,7 +995,7 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
     input_dict = {input_name: input_data}
 
     # Run with CPU validation enabled
-    # Note: When skip_setup=True, run_test will load the transformed model from file
+    # Note: When start_at > TRANSFORM, run_test will load the transformed model from file
     run_test(test_name, dir_name, mod, param_dict, options=options, input_data_dict=input_dict)
 
 
@@ -1037,7 +1046,7 @@ def _generate_test_parameters():
 def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_cache):
   """Parametrized test for IMCFLOW models with all input patterns
 
-  Uses setup caching: first pattern does full setup, subsequent patterns skip setup.
+  Uses setup caching: first pattern does full setup, subsequent patterns reuse compiled model.
   The default pattern for each model is marked with (default) in the test ID,
   allowing both 'pytest -k default' and 'pytest -k <pattern>' to work correctly.
   """
