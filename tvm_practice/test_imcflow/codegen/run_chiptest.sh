@@ -247,10 +247,10 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
-    echo "Step 6: Executing on remote chip (timeout: 10s)..."
+    echo "Step 6: Executing on remote chip (timeout: 30s)..."
     echo ""
     sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && timeout 10 ./execute_graph \
+               "cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && timeout 30 ./execute_graph \
                 $TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"

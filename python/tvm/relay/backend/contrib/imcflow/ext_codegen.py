@@ -291,6 +291,8 @@ class KernelCodeGenerator:
     return ("""
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/wait.h>
 #include <tvm/runtime/c_runtime_api.h>
 #include <tvm/runtime/c_backend_api.h>
 #include <dlpack/dlpack.h>
@@ -392,6 +394,35 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
   def emitReset(self):
     """Generate code to reset the NPU state."""
     return f"reset_gen_pointer[0] = 1;\n"
+
+  def emitWarmup(self):
+    """Generate code to warm up the NPU state."""
+    return ("""
+// Warmup: clear timing data and run warmup routine
+{
+  int ret;
+
+  // Step 1: Clear timing data
+  ret = system("make -C /home/root/imcflow/xilinx/petalinux-csrc clear_time > /dev/null 2>&1");
+  if (ret == -1) {
+    fprintf(stderr, "Error: make clear_time failed to execute: %s\\n", strerror(errno));
+  } else if (WIFEXITED(ret) && WEXITSTATUS(ret) != 0) {
+    fprintf(stderr, "Error: make clear_time exited with status %d\\n", WEXITSTATUS(ret));
+  } else if (WIFSIGNALED(ret)) {
+    fprintf(stderr, "Error: make clear_time killed by signal %d\\n", WTERMSIG(ret));
+  }
+
+  // Step 2: Execute warmup target
+  ret = system("make -C /home/root/imcflow/xilinx/petalinux-csrc warmup > /dev/null 2>&1");
+  if (ret == -1) {
+    fprintf(stderr, "Error: make warmup failed to execute: %s\\n", strerror(errno));
+  } else if (WIFEXITED(ret) && WEXITSTATUS(ret) != 0) {
+    fprintf(stderr, "Error: make warmup exited with status %d\\n", WEXITSTATUS(ret));
+  } else if (WIFSIGNALED(ret)) {
+    fprintf(stderr, "Error: make warmup killed by signal %d\\n", WTERMSIG(ret));
+  }
+}
+    """)
 
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
@@ -689,6 +720,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"fprintf(stderr,\"{self.func_name}_kernel called\\n\");\n"
     code += self.generateDevicePointerSetup()
     code += self.emitReset()
+    if self.os == "linux":
+      code += self.emitWarmup()
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
