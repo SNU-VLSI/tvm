@@ -828,7 +828,11 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       print("\n  Running with handcraft patches...")
 
       script_dir = os.path.dirname(os.path.abspath(__file__))
-      handcraft_build = os.path.join(script_dir, "handcraft", eval_dir, "build")
+      # handcraft uses {test_name}_evl directly (without .baremetal/.linux suffix)
+      evl_basename = os.path.basename(eval_dir)  # e.g., "resnet8_subset31_evl.baremetal"
+      # Remove .baremetal or .linux suffix for handcraft path
+      handcraft_name = evl_basename.rsplit('.', 1)[0] if evl_basename.endswith(('.baremetal', '.linux')) else evl_basename
+      handcraft_build = os.path.join(script_dir, "handcraft", handcraft_name, "build")
       evl_build = os.path.join(eval_dir, "build")
 
       # Step 1: Transform model if needed (generates original .cpp files)
@@ -943,8 +947,9 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
   if input_pattern == "default":
     input_pattern = default_input_pattern
 
-  # Determine directory name
-  dir_name = f"{test_name}_evl"
+  # Determine directory name based on IMCFLOW_HOST_OS
+  host_os = os.getenv("IMCFLOW_HOST_OS", "baremetal")
+  dir_name = f"eval_dir/{test_name}_evl.{host_os}"
 
   # Extract flags from options for directory setup logic
   skip_setup = options.should_skip_transform()

@@ -327,10 +327,11 @@ class PyRunner(ImcFlowRunner):
             Absolute path to output.npy in py_runner test_outputs
         """
         # With runner_name support, outputs are saved to:
-        # {eval_dir}/{test_name}/test_outputs/{runner_name}/output.npy
-        eval_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
+        # {codegen_dir}/{test_name}/test_outputs/{runner_name}/output.npy
+        # test_name is already "eval_dir/xxx_evl" format
+        codegen_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
         return os.path.abspath(
-            os.path.join(eval_dir, test_name, "test_outputs", self.name, "output.npy")
+            os.path.join(codegen_dir, test_name, "test_outputs", self.name, "output.npy")
         )
 
 
@@ -466,10 +467,11 @@ class RTLRunner(ImcFlowRunner):
             Absolute path to output.npy in rtl_runner test_outputs
         """
         # With runner_name support, outputs are saved to:
-        # {eval_dir}/{test_name}/test_outputs/{runner_name}/output.npy
-        eval_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
+        # {codegen_dir}/{test_name}/test_outputs/{runner_name}/output.npy
+        # test_name is already "eval_dir/xxx_evl" format
+        codegen_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
         return os.path.abspath(
-            os.path.join(eval_dir, test_name, "test_outputs", self.name, "output.npy")
+            os.path.join(codegen_dir, test_name, "test_outputs", self.name, "output.npy")
         )
 
 

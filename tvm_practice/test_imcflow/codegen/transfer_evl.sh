@@ -7,9 +7,9 @@
 # Default configuration
 REMOTE_HOST="147.46.117.99"
 REMOTE_PORT="1326"
-REMOTE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen/."
+REMOTE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen/eval_dir/."
 REMOTE_PASSWORD="root"
-TEST_OUTPUTS_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen/."
+TEST_OUTPUTS_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen/eval_dir/."
 
 # Function to display help message
 show_help() {
@@ -86,22 +86,22 @@ else
         exit 1
     fi
 
-    # Normalize pattern - if it already ends with _evl, use as-is, otherwise append _evl
+    # Normalize pattern - if it already ends with _evl or _evl.*, use as-is, otherwise append _evl*
     SEARCH_PATTERN="$PATTERN"
-    if [[ "$PATTERN" != "*" ]] && [[ "$PATTERN" != *_evl ]] && [[ "$PATTERN" != *\*_evl ]]; then
-        SEARCH_PATTERN="${PATTERN}_evl"
+    if [[ "$PATTERN" != "*" ]] && [[ "$PATTERN" != *_evl ]] && [[ "$PATTERN" != *_evl.* ]] && [[ "$PATTERN" != *\*_evl* ]]; then
+        SEARCH_PATTERN="${PATTERN}_evl*"
     fi
 
-    # Find matching _evl directories
+    # Find matching _evl directories (supports _evl, _evl.baremetal, _evl.linux)
     echo "Searching for directories matching pattern '$SEARCH_PATTERN' in $TEST_OUTPUTS_DIR..."
     MATCHING_DIRS=()
 
     # Handle the pattern matching
     if [[ "$PATTERN" == "*" ]]; then
-        # Match all _evl directories
+        # Match all _evl directories (including _evl.baremetal, _evl.linux)
         while IFS= read -r -d '' dir; do
             MATCHING_DIRS+=("$dir")
-        done < <(find "$TEST_OUTPUTS_DIR" -maxdepth 1 -type d -name "*_evl" -print0)
+        done < <(find "$TEST_OUTPUTS_DIR" -maxdepth 1 -type d -name "*_evl*" -print0)
     else
         # Match specific pattern
         while IFS= read -r -d '' dir; do
@@ -114,7 +114,7 @@ else
         echo "Error: No directories found matching pattern '$SEARCH_PATTERN'"
         echo ""
         echo "Available _evl directories:"
-        ls -1 "$TEST_OUTPUTS_DIR" | grep "_evl$" || echo "  (none)"
+        ls -1 "$TEST_OUTPUTS_DIR" | grep "_evl" || echo "  (none)"
         exit 1
     fi
 fi

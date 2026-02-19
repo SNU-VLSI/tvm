@@ -224,6 +224,7 @@ static void print_tensor_info(const char* name, const DLTensor* tensor) {
 int main(int argc, char** argv) {
   // Parse command line arguments
   const char* test_name = argc > 1 ? argv[1] : "default_test";
+  // test_name already includes "eval_dir/" prefix (e.g., "eval_dir/xxx_evl")
   const char* eval_dir = argc > 2 ? argv[2] : "/root/project/tvm/tvm_practice/test_imcflow/codegen";
   const char* graph_path = argc > 3 ? argv[3] : "mlf/executor-config/graph/default.graph";
   const char* params_path = argc > 4 ? argv[4] : "mlf/parameters/default.params";

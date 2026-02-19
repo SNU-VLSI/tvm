@@ -1,27 +1,26 @@
 #!/bin/bash
 # Build script for execute_graph_for_dataset
-# Usage: ./build_dataset_eval.sh <test_evl_dir> [ISA]
+# Usage: ./build.sh <test_evl_dir> [ISA]
 #
 # Example:
-#   ./build_dataset_eval.sh /root/project/tvm/tvm_practice/test_imcflow/codegen/resnet8_subset31_pretrained_orig_evl x86
+#   ./build.sh /root/project/tvm/tvm_practice/test_imcflow/codegen/resnet8_subset31_pretrained_orig_evl x86
 
 set -e
 
 # Arguments
 TEST_EVL_DIR=${1:-""}
 ISA=${2:-"x86"}
-MAIN_SCRIPT="execute_graph_for_dataset.c"
 
 # Validate arguments
 if [ -z "$TEST_EVL_DIR" ]; then
     echo "Usage: $0 <test_evl_dir> [ISA]"
     echo ""
     echo "Arguments:"
-    echo "  test_evl_dir  Path to the test evaluation directory (e.g., resnet8_subset31_pretrained_orig_evl)"
+    echo "  test_evl_dir  Path to the test evaluation directory (e.g., resnet8_*_evl)"
     echo "  ISA           Target ISA: x86 or arm (default: x86)"
     echo ""
     echo "Available test directories:"
-    find "$(dirname "$0")/.." -maxdepth 1 -name "*_evl" -type d 2>/dev/null | while read dir; do
+    find "$(dirname "$0")/../eval_dir" -maxdepth 1 -name "*_evl*" -type d 2>/dev/null | while read dir; do
         if [ -f "$dir/lib_graph_system-lib.tar" ]; then
             echo "  $dir"
         fi
@@ -74,14 +73,12 @@ cd "$BUILD_DIR"
 # Clean previous build
 rm -rf *
 
-# Configure - ARM requires toolchain file to be specified BEFORE project()
+# Configure
 CMAKE_ARGS=(
     -DCMAKE_BUILD_TYPE=Debug
-    -DMAIN_SCRIPT="$MAIN_SCRIPT"
     -DISA="$ISA_UPPER"
     -DMLF_TAR="$MLF_TAR"
     -DH_OBJ_PATH="$H_OBJ_PATH"
-    -DTVM_BUILD_HOST_RUNNER=ON
 )
 
 if [ "$ISA_UPPER" = "ARM" ]; then
@@ -103,16 +100,14 @@ if [ $? -eq 0 ]; then
     cmake --build . -j$(nproc)
 
     if [ $? -eq 0 ]; then
-        # Derive executable name from MAIN_SCRIPT
-        EXEC_NAME="${MAIN_SCRIPT%.*}"
         echo ""
         echo "========================================"
         echo "Build successful!"
         echo "========================================"
-        echo "Executable: $BUILD_DIR/$EXEC_NAME"
+        echo "Executable: $BUILD_DIR/execute_graph_for_dataset"
         echo ""
         echo "Usage:"
-        echo "  $BUILD_DIR/$EXEC_NAME \\"
+        echo "  $BUILD_DIR/execute_graph_for_dataset \\"
         echo "      $BUILD_DIR/mlf/executor-config/graph/default.graph \\"
         echo "      $BUILD_DIR/mlf/parameters/default.params \\"
         echo "      /path/to/images.npy \\"
