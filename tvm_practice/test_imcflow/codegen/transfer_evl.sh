@@ -7,9 +7,11 @@
 # Default configuration
 REMOTE_HOST="147.46.117.99"
 REMOTE_PORT="1326"
-REMOTE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen/eval_dir/."
+REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
+REMOTE_PATH="$REMOTE_BASE_PATH/eval_dir"
 REMOTE_PASSWORD="root"
-TEST_OUTPUTS_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen/eval_dir/."
+LOCAL_CODEGEN_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen"
+TEST_OUTPUTS_DIR="$LOCAL_CODEGEN_DIR/eval_dir"
 
 # Function to display help message
 show_help() {
@@ -66,8 +68,20 @@ if [[ -n "$CUSTOM_PATH" ]]; then
         exit 1
     fi
 
+    # Get the relative path from codegen directory
+    CUSTOM_PATH_ABS="$(cd "$CUSTOM_PATH" && pwd)"
+    CUSTOM_PATH_REL="${CUSTOM_PATH_ABS#$LOCAL_CODEGEN_DIR/}"
+    CUSTOM_PATH_PARENT="$(dirname "$CUSTOM_PATH_REL")"
+
+    # Set remote path to maintain the same relative structure under codegen
+    if [[ "$CUSTOM_PATH_PARENT" == "." ]]; then
+        CUSTOM_REMOTE_PATH="$REMOTE_BASE_PATH"
+    else
+        CUSTOM_REMOTE_PATH="$REMOTE_BASE_PATH/$CUSTOM_PATH_PARENT"
+    fi
+
     MATCHING_DIRS=("$CUSTOM_PATH")
-    echo "Custom path mode: transferring directory '$(basename "$CUSTOM_PATH")'"
+    echo "Custom path mode: transferring '$CUSTOM_PATH_REL' to $CUSTOM_REMOTE_PATH"
 else
     # Check if test_outputs directory exists
     if [[ ! -d "$TEST_OUTPUTS_DIR" ]]; then
@@ -98,7 +112,8 @@ done
 echo ""
 
 # Confirm transfer
-read -p "Transfer these directories to $USERNAME@$REMOTE_HOST:$REMOTE_PATH? (y/n) " -n 1 -r
+DISPLAY_REMOTE_PATH="${CUSTOM_REMOTE_PATH:-$REMOTE_PATH}"
+read -p "Transfer these directories to $USERNAME@$REMOTE_HOST:$DISPLAY_REMOTE_PATH? (y/n) " -n 1 -r
 echo ""
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Transfer cancelled"
@@ -149,11 +164,13 @@ for dir in "${MATCHING_DIRS[@]}"; do
         fi
     else
         # For custom paths or non-evl directories, transfer everything with clean overwrite
-        echo "  - Cleaning old directory on remote..."
-        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "rm -rf $REMOTE_PATH/$dir_name"
+        # Use CUSTOM_REMOTE_PATH if set, otherwise REMOTE_PATH
+        TARGET_REMOTE_PATH="${CUSTOM_REMOTE_PATH:-$REMOTE_PATH}"
+        echo "  - Cleaning old directory on remote ($TARGET_REMOTE_PATH/$dir_name)..."
+        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "rm -rf $TARGET_REMOTE_PATH/$dir_name"
 
-        if sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$dir" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH"; then
-            echo "  ✓ Successfully transferred $dir_name"
+        if sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$dir" "$USERNAME@$REMOTE_HOST:$TARGET_REMOTE_PATH"; then
+            echo "  ✓ Successfully transferred $dir_name to $TARGET_REMOTE_PATH"
             ((TRANSFER_COUNT++))
         else
             echo "  ✗ Failed to transfer $dir_name"
