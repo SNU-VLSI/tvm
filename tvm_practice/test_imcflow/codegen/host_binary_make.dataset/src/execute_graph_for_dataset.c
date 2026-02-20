@@ -183,6 +183,40 @@ static int get_argmax(const DLTensor* tensor) {
   return -1;
 }
 
+/**
+ * Print class scores for debugging
+ * Shows all class scores, predicted class, label, and O/X result
+ */
+static void print_class_scores(const DLTensor* tensor, int num_classes,
+                                int predicted, int64_t label, size_t sample_idx) {
+  printf("\n[Sample %zu] ", sample_idx);
+  printf("Scores: [");
+
+  // Print all class scores based on dtype
+  if (tensor->dtype.code == kDLFloat && tensor->dtype.bits == 32) {
+    float* data = (float*)tensor->data;
+    for (int i = 0; i < num_classes; i++) {
+      printf("%.4f%s", data[i], i < num_classes - 1 ? ", " : "");
+    }
+  } else if (tensor->dtype.code == kDLInt && tensor->dtype.bits == 32) {
+    int32_t* data = (int32_t*)tensor->data;
+    for (int i = 0; i < num_classes; i++) {
+      printf("%d%s", data[i], i < num_classes - 1 ? ", " : "");
+    }
+  } else if (tensor->dtype.code == kDLInt && tensor->dtype.bits == 8) {
+    int8_t* data = (int8_t*)tensor->data;
+    for (int i = 0; i < num_classes; i++) {
+      printf("%d%s", data[i], i < num_classes - 1 ? ", " : "");
+    }
+  }
+  printf("]\n");
+
+  // Print predicted, label, and result
+  int is_correct = (predicted == (int)label);
+  printf("         Predicted: %d, Label: %lld, Result: %s\n",
+         predicted, (long long)label, is_correct ? "O" : "X");
+}
+
 // ============================================================================
 // Main Execution Logic
 // ============================================================================
@@ -459,6 +493,9 @@ int main(int argc, char** argv) {
     if (predicted == (int)label) {
       correct++;
     }
+
+    // Debug: Print class scores for each sample
+    print_class_scores(&output_tensor, num_classes, predicted, label, i);
 
     // Print progress every 100 samples
     if ((i + 1) % 100 == 0 || i + 1 == num_samples) {
