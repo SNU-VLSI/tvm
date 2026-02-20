@@ -23,6 +23,7 @@ if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
     RESET_GEN_ADDR = 0x80000000 + 270464 + 4 
   else:
     RESET_GEN_ADDR = 0x80000000 + 266368 + 4 
+  MEASURE_POWER = False
 elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   print("IMCFLOW_HOST_OS: linux")
   IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
@@ -30,6 +31,17 @@ elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
   INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
   RESET_GEN_ADDR = 0xa0130000 
+  MEASURE_POWER = os.getenv("IMCFLOW_MEASURE_POWER", "0").lower() in ("1", "true", "yes")
+
+  if MEASURE_POWER:
+    DMM_NAMES       = ["VDD", "DDA", "DDC"]
+    NPLCs           = [0.001, 0.001, 0.001]
+    INTERVALs       = [-1, -1, -1]
+    SAMPLE_COUNTs   = [10000, 10000, 10000]
+    CURR_RANGEs     = [0.1, 0.01, 0.1]
+    RESETs          = [1, 1, 1]
+    OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
+
 else:
   raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
 
@@ -288,7 +300,7 @@ class KernelCodeGenerator:
 
   def generateHeader(self):
     """Generate C header includes."""
-    return ("""
+    code = """
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -303,7 +315,10 @@ class KernelCodeGenerator:
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <unistd.h>
-""")
+"""
+    if self.os == "linux" and MEASURE_POWER:
+      code += '#include "dmm_measure.h"\n'
+    return code
 
   def generateInterruptUtilities(self):
     """Generate interrupt handling utility functions."""
@@ -423,6 +438,76 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
   }
 }
     """)
+  
+  def generatePowerMeasureStart(self, t_idx):
+    """Generate C code to start DMM current measurement (non-blocking)."""
+    assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
+
+    n_dmms = len(DMM_NAMES)
+    code = CodeWriter()
+    code += f"// --- Power measurement start (tile {t_idx}) ---\n"
+    code += "{\n"
+    code.nextIndent()
+    code += f"dmm_config_t dmm_cfgs[{n_dmms}] = {{\n"
+    code.nextIndent()
+    for i in range(n_dmms):
+      interval_val = -1 if INTERVALs[i] == "MIN" else INTERVALs[i]
+      ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}.txt"
+      server_ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}_server.txt"
+      trailing = "," if i < n_dmms - 1 else ""
+      code += "{\n"
+      code.nextIndent()
+      code += f".name = \"{DMM_NAMES[i]}\",\n"
+      code += f".nplc = {NPLCs[i]},\n"
+      code += f".interval_s = {interval_val},\n"
+      code += f".sample_count = {SAMPLE_COUNTs[i]},\n"
+      code += f".curr_range = {CURR_RANGEs[i]},\n"
+      code += f".reset = {RESETs[i]},\n"
+      code += f".ofname = \"{ofname}\",\n"
+      code += f".server_ofname = \"{server_ofname}\",\n"
+      code.prevIndent()
+      code += "}" + trailing + "\n"
+    code.prevIndent()
+    code += "};\n"
+    code += f"if (dmm_start_current({n_dmms}, dmm_cfgs) != 0) {{\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_start_current failed: %s\\n\", dmm_last_error());\n"
+    code += f"  exit(1);\n"
+    code += f"}}\n"
+    code += f"fprintf(stderr, \"[DMM] measurement started (tile {t_idx})\\n\");\n"
+    code.prevIndent()
+    code += "}\n"
+    return code
+
+  def generatePowerMeasureEnd(self, t_idx):
+    """Generate C code to wait for DMM results and close (blocking)."""
+    assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
+
+    n_dmms = len(DMM_NAMES)
+    code = CodeWriter()
+    code += f"// --- Power measurement end (tile {t_idx}) ---\n"
+    code += "{\n"
+    code.nextIndent()
+    code += f"char dmm_name[64];\n"
+    code += f"double dmm_avg;\n"
+    code += f"int dmm_count;\n"
+    code += f"for (int dmm_i = 0; dmm_i < {n_dmms}; dmm_i++) {{\n"
+    code.nextIndent()
+    code += f"int rc = dmm_wait_result(dmm_name, sizeof(dmm_name), &dmm_avg, &dmm_count);\n"
+    code += f"if (rc == -2) {{\n"
+    code += f"  fprintf(stderr, \"DMM ERROR [%s]: %s\\n\", dmm_name, dmm_last_error());\n"
+    code += f"}} else if (rc != 0) {{\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_wait_result failed: %s\\n\", dmm_last_error());\n"
+    code += f"  dmm_close();\n"
+    code += f"  exit(1);\n"
+    code += f"}}\n"
+    code += f"fprintf(stderr, \"[DMM] [%s] avg = %.9g A  (%d samples)\\n\", dmm_name, dmm_avg, dmm_count);\n"
+    code.prevIndent()
+    code += f"}}\n"
+    code += f"dmm_close();\n"
+    code += f"fprintf(stderr, \"[DMM] measurement done (tile {t_idx})\\n\");\n"
+    code.prevIndent()
+    code += "}\n"
+    return code
 
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
@@ -735,7 +820,17 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
+
+      if self.os == "linux" and MEASURE_POWER: # measure power
+        # set DMM to start measurement at the same time as NPU execution
+        code += self.generatePowerMeasureStart(t_idx)
+
       code += self.generateInvokeCode() # end of exec
+
+      if self.os == "linux" and MEASURE_POWER: # measure power
+        # wait finishment of DMM measurement and read power data
+        code += self.generatePowerMeasureEnd(t_idx)
+
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
     code += self.generateDevicePointerCleanup()
     code.prevIndent()

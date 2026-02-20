@@ -203,6 +203,16 @@ target_include_directories(tvm_model PRIVATE
   "${TVM_ROOT}/3rdparty/dmlc-core/include"
 )
 
+# Add DMM power measurement support to tvm_model
+# (generated kernel code includes dmm_measure.h and calls dmm_* functions)
+if("$ENV{IMCFLOW_HOST_OS}" STREQUAL "linux" AND "$ENV{IMCFLOW_MEASURE_POWER}" STREQUAL "1")
+  set(DMM_CAPI_DIR "/root/project/measurement_utils/capi")
+  target_sources(tvm_model PRIVATE "${DMM_CAPI_DIR}/dmm_measure.c")
+  set_source_files_properties("${DMM_CAPI_DIR}/dmm_measure.c" PROPERTIES LANGUAGE C)
+  target_include_directories(tvm_model PRIVATE "${DMM_CAPI_DIR}")
+  message(STATUS "Adding DMM measurement support to tvm_model")
+endif()
+
 target_compile_definitions(tvm_model PRIVATE DMLC_LOG_STACK_TRACE=0)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(tvm_model PRIVATE
@@ -286,6 +296,15 @@ if(TVM_BUILD_HOST_RUNNER)
     "${CNPY_DIR}"
   )
   target_sources(${HOST_RUNNER_NAME} PRIVATE "${TVM_ROOT}/src/runtime/crt/host/platform.cc")
+
+  # Add DMM power measurement support (linux + IMCFLOW_MEASURE_POWER=1)
+  if("$ENV{IMCFLOW_HOST_OS}" STREQUAL "linux" AND "$ENV{IMCFLOW_MEASURE_POWER}" STREQUAL "1")
+    set(DMM_CAPI_DIR "/root/project/measurement_utils/capi")
+    target_sources(${HOST_RUNNER_NAME} PRIVATE "${DMM_CAPI_DIR}/dmm_measure.c")
+    target_include_directories(${HOST_RUNNER_NAME} PRIVATE "${DMM_CAPI_DIR}")
+    message(STATUS "Adding DMM measurement support")
+  endif()
+
   target_compile_definitions(${HOST_RUNNER_NAME} PRIVATE
     DMLC_LOG_STACK_TRACE=0
     TVM_WORKSPACE_SIZE_BYTES=8388608
