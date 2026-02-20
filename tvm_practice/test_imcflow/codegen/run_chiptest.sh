@@ -235,7 +235,7 @@ else
     echo "Step 5: Executing scan program on remote chip (timeout: 0.5s)..."
     echo ""
     sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "cd $REMOTE_BASE_PATH/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
+               "cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
                 $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"
