@@ -103,6 +103,7 @@ def make_payload(
     *,
     pattern: str,
     seed: int,
+    value: int | None = None,
 ) -> np.ndarray:
     """Return uint8[64] payload for one IMCE."""
 
@@ -118,7 +119,10 @@ def make_payload(
         return data
 
     if pattern == "constant":
-        base = (idx + 1) & 0xF
+        if value is not None:
+            base = value & 0xFF
+        else:
+            base = (idx + 1) & 0xFF
         return np.full((64,), np.uint8(base), dtype=np.uint8)
 
     if pattern == "random":
@@ -207,6 +211,15 @@ def main() -> None:
         help="Seed used for --pattern random (default: 0)",
     )
     parser.add_argument(
+        "--value",
+        type=str,
+        default="",
+        help=(
+            "Value for --pattern constant (0x00..0xff or 0..255). "
+            "If not set, each IMCE gets a unique value based on its index."
+        ),
+    )
+    parser.add_argument(
         "--json",
         type=str,
         default="",
@@ -233,6 +246,17 @@ def main() -> None:
     if args.manual:
         manual_payload = _parse_manual_nibbles(args.manual)
 
+    # Parse --value for constant pattern
+    const_value: int | None = None
+    if args.value:
+        v = args.value.strip()
+        if v.lower().startswith("0x"):
+            const_value = int(v, 16)
+        else:
+            const_value = int(v)
+        if not (0 <= const_value <= 255):
+            raise SystemExit(f"--value must be 0..255 (0x00..0xff), got {const_value}")
+
     written: List[str] = []
     for coord in imces:
         if json_payloads is not None:
@@ -240,15 +264,19 @@ def main() -> None:
         elif manual_payload is not None:
             payload = manual_payload
         else:
-            payload = make_payload(coord, pattern=args.pattern, seed=args.seed)
+            payload = make_payload(coord, pattern=args.pattern, seed=args.seed, value=const_value)
         if payload.shape != (64,) or payload.dtype != np.uint8:
             raise RuntimeError("Internal error: payload must be uint8[64]")
         written.append(write_npz(args.out_dir, coord, payload))
 
     print(f"Wrote {len(written)} NPZ files to: {os.path.abspath(args.out_dir)}")
-    print("Example:")
+    print("Example (first 4 files with hex scan tokens):")
     for p in written[:4]:
+        data = np.load(p)
+        arr = data['arr_0']
+        hex_tokens = '_'.join(f'{b:02x}' for b in arr)
         print(f"  - {p}")
+        print(f"    scan: {hex_tokens}")
 
 
 if __name__ == "__main__":
