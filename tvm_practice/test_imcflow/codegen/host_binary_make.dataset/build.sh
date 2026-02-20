@@ -9,7 +9,18 @@ set -e
 
 # Arguments
 TEST_EVL_DIR=${1:-""}
-ISA=${2:-"x86"}
+ISA=${2:-""}
+
+# Auto-detect ISA from IMCFLOW_HOST_ISA environment variable if not specified
+if [ -z "$ISA" ]; then
+    if [ -n "$IMCFLOW_HOST_ISA" ]; then
+        ISA="$IMCFLOW_HOST_ISA"
+        echo "Auto-detected ISA from IMCFLOW_HOST_ISA: $ISA"
+    else
+        ISA="x86"
+        echo "No ISA specified and IMCFLOW_HOST_ISA not set, defaulting to: $ISA"
+    fi
+fi
 
 # Validate arguments
 if [ -z "$TEST_EVL_DIR" ]; then

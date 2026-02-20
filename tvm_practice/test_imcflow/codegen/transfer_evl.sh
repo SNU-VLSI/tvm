@@ -13,33 +13,22 @@ TEST_OUTPUTS_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen/eval_dir/.
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 <pattern> [username]"
+    echo "Usage: $0 <dir_name> [username]"
     echo "   or: $0 --path <directory> [username]"
     echo "   or: $0 -p <directory> [username]"
     echo ""
-    echo "Transfer _evl directories matching a pattern or arbitrary directories to remote server"
+    echo "Transfer _evl directories or arbitrary directories to remote server"
     echo ""
     echo "Arguments:"
-    echo "  pattern     Pattern to match test directories (e.g., 'one_*', 'resnet8_*', 'one_relu')"
-    echo "              Use '*' to match all _evl directories"
-    echo "              Can be specified with or without '_evl' suffix (e.g., 'one_relu' or 'one_relu_evl')"
+    echo "  dir_name    Exact directory name in eval_dir/ (e.g., 'one_relu_evl.linux')"
     echo "  --path, -p  Transfer a specific directory (absolute or relative path)"
     echo "  username    Optional username for remote connection (default: root)"
     echo ""
     echo "Examples:"
-    echo "  $0 one_*                    # Transfer all one_*_evl directories"
-    echo "  $0 one_relu                 # Transfer one_relu_evl directory"
-    echo "  $0 one_relu_evl             # Transfer one_relu_evl directory (same as above)"
-    echo "  $0 resnet8_* myuser         # Transfer all resnet8_*_evl with custom username"
-    echo "  $0 '*'                      # Transfer all _evl directories"
-    echo "  $0 --path /path/to/dir      # Transfer specific directory"
-    echo "  $0 -p ./host_binary_make    # Transfer specific directory"
-    echo ""
-    echo "Available test patterns (from MODEL_REGISTRY):"
-    echo "  - one_*: one_relu, one_conv_small, one_conv_big, one_mmquant, etc."
-    echo "  - resnet8_*: resnet8_subset01-25 variants"
-    echo "  - conv_*: conv_quant_conv, etc."
-    echo "  - residual_*: residual_model, residual_rnd_model"
+    echo "  $0 one_relu_evl.linux                    # Transfer one_relu_evl.linux"
+    echo "  $0 resnet8_subset31_pretrained_orig_evl.linux"
+    echo "  $0 --path /path/to/dir                   # Transfer specific directory"
+    echo "  $0 -p ./host_binary_make                 # Transfer specific directory"
     echo ""
     echo "Configuration:"
     echo "  Remote host: $REMOTE_HOST"
@@ -86,37 +75,19 @@ else
         exit 1
     fi
 
-    # Normalize pattern - if it already ends with _evl or _evl.*, use as-is, otherwise append _evl*
-    SEARCH_PATTERN="$PATTERN"
-    if [[ "$PATTERN" != "*" ]] && [[ "$PATTERN" != *_evl ]] && [[ "$PATTERN" != *_evl.* ]] && [[ "$PATTERN" != *\*_evl* ]]; then
-        SEARCH_PATTERN="${PATTERN}_evl*"
-    fi
+    # Exact directory name matching (no pattern expansion)
+    DIR_NAME="$PATTERN"
+    TARGET_DIR="$TEST_OUTPUTS_DIR/$DIR_NAME"
 
-    # Find matching _evl directories (supports _evl, _evl.baremetal, _evl.linux)
-    echo "Searching for directories matching pattern '$SEARCH_PATTERN' in $TEST_OUTPUTS_DIR..."
-    MATCHING_DIRS=()
-
-    # Handle the pattern matching
-    if [[ "$PATTERN" == "*" ]]; then
-        # Match all _evl directories (including _evl.baremetal, _evl.linux)
-        while IFS= read -r -d '' dir; do
-            MATCHING_DIRS+=("$dir")
-        done < <(find "$TEST_OUTPUTS_DIR" -maxdepth 1 -type d -name "*_evl*" -print0)
-    else
-        # Match specific pattern
-        while IFS= read -r -d '' dir; do
-            MATCHING_DIRS+=("$dir")
-        done < <(find "$TEST_OUTPUTS_DIR" -maxdepth 1 -type d -name "$SEARCH_PATTERN" -print0)
-    fi
-
-    # Check if any directories were found
-    if [[ ${#MATCHING_DIRS[@]} -eq 0 ]]; then
-        echo "Error: No directories found matching pattern '$SEARCH_PATTERN'"
+    if [[ ! -d "$TARGET_DIR" ]]; then
+        echo "Error: Directory '$DIR_NAME' not found in $TEST_OUTPUTS_DIR"
         echo ""
         echo "Available _evl directories:"
         ls -1 "$TEST_OUTPUTS_DIR" | grep "_evl" || echo "  (none)"
         exit 1
     fi
+
+    MATCHING_DIRS=("$TARGET_DIR")
 fi
 
 # Display found directories
@@ -143,8 +114,8 @@ for dir in "${MATCHING_DIRS[@]}"; do
     dir_name=$(basename "$dir")
     echo "Transferring $dir_name..."
 
-    # Check if this is a test folder (_evl) and not a custom path
-    if [[ "$dir_name" == *_evl ]] && [[ -z "$CUSTOM_PATH" ]]; then
+    # Check if this is a test folder (_evl or _evl.linux/_evl.baremetal) and not a custom path
+    if [[ "$dir_name" == *_evl || "$dir_name" == *_evl.linux || "$dir_name" == *_evl.baremetal ]] && [[ -z "$CUSTOM_PATH" ]]; then
         # For test folders, only transfer specific subdirectories
         SUBDIRS_TO_TRANSFER=("host_binary_make" "test_inputs" "test_outputs" "test_references" "build")
 

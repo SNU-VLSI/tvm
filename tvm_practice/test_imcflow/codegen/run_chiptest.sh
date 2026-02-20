@@ -5,7 +5,7 @@
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 [options] <test_name> <input_setting>"
+    echo "Usage: $0 [options] <test_folder_evl.linux> <input_setting>"
     echo ""
     echo "Automated chip test workflow that:"
     echo "  1. Runs test.py to generate test folder"
@@ -21,15 +21,14 @@ show_help() {
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Arguments:"
-    echo "  test_name       Name of the test (e.g., 'one_relu', 'one_conv_small')"
-    echo "  input_setting   Input setting for the test (e.g., 'ones', 'random', 'incremental')"
+    echo "  test_folder_evl.linux  Exact test folder name ending with '_evl.linux'"
+    echo "  input_setting          Input setting for the test (e.g., 'ones', 'random', 'incremental')"
     echo ""
     echo "Examples:"
-    echo "  $0 one_relu ones"
-    echo "  $0 one_conv_small random"
-    echo "  $0 -r one_conv_small random"
-    echo "  $0 -s 2,3 one_conv_small random"
-    echo "  $0 -h                                    # Show this help message"
+    echo "  $0 one_relu_evl.linux ones"
+    echo "  $0 one_conv_small_evl.linux random"
+    echo "  $0 -r resnet8_subset31_pretrained_orig_evl.linux random"
+    echo "  $0 -s 1,3 resnet8_subset31_pretrained_orig_evl.linux random"
     echo ""
     echo "Remote Configuration:"
     echo "  Host: 147.46.117.99"
@@ -132,9 +131,22 @@ if [[ $# -lt 2 ]]; then
 fi
 
 # Configuration
-TEST_NAME="$1"
+TEST_FOLDER="$1"
 INPUT_SETTING="$2"
-TEST_FOLDER="${TEST_NAME}_evl"
+
+# Validate test folder name format: must be *_evl.linux
+if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
+    echo "Error: Test folder must end with '_evl.linux' (got: $TEST_FOLDER)"
+    echo ""
+    echo "Example:"
+    echo "  $0 resnet8_subset31_pretrained_orig_evl.linux random"
+    echo ""
+    echo "This is required because chip test runs on ARM Linux platform."
+    exit 1
+fi
+
+# Extract model name from test folder (remove _evl.linux suffix)
+TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"
 
 REMOTE_HOST="147.46.117.99"
 REMOTE_PORT="1326"
@@ -250,8 +262,8 @@ else
     echo "Step 6: Executing on remote chip (timeout: 30s)..."
     echo ""
     sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "cd $REMOTE_BASE_PATH/$TEST_FOLDER/host_binary_make/build && timeout 30 ./execute_graph \
-                $TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
+               "cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 30 ./execute_graph \
+                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"
 
