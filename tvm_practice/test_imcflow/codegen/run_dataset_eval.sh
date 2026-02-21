@@ -146,7 +146,8 @@ if [[ "$SKIP_STEP3" == true ]]; then
 else
     echo "Step 3: Executing on remote chip..."
     echo ""
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && $BINARY_DIR/build/execute_graph_for_dataset \
+    REMOTE_CMD="source ~/.bashrc && source /home/root/.venv/bin/activate && \
+cd $REMOTE_BASE_PATH && $BINARY_DIR/build/execute_graph_for_dataset \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \

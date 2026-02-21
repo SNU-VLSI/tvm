@@ -11,6 +11,7 @@ from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
 import math
 import os
+from enum import Enum
 
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
@@ -33,15 +34,31 @@ elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   RESET_GEN_ADDR = 0xa0130000 
   MEASURE_POWER = os.getenv("IMCFLOW_MEASURE_POWER", "0").lower() in ("1", "true", "yes")
 
-  if MEASURE_POWER:
+  class PowerMeasurePhase(Enum):
+    MODEL=0
+    REGION=1
+    TILE=2
+  
+  POWER_MEASURE_PHASE = PowerMeasurePhase.MODEL
+
+  if POWER_MEASURE_PHASE == PowerMeasurePhase.REGION or POWER_MEASURE_PHASE == PowerMeasurePhase.TILE:
     DMM_NAMES       = ["VDD", "DDA", "DDC"]
     NPLCs           = [0.001, 0.001, 0.001]
     INTERVALs       = [-1, -1, -1]
-    SAMPLE_COUNTs   = [10000, 10000, 10000]
+    SAMPLE_COUNTs   = [500, 500, 500]
     CURR_RANGEs     = [0.1, 0.01, 0.1]
     RESETs          = [1, 1, 1]
     OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
-
+  elif POWER_MEASURE_PHASE == PowerMeasurePhase.MODEL:
+    DMM_NAMES       = ["VDD", "DDA", "DDC"]
+    NPLCs           = [0.001, 0.001, 0.001]
+    INTERVALs       = [-1, -1, -1]
+    SAMPLE_COUNTs   = [50000, 50000, 50000]
+    CURR_RANGEs     = [0.1, 0.01, 0.1]
+    RESETs          = [1, 1, 1]
+    OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
+  else:
+    raise ValueError(f"Unsupported POWER_MEASURE_PHASE: {POWER_MEASURE_PHASE}")
 else:
   raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
 
@@ -439,21 +456,33 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 }
     """)
   
-  def generatePowerMeasureStart(self, t_idx):
+  def generatePowerMeasureStart(self, t_idx=None):
     """Generate C code to start DMM current measurement (non-blocking)."""
     assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
 
     n_dmms = len(DMM_NAMES)
     code = CodeWriter()
-    code += f"// --- Power measurement start (tile {t_idx}) ---\n"
+
+    if t_idx is not None:
+      code += f"// --- Power measurement start (tile {t_idx}) ---\n"
+    else:
+      code += f"// --- Power measurement start ---\n"
+
     code += "{\n"
     code.nextIndent()
     code += f"dmm_config_t dmm_cfgs[{n_dmms}] = {{\n"
     code.nextIndent()
+
     for i in range(n_dmms):
       interval_val = -1 if INTERVALs[i] == "MIN" else INTERVALs[i]
-      ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}.txt"
-      server_ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}_server.txt"
+
+      if t_idx is not None:
+        ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}.txt"
+        server_ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}_server.txt"
+      else:
+        ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}.txt"
+        server_ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}_server.txt"
+
       trailing = "," if i < n_dmms - 1 else ""
       code += "{\n"
       code.nextIndent()
@@ -473,18 +502,26 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"  fprintf(stderr, \"ERROR: dmm_start_current failed: %s\\n\", dmm_last_error());\n"
     code += f"  exit(1);\n"
     code += f"}}\n"
-    code += f"fprintf(stderr, \"[DMM] measurement started (tile {t_idx})\\n\");\n"
+
+    if t_idx is not None:
+      code += f"fprintf(stderr, \"[DMM] measurement started (tile {t_idx})\\n\");\n"
+    else:
+      code += f"fprintf(stderr, \"[DMM] measurement started \\n\");\n"
+
     code.prevIndent()
     code += "}\n"
     return code
 
-  def generatePowerMeasureEnd(self, t_idx):
+  def generatePowerMeasureEnd(self, t_idx=None):
     """Generate C code to wait for DMM results and close (blocking)."""
     assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
 
     n_dmms = len(DMM_NAMES)
     code = CodeWriter()
-    code += f"// --- Power measurement end (tile {t_idx}) ---\n"
+    if t_idx is not None:
+      code += f"// --- Power measurement end (tile {t_idx}) ---\n"
+    else:
+      code += f"// --- Power measurement end ---\n"
     code += "{\n"
     code.nextIndent()
     code += f"char dmm_name[64];\n"
@@ -504,7 +541,10 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code.prevIndent()
     code += f"}}\n"
     code += f"dmm_close();\n"
-    code += f"fprintf(stderr, \"[DMM] measurement done (tile {t_idx})\\n\");\n"
+    if t_idx is not None:
+      code += f"fprintf(stderr, \"[DMM] measurement ended (tile {t_idx})\\n\");\n"
+    else:
+      code += f"fprintf(stderr, \"[DMM] measurement ended \\n\");\n"
     code.prevIndent()
     code += "}\n"
     return code
@@ -807,6 +847,18 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.emitReset()
     if self.os == "linux":
       code += self.emitWarmup()
+
+    power_measure_active = self.os == "linux" and MEASURE_POWER
+    total_func_num = len(list(DevConfig().ImcflowFuncMap.keys()))
+    first_func = "region1" in self.func_name 
+    last_func  = f"region{total_func_num}" in self.func_name
+
+    if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.MODEL and first_func:
+      code += self.generatePowerMeasureStart() # use tile_idx None for model-level measurement
+    
+    if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.REGION:
+      code += self.generatePowerMeasureStart() # use tile_idx 0 for region-level measurement
+
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
@@ -821,17 +873,24 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
 
-      if self.os == "linux" and MEASURE_POWER: # measure power
+      if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.TILE: # measure power
         # set DMM to start measurement at the same time as NPU execution
         code += self.generatePowerMeasureStart(t_idx)
 
       code += self.generateInvokeCode() # end of exec
 
-      if self.os == "linux" and MEASURE_POWER: # measure power
+      if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.TILE: # measure power
         # wait finishment of DMM measurement and read power data
         code += self.generatePowerMeasureEnd(t_idx)
 
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
+    
+    if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.REGION:
+      code += self.generatePowerMeasureEnd() # end region-level measurement
+    
+    if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.MODEL and last_func:
+      code += self.generatePowerMeasureEnd() # end model-level measurement
+
     code += self.generateDevicePointerCleanup()
     code.prevIndent()
     code += '}\n'
