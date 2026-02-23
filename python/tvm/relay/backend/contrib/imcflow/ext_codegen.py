@@ -498,8 +498,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       code += "}" + trailing + "\n"
     code.prevIndent()
     code += "};\n"
-    code += f"if (dmm_start_current({n_dmms}, dmm_cfgs) != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_start_current failed: %s\\n\", dmm_last_error());\n"
+    code += f"if (dmm_start_current_now({n_dmms}, dmm_cfgs) != 0) {{\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_start_current_now failed: %s\\n\", dmm_last_error());\n"
     code += f"  exit(1);\n"
     code += f"}}\n"
 
@@ -529,11 +529,11 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"int dmm_count;\n"
     code += f"for (int dmm_i = 0; dmm_i < {n_dmms}; dmm_i++) {{\n"
     code.nextIndent()
-    code += f"int rc = dmm_wait_result(dmm_name, sizeof(dmm_name), &dmm_avg, &dmm_count);\n"
+    code += f"int rc = dmm_get_result_now(dmm_name, sizeof(dmm_name), &dmm_avg, &dmm_count);\n"
     code += f"if (rc == -2) {{\n"
     code += f"  fprintf(stderr, \"DMM ERROR [%s]: %s\\n\", dmm_name, dmm_last_error());\n"
     code += f"}} else if (rc != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_wait_result failed: %s\\n\", dmm_last_error());\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_get_result_now failed: %s\\n\", dmm_last_error());\n"
     code += f"  dmm_close();\n"
     code += f"  exit(1);\n"
     code += f"}}\n"
@@ -622,6 +622,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     """Generate policy update code."""
     out = [
       "// Set the inode pc to 0 and run.",
+      "fprintf(stderr,\"RUN policy update...\\n\");",
       "for(int i=0; i<INODE_NUM; i++) {",
       "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
       "}",
@@ -636,6 +637,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
   def generateInvokeCode(self):
     """Generate NPU invoke code."""
     out = [
+      "fprintf(stderr,\"Invoke NPU...\\n\");",
       "for(int i=0; i<INODE_NUM; i++) {",
       "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
       "}",
@@ -719,6 +721,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
         code += f"fprintf(stderr,\"Transferring input block to NPU [TILE:{tile_idx}]\\n\");\n"
+      else:
+        code += f"fprintf(stderr,\"Transferring input block to NPU\\n\");\n"
 
       # Determine source variable and loop parameters based on block type
       if isinstance(block.id, str):
@@ -743,6 +747,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
         code += f"fprintf(stderr,\"Transferring output block to out{idx} [TILE:{tile_idx}]\\n\");\n"
+      else:
+        code += f"fprintf(stderr,\"Transferring output block to out{idx}\\n\");\n"
 
       # Get loop parameters
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
