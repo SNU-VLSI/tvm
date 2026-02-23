@@ -499,7 +499,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code.prevIndent()
     code += "};\n"
     code += f"if (dmm_start_current_now({n_dmms}, dmm_cfgs) != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_start_current_now failed: %s\\n\", dmm_last_error());\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_start_current_now failed: %s (start measure-bridge-daemon, check DMM_FIFO_CMD/DMM_FIFO_RESP)\\n\", dmm_last_error());\n"
     code += f"  exit(1);\n"
     code += f"}}\n"
 
@@ -533,7 +533,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"if (rc == -2) {{\n"
     code += f"  fprintf(stderr, \"DMM ERROR [%s]: %s\\n\", dmm_name, dmm_last_error());\n"
     code += f"}} else if (rc != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_get_result_now failed: %s\\n\", dmm_last_error());\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_get_result_now failed: %s (daemon/fifo communication)\\n\", dmm_last_error());\n"
     code += f"  dmm_close();\n"
     code += f"  exit(1);\n"
     code += f"}}\n"

@@ -64,6 +64,9 @@ if(NOT EXISTS "${CRT_LIB_BASE}")
   message(FATAL_ERROR "TVM CRT directory not found at: ${CRT_LIB_BASE}\nSet -DTVM_ROOT=/path/to/tvm")
 endif()
 
+# DMM C API path (TVM_HOME only; no fallback)
+set(DMM_CAPI_DIR "$ENV{TVM_HOME}/3rdparty/measurement_utils/capi")
+
 # ============================================================================
 # Extract MLF
 # ============================================================================
@@ -138,7 +141,9 @@ target_include_directories(tvm_model PRIVATE
 
 # Add DMM power measurement support to tvm_model
 if("$ENV{IMCFLOW_HOST_OS}" STREQUAL "linux" AND "$ENV{IMCFLOW_MEASURE_POWER}" STREQUAL "1")
-  set(DMM_CAPI_DIR "/root/project/measurement_utils/capi")
+  if(NOT EXISTS "${DMM_CAPI_DIR}/dmm_measure.c")
+    message(FATAL_ERROR "DMM C API not found: ${DMM_CAPI_DIR}/dmm_measure.c\nSet TVM_HOME to your TVM repo root")
+  endif()
   target_sources(tvm_model PRIVATE "${DMM_CAPI_DIR}/dmm_measure.c")
   set_source_files_properties("${DMM_CAPI_DIR}/dmm_measure.c" PROPERTIES LANGUAGE C)
   target_include_directories(tvm_model PRIVATE "${DMM_CAPI_DIR}")
@@ -181,7 +186,9 @@ target_sources(execute_graph_for_dataset PRIVATE
 
 # Add DMM power measurement support (linux + IMCFLOW_MEASURE_POWER=1)
 if("$ENV{IMCFLOW_HOST_OS}" STREQUAL "linux" AND "$ENV{IMCFLOW_MEASURE_POWER}" STREQUAL "1")
-  set(DMM_CAPI_DIR "/root/project/measurement_utils/capi")
+  if(NOT EXISTS "${DMM_CAPI_DIR}/dmm_measure.c")
+    message(FATAL_ERROR "DMM C API not found: ${DMM_CAPI_DIR}/dmm_measure.c\nSet TVM_HOME to your TVM repo root")
+  endif()
   target_sources(execute_graph_for_dataset PRIVATE "${DMM_CAPI_DIR}/dmm_measure.c")
   target_include_directories(execute_graph_for_dataset PRIVATE "${DMM_CAPI_DIR}")
   message(STATUS "Adding DMM measurement support to dataset executable")
