@@ -5,7 +5,7 @@
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 [options] <test_folder_evl.linux> <input_setting>"
+    echo "Usage: $0 [options] <test_folder_evl.linux> <input_setting> [remote_host]"
     echo ""
     echo "Automated chip test workflow that:"
     echo "  1. Runs test.py to generate test folder"
@@ -23,15 +23,17 @@ show_help() {
     echo "Arguments:"
     echo "  test_folder_evl.linux  Exact test folder name ending with '_evl.linux'"
     echo "  input_setting          Input setting for the test (e.g., 'ones', 'random', 'incremental')"
+    echo "  remote_host            Remote host IP (default: 147.46.117.99)"
     echo ""
     echo "Examples:"
     echo "  $0 one_relu_evl.linux ones"
     echo "  $0 one_conv_small_evl.linux random"
     echo "  $0 -r resnet8_subset31_pretrained_orig_evl.linux random"
     echo "  $0 -s 1,3 resnet8_subset31_pretrained_orig_evl.linux random"
+    echo "  $0 one_conv_small_evl.linux random 192.168.1.100"
     echo ""
     echo "Remote Configuration:"
-    echo "  Host: 147.46.117.99"
+    echo "  Host: 147.46.117.99 (default, overridable via 3rd argument)"
     echo "  Port: 1326"
     echo "  User: root"
     echo "  Path: /home/root/tvm/tvm_practice/test_imcflow/codegen"
@@ -148,7 +150,7 @@ fi
 # Extract model name from test folder (remove _evl.linux suffix)
 TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"
 
-REMOTE_HOST="147.46.117.99"
+REMOTE_HOST="${3:-147.46.117.99}"
 REMOTE_PORT="1326"
 REMOTE_USER="root"
 REMOTE_PASSWORD="root"
@@ -191,7 +193,7 @@ if [[ "$SKIP_STEP2" == true ]]; then
 else
     echo "Step 2: Transferring $TEST_FOLDER to remote server..."
     echo ""
-    echo "y" | ./transfer_evl.sh "$TEST_FOLDER"
+    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" "$TEST_FOLDER"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer $TEST_FOLDER"
         exit 1
@@ -205,7 +207,7 @@ if [[ "$SKIP_STEP3" == true ]]; then
     echo ""
 else
     echo "Step 3: Transferring scan_reg_files to remote server..."
-    echo "y" | ./transfer_evl.sh --path "scan_gen/$NPZ_FILE_PATH"
+    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/$NPZ_FILE_PATH"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer $NPZ_FILE_PATH"
         exit 1
@@ -219,7 +221,7 @@ if [[ "$SKIP_STEP4" == true ]]; then
     echo ""
 else
     echo "Step 4: Transferring program_scan_reg to remote server..."
-    echo "y" | ./transfer_evl.sh --path "scan_gen/scan_executable_make"
+    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/scan_executable_make"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer scan_executable_make"
         exit 1
@@ -235,7 +237,8 @@ else
     echo "Step 5: Executing scan program on remote chip (timeout: 0.5s)..."
     echo ""
     sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
+               "source ~/.bashrc && source /home/root/.venv/bin/activate && \
+                cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
                 $REMOTE_BASE_PATH/scan_gen/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"
@@ -259,10 +262,11 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
-    echo "Step 6: Executing on remote chip (timeout: 30s)..."
+    echo "Step 6: Executing on remote chip (timeout: 300s)..."
     echo ""
     sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 30 ./execute_graph \
+               "source ~/.bashrc && source /home/root/.venv/bin/activate && \
+                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./execute_graph \
                 eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"
