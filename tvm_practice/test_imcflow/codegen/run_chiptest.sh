@@ -5,7 +5,7 @@
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 [options] <test_folder_evl.linux> <input_setting>"
+    echo "Usage: $0 [options] <test_folder_evl.linux> <input_setting> [remote_host]"
     echo ""
     echo "Automated chip test workflow that:"
     echo "  1. Runs test.py to generate test folder"
@@ -23,15 +23,17 @@ show_help() {
     echo "Arguments:"
     echo "  test_folder_evl.linux  Exact test folder name ending with '_evl.linux'"
     echo "  input_setting          Input setting for the test (e.g., 'ones', 'random', 'incremental')"
+    echo "  remote_host            Remote host IP (default: 147.46.117.99)"
     echo ""
     echo "Examples:"
     echo "  $0 one_relu_evl.linux ones"
     echo "  $0 one_conv_small_evl.linux random"
     echo "  $0 -r resnet8_subset31_pretrained_orig_evl.linux random"
     echo "  $0 -s 1,3 resnet8_subset31_pretrained_orig_evl.linux random"
+    echo "  $0 one_conv_small_evl.linux random 192.168.1.100"
     echo ""
     echo "Remote Configuration:"
-    echo "  Host: 147.46.117.99"
+    echo "  Host: 147.46.117.99 (default, overridable via 3rd argument)"
     echo "  Port: 1326"
     echo "  User: root"
     echo "  Path: /home/root/tvm/tvm_practice/test_imcflow/codegen"
@@ -148,7 +150,7 @@ fi
 # Extract model name from test folder (remove _evl.linux suffix)
 TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"
 
-REMOTE_HOST="147.46.117.99"
+REMOTE_HOST="${3:-147.46.117.99}"
 REMOTE_PORT="1326"
 REMOTE_USER="root"
 REMOTE_PASSWORD="root"

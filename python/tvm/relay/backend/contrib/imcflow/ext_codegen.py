@@ -13,6 +13,8 @@ import math
 import os
 from enum import Enum
 
+TEMP_DEBUG = 0
+
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
   IMCFLOW_ADDR = 0x80000000
@@ -39,7 +41,7 @@ elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
     REGION=1
     TILE=2
   
-  POWER_MEASURE_PHASE = PowerMeasurePhase.MODEL
+  POWER_MEASURE_PHASE = PowerMeasurePhase.REGION
 
   if POWER_MEASURE_PHASE == PowerMeasurePhase.REGION or POWER_MEASURE_PHASE == PowerMeasurePhase.TILE:
     DMM_NAMES       = ["VDD", "DDA", "DDC"]
@@ -499,7 +501,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code.prevIndent()
     code += "};\n"
     code += f"if (dmm_start_current_now({n_dmms}, dmm_cfgs) != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_start_current_now failed: %s (start measure-bridge-daemon, check DMM_FIFO_CMD/DMM_FIFO_RESP)\\n\", dmm_last_error());\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_start_current_now failed: %s\\n\", dmm_last_error());\n"
     code += f"  exit(1);\n"
     code += f"}}\n"
 
@@ -532,8 +534,9 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"int rc = dmm_get_result_now(dmm_name, sizeof(dmm_name), &dmm_avg, &dmm_count);\n"
     code += f"if (rc == -2) {{\n"
     code += f"  fprintf(stderr, \"DMM ERROR [%s]: %s\\n\", dmm_name, dmm_last_error());\n"
+    code += f"  continue;\n"
     code += f"}} else if (rc != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_get_result_now failed: %s (daemon/fifo communication)\\n\", dmm_last_error());\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_get_result_now failed: %s\\n\", dmm_last_error());\n"
     code += f"  dmm_close();\n"
     code += f"  exit(1);\n"
     code += f"}}\n"
@@ -720,9 +723,9 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
-        code += f"fprintf(stderr,\"Transferring input block to NPU [TILE:{tile_idx}]\\n\");\n"
+        code += f"fprintf(stderr,\"Transferring input block {block.id} to NPU [TILE:{tile_idx}]\\n\");\n"
       else:
-        code += f"fprintf(stderr,\"Transferring input block to NPU\\n\");\n"
+        code += f"fprintf(stderr,\"Transferring input block {block.id} to NPU\\n\");\n"
 
       # Determine source variable and loop parameters based on block type
       if isinstance(block.id, str):
@@ -746,9 +749,9 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
-        code += f"fprintf(stderr,\"Transferring output block to out{idx} [TILE:{tile_idx}]\\n\");\n"
+        code += f"fprintf(stderr,\"Transferring output block {block.id} to out{idx} [TILE:{tile_idx}]\\n\");\n"
       else:
-        code += f"fprintf(stderr,\"Transferring output block to out{idx}\\n\");\n"
+        code += f"fprintf(stderr,\"Transferring output block {block.id} to out{idx}\\n\");\n"
 
       # Get loop parameters
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
@@ -868,7 +871,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
-    code += self.generateInvokeCode() # proceed up to halt
+    if not TEMP_DEBUG:
+      code += self.generateInvokeCode() # proceed up to halt
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
@@ -883,7 +887,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
         # set DMM to start measurement at the same time as NPU execution
         code += self.generatePowerMeasureStart(t_idx)
 
-      code += self.generateInvokeCode() # end of exec
+      if not TEMP_DEBUG:
+        code += self.generateInvokeCode() # end of exec
 
       if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.TILE: # measure power
         # wait finishment of DMM measurement and read power data
