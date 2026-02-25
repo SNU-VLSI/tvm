@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # Script to transfer _evl directories or arbitrary paths to remote server
-# Usage: ./transfer_evl.sh <pattern> [username]
-#    or: ./transfer_evl.sh --path <directory> [username]
+# Usage: ./transfer_evl.sh [--host <ip>] <pattern> [username]
+#    or: ./transfer_evl.sh [--host <ip>] --path <directory> [username]
 
 # Default configuration
-REMOTE_HOST="147.46.117.99"
+REMOTE_HOST="${REMOTE_HOST:-147.46.117.99}"
 REMOTE_PORT="1326"
 REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
 REMOTE_PATH="$REMOTE_BASE_PATH/eval_dir"
@@ -15,11 +15,14 @@ TEST_OUTPUTS_DIR="$LOCAL_CODEGEN_DIR/eval_dir"
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 <dir_name> [username]"
-    echo "   or: $0 --path <directory> [username]"
-    echo "   or: $0 -p <directory> [username]"
+    echo "Usage: $0 [--host <ip>] <dir_name> [username]"
+    echo "   or: $0 [--host <ip>] --path <directory> [username]"
+    echo "   or: $0 [--host <ip>] -p <directory> [username]"
     echo ""
     echo "Transfer _evl directories or arbitrary directories to remote server"
+    echo ""
+    echo "Options:"
+    echo "  --host, -H  Remote host IP (default: 147.46.117.99)"
     echo ""
     echo "Arguments:"
     echo "  dir_name    Exact directory name in eval_dir/ (e.g., 'one_relu_evl.linux')"
@@ -31,6 +34,7 @@ show_help() {
     echo "  $0 resnet8_subset31_pretrained_orig_evl.linux"
     echo "  $0 --path /path/to/dir                   # Transfer specific directory"
     echo "  $0 -p ./host_binary_make                 # Transfer specific directory"
+    echo "  $0 --host 192.168.1.100 one_relu_evl.linux  # Use custom host"
     echo ""
     echo "Configuration:"
     echo "  Remote host: $REMOTE_HOST"
@@ -44,7 +48,17 @@ if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]] || [[ $# -eq 0 ]]; then
     show_help
 fi
 
-# Parse arguments
+# Parse --host option first
+if [[ "$1" == "--host" ]] || [[ "$1" == "-H" ]]; then
+    if [[ -z "$2" ]]; then
+        echo "Error: Missing value for $1"
+        exit 1
+    fi
+    REMOTE_HOST="$2"
+    shift 2
+fi
+
+# Parse remaining arguments
 CUSTOM_PATH=""
 if [[ "$1" == "--path" ]] || [[ "$1" == "-p" ]]; then
     CUSTOM_PATH="$2"
