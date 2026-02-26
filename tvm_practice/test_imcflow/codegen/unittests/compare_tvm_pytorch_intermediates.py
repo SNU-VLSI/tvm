@@ -40,7 +40,7 @@ CODEGEN_DIR = '/root/project/tvm/tvm_practice/test_imcflow/codegen'
 EVAL_DIR = os.path.join(CODEGEN_DIR, 'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal')
 PKL_PATH = os.path.join(EVAL_DIR, 'debug_executor_output_tensors.pkl')
 INPUT_PATH = os.path.join(EVAL_DIR, 'test_inputs/model_input.npy')
-CHECKPOINT_PATH = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/equal_ch_split/2025-Nov-20-18-05-24/imcflow/2026-Feb-26-12-46-15/checkpoint.pth.tar'
+CHECKPOINT_PATH = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar'
 
 
 def load_tvm_intermediates(pkl_path):
@@ -82,8 +82,13 @@ def run_pytorch_debug(checkpoint_path, input_tensor):
     original_checkpoint = checkpoint['original_checkpoint']
 
     # Create debug model using original checkpoint (has 'module.' keys)
+    # Use PsumConv (bit-serial + ADC psum quantization) to match TVM imcflow_qconv
+    psum_config = {
+        'arraySize': 256, 'wbits': 4, 'abits': 4,
+        'pbits': 6, 'prange': 1, 'cbits': 1,
+    }
     _, _, _, debug_model_int16 = create_debug_models(
-        original_checkpoint, adjust_factors, psum_config=None
+        original_checkpoint, adjust_factors, psum_config=psum_config
     )
     debug_model_int16.eval()
 
@@ -217,16 +222,48 @@ def main():
     # =========================================================================
     # Layer-by-layer comparison
     # =========================================================================
-
-    # Mapping: (description, tvm_topo_index, pytorch_debug_key_path, optional_transform)
-    # The pytorch_debug_key_path uses '.' to navigate nested dicts.
-    # tvm_topo_index can be a tuple (index, output_num) for multi-output nodes.
+    # New topo index mapping (after conv1+bn1 fuse to multiply+add):
+    #   0: model_input
+    #   2: conv2d (conv1)
+    #   4: multiply (fused scale)
+    #   6: add (fused bias) = conv1+bn1 output
+    #   7: clip
+    #   8: cast int16
+    #  13: min_max_quantize (layer1 act1)
+    #  16: qconv (layer1 conv1)
+    #  19: fused_batch_norm (layer1 bn1)
+    #  22: min_max_quantize_1 (layer1 act2)
+    #  25: qconv_1 (layer1 conv2)
+    #  28: fused_batch_norm_1 (layer1 bn2)
+    #  29: relu (residual path)
+    #  47: cast_3_1 (layer1 output after residual add + clip + cast)
+    #  50: min_max_quantize_2 (layer2 act1)
+    #  53: qconv_1_1 (layer2 conv1, stride=2)
+    #  56: fused_batch_norm_1_1 (layer2 bn1)
+    #  59: min_max_quantize_1_1 (layer2 act2)
+    #  71: cast_5 (layer2 conv2 after split accum + clip + cast)
+    #  74: fused_batch_norm_1_2 (layer2 bn2)
+    #  85: fused_batch_norm_1_3 (layer2 downsample bn)
+    #  93: cast_5_1 (layer2 output after residual add)
+    # 111: min_max_quantize_1_2 (layer3 act1)
+    # 123: cast_8 (layer3 conv1 after split accum)
+    # 126: fused_batch_norm_2 (layer3 bn1)
+    # 129: min_max_quantize_3 (layer3 act2)
+    # 147: cast_8_1 (layer3 conv2 after 3-way split)
+    # 150: fused_batch_norm_2_1 (layer3 bn2)
+    # 161: fused_batch_norm_2_2 (layer3 downsample bn)
+    # 169: cast_8_2 (layer3 output after residual add)
+    # 187: layout_transform_13 -> NCHW (after relu, dequant)
+    # 188: adaptive_avg_pool2d
+    # 189: reshape
+    # 191: dense
+    # 193: bias_add (final output)
 
     comparisons = []
 
     # --- 1. Input ---
     print("\n" + "=" * 80)
-    print("SECTION 1: Initial Conv + BN + Quantize (before imcflow regions)")
+    print("SECTION 1: Initial Conv + BN(fused) + Quantize (before imcflow regions)")
     print("=" * 80)
 
     tvm_input = get_tvm_tensor(tvm_data, 0)
@@ -236,89 +273,76 @@ def main():
 
     # Conv1 output (TVM topo 2)
     tvm_conv1 = get_tvm_tensor(tvm_data, 2)
-    # PyTorch: after_conv1 in model-level debug
     pt_conv1 = pt_debug['after_conv1']
     r = compare_arrays(tvm_conv1, pt_conv1, name="conv1_output")
     print_comparison(r)
     comparisons.append(r)
 
-    # BN1 output (TVM topo 17 = full batch_norm result)
-    tvm_bn1 = get_tvm_tensor(tvm_data, 17)
+    # Fused conv1+bn1 output (TVM topo 6 = after multiply + add)
+    tvm_bn1 = get_tvm_tensor(tvm_data, 6)
     pt_bn1 = pt_debug['after_bn1']
-    r = compare_arrays(tvm_bn1, pt_bn1, name="bn1_output")
+    r = compare_arrays(tvm_bn1, pt_bn1, name="conv1+bn1_fused_output")
     print_comparison(r)
     comparisons.append(r)
 
-    # x_f_1 scaling (TVM topo 18)
-    tvm_xf1 = get_tvm_tensor(tvm_data, 18)
-    print(f"\n  x_f_1: TVM={tvm_xf1.item():.4f}, PyTorch adjust_factors={adjust_factors['x_f_1']}")
-
-    # After quantize to int16 (TVM topo 21 = cast to int16)
-    tvm_int16 = get_tvm_tensor(tvm_data, 21)
-    # PyTorch: layer1 debug input_quantized (= x * x_f_1, cast to int16)
+    # After quantize to int16 (TVM topo 8 = cast to int16)
+    tvm_int16 = get_tvm_tensor(tvm_data, 8)
     layer1_debug = pt_debug['layer1']
     pt_int16_input = layer1_debug['input_quantized']
     r = compare_arrays(tvm_int16, pt_int16_input, name="quantized_to_int16 (input to layer1)")
     print_comparison(r)
     comparisons.append(r)
 
-    # --- 2. Layer 1 (Basic Block 1: 16->16, no downsample, y_f_1=1) ---
+    # --- 2. Layer 1 (Basic Block 1: 16->16, no downsample) ---
     print("\n" + "=" * 80)
     print("SECTION 2: Layer 1 (BasicBlock 16->16, no downsample)")
     print("=" * 80)
 
     # Act1 output (min_max_quantize -> uint8)
-    # TVM topo 26: quantize output
-    tvm_act1 = get_tvm_tensor(tvm_data, 26)
+    tvm_act1 = get_tvm_tensor(tvm_data, 13)
     pt_act1 = layer1_debug['after_act1']
     print(f"\n  layer1.act1 (min_max_quantize):")
     print(f"    TVM: shape={tvm_act1.shape} dtype={tvm_act1.dtype} range=[{tvm_act1.min()}, {tvm_act1.max()}]")
     print(f"    PT:  shape={pt_act1.shape} dtype={pt_act1.detach().numpy().dtype} range=[{pt_act1.min().item()}, {pt_act1.max().item()}]")
-    print(f"    Note: TVM outputs uint8 (4-bit quantized), PyTorch outputs int16 (pre-quantize activation)")
 
     # Conv1 output (qconv)
-    # TVM topo 29: qconv output (int16)
-    tvm_qconv1 = get_tvm_tensor(tvm_data, 29)
+    tvm_qconv1 = get_tvm_tensor(tvm_data, 16)
     pt_conv1_l1 = layer1_debug['after_conv1']
     r = compare_arrays(tvm_qconv1, pt_conv1_l1, name="layer1.conv1 (qconv)")
     print_comparison(r)
     comparisons.append(r)
 
     # BN1 output (fused_batch_norm)
-    # TVM topo 32: fused_batch_norm output
-    tvm_bn1_l1 = get_tvm_tensor(tvm_data, 32)
+    tvm_bn1_l1 = get_tvm_tensor(tvm_data, 19)
     pt_bn1_l1 = layer1_debug['after_bn1']
     r = compare_arrays(tvm_bn1_l1, pt_bn1_l1, name="layer1.bn1 (fused_batch_norm)")
     print_comparison(r)
     comparisons.append(r)
 
     # Act2 (second quantize)
-    # TVM topo 35: second min_max_quantize
-    tvm_act2 = get_tvm_tensor(tvm_data, 35)
+    tvm_act2 = get_tvm_tensor(tvm_data, 22)
     pt_act2 = layer1_debug['after_act2']
     print(f"\n  layer1.act2 (min_max_quantize):")
     print(f"    TVM: shape={tvm_act2.shape} dtype={tvm_act2.dtype} range=[{tvm_act2.min()}, {tvm_act2.max()}]")
     print(f"    PT:  shape={pt_act2.shape} dtype={pt_act2.detach().numpy().dtype} range=[{pt_act2.min().item()}, {pt_act2.max().item()}]")
 
     # Conv2 output (qconv)
-    # TVM topo 38: second qconv
-    tvm_qconv2 = get_tvm_tensor(tvm_data, 38)
+    tvm_qconv2 = get_tvm_tensor(tvm_data, 25)
     pt_conv2_l1 = layer1_debug['after_conv2']
     r = compare_arrays(tvm_qconv2, pt_conv2_l1, name="layer1.conv2 (qconv)")
     print_comparison(r)
     comparisons.append(r)
 
     # BN2 output
-    # TVM topo 41: second fused_batch_norm
-    tvm_bn2_l1 = get_tvm_tensor(tvm_data, 41)
+    tvm_bn2_l1 = get_tvm_tensor(tvm_data, 28)
     pt_bn2_l1 = layer1_debug['after_bn2']
     r = compare_arrays(tvm_bn2_l1, pt_bn2_l1, name="layer1.bn2 (fused_batch_norm)")
     print_comparison(r)
     comparisons.append(r)
 
     # Residual + output
-    # TVM topo 60: final output after residual add + clip + cast
-    tvm_block1_out = get_tvm_tensor(tvm_data, 60)
+    # TVM topo 47: cast_3_1 = final output after residual add + clip + cast
+    tvm_block1_out = get_tvm_tensor(tvm_data, 47)
     pt_block1_out = layer1_debug['output']
     r = compare_arrays(tvm_block1_out, pt_block1_out, name="layer1 output (after residual add)")
     print_comparison(r)
@@ -332,52 +356,52 @@ def main():
     layer2_debug = pt_debug['layer2']
 
     # Act1 (quantize)
-    tvm_l2_act1 = get_tvm_tensor(tvm_data, 63)
+    tvm_l2_act1 = get_tvm_tensor(tvm_data, 50)
     pt_l2_act1 = layer2_debug['after_act1']
     print(f"\n  layer2.act1 (min_max_quantize):")
     print(f"    TVM: shape={tvm_l2_act1.shape} dtype={tvm_l2_act1.dtype} range=[{tvm_l2_act1.min()}, {tvm_l2_act1.max()}]")
     print(f"    PT:  shape={pt_l2_act1.shape} dtype={pt_l2_act1.detach().numpy().dtype} range=[{pt_l2_act1.min().item()}, {pt_l2_act1.max().item()}]")
 
     # Conv1 (stride=2, 16->32)
-    tvm_l2_conv1 = get_tvm_tensor(tvm_data, 66)
+    tvm_l2_conv1 = get_tvm_tensor(tvm_data, 53)
     pt_l2_conv1 = layer2_debug['after_conv1']
     r = compare_arrays(tvm_l2_conv1, pt_l2_conv1, name="layer2.conv1 (qconv stride=2)")
     print_comparison(r)
     comparisons.append(r)
 
     # BN1
-    tvm_l2_bn1 = get_tvm_tensor(tvm_data, 69)
+    tvm_l2_bn1 = get_tvm_tensor(tvm_data, 56)
     pt_l2_bn1 = layer2_debug['after_bn1']
     r = compare_arrays(tvm_l2_bn1, pt_l2_bn1, name="layer2.bn1 (fused_batch_norm)")
     print_comparison(r)
     comparisons.append(r)
 
     # Conv2 (split into 28+4 channels, accumulated)
-    # TVM topo 84 = cast_5 = final conv2 output after split accumulation
-    tvm_l2_conv2 = get_tvm_tensor(tvm_data, 84)
+    # TVM topo 71 = cast_5 = final conv2 output after split accumulation + clip + cast
+    tvm_l2_conv2 = get_tvm_tensor(tvm_data, 71)
     pt_l2_conv2 = layer2_debug['after_conv2']
     r = compare_arrays(tvm_l2_conv2, pt_l2_conv2, name="layer2.conv2 (qconv split 28+4)")
     print_comparison(r)
     comparisons.append(r)
 
     # BN2
-    tvm_l2_bn2 = get_tvm_tensor(tvm_data, 87)
+    tvm_l2_bn2 = get_tvm_tensor(tvm_data, 74)
     pt_l2_bn2 = layer2_debug['after_bn2']
     r = compare_arrays(tvm_l2_bn2, pt_l2_bn2, name="layer2.bn2 (fused_batch_norm)")
     print_comparison(r)
     comparisons.append(r)
 
     # Downsample output
-    # TVM topo 106 = cast_5_1 = downsample path output (after qconv 1x1 + bn + scale)
-    tvm_l2_ds = get_tvm_tensor(tvm_data, 106)
+    # TVM topo 85 = fused_batch_norm_1_3 = downsample path bn output
+    tvm_l2_ds = get_tvm_tensor(tvm_data, 85)
     pt_l2_ds = layer2_debug['downsample_output']
     r = compare_arrays(tvm_l2_ds, pt_l2_ds, name="layer2.downsample output")
     print_comparison(r)
     comparisons.append(r)
 
     # Block output (after residual add)
-    # TVM topo 121 = clip_2_3 -> topo 122 = cast_5_2 = layer2 output
-    tvm_l2_out = get_tvm_tensor(tvm_data, 121)
+    # TVM topo 93 = cast_5_1 = layer2 output after residual add + clip + cast
+    tvm_l2_out = get_tvm_tensor(tvm_data, 93)
     pt_l2_out = layer2_debug['output']
     r = compare_arrays(tvm_l2_out, pt_l2_out, name="layer2 output (after residual add)")
     print_comparison(r)
@@ -391,53 +415,54 @@ def main():
     layer3_debug = pt_debug['layer3']
 
     # Act1 (quantize)
-    tvm_l3_act1 = get_tvm_tensor(tvm_data, 124)
+    tvm_l3_act1 = get_tvm_tensor(tvm_data, 111)
     pt_l3_act1 = layer3_debug['after_act1']
     print(f"\n  layer3.act1 (min_max_quantize):")
     print(f"    TVM: shape={tvm_l3_act1.shape} dtype={tvm_l3_act1.dtype} range=[{tvm_l3_act1.min()}, {tvm_l3_act1.max()}]")
     print(f"    PT:  shape={pt_l3_act1.shape} dtype={pt_l3_act1.detach().numpy().dtype} range=[{pt_l3_act1.min().item()}, {pt_l3_act1.max().item()}]")
 
     # Conv1 (split 28+4, stride=2, 32->64)
-    # TVM topo 136 = cast_8 = conv1 output after split accumulation
-    tvm_l3_conv1 = get_tvm_tensor(tvm_data, 136)
+    # TVM topo 123 = cast_8 = conv1 output after split accumulation
+    tvm_l3_conv1 = get_tvm_tensor(tvm_data, 123)
     pt_l3_conv1 = layer3_debug['after_conv1']
     r = compare_arrays(tvm_l3_conv1, pt_l3_conv1, name="layer3.conv1 (qconv split 28+4, stride=2)")
     print_comparison(r)
     comparisons.append(r)
 
     # BN1
-    tvm_l3_bn1 = get_tvm_tensor(tvm_data, 139)
+    tvm_l3_bn1 = get_tvm_tensor(tvm_data, 126)
     pt_l3_bn1 = layer3_debug['after_bn1']
     r = compare_arrays(tvm_l3_bn1, pt_l3_bn1, name="layer3.bn1 (fused_batch_norm)")
     print_comparison(r)
     comparisons.append(r)
 
     # Conv2 (split 28+28+8, 64->64)
-    # TVM topo 160 = cast_8_1 = conv2 output after 3-way split accumulation
-    tvm_l3_conv2 = get_tvm_tensor(tvm_data, 160)
+    # TVM topo 147 = cast_8_1 = conv2 output after 3-way split accumulation
+    tvm_l3_conv2 = get_tvm_tensor(tvm_data, 147)
     pt_l3_conv2 = layer3_debug['after_conv2']
     r = compare_arrays(tvm_l3_conv2, pt_l3_conv2, name="layer3.conv2 (qconv 3-way split)")
     print_comparison(r)
     comparisons.append(r)
 
     # BN2
-    tvm_l3_bn2 = get_tvm_tensor(tvm_data, 163)
+    tvm_l3_bn2 = get_tvm_tensor(tvm_data, 150)
     pt_l3_bn2 = layer3_debug['after_bn2']
     r = compare_arrays(tvm_l3_bn2, pt_l3_bn2, name="layer3.bn2 (fused_batch_norm)")
     print_comparison(r)
     comparisons.append(r)
 
     # Downsample output
-    # TVM topo 182 = cast_8_2 = downsample path output
-    tvm_l3_ds = get_tvm_tensor(tvm_data, 182)
+    # TVM topo 161 = fused_batch_norm_2_2 = downsample path bn output
+    tvm_l3_ds = get_tvm_tensor(tvm_data, 161)
     pt_l3_ds = layer3_debug['downsample_output']
     r = compare_arrays(tvm_l3_ds, pt_l3_ds, name="layer3.downsample output")
     print_comparison(r)
     comparisons.append(r)
 
     # Block output (after residual add)
-    # TVM topo 193 = cast_8_3 = layer3 output
-    tvm_l3_out = get_tvm_tensor(tvm_data, 193)
+    # TVM topo 169 = cast_8_2 = layer3 output after residual add
+    # Actually check: topo 180 = cast_8_3 might be after layout transforms for residual
+    tvm_l3_out = get_tvm_tensor(tvm_data, 180)
     pt_l3_out = layer3_debug['output']
     r = compare_arrays(tvm_l3_out, pt_l3_out, name="layer3 output (after residual add)")
     print_comparison(r)
@@ -448,41 +473,29 @@ def main():
     print("SECTION 5: Post-processing (dequant, relu, avgpool, dense)")
     print("=" * 80)
 
-    # After dequantize (cast to float32 * post_f_inv)
-    # TVM topo 198 = multiply_6 = dequantized float
-    tvm_dequant = get_tvm_tensor(tvm_data, 198)
-    # PyTorch: after the layer3 output, the model does out / bn2_f_3
-    # In pt_debug, layer3 is_fp_output=True, so output_fp = out / bn2_f_3
-    # But the model-level debug captures 'after_relu' which is after relu
-    # We need the pre-relu dequantized value
-
-    # The TVM layout is (1, 4, 8, 8, 16) at topo 198, need to compare with NCHW
-    tvm_relu = get_tvm_tensor(tvm_data, 200)  # after layout_transform_13 -> NCHW (1,64,8,8)
-    tvm_relu_out = get_tvm_tensor(tvm_data, 199)  # relu output in (1,4,8,8,16)
-
-    # After relu: TVM topo 200 (layout transformed to NCHW)
-    tvm_after_relu = get_tvm_tensor(tvm_data, 200)
+    # After relu: TVM topo 187 (layout transformed to NCHW)
+    tvm_after_relu = get_tvm_tensor(tvm_data, 187)
     pt_after_relu = pt_debug['after_relu']
     r = compare_arrays(tvm_after_relu, pt_after_relu, name="after_relu")
     print_comparison(r)
     comparisons.append(r)
 
     # After avgpool
-    tvm_avgpool = get_tvm_tensor(tvm_data, 201)
+    tvm_avgpool = get_tvm_tensor(tvm_data, 188)
     pt_avgpool = pt_debug['after_avgpool']
     r = compare_arrays(tvm_avgpool, pt_avgpool, name="after_avgpool")
     print_comparison(r)
     comparisons.append(r)
 
     # After flatten (view)
-    tvm_flatten = get_tvm_tensor(tvm_data, 202)
+    tvm_flatten = get_tvm_tensor(tvm_data, 189)
     pt_view = pt_debug['after_view']
     r = compare_arrays(tvm_flatten, pt_view, name="after_flatten/view")
     print_comparison(r)
     comparisons.append(r)
 
     # Final output (dense + bias_add)
-    tvm_output = get_tvm_tensor(tvm_data, 206)
+    tvm_output = get_tvm_tensor(tvm_data, 193)
     pt_final = pt_debug['output']
     r = compare_arrays(tvm_output, pt_final, name="final_output (dense + bias)")
     print_comparison(r)
@@ -521,7 +534,7 @@ def main():
 
     # Print final output comparison
     print(f"\nFinal outputs:")
-    tvm_final = get_tvm_tensor(tvm_data, 206)
+    tvm_final = get_tvm_tensor(tvm_data, 193)
     pt_final_np = pt_debug['output'].detach().cpu().numpy()
     print(f"  TVM:     {tvm_final.ravel()}")
     print(f"  PyTorch: {pt_final_np.ravel()}")
