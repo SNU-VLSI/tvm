@@ -74,9 +74,12 @@ def getModel_(input_shape, until_relay: int = None):
 
     N, IC, H, W = (N, 16, get_height(H, 3, 1, 1), get_width(W, 3, 1, 1))
 
-    y = c.check(relay.nn.batch_norm(y,
-                            relay.var("bn_gamma", shape=(16,), dtype="float32"), relay.var("bn_beta", shape=(16,), dtype="float32"),
-                            relay.var("bn_moving_mean", shape=(16,), dtype="float32"), relay.var("bn_moving_var", shape=(16,), dtype="float32"))[0])
+    # conv1 + bn1 fused as multiply + add (conv1 bias absorbed into fused_bias)
+    # Matches BasicBlockIMCFlowInt16 pattern: Conv(bias=None) + MultiplyAdd(scale, bias)
+    # Shape (1, 16, 1, 1) so layout transformer sees NCHW, not C
+    conv1bn_scale = relay.var("conv1bn_fused_scale", shape=(1, 16, 1, 1), dtype="float32")
+    conv1bn_bias = relay.var("conv1bn_fused_bias", shape=(1, 16, 1, 1), dtype="float32")
+    y = c.check(y * conv1bn_scale + conv1bn_bias)
 
     y = c.check(y * relay.var("x_f_1", shape=(1,), dtype="float32"))
     y = relay.clip(y, a_min=-32768.0, a_max=32767.0)
@@ -279,7 +282,7 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
   out, var_dict = getModel_([1, 3, iH, iW], until_relay=until_relay)
 
   # Load checkpoint
-  checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/2025-Nov-20-18-05-24/imcflow/2026-Feb-13-10-40-47/checkpoint.pth.tar'
+  checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar'
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']
@@ -299,13 +302,9 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
     Raises:
         ValueError: If no matching parameter found in checkpoint
     """
-    # Direct mappings for initial conv and bn layers
+    # Direct mappings for initial conv and fc layers
     direct_mappings = {
         'weight1': 'conv1.weight',
-        'bn_gamma': 'bn1.weight',
-        'bn_beta': 'bn1.bias',
-        'bn_moving_mean': 'bn1.running_mean',
-        'bn_moving_var': 'bn1.running_var',
         'dense_weight': 'fc.weight',
         'dense_bias': 'fc.bias',
     }
@@ -319,6 +318,25 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
         return tensor
       else:
         raise ValueError(f"Key {key} not found in checkpoint for parameter {name}")
+
+    # Fused conv1 + bn1 parameters (conv1 bias absorbed into bn1)
+    # fused_scale = gamma / sqrt(var + eps)
+    # fused_bias  = beta + (conv1_bias - mean) * gamma / sqrt(var + eps)
+    if name == 'conv1bn_fused_scale':
+      gamma = model_dict['bn1.weight'].cpu().numpy()
+      var = model_dict['bn1.running_var'].cpu().numpy()
+      result = (gamma / np.sqrt(var + 1e-5)).astype(dtype)
+      return result.reshape(shape)
+
+    if name == 'conv1bn_fused_bias':
+      gamma = model_dict['bn1.weight'].cpu().numpy()
+      beta = model_dict['bn1.bias'].cpu().numpy()
+      mean = model_dict['bn1.running_mean'].cpu().numpy()
+      var = model_dict['bn1.running_var'].cpu().numpy()
+      conv1_bias = model_dict['conv1.bias'].cpu().numpy()
+      inv_std = gamma / np.sqrt(var + 1e-5)
+      result = (beta + (conv1_bias - mean) * inv_std).astype(dtype)
+      return result.reshape(shape)
 
     # Handle scaling factors from adjust_factors
     if name == 'x_f_1':
