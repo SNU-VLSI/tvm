@@ -155,6 +155,7 @@ REMOTE_PORT="1326"
 REMOTE_USER="root"
 REMOTE_PASSWORD="root"
 REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
+REMOTE_PATH="$REMOTE_BASE_PATH/eval_dir"
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
 DEFAULT_RUNNER_NAME="."
@@ -262,14 +263,34 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
-    echo "Step 6: Executing on remote chip (timeout: 300s)..."
+    echo "Step 6: Executing on remote chip (timeout: 60s)..."
     echo ""
-    sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./execute_graph \
-                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
-                cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
-                tvm_status=\$?; exit \$tvm_status"
+    cmd="source ~/.bashrc && source /home/root/.venv/bin/activate && \
+           cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 60 stdbuf -o0 -e0 ./execute_graph \
+           eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/scan_gen/$NPZ_FILE_PATH; \
+           cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
+           tvm_status=\$?; exit \$tvm_status"
+    echo "Running command on remote host:"
+    # send run command script for inplace test
+    echo "$cmd" > /tmp/run.sh
+    loop_cmd="
+    #!/bin/bash
+    for i in \$(seq 1 10); do
+        echo \"Run \$i\"
+        bash run.sh 
+    done
+    "
+    echo "$loop_cmd" > /tmp/run_loop.sh
+    sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" "/tmp/run.sh" "root@$REMOTE_HOST:$REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build/"
+    sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" "/tmp/run_loop.sh" "root@$REMOTE_HOST:$REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build/"
+
+    # if you want to test with remote, uncomment below
+    # sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
+    #            "source ~/.bashrc && source /home/root/.venv/bin/activate && \
+    #             cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 stdbuf -o0 -e0 ./execute_graph \
+    #             eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
+    #             cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
+    #             tvm_status=\$?; exit \$tvm_status"
 
     if [ $? -eq 0 ]; then
         echo ""

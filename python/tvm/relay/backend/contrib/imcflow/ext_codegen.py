@@ -13,7 +13,10 @@ import math
 import os
 from enum import Enum
 
-TEMP_DEBUG = 0
+DEBUG_FILE_WRITE_NO = False
+DEBUG_PRINTF_NO     = False
+DEBUG_RUN_NO        = False
+DEBUG_MMIO_TRACE    = True
 
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
@@ -47,8 +50,8 @@ elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
     DMM_NAMES       = ["VDD", "DDA", "DDC"]
     NPLCs           = [0.001, 0.001, 0.001]
     INTERVALs       = [-1, -1, -1]
-    SAMPLE_COUNTs   = [500, 500, 500]
-    CURR_RANGEs     = [0.1, 0.01, 0.1]
+    SAMPLE_COUNTs   = [50000, 50000, 50000]
+    CURR_RANGEs     = [0.1, 0.1, 0.1]
     RESETs          = [1, 1, 1]
     OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
   elif POWER_MEASURE_PHASE == PowerMeasurePhase.MODEL:
@@ -56,7 +59,7 @@ elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
     NPLCs           = [0.001, 0.001, 0.001]
     INTERVALs       = [-1, -1, -1]
     SAMPLE_COUNTs   = [50000, 50000, 50000]
-    CURR_RANGEs     = [0.1, 0.01, 0.1]
+    CURR_RANGEs     = [0.1, 0.1, 0.1]
     RESETs          = [1, 1, 1]
     OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
   else:
@@ -365,6 +368,7 @@ static inline void wait_imcflow_interrupt(int fd)
   timeout.tv_sec = 1;
   timeout.tv_usec = 0;
 
+  fprintf(stderr, "Waiting for IMCFlow interrupt...\\n");
   int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
   if (ret == 0) {
     fprintf(stderr, "ERROR: Interrupt timeout (1s) - IMCFlow not responding\\n");
@@ -383,6 +387,7 @@ static inline void wait_imcflow_interrupt(int fd)
 
 static inline void generate_ack(uint32_t* int_ack_gen)
 {
+  fprintf(stderr, "Generating interrupt acknowledgment...\\n");
   int_ack_gen[0] = 0b1;
 }
 """)
@@ -427,7 +432,13 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
   def emitReset(self):
     """Generate code to reset the NPU state."""
-    return f"reset_gen_pointer[0] = 1;\n"
+    code = ""
+    if DEBUG_MMIO_TRACE:
+      code += 'fprintf(stderr,"[MMIO] WRITE reset_gen_pointer[0] = 1\\n");\n'
+    code += "reset_gen_pointer[0] = 1;\n"
+    if DEBUG_MMIO_TRACE:
+      code += 'fprintf(stderr,"[MMIO] DONE  reset_gen_pointer[0]\\n");\n'
+    return code
 
   def emitWarmup(self):
     """Generate code to warm up the NPU state."""
@@ -469,6 +480,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       code += f"// --- Power measurement start (tile {t_idx}) ---\n"
     else:
       code += f"// --- Power measurement start ---\n"
+    
+    code += f"fprintf(stderr, \"[DMM] starting measurement...\\n\");\n"
 
     code += "{\n"
     code.nextIndent()
@@ -479,10 +492,16 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       interval_val = -1 if INTERVALs[i] == "MIN" else INTERVALs[i]
 
       if t_idx is not None:
-        ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}.txt"
+        if not DEBUG_FILE_WRITE_NO:
+          ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}.txt"
+        else:
+          ofname = None
         server_ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}_server.txt"
       else:
-        ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}.txt"
+        if not DEBUG_FILE_WRITE_NO:
+          ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}.txt"
+        else:
+          ofname = None
         server_ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}_server.txt"
 
       trailing = "," if i < n_dmms - 1 else ""
@@ -524,6 +543,10 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       code += f"// --- Power measurement end (tile {t_idx}) ---\n"
     else:
       code += f"// --- Power measurement end ---\n"
+    if t_idx is not None:
+      code += f"fprintf(stderr, \"[DMM] getting measurement result... (tile {t_idx})\\n\");\n"
+    else:
+      code += f"fprintf(stderr, \"[DMM] getting measurement result... \\n\");\n"
     code += "{\n"
     code.nextIndent()
     code += f"char dmm_name[64];\n"
@@ -623,32 +646,48 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
   def generatePolicyUpdateCode(self):
     """Generate policy update code."""
+    t = lambda msg: f'fprintf(stderr,"[MMIO] {msg}\\n");' if DEBUG_MMIO_TRACE else ""
     out = [
       "// Set the inode pc to 0 and run.",
-      "fprintf(stderr,\"RUN policy update...\\n\");",
+      "fprintf(stderr,\"RUN policy update...\\n\");" if not DEBUG_PRINTF_NO else "",
+      t("WRITE npu_pointer[PC_REG_IDX+i] (policy PC setup)"),
       "for(int i=0; i<INODE_NUM; i++) {",
       "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
       "}",
+      t("DONE  npu_pointer[PC_REG_IDX+i]"),
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      t("WRITE npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE"),
       " npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
+      t("DONE  npu_pointer[STATE_REG_IDX]"),
       "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("wait_for_idle(npu_pointer);" if USE_POLLING else ""),
+      t("WRITE generate_ack"),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
+      t("WRITE npu_pointer[INTR_DONE_REG_IDX] = 1"),
       "npu_pointer[INTR_DONE_REG_IDX] = 1;",
+      t("DONE  npu_pointer[INTR_DONE_REG_IDX]"),
     ]
     return "\n".join(out) + "\n"
 
   def generateInvokeCode(self):
     """Generate NPU invoke code."""
+    t = lambda msg: f'fprintf(stderr,"[MMIO] {msg}\\n");' if DEBUG_MMIO_TRACE else ""
     out = [
-      "fprintf(stderr,\"Invoke NPU...\\n\");",
+      "fprintf(stderr,\"Invoke NPU...\\n\");" if not DEBUG_PRINTF_NO else "",
+      t("WRITE npu_pointer[PC_REG_IDX+i] (invoke PC setup)"),
       "for(int i=0; i<INODE_NUM; i++) {",
       "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
       "}",
+      t("DONE  npu_pointer[PC_REG_IDX+i]"),
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
+      t("WRITE npu_pointer[STATE_REG_IDX] = SET_RUN_CODE"),
       "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
+      t("DONE  npu_pointer[STATE_REG_IDX]"),
       "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("wait_for_idle(npu_pointer);" if USE_POLLING else ""),
+      t("WRITE generate_ack"),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
-        "npu_pointer[INTR_DONE_REG_IDX] = 1;"
+      t("WRITE npu_pointer[INTR_DONE_REG_IDX] = 1"),
+      "npu_pointer[INTR_DONE_REG_IDX] = 1;",
+      t("DONE  npu_pointer[INTR_DONE_REG_IDX]"),
     ]
     return "\n".join(out) + "\n"
 
@@ -691,6 +730,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       # Binary object file transfer
       var_prefix = getObjectFileName(block, func_name)
       src_var = f"{var_prefix}_start"
+      if DEBUG_MMIO_TRACE:
+        code += f'fprintf(stderr,"[MMIO] WRITE npu_pointer[{base_address_name}/4 + ...] (obj: {block.id}, tile:{tile_idx})\\n");\n'
       if tile_idx is None:
         loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
         code += f"for(int i=0; i<{loop_end}; i++){{\n"
@@ -701,6 +742,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
         code += f"for(int i=1; i<8; i++){{\n"
         code += f"  npu_pointer[({base_address_name} / 4) + i] = 0;\n"
         code += f"}}\n"
+      if DEBUG_MMIO_TRACE:
+        code += f'fprintf(stderr,"[MMIO] DONE  npu_pointer[{base_address_name}/4 + ...] (obj: {block.id})\\n");\n'
       return code
 
     def _appendLoopForCVarTransfer(code, block, base_address_name, func_name, tile_idx=None):
@@ -708,9 +751,13 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
       src_var = getCInputVarName(func_name, block)
 
+      if DEBUG_MMIO_TRACE:
+        code += f'fprintf(stderr,"[MMIO] WRITE npu_pointer[{base_address_name}/4 + ...] (cvar: {block.id}, {loop_end-loop_start} words, tile:{tile_idx})\\n");\n'
       code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
       code += f"  npu_pointer[({base_address_name} / 4) + i] = ((uint32_t*){src_var})[i + {loop_start//4}];\n"
       code += f"}}\n"
+      if DEBUG_MMIO_TRACE:
+        code += f'fprintf(stderr,"[MMIO] DONE  npu_pointer[{base_address_name}/4 + ...] (cvar: {block.id})\\n");\n'
       return code
 
     code = CodeWriter()
@@ -723,9 +770,11 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
-        code += f"fprintf(stderr,\"Transferring input block {block.id} to NPU [TILE:{tile_idx}]\\n\");\n"
+        if not DEBUG_PRINTF_NO and not DEBUG_MMIO_TRACE:
+          code += f"fprintf(stderr,\"Transferring input block {block.id} to NPU [TILE:{tile_idx}]\\n\");\n"
       else:
-        code += f"fprintf(stderr,\"Transferring input block {block.id} to NPU\\n\");\n"
+        if not DEBUG_PRINTF_NO and not DEBUG_MMIO_TRACE:
+          code += f"fprintf(stderr,\"Transferring input block {block.id} to NPU\\n\");\n"
 
       # Determine source variable and loop parameters based on block type
       if isinstance(block.id, str):
@@ -749,17 +798,23 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
-        code += f"fprintf(stderr,\"Transferring output block {block.id} to out{idx} [TILE:{tile_idx}]\\n\");\n"
+        if not DEBUG_PRINTF_NO and not DEBUG_MMIO_TRACE:
+          code += f"fprintf(stderr,\"Transferring output block {block.id} to out{idx} [TILE:{tile_idx}]\\n\");\n"
       else:
-        code += f"fprintf(stderr,\"Transferring output block {block.id} to out{idx}\\n\");\n"
+        if not DEBUG_PRINTF_NO and not DEBUG_MMIO_TRACE:
+          code += f"fprintf(stderr,\"Transferring output block {block.id} to out{idx}\\n\");\n"
 
       # Get loop parameters
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
 
       # Generate loop code
+      if DEBUG_MMIO_TRACE:
+        code += f'fprintf(stderr,"[MMIO] READ  npu_pointer[{base_address_name}/4 + ...] -> out{idx} ({loop_end-loop_start} words, tile:{tile_idx})\\n");\n'
       code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
       code += f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = npu_pointer[({base_address_name} / 4) + i];\n"
       code += f"}}\n"
+      if DEBUG_MMIO_TRACE:
+        code += f'fprintf(stderr,"[MMIO] DONE  READ npu_pointer[{base_address_name}/4 + ...] -> out{idx}\\n");\n'
     return code
 
   def generateBaseAddrMacros(self):
@@ -851,7 +906,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     # Kernel function prototype and definition (C)
     code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
     code.nextIndent()
-    code += f"fprintf(stderr,\"{self.func_name}_kernel called\\n\");\n"
+    if not DEBUG_PRINTF_NO:
+      code += f"fprintf(stderr,\"{self.func_name}_kernel called\\n\");\n"
     code += self.generateDevicePointerSetup()
     code += self.emitReset()
     if self.os == "linux":
@@ -870,16 +926,18 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
-    code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
-    if not TEMP_DEBUG:
+    if not DEBUG_RUN_NO:
+      code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
       code += self.generateInvokeCode() # proceed up to halt
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
     code += f"// Tiled execution with factor {tile_factor}\n"
-    code += f"fprintf(stderr,\"Starting tiled execution with factor {tile_factor}\\n\");\n"
+    if not DEBUG_PRINTF_NO:
+      code += f"fprintf(stderr,\"Starting tiled execution with factor {tile_factor}\\n\");\n"
     for t_idx in range(tile_factor):
-      code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
+      if not DEBUG_PRINTF_NO:
+        code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
 
@@ -887,7 +945,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
         # set DMM to start measurement at the same time as NPU execution
         code += self.generatePowerMeasureStart(t_idx)
 
-      if not TEMP_DEBUG:
+      if not DEBUG_RUN_NO:
         code += self.generateInvokeCode() # end of exec
 
       if power_measure_active and POWER_MEASURE_PHASE == PowerMeasurePhase.TILE: # measure power
