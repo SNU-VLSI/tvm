@@ -47,7 +47,7 @@ from handcraft.copy_cpp import copy_cpp_as_patched
 
 np.random.seed(1234)
 
-DEBUG_EXECUTOR=0
+DEBUG_EXECUTOR=1
 DEBUG_SUBSET=1
 
 # Print environment configuration at startup
@@ -987,10 +987,16 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
 
     # Generate and save test inputs
     input_dir = f"./{dir_name}/test_inputs"
-    print(f"Generating test inputs for {test_name} with pattern '{input_pattern}'...")
     known_keys = param_dict.keys() if param_dict is not None else []
     gen = InputGenerator(mod=mod, known_keys=known_keys, seed=42)
-    inputs = gen.generate_input(pattern=input_pattern)
+
+    if options.dataset:
+      print(f"Loading test input from dataset '{options.dataset}' sample {options.sample}...")
+      inputs = gen.generate_from_dataset(options.dataset, options.sample)
+    else:
+      print(f"Generating test inputs for {test_name} with pattern '{input_pattern}'...")
+      inputs = gen.generate_input(pattern=input_pattern)
+
     gen.save_to_files(inputs, input_dir)
     gen.save_to_files(param_dict, input_dir) # also save params
 

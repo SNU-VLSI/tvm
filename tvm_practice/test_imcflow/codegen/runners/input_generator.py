@@ -171,6 +171,86 @@ class InputGenerator:
 
         return inputs
 
+    def generate_from_dataset(self, dataset_name: str, sample_idx: int,
+                              dataset_base_dir: str = None) -> Dict[str, np.ndarray]:
+        """
+        Generate input data from a dataset sample (e.g., CIFAR-10).
+
+        Loads the specified sample from the dataset's images.npy file and
+        returns it in the same format as generate_input() — a dict mapping
+        input name to numpy array, compatible with save_to_files().
+
+        Args:
+            dataset_name: Dataset name (e.g., "cifar10"). Must match a
+                          subdirectory under dataset_base_dir.
+            sample_idx: 0-based index of the sample to extract.
+            dataset_base_dir: Base directory containing dataset folders.
+                              Defaults to ./dataset/ relative to the codegen directory.
+
+        Returns:
+            Dictionary mapping input name to numpy array (batch dim included).
+
+        Raises:
+            ValueError: If no model was provided, or shape/dtype mismatch.
+            FileNotFoundError: If dataset files are not found.
+        """
+        if self.input_info is None:
+            raise ValueError(
+                "Cannot generate input from dataset: no model provided. "
+                "Please provide a mod parameter in the constructor."
+            )
+
+        if dataset_base_dir is None:
+            dataset_base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dataset")
+
+        images_path = os.path.join(dataset_base_dir, dataset_name, "images.npy")
+        labels_path = os.path.join(dataset_base_dir, dataset_name, "labels.npy")
+
+        if not os.path.exists(images_path):
+            raise FileNotFoundError(f"Dataset images not found: {images_path}")
+
+        # Load only the header first to check shape without loading all data
+        images = np.load(images_path, mmap_mode='r')
+        num_samples = images.shape[0]
+
+        if sample_idx < 0 or sample_idx >= num_samples:
+            raise ValueError(
+                f"Sample index {sample_idx} out of range. "
+                f"Dataset has {num_samples} samples (0-{num_samples - 1})."
+            )
+
+        # Extract the single sample with batch dimension: (1, C, H, W)
+        sample = np.array(images[sample_idx:sample_idx + 1])
+
+        # Load label if available
+        label = None
+        if os.path.exists(labels_path):
+            labels = np.load(labels_path, mmap_mode='r')
+            label = int(labels[sample_idx])
+
+        inputs = {}
+        for name, info in self.input_info.items():
+            expected_shape = info["shape"]
+            expected_dtype = info["dtype"]
+
+            # Validate spatial dimensions match (ignore batch dim)
+            if sample.shape[1:] != expected_shape[1:]:
+                raise ValueError(
+                    f"Dataset sample shape {sample.shape} does not match "
+                    f"model input '{name}' expected shape {expected_shape}. "
+                    f"Spatial dimensions must match."
+                )
+
+            # Cast dtype if needed (e.g., dataset float32 -> model int8)
+            inputs[name] = sample.astype(expected_dtype)
+
+        if label is not None:
+            print(f"  Dataset: {dataset_name}, sample: {sample_idx}, label: {label}")
+        else:
+            print(f"  Dataset: {dataset_name}, sample: {sample_idx}")
+
+        return inputs
+
     def generate_resnet8_input(self, small_debug=False) -> Dict[str, np.ndarray]:
         """
         Generate input for ResNet8 CIFAR-10 model.

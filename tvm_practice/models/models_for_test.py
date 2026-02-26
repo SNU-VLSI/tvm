@@ -127,6 +127,35 @@ def getOneReluModel():
 
   return out, param_dict
 
+def getOne1x1ConvModel(iH=8, iW=8, IC=256):
+  N, IC, H, W = 1, IC, iH, iW
+  OC = 64
+  KH, KW = 1, 1
+  stride, padding = 1, 1
+  # input = relay.var("conv_input", shape=(N,math.ceil(IC/256),H,W,4,8), dtype="int32")
+  input = relay.var("conv_input", shape=(N,IC,H,W), dtype="uint8")
+
+  y = imcflow_qconv2d(
+    input,
+    relay.var("conv_weight", shape=(OC,IC,KH,KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+
+  # param_dict = {"conv_weight": np.ones((OC,IC,KH,KW), dtype="int8")}
+  param_dict = {
+    "conv_weight": np.random.randint(-8, 8, size=(OC,IC,KH,KW), dtype=np.int8),
+    # "conv_weight": np.random.randint(-1, 0, size=(OC,IC,KH,KW), dtype=np.int8),
+  }
+
+  out = tvm.IRModule.from_expr(y)
+
+  return out, param_dict
+
 def getOneConvModel(iH=4, iW=4, IC=28):
   N, IC, H, W = 1, IC, iH, iW
   OC = 64
@@ -796,7 +825,7 @@ def getResnetCifar10SmallPretrained(small_debug=False):
     out, var_dict = getResnetCifar10Small_([1, 3, 32, 32])
   
   # Load checkpoint
-  checkpoint_path = '/root/project/tvm/tvm_practice/models/checkpoint.pth.tar' # with int16 conversion, CIM/tree/deploy/models_checkpoint/A4W4%2BPS6/2025-Sep-24-01-20-40/imcflow/2025-Oct-28-17-49-32
+  checkpoint_path = '/root/project/tvm/tvm_practice/models/checkpoint.pth.tar' 
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']

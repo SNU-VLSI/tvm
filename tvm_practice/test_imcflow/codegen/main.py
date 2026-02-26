@@ -36,6 +36,9 @@ Examples:
   python main.py --model one_relu --start-at codegen    # Skip transform
   python main.py --model one_relu --start-at simulate   # Skip transform, codegen, compile
 
+  # Use a specific dataset sample as input (e.g., CIFAR-10 sample #2)
+  python main.py --model resnet8_subset31_pretrained_orig --dataset cifar10 --sample 2
+
   # Run with handcraft patches (copy C++ from handcraft, codegen, patch inode, rebuild)
   python main.py --model resnet8_subset31_pretrained_orig --with-patch
 
@@ -83,6 +86,20 @@ Examples:
   )
 
   parser.add_argument(
+    "--dataset",
+    type=str,
+    default=None,
+    help="Dataset to use for input (e.g., 'cifar10'). Overrides --pattern when specified."
+  )
+
+  parser.add_argument(
+    "--sample",
+    type=int,
+    default=None,
+    help="0-based sample index within the dataset (requires --dataset)"
+  )
+
+  parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
@@ -121,6 +138,14 @@ Examples:
     if args.start_at:
       start_at = parse_start_at(args.start_at)
 
+    # Validate --dataset/--sample requirements
+    if args.dataset and args.sample is None:
+      print("Error: --sample is required when --dataset is specified")
+      return 1
+    if args.sample is not None and not args.dataset:
+      print("Error: --dataset is required when --sample is specified")
+      return 1
+
     # Validate --with-patch requirements
     if args.with_patch:
       script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -145,6 +170,8 @@ Examples:
       start_at=start_at,
       with_patch=args.with_patch,
       input_pattern=args.pattern if args.pattern else "default",
+      dataset=args.dataset,
+      sample=args.sample,
     )
   except ValueError as e:
     parser.print_help()

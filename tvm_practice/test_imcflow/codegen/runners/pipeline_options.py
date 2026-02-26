@@ -56,6 +56,8 @@ class PipelineOptions:
     skip_stages: Set[PipelineStage] = field(default_factory=set)
     with_patch: bool = False
     input_pattern: str = "default"
+    dataset: Optional[str] = None
+    sample: Optional[int] = None
     run_mode: RunMode = field(init=False)
 
     def __post_init__(self):
@@ -216,10 +218,11 @@ class PipelineOptions:
     def __str__(self) -> str:
         """Human-readable representation."""
         skip_names = [s.name for s in sorted(self.skip_stages)]
+        dataset_str = f", dataset={self.dataset}[{self.sample}]" if self.dataset else ""
         return (
             f"PipelineOptions(start_at={self.start_at.name}, stop_at={self.stop_at.name}, "
             f"skip={skip_names}, with_patch={self.with_patch}, "
-            f"pattern={self.input_pattern}, run_mode={self.run_mode.name})"
+            f"pattern={self.input_pattern}{dataset_str}, run_mode={self.run_mode.name})"
         )
 
 
