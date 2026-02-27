@@ -283,7 +283,7 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
 
   # Load checkpoint
   checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar'
-  checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+  checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']
 
