@@ -2,6 +2,7 @@
 
 (
   cd ${GEM5_RTL_TEST_DIR}
+  rm -rf ${GEM5_RTL_TEST_DIR}/logs
   ./run_standalone.sh \
     ${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_executable_make/build/program_scan_reg \
     no \
@@ -10,5 +11,6 @@
     "1234" \
     "${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_reg_files10"
   
-  cp -r ./logs ${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_gen_test_logs
+  rm -rf ${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_gen_test_logs
+  cp -r ${GEM5_RTL_TEST_DIR}/logs ${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_gen_test_logs
 )
