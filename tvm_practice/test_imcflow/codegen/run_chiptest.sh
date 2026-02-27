@@ -43,7 +43,6 @@ show_help() {
 }
 
 # Parse options
-RERUN_FLAG=false
 SKIP_STEP1=false
 SKIP_STEP2=false
 SKIP_STEP3=false
@@ -56,10 +55,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             show_help
-            ;;
-        -r)
-            RERUN_FLAG=true
-            shift
             ;;
         -s|--skip)
             if [[ -z "$2" ]]; then
@@ -160,6 +155,9 @@ DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
 DEFAULT_RUNNER_NAME="."
 NPZ_FILE_PATH="scan_reg_files"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/scan_steps.sh"
+
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"
 echo "Test folder: $TEST_FOLDER"
@@ -174,10 +172,7 @@ if [[ "$SKIP_STEP1" == true ]]; then
 else
     echo "Step 1: Running main.py to generate $TEST_FOLDER..."
     echo ""
-    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME" --patch-inode)
-    if [[ "$RERUN_FLAG" == true ]]; then
-        CMD+=("-r")
-    fi
+    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME" --with-patch)
     "${CMD[@]}"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to generate test folder"
@@ -201,61 +196,10 @@ else
     echo ""
 fi
 
-# Step 3: Transfer scan_reg_files to remote
-if [[ "$SKIP_STEP3" == true ]]; then
-    echo "Step 3: Skipped."
-    echo ""
-else
-    echo "Step 3: Transferring scan_reg_files to remote server..."
-    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/$NPZ_FILE_PATH"
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to transfer $NPZ_FILE_PATH"
-        exit 1
-    fi
-    echo ""
-fi
-
-# Step 4: Transfer scan_executable to remote
-if [[ "$SKIP_STEP4" == true ]]; then
-    echo "Step 4: Skipped."
-    echo ""
-else
-    echo "Step 4: Transferring program_scan_reg to remote server..."
-    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/scan_executable_make"
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to transfer scan_executable_make"
-        exit 1
-    fi
-    echo ""
-fi
-
-# Step 5: Execute scan program on remote chip
-if [[ "$SKIP_STEP5" == true ]]; then
-    echo "Step 5: Skipped."
-    echo ""
-else
-    echo "Step 5: Executing scan program on remote chip (timeout: 0.5s)..."
-    echo ""
-    sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
-                $REMOTE_BASE_PATH/scan_gen/$NPZ_FILE_PATH; \
-                cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
-                tvm_status=\$?; exit \$tvm_status"
-
-    if [ $? -eq 0 ]; then
-        echo ""
-        echo "=========================================="
-        echo "SCAN programming completed successfully!"
-        echo "=========================================="
-    else
-        echo ""
-        echo "=========================================="
-        echo "SCAN programming failed!"
-        echo "=========================================="
-        exit 1
-    fi
-fi
+# Steps 3-5: Scan programming (shared with run_dataset_eval.sh)
+scan_transfer_reg_files 3 "$SKIP_STEP3"
+scan_transfer_executable 4 "$SKIP_STEP4"
+scan_program_registers 5 "$SKIP_STEP5"
 
 # Step 6: Execute on remote chip
 if [[ "$SKIP_STEP6" == true ]]; then
