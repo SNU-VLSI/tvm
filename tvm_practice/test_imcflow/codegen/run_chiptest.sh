@@ -5,7 +5,7 @@
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 [options] <test_folder_evl.linux> <input_setting> [remote_host]"
+    echo "Usage: $0 [options] <test_folder_evl.linux> <input_setting>"
     echo ""
     echo "Automated chip test workflow that:"
     echo "  1. Runs test.py to generate test folder"
@@ -16,28 +16,19 @@ show_help() {
     echo "  6. Executes test on remote chip"
     echo ""
     echo "Options:"
-    echo "  -r              Pass -r to main.py in step 1"
     echo "  -s, --skip LIST  Comma-separated step numbers to skip (e.g., 1,3)"
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Arguments:"
     echo "  test_folder_evl.linux  Exact test folder name ending with '_evl.linux'"
     echo "  input_setting          Input setting for the test (e.g., 'ones', 'random', 'incremental')"
-    echo "  remote_host            Remote host IP (default: 147.46.117.99)"
     echo ""
     echo "Examples:"
     echo "  $0 one_relu_evl.linux ones"
     echo "  $0 one_conv_small_evl.linux random"
-    echo "  $0 -r resnet8_subset31_pretrained_orig_evl.linux random"
     echo "  $0 -s 1,3 resnet8_subset31_pretrained_orig_evl.linux random"
-    echo "  $0 one_conv_small_evl.linux random 192.168.1.100"
     echo ""
-    echo "Remote Configuration:"
-    echo "  Host: 147.46.117.99 (default, overridable via 3rd argument)"
-    echo "  Port: 1326"
-    echo "  User: root"
-    echo "  Path: /home/root/tvm/tvm_practice/test_imcflow/codegen"
-    echo ""
+    echo "Remote configuration is loaded from .env file."
     echo "Note: Host binary should be built before running this script"
     exit 0
 }
@@ -145,11 +136,6 @@ fi
 # Extract model name from test folder (remove _evl.linux suffix)
 TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"
 
-REMOTE_HOST="${3:-147.46.117.99}"
-REMOTE_PORT="1326"
-REMOTE_USER="root"
-REMOTE_PASSWORD="root"
-REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
 DEFAULT_RUNNER_NAME="."
@@ -157,6 +143,7 @@ NPZ_FILE_PATH="scan_reg_files"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/scan_steps.sh"
+load_env
 
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"

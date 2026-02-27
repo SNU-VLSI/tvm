@@ -3,15 +3,11 @@
 # Script to run dataset evaluation on remote chip
 # Usage: ./run_dataset_eval.sh [options] [num_samples] [remote_host]
 
-# Default configuration (REMOTE_HOST can be overridden via positional argument)
-REMOTE_PORT="1326"
-REMOTE_USER="root"
-REMOTE_PASSWORD="root"
-REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
 NPZ_FILE_PATH="scan_reg_files"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/scan_steps.sh"
+load_env
 
 # Paths
 BINARY_DIR="host_binary_make.dataset"
@@ -25,7 +21,7 @@ LOCAL_RESULT_DIR="eval_results"
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 [options] [num_samples] [remote_host]"
+    echo "Usage: $0 [options] [num_samples]"
     echo ""
     echo "Run dataset evaluation on remote chip"
     echo ""
@@ -47,7 +43,6 @@ show_help() {
     echo ""
     echo "Arguments:"
     echo "  num_samples    Number of samples to evaluate (default: 20)"
-    echo "  remote_host    Remote host IP (default: 147.46.117.99)"
     echo ""
     echo "Examples:"
     echo "  $0                       # Run all steps, evaluate 20 samples"
@@ -55,12 +50,8 @@ show_help() {
     echo "  $0 -s 1,2,3,4,5 50      # Skip to evaluation only, 50 samples"
     echo "  $0 -q 100               # Quiet mode, 100 samples"
     echo "  $0 -m my_model_evl.linux 20  # Use different evl dir for build"
-    echo "  $0 100 192.168.1.100     # Evaluate 100 samples on custom host"
     echo ""
-    echo "Remote Configuration:"
-    echo "  Host: 147.46.117.99 (default, overridable via 2nd argument)"
-    echo "  Port: $REMOTE_PORT"
-    echo "  User: $REMOTE_USER"
+    echo "Remote configuration is loaded from .env file."
     exit 0
 }
 
@@ -146,7 +137,6 @@ fi
 
 # Positional arguments
 NUM_SAMPLES="${1:-20}"
-REMOTE_HOST="${2:-147.46.117.99}"
 
 echo "=========================================="
 echo "Running dataset evaluation on remote chip"
@@ -221,9 +211,9 @@ cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > 
     echo "[CMD] sshpass -p \"$REMOTE_PASSWORD\" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \"$REMOTE_CMD\""
 
     if [[ "$QUIET_MODE" == true ]]; then
-        echo "(Quiet mode: remote stdout suppressed, results saved to $REMOTE_RESULT_PATH)"
+        echo "(Quiet mode: remote output suppressed, results saved to $REMOTE_RESULT_PATH)"
         sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-            "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" > /dev/null
+            "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" > /dev/null 2>&1
     else
         sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
             "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status"
