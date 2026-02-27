@@ -3,8 +3,7 @@
 # Script to run dataset evaluation on remote chip
 # Usage: ./run_dataset_eval.sh [options] [num_samples]
 
-# Default configuration
-REMOTE_HOST="147.46.117.99"
+# Default configuration (REMOTE_HOST can be overridden via positional argument)
 REMOTE_PORT="1326"
 REMOTE_USER="root"
 REMOTE_PASSWORD="root"
@@ -20,7 +19,7 @@ LABELS_PATH="$DATASET_DIR/cifar10/labels.npy"
 
 # Function to display help message
 show_help() {
-    echo "Usage: $0 [options] [num_samples]"
+    echo "Usage: $0 [options] [num_samples] [remote_host]"
     echo ""
     echo "Run dataset evaluation on remote chip"
     echo ""
@@ -35,14 +34,16 @@ show_help() {
     echo ""
     echo "Arguments:"
     echo "  num_samples    Number of samples to evaluate (default: 20)"
+    echo "  remote_host    Remote host IP (default: 147.46.117.99)"
     echo ""
     echo "Examples:"
     echo "  $0              # Run all steps, evaluate 20 samples"
     echo "  $0 100          # Run all steps, evaluate 100 samples"
     echo "  $0 -s 1,2 50    # Skip transfer steps, evaluate 50 samples"
+    echo "  $0 100 192.168.1.100  # Evaluate 100 samples on custom host"
     echo ""
     echo "Remote Configuration:"
-    echo "  Host: $REMOTE_HOST"
+    echo "  Host: 147.46.117.99 (default, overridable via 2nd argument)"
     echo "  Port: $REMOTE_PORT"
     echo "  User: $REMOTE_USER"
     exit 0
@@ -98,12 +99,14 @@ if [[ -n "$SKIP_LIST" ]]; then
     done
 fi
 
-# Default number of samples
+# Positional arguments
 NUM_SAMPLES="${1:-20}"
+REMOTE_HOST="${2:-147.46.117.99}"
 
 echo "=========================================="
 echo "Running dataset evaluation on remote chip"
 echo "Number of samples: $NUM_SAMPLES"
+echo "Remote host: $REMOTE_HOST"
 echo "=========================================="
 echo ""
 
@@ -114,8 +117,8 @@ if [[ "$SKIP_STEP1" == true ]]; then
 else
     echo "Step 1: Transferring $BINARY_DIR to remote server..."
     echo ""
-    echo "[CMD] echo \"y\" | ./transfer_evl.sh --path \"$BINARY_DIR\""
-    echo "y" | ./transfer_evl.sh --path "$BINARY_DIR"
+    echo "[CMD] echo \"y\" | ./transfer_evl.sh --host \"$REMOTE_HOST\" --path \"$BINARY_DIR\""
+    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "$BINARY_DIR"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer $BINARY_DIR"
         exit 1
@@ -130,8 +133,8 @@ if [[ "$SKIP_STEP2" == true ]]; then
 else
     echo "Step 2: Transferring $DATASET_DIR to remote server..."
     echo ""
-    echo "[CMD] ./dataset/transfer_dataset.sh"
-    ./dataset/transfer_dataset.sh
+    echo "[CMD] ./dataset/transfer_dataset.sh $REMOTE_HOST"
+    ./dataset/transfer_dataset.sh "$REMOTE_HOST"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer $DATASET_DIR"
         exit 1

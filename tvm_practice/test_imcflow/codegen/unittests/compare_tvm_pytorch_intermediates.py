@@ -82,10 +82,11 @@ def run_pytorch_debug(checkpoint_path, input_tensor):
     original_checkpoint = checkpoint['original_checkpoint']
 
     # Create debug model using original checkpoint (has 'module.' keys)
-    # Use PsumConv (bit-serial + ADC psum quantization) to match TVM imcflow_qconv
+    # Use PsumConv with hw_accurate=True to match TVM imcflow_qconv / acim.py
     psum_config = {
         'arraySize': 256, 'wbits': 4, 'abits': 4,
         'pbits': 6, 'prange': 1, 'cbits': 1,
+        'hw_accurate': True,
     }
     _, _, _, debug_model_int16 = create_debug_models(
         original_checkpoint, adjust_factors, psum_config=psum_config
@@ -244,7 +245,8 @@ def main():
     #  71: cast_5 (layer2 conv2 after split accum + clip + cast)
     #  74: fused_batch_norm_1_2 (layer2 bn2)
     #  85: fused_batch_norm_1_3 (layer2 downsample bn)
-    #  93: cast_5_1 (layer2 output after residual add)
+    #  93: cast_5_1 (downsample path cast, NOT layer2 output)
+    # 108: cast_5_2 (layer2 output after residual add + clip + cast)
     # 111: min_max_quantize_1_2 (layer3 act1)
     # 123: cast_8 (layer3 conv1 after split accum)
     # 126: fused_batch_norm_2 (layer3 bn1)
@@ -400,8 +402,8 @@ def main():
     comparisons.append(r)
 
     # Block output (after residual add)
-    # TVM topo 93 = cast_5_1 = layer2 output after residual add + clip + cast
-    tvm_l2_out = get_tvm_tensor(tvm_data, 93)
+    # TVM topo 108 = cast_5_2 = layer2 output after residual add + clip + cast
+    tvm_l2_out = get_tvm_tensor(tvm_data, 108)
     pt_l2_out = layer2_debug['output']
     r = compare_arrays(tvm_l2_out, pt_l2_out, name="layer2 output (after residual add)")
     print_comparison(r)
