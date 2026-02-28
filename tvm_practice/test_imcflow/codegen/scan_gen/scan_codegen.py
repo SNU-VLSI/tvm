@@ -920,28 +920,17 @@ int32_t program_scan_reg(const char* scan_file_path) {{
         for (int i = 0; i < 16; i++) {{
             // Extract 16 bits for this int16
             char bits_16[17];
-            memcpy(bits_16, &reg0_bits[i * 16], 16);
+            memcpy(bits_16, &reg0_bits[(15-i) * 16], 16);
             bits_16[16] = '\\0';
-            
-            // Reverse bits for little-endian int16 interpretation
-            char bits_16_rev[17];
-            for (int b = 0; b < 16; b++) {{
-                bits_16_rev[b] = bits_16[15 - b];
-            }}
-            bits_16_rev[16] = '\\0';
             
             // Convert binary string to int16 (treat leftmost char as MSB)
             int32_t val = 0;
             for (int b = 0; b < 16; b++) {{
-                if (bits_16_rev[b] == '1') {{
+                if (bits_16[b] == '1') {{
                     val |= (1 << (15 - b));  // Leftmost char is MSB (bit 15)
                 }}
             }}
             
-            // Handle signed conversion (2's complement)
-            if (val >= 32768) {{
-                val -= 65536;
-            }}
             packet_0[i] = (int16_t)val;
         }}
         
@@ -949,28 +938,17 @@ int32_t program_scan_reg(const char* scan_file_path) {{
         for (int i = 0; i < 16; i++) {{
             // Extract 16 bits for this int16
             char bits_16[17];
-            memcpy(bits_16, &reg1_bits[i * 16], 16);
+            memcpy(bits_16, &reg1_bits[(15-i) * 16], 16);
             bits_16[16] = '\\0';
-            
-            // Reverse bits for little-endian int16 interpretation
-            char bits_16_rev[17];
-            for (int b = 0; b < 16; b++) {{
-                bits_16_rev[b] = bits_16[15 - b];
-            }}
-            bits_16_rev[16] = '\\0';
             
             // Convert binary string to int16 (treat leftmost char as MSB)
             int32_t val = 0;
             for (int b = 0; b < 16; b++) {{
-                if (bits_16_rev[b] == '1') {{
+                if (bits_16[b] == '1') {{
                     val |= (1 << (15 - b));  // Leftmost char is MSB (bit 15)
                 }}
             }}
             
-            // Handle signed conversion (2's complement)
-            if (val >= 32768) {{
-                val -= 65536;
-            }}
             packet_1[i] = (int16_t)val;
         }}
     }}
