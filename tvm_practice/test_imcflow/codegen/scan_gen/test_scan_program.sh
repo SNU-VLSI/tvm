@@ -9,7 +9,7 @@
     "./logs" \
     "266368" \
     "1234" \
-    "${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_reg_files10"
+    "${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_reg_files"
   
   rm -rf ${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_gen_test_logs
   cp -r ${GEM5_RTL_TEST_DIR}/logs ${TVM_CODEGEN_TEST_DIR}/scan_gen/scan_gen_test_logs
