@@ -178,7 +178,8 @@
   },
   "python.analysis.autoSearchPaths": false,
   "python.analysis.extraPaths": [
-    "${workspaceFolder}/python"
+    "${workspaceFolder}/python",
+    "/root/project/CIM"
   ],
   "python.analysis.diagnosticMode": "openFilesOnly",
   "python.analysis.useLibraryCodeForTypes": false,
