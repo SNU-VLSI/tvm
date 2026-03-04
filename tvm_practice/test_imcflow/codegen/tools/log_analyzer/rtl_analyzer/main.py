@@ -761,8 +761,8 @@ def cmd_find_stalls(args):
     if not stalls:
         print("  No nodes are stalled at the end of simulation.")
     else:
-        print(f"\n  {'Time':>15}  {'Node':<15} {'Stall Type':<12} {'Reason':<20} {'Extra'}")
-        print("  " + "-" * 85)
+        print(f"\n  {'Time':>15}  {'Node':<15} {'Stall Type':<12} {'Reason':<20} {'PC':>5} {'Opcode':<18} {'Extra'}")
+        print("  " + "-" * 110)
 
         for s in stalls:
             node_label = f"{s.node_type}({s.row},{s.col})"
@@ -773,7 +773,10 @@ def cmd_find_stalls(args):
                     extra_parts.append(f"{k}={v}")
             extra = ", ".join(extra_parts) if extra_parts else ""
 
-            print(f"  {s.start_time:>15,}  {node_label:<15} {s.stall_type:<12} {s.reason:<20} {extra}")
+            pc_str = str(s.pc) if s.pc is not None else "-"
+            opcode_str = s.opcode if s.opcode else "-"
+
+            print(f"  {s.start_time:>15,}  {node_label:<15} {s.stall_type:<12} {s.reason:<20} {pc_str:>5} {opcode_str:<18} {extra}")
 
     # Summary by reason
     if summary["by_reason"]:

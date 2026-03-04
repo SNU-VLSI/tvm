@@ -110,15 +110,15 @@ def parse_erf_write_line(line: str) -> Optional[ERFWrite]:
 
 def parse_imce_ctrl_line(line: str, row: int, col: int) -> Optional[IMCECtrlLogEntry]:
     """Parse an IMCE ctrl_pl log line"""
-    # Format: [timestamp] [IMCE_EX] LOG_TYPE | ...
-    pattern = r'\[\s*(\d+)\]\s*\[IMCE_EX\]\s*(\w+)'
+    # Format: [timestamp] | LOG_TYPE | {content}
+    pattern = r'\[\s*(\d+)\]\s*\|\s*(\w+)\s*\|'
     match = re.search(pattern, line)
     if match:
         timestamp = int(match.group(1))
         log_type = match.group(2)
-        # Get content after the log type
-        content_start = line.find(log_type) + len(log_type)
-        content = line[content_start:].strip()
+        # Get content after the second '|'
+        second_pipe = line.find('|', line.find('|') + 1)
+        content = line[second_pipe + 1:].strip() if second_pipe != -1 else ''
         return IMCECtrlLogEntry(timestamp, row, col, log_type, content)
     return None
 
@@ -129,10 +129,12 @@ def parse_imce_ctrl_log(log_path: str, row: int, col: int) -> List[IMCECtrlLogEn
     try:
         with open(log_path, 'r') as f:
             for line in f:
-                if '[IMCE_EX]' in line:
-                    result = parse_imce_ctrl_line(line, row, col)
-                    if result:
-                        entries.append(result)
+                line = line.strip()
+                if not line:
+                    continue
+                result = parse_imce_ctrl_line(line, row, col)
+                if result:
+                    entries.append(result)
     except FileNotFoundError:
         pass
     return entries

@@ -92,6 +92,8 @@ class StallInfo:
     start_time: int     # timestamp of STALL_START
     payload: dict       # full payload from the START event
     source_file: str    # which log file
+    pc: Optional[int] = None        # instruction address at stall
+    opcode: Optional[str] = None    # opcode of the stalled instruction
 
 
 @dataclass

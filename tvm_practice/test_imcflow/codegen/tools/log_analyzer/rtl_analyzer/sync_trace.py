@@ -78,7 +78,7 @@ class SyncTraceAnalyzer:
         # Find all matching log files for this node
         for log_file in self.log_dir.glob("*.log"):
             fname = log_file.name.lower()
-            if f"core_row[{row}].core_col[{col}]" in fname.lower():
+            if f"core_row_{row}_.core_col_{col}_" in fname.lower():
                 if node_type == "inode":
                     # Include inode-relevant log files
                     if any(k in fname for k in ("hazard_control", "wb_stage", "ex_stage",
