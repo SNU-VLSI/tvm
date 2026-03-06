@@ -10,7 +10,7 @@
  * - Computes and reports accuracy
  *
  * Usage:
- *   execute_graph_for_dataset <graph.json> <params.params> <images.npy> <labels.npy> [num_samples]
+ *   execute_graph_for_dataset <graph.json> <params.params> <images.npy> <labels.npy> [num_samples] [output_path]
  *
  * Arguments:
  *   graph.json    - Path to TVM graph JSON file
@@ -18,6 +18,7 @@
  *   images.npy    - Path to images dataset (shape: [N, C, H, W], dtype: float32)
  *   labels.npy    - Path to labels dataset (shape: [N], dtype: int64 or similar)
  *   num_samples   - Optional: number of samples to evaluate (default: all)
+ *   output_path   - Optional: path to save results (default: /tmp/tvm_dataset_results.txt)
  *
  * Example:
  *   ./execute_graph_for_dataset \
@@ -42,6 +43,11 @@
 
 // Dataset loader
 #include "npy_dataset_loader.h"
+
+// Result file handle (global for use by helper functions)
+static FILE* g_result_file = NULL;
+
+#define DEFAULT_RESULT_PATH "/tmp/tvm_dataset_results.txt"
 
 // ============================================================================
 // Utility Functions
@@ -189,32 +195,38 @@ static int get_argmax(const DLTensor* tensor) {
  */
 static void print_class_scores(const DLTensor* tensor, int num_classes,
                                 int predicted, int64_t label, size_t sample_idx) {
-  printf("\n[Sample %zu] ", sample_idx);
-  printf("Scores: [");
+  FILE* outs[] = { stdout, g_result_file };
+  int num_outs = g_result_file ? 2 : 1;
 
-  // Print all class scores based on dtype
-  if (tensor->dtype.code == kDLFloat && tensor->dtype.bits == 32) {
-    float* data = (float*)tensor->data;
-    for (int i = 0; i < num_classes; i++) {
-      printf("%.4f%s", data[i], i < num_classes - 1 ? ", " : "");
+  for (int o = 0; o < num_outs; o++) {
+    FILE* f = outs[o];
+    fprintf(f, "\n[Sample %zu] ", sample_idx);
+    fprintf(f, "Scores: [");
+
+    // Print all class scores based on dtype
+    if (tensor->dtype.code == kDLFloat && tensor->dtype.bits == 32) {
+      float* data = (float*)tensor->data;
+      for (int i = 0; i < num_classes; i++) {
+        fprintf(f, "%.4f%s", data[i], i < num_classes - 1 ? ", " : "");
+      }
+    } else if (tensor->dtype.code == kDLInt && tensor->dtype.bits == 32) {
+      int32_t* data = (int32_t*)tensor->data;
+      for (int i = 0; i < num_classes; i++) {
+        fprintf(f, "%d%s", data[i], i < num_classes - 1 ? ", " : "");
+      }
+    } else if (tensor->dtype.code == kDLInt && tensor->dtype.bits == 8) {
+      int8_t* data = (int8_t*)tensor->data;
+      for (int i = 0; i < num_classes; i++) {
+        fprintf(f, "%d%s", data[i], i < num_classes - 1 ? ", " : "");
+      }
     }
-  } else if (tensor->dtype.code == kDLInt && tensor->dtype.bits == 32) {
-    int32_t* data = (int32_t*)tensor->data;
-    for (int i = 0; i < num_classes; i++) {
-      printf("%d%s", data[i], i < num_classes - 1 ? ", " : "");
-    }
-  } else if (tensor->dtype.code == kDLInt && tensor->dtype.bits == 8) {
-    int8_t* data = (int8_t*)tensor->data;
-    for (int i = 0; i < num_classes; i++) {
-      printf("%d%s", data[i], i < num_classes - 1 ? ", " : "");
-    }
+    fprintf(f, "]\n");
+
+    // Print predicted, label, and result
+    int is_correct = (predicted == (int)label);
+    fprintf(f, "         Predicted: %d, Label: %lld, Result: %s\n",
+           predicted, (long long)label, is_correct ? "O" : "X");
   }
-  printf("]\n");
-
-  // Print predicted, label, and result
-  int is_correct = (predicted == (int)label);
-  printf("         Predicted: %d, Label: %lld, Result: %s\n",
-         predicted, (long long)label, is_correct ? "O" : "X");
 }
 
 // ============================================================================
@@ -223,7 +235,7 @@ static void print_class_scores(const DLTensor* tensor, int num_classes,
 
 int main(int argc, char** argv) {
   if (argc < 5) {
-    fprintf(stderr, "Usage: %s <graph.json> <params.params> <images.npy> <labels.npy> [num_samples]\n", argv[0]);
+    fprintf(stderr, "Usage: %s <graph.json> <params.params> <images.npy> <labels.npy> [num_samples] [output_path]\n", argv[0]);
     fprintf(stderr, "\nExample:\n");
     fprintf(stderr, "  %s mlf/executor-config/graph/default.graph mlf/parameters/default.params \\\n", argv[0]);
     fprintf(stderr, "      /path/to/images.npy /path/to/labels.npy 100\n");
@@ -235,6 +247,15 @@ int main(int argc, char** argv) {
   const char* images_path = argv[3];
   const char* labels_path = argv[4];
   int num_samples_arg = argc > 5 ? atoi(argv[5]) : 0;
+  const char* result_path = argc > 6 ? argv[6] : DEFAULT_RESULT_PATH;
+
+  // Open result file
+  g_result_file = fopen(result_path, "w");
+  if (!g_result_file) {
+    fprintf(stderr, "Warning: Could not open result file '%s', results will only go to stdout\n", result_path);
+  } else {
+    fprintf(stderr, "Results will be saved to: %s\n", result_path);
+  }
 
   fprintf(stderr, "\n");
   fprintf(stderr, "========================================\n");
@@ -245,6 +266,18 @@ int main(int argc, char** argv) {
   fprintf(stderr, "Images:  %s\n", images_path);
   fprintf(stderr, "Labels:  %s\n", labels_path);
   fprintf(stderr, "========================================\n\n");
+
+  // Write header to result file
+  if (g_result_file) {
+    fprintf(g_result_file, "========================================\n");
+    fprintf(g_result_file, "  TVM Dataset Evaluation Results\n");
+    fprintf(g_result_file, "========================================\n");
+    fprintf(g_result_file, "Graph:   %s\n", graph_path);
+    fprintf(g_result_file, "Params:  %s\n", params_path);
+    fprintf(g_result_file, "Images:  %s\n", images_path);
+    fprintf(g_result_file, "Labels:  %s\n", labels_path);
+    fprintf(g_result_file, "========================================\n");
+  }
 
   // ============================================================================
   // Load Datasets
@@ -459,6 +492,9 @@ int main(int argc, char** argv) {
   // ============================================================================
   fprintf(stderr, "\n--- Evaluating Dataset ---\n");
   printf("\nStarting evaluation of %zu samples...\n", num_samples);
+  if (g_result_file) {
+    fprintf(g_result_file, "\nStarting evaluation of %zu samples...\n", num_samples);
+  }
 
   int correct = 0;
   for (size_t i = 0; i < num_samples; i++) {
@@ -502,6 +538,11 @@ int main(int argc, char** argv) {
       double accuracy = 100.0 * correct / (i + 1);
       printf("Progress: %zu/%zu, Correct: %d, Accuracy: %.2f%%\n",
              i + 1, num_samples, correct, accuracy);
+      if (g_result_file) {
+        fprintf(g_result_file, "Progress: %zu/%zu, Correct: %d, Accuracy: %.2f%%\n",
+                i + 1, num_samples, correct, accuracy);
+        fflush(g_result_file);
+      }
     }
   }
 
@@ -517,10 +558,26 @@ int main(int argc, char** argv) {
   printf("Accuracy:      %.2f%% (%d/%zu)\n", final_accuracy, correct, num_samples);
   printf("========================================\n\n");
 
+  if (g_result_file) {
+    fprintf(g_result_file, "\n========================================\n");
+    fprintf(g_result_file, "  FINAL RESULTS\n");
+    fprintf(g_result_file, "========================================\n");
+    fprintf(g_result_file, "Total Samples: %zu\n", num_samples);
+    fprintf(g_result_file, "Correct:       %d\n", correct);
+    fprintf(g_result_file, "Accuracy:      %.2f%% (%d/%zu)\n", final_accuracy, correct, num_samples);
+    fprintf(g_result_file, "========================================\n\n");
+  }
+
   // ============================================================================
   // Cleanup
   // ============================================================================
   fprintf(stderr, "--- Cleaning Up ---\n");
+
+  if (g_result_file) {
+    fclose(g_result_file);
+    g_result_file = NULL;
+    fprintf(stderr, "Results saved to: %s\n", result_path);
+  }
 
   free(input_shape);
   free(output_shape);

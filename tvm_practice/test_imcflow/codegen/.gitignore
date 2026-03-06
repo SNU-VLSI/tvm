@@ -20,6 +20,9 @@ vc_hdrs.h
 verdiLog/
 novas*
 
+# Environment config
+.env
+
 # Temporary files
 *.swp
 *.dump
