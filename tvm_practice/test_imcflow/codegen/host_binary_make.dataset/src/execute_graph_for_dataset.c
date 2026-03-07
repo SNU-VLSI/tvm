@@ -10,14 +10,15 @@
  * - Computes and reports accuracy
  *
  * Usage:
- *   execute_graph_for_dataset <graph.json> <params.params> <images.npy> <labels.npy> [num_samples] [output_path]
+ *   execute_graph_for_dataset <graph.json> <params.params> <images.npy> <labels.npy> [num_samples_or_indices] [output_path]
  *
  * Arguments:
  *   graph.json    - Path to TVM graph JSON file
  *   params.params - Path to TVM parameters file
  *   images.npy    - Path to images dataset (shape: [N, C, H, W], dtype: float32)
  *   labels.npy    - Path to labels dataset (shape: [N], dtype: int64 or similar)
- *   num_samples   - Optional: number of samples to evaluate (default: all)
+ *   num_samples_or_indices - Optional: number of samples (e.g. 100) or
+ *                            comma-separated indices (e.g. 1,2,3,4). Default: all.
  *   output_path   - Optional: path to save results (default: /tmp/tvm_dataset_results.txt)
  *
  * Example:
@@ -27,6 +28,14 @@
  *       /path/to/cifar10/images.npy \
  *       /path/to/cifar10/labels.npy \
  *       100
+ *
+ *   # Or with specific indices:
+ *   ./execute_graph_for_dataset \
+ *       mlf/executor-config/graph/default.graph \
+ *       mlf/parameters/default.params \
+ *       /path/to/cifar10/images.npy \
+ *       /path/to/cifar10/labels.npy \
+ *       0,5,10,15,20
  */
 
 #include <stdio.h>
@@ -48,6 +57,7 @@
 static FILE* g_result_file = NULL;
 
 #define DEFAULT_RESULT_PATH "/tmp/tvm_dataset_results.txt"
+#define MAX_INDICES 10000
 
 // ============================================================================
 // Utility Functions
@@ -235,10 +245,12 @@ static void print_class_scores(const DLTensor* tensor, int num_classes,
 
 int main(int argc, char** argv) {
   if (argc < 5) {
-    fprintf(stderr, "Usage: %s <graph.json> <params.params> <images.npy> <labels.npy> [num_samples] [output_path]\n", argv[0]);
+    fprintf(stderr, "Usage: %s <graph.json> <params.params> <images.npy> <labels.npy> [num_samples_or_indices] [output_path]\n", argv[0]);
     fprintf(stderr, "\nExample:\n");
     fprintf(stderr, "  %s mlf/executor-config/graph/default.graph mlf/parameters/default.params \\\n", argv[0]);
     fprintf(stderr, "      /path/to/images.npy /path/to/labels.npy 100\n");
+    fprintf(stderr, "  %s mlf/executor-config/graph/default.graph mlf/parameters/default.params \\\n", argv[0]);
+    fprintf(stderr, "      /path/to/images.npy /path/to/labels.npy 0,5,10,15\n");
     return 1;
   }
 
@@ -246,8 +258,28 @@ int main(int argc, char** argv) {
   const char* params_path = argv[2];
   const char* images_path = argv[3];
   const char* labels_path = argv[4];
-  int num_samples_arg = argc > 5 ? atoi(argv[5]) : 0;
   const char* result_path = argc > 6 ? argv[6] : DEFAULT_RESULT_PATH;
+
+  // Parse 5th argument: comma-separated indices or num_samples
+  int num_samples_arg = 0;
+  int sample_indices[MAX_INDICES];
+  int num_indices = 0;
+
+  if (argc > 5) {
+    // Check if argument contains a comma -> indices mode
+    if (strchr(argv[5], ',') != NULL) {
+      char* indices_str = strdup(argv[5]);
+      char* token = strtok(indices_str, ",");
+      while (token != NULL && num_indices < MAX_INDICES) {
+        sample_indices[num_indices++] = atoi(token);
+        token = strtok(NULL, ",");
+      }
+      free(indices_str);
+      fprintf(stderr, "Index mode: %d specific indices\n", num_indices);
+    } else {
+      num_samples_arg = atoi(argv[5]);
+    }
+  }
 
   // Open result file
   g_result_file = fopen(result_path, "w");
@@ -306,11 +338,27 @@ int main(int argc, char** argv) {
   }
 
   // Determine number of samples to evaluate
-  size_t num_samples = images.num_samples;
-  if (num_samples_arg > 0 && (size_t)num_samples_arg < num_samples) {
-    num_samples = (size_t)num_samples_arg;
+  size_t num_samples;
+  if (num_indices > 0) {
+    num_samples = (size_t)num_indices;
+    // Validate indices
+    for (int idx = 0; idx < num_indices; idx++) {
+      if (sample_indices[idx] < 0 || (size_t)sample_indices[idx] >= images.num_samples) {
+        fprintf(stderr, "Error: index %d out of range [0, %zu)\n",
+                sample_indices[idx], images.num_samples);
+        free_npy_dataset(&images);
+        free_npy_dataset(&labels);
+        return 2;
+      }
+    }
+    fprintf(stderr, "\nWill evaluate %zu specific indices\n\n", num_samples);
+  } else {
+    num_samples = images.num_samples;
+    if (num_samples_arg > 0 && (size_t)num_samples_arg < num_samples) {
+      num_samples = (size_t)num_samples_arg;
+    }
+    fprintf(stderr, "\nWill evaluate %zu samples\n\n", num_samples);
   }
-  fprintf(stderr, "\nWill evaluate %zu samples\n\n", num_samples);
 
   // ============================================================================
   // Initialize TVM
@@ -497,11 +545,14 @@ int main(int argc, char** argv) {
   }
 
   int correct = 0;
-  for (size_t i = 0; i < num_samples; i++) {
+  for (size_t iter = 0; iter < num_samples; iter++) {
+    // Determine actual sample index
+    size_t sample_idx = (num_indices > 0) ? (size_t)sample_indices[iter] : iter;
+
     // Copy image data to input tensor
-    void* sample_data = get_sample(&images, i);
+    void* sample_data = get_sample(&images, sample_idx);
     if (!sample_data) {
-      fprintf(stderr, "Failed to get sample %zu\n", i);
+      fprintf(stderr, "Failed to get sample %zu\n", sample_idx);
       continue;
     }
     memcpy(input_tensor.data, sample_data, images.sample_size);
@@ -515,7 +566,7 @@ int main(int argc, char** argv) {
     // Get output
     rc = TVMGraphExecutor_GetOutput(exec, 0, &output_tensor);
     if (rc != 0) {
-      fprintf(stderr, "GetOutput failed for sample %zu: %d\n", i, rc);
+      fprintf(stderr, "GetOutput failed for sample %zu: %d\n", sample_idx, rc);
       continue;
     }
 
@@ -523,7 +574,7 @@ int main(int argc, char** argv) {
     int predicted = get_argmax(&output_tensor);
 
     // Get ground truth label
-    int64_t label = get_label(&labels, i);
+    int64_t label = get_label(&labels, sample_idx);
 
     // Check if correct
     if (predicted == (int)label) {
@@ -531,16 +582,16 @@ int main(int argc, char** argv) {
     }
 
     // Debug: Print class scores for each sample
-    print_class_scores(&output_tensor, num_classes, predicted, label, i);
+    print_class_scores(&output_tensor, num_classes, predicted, label, sample_idx);
 
     // Print progress every 100 samples
-    if ((i + 1) % 100 == 0 || i + 1 == num_samples) {
-      double accuracy = 100.0 * correct / (i + 1);
+    if ((iter + 1) % 100 == 0 || iter + 1 == num_samples) {
+      double accuracy = 100.0 * correct / (iter + 1);
       printf("Progress: %zu/%zu, Correct: %d, Accuracy: %.2f%%\n",
-             i + 1, num_samples, correct, accuracy);
+             iter + 1, num_samples, correct, accuracy);
       if (g_result_file) {
         fprintf(g_result_file, "Progress: %zu/%zu, Correct: %d, Accuracy: %.2f%%\n",
-                i + 1, num_samples, correct, accuracy);
+                iter + 1, num_samples, correct, accuracy);
         fflush(g_result_file);
       }
     }

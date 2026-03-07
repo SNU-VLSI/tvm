@@ -35,11 +35,12 @@ show_help() {
     echo "  7. Fetch result file from remote to local"
     echo ""
     echo "Options:"
-    echo "  -m, --model DIR  Evl dir name for build step (default: resnet8_subset31_pretrained_orig_evl.linux)"
-    echo "  -s, --skip LIST  Comma-separated step numbers to skip (e.g., 1,2,7)"
-    echo "  -q, --quiet      Quiet mode: suppress remote stdout during evaluation"
-    echo "  -o, --output DIR Local directory to save result file (default: eval_results)"
-    echo "  -h, --help       Show this help message"
+    echo "  -m, --model DIR    Evl dir name for build step (default: resnet8_subset31_pretrained_orig_evl.linux)"
+    echo "  -s, --skip LIST    Comma-separated step numbers to skip (e.g., 1,2,7)"
+    echo "  -i, --indices LIST Comma-separated sample indices (e.g., 0,5,10,15). Overrides num_samples."
+    echo "  -q, --quiet        Quiet mode: suppress remote stdout during evaluation"
+    echo "  -o, --output DIR   Local directory to save result file (default: eval_results)"
+    echo "  -h, --help         Show this help message"
     echo ""
     echo "Arguments:"
     echo "  num_samples    Number of samples to evaluate (default: 20)"
@@ -50,6 +51,7 @@ show_help() {
     echo "  $0 -s 1,2,3,4,5 50      # Skip to evaluation only, 50 samples"
     echo "  $0 -q 100               # Quiet mode, 100 samples"
     echo "  $0 -m my_model_evl.linux 20  # Use different evl dir for build"
+    echo "  $0 -i 0,5,10,15,20      # Evaluate specific sample indices"
     echo ""
     echo "Remote configuration is loaded from .env file."
     exit 0
@@ -65,6 +67,7 @@ SKIP_STEP6=false
 SKIP_STEP7=false
 SKIP_LIST=""
 QUIET_MODE=false
+SAMPLE_INDICES=""
 MODEL_EVL_DIR="resnet8_subset31_pretrained_orig_evl.linux"
 
 while [[ $# -gt 0 ]]; do
@@ -86,6 +89,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             SKIP_LIST="$2"
+            shift 2
+            ;;
+        -i|--indices)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            SAMPLE_INDICES="$2"
             shift 2
             ;;
         -q|--quiet)
@@ -138,10 +149,19 @@ fi
 # Positional arguments
 NUM_SAMPLES="${1:-20}"
 
+# Determine the samples argument for the binary
+if [[ -n "$SAMPLE_INDICES" ]]; then
+    SAMPLES_ARG="$SAMPLE_INDICES"
+    SAMPLES_DISPLAY="indices: $SAMPLE_INDICES"
+else
+    SAMPLES_ARG="$NUM_SAMPLES"
+    SAMPLES_DISPLAY="num_samples: $NUM_SAMPLES"
+fi
+
 echo "=========================================="
 echo "Running dataset evaluation on remote chip"
 echo "Model (evl dir): $MODEL_EVL_DIR"
-echo "Number of samples: $NUM_SAMPLES"
+echo "Samples: $SAMPLES_DISPLAY"
 echo "Remote host: $REMOTE_HOST"
 echo "Quiet mode: $QUIET_MODE"
 echo "Result file (remote): $REMOTE_RESULT_PATH"
@@ -205,7 +225,7 @@ $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
 $LABELS_PATH \
-$NUM_SAMPLES \
+$SAMPLES_ARG \
 $REMOTE_RESULT_PATH; \
 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1"
     echo "[CMD] sshpass -p \"$REMOTE_PASSWORD\" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \"$REMOTE_CMD\""
