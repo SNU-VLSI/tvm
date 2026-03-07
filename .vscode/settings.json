@@ -179,7 +179,9 @@
   "python.analysis.autoSearchPaths": false,
   "python.analysis.extraPaths": [
     "${workspaceFolder}/python",
-    "/root/project/CIM"
+    "/root/project/CIM",
+    "/root/project/imcflow/xilinx/measurement",
+    "/root/project/imcflow/pmap/ISA_sim/multi_core"
   ],
   "python.analysis.diagnosticMode": "openFilesOnly",
   "python.analysis.useLibraryCodeForTypes": false,
