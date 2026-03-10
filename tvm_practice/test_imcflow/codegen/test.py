@@ -24,7 +24,7 @@ from contextlib import contextmanager
 import os
 
 # Import IMCFlow compiler driver
-from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, rebuild_imcflow_cpp_only
+from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, compile_for_imcflow_single_qconv, rebuild_imcflow_cpp_only
 
 # Import pipeline options
 from runners.pipeline_options import PipelineOptions, PipelineStage, RunMode
@@ -307,15 +307,28 @@ def save_transformed_model(mod, param_dict, eval_dir, pkl_name="transformed_mode
   import pickle
   model_save_path = os.path.join(eval_dir, pkl_name)
 
+  # Convert tvm.nd.NDArray values to numpy for pickle compatibility
+  # (tvm.nd.NDArray contains ctypes pointers that cannot be pickled)
+  safe_param_dict = {}
+  for k, v in param_dict.items():
+    safe_param_dict[k] = v.numpy() if hasattr(v, 'numpy') else v
+
   save_data = {
     "mod": mod,
-    "param_dict": param_dict,
+    "param_dict": safe_param_dict,
   }
 
-  with open(model_save_path, "wb") as f:
-    pickle.dump(save_data, f)
-
-  print(f"💾 Saved transformed model to: {model_save_path}")
+  tmp_path = model_save_path + ".tmp"
+  try:
+    with open(tmp_path, "wb") as f:
+      pickle.dump(save_data, f)
+    os.replace(tmp_path, model_save_path)
+    print(f"Saved transformed model to: {model_save_path}")
+  except Exception as e:
+    print(f"Warning: Could not pickle transformed model: {e}")
+    # Remove incomplete temp file so a corrupted pkl is never left behind
+    if os.path.exists(tmp_path):
+      os.remove(tmp_path)
 
 
 def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
@@ -344,8 +357,13 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
   with open(model_save_path, "rb") as f:
     save_data = pickle.load(f)
 
+  # Restore numpy arrays back to tvm.nd.NDArray for compatibility
+  param_dict = {}
+  for k, v in save_data["param_dict"].items():
+    param_dict[k] = tvm.nd.array(v) if isinstance(v, np.ndarray) else v
+
   print(f"📂 Loaded transformed model from: {model_save_path}")
-  return save_data["mod"], save_data["param_dict"]
+  return save_data["mod"], param_dict
 
 
 def save_build_metadata(eval_dir, use_patched: bool):
@@ -801,7 +819,10 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
     case RunMode.FULL:
       # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
       skip_codegen = not options.should_run(PipelineStage.CODEGEN)
-      mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
+      if options.single_qconv:
+        mod, param_dict, _ = compile_for_imcflow_single_qconv(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
+      else:
+        mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
 
       # Save transformed model for future reuse
       save_transformed_model(mod, param_dict, eval_dir)

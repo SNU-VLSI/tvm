@@ -784,6 +784,221 @@ def partitionImcflowSubGraph(mod):
   # mod = clearPrimitiveTag(mod)
   return mod
 
+
+def get_imcflow_supported_regions_qconv_only(mod):
+  """
+  Like get_imcflow_supported_regions but only nn.imcflow_qconv is supported.
+  Each qconv is naturally isolated since non-qconv ops break connectivity.
+  Returns one region per atomic qconv.
+  """
+  _SUPPORTED_OPS = {
+    "nn.imcflow_qconv",
+  }
+
+  def is_supported(call):
+    return isinstance(call.op, Op) and call.op.name in _SUPPORTED_OPS
+
+  class NodeCollector(ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.call_nodes = []
+
+    def visit_call(self, call):
+      super().visit_call(call)
+      self.call_nodes.append(call)
+
+  def _is_int_dtype(dt: str) -> bool:
+    return isinstance(dt, str) and (dt.startswith("int") or dt.startswith("uint"))
+
+  def _expr_tensor_dtype(e):
+    try:
+      ty = e.checked_type
+    except Exception:
+      return None
+    if isinstance(ty, relay.ty.TensorType):
+      return ty.dtype
+    return None
+
+  def _inputs_are_int(call: Call) -> bool:
+    for arg in call.args:
+      if isinstance(arg.checked_type, relay.ty.TupleType):
+        for field_ty in arg.checked_type.fields:
+          if isinstance(field_ty, relay.ty.TensorType):
+            if not _is_int_dtype(field_ty.dtype):
+              return False
+        continue
+      dt = _expr_tensor_dtype(arg)
+      if dt is None:
+        continue
+      if not _is_int_dtype(dt):
+        return False
+    return True
+
+  typed_mod = mod
+  main_func = typed_mod["main"]
+  collector = NodeCollector()
+  collector.visit(main_func)
+
+  supported_calls = []
+  for call in collector.call_nodes:
+    if is_supported(call) and _inputs_are_int(call):
+      supported_calls.append(call)
+  supported_set = set(supported_calls)
+
+  if not supported_calls:
+    return []
+
+  # Each qconv is its own region (no connectivity between qconvs
+  # since non-qconv ops are excluded and break the chain)
+  node_to_id = {node: i for i, node in enumerate(supported_calls)}
+  adj = [[] for _ in range(len(supported_calls))]
+
+  memo = {}
+  tuple_get_nodes = {}
+
+  def get_producer(expr):
+    if expr in memo:
+      return memo[expr]
+    if expr in supported_set:
+      memo[expr] = expr
+      return expr
+    if isinstance(expr, TupleGetItem):
+      producer = get_producer(expr.tuple_value)
+      memo[expr] = producer
+      return producer
+    memo[expr] = None
+    return None
+
+  for i, call_node in enumerate(supported_calls):
+    for arg in call_node.args:
+      producer = get_producer(arg)
+      if producer:
+        j = node_to_id[producer]
+        adj[i].append(j)
+        adj[j].append(i)
+        if isinstance(arg, TupleGetItem):
+          tuple_get_nodes[producer] = arg
+
+  regions = []
+  visited = set()
+  for i in range(len(supported_calls)):
+    node = supported_calls[i]
+    if node not in visited:
+      component = []
+      q = [node]
+      visited.add(node)
+      head = 0
+      while head < len(q):
+        u = q[head]
+        head += 1
+        component.append(u)
+        if u in tuple_get_nodes:
+          component.append(tuple_get_nodes[u])
+        u_idx = node_to_id[u]
+        for v_idx in adj[u_idx]:
+          v = supported_calls[v_idx]
+          if v not in visited:
+            visited.add(v)
+            q.append(v)
+      regions.append(component)
+
+  return regions
+
+
+def partitionImcflowSubGraph_qconv_only(mod):
+  """Partition module so only nn.imcflow_qconv ops go to imcflow. Each qconv gets its own function."""
+  mod = relay.transform.InferType()(mod)
+  region_list = get_imcflow_supported_regions_qconv_only(mod)
+  mod = imcflow.ImcflowAnnotationPass(region_list)(mod)
+  mod = transform.MergeCompilerRegions()(mod)
+  mod = imcflow.ImcflowCleanRegionTag()(mod)
+  mod = transform.PartitionGraph()(mod)
+  return mod
+
+
+def dissolve_imcflow_functions(mod):
+  """
+  Remove imcflow function partitioning, inlining everything back to main.
+  Reuses clearCompilerAttr and clearPrimitiveTag from cpu_run.py.
+  """
+  from tvm.relay.backend.contrib.imcflow.cpu_run import clearCompilerAttr, clearPrimitiveTag
+
+  mod = clearCompilerAttr(mod)
+  mod = clearPrimitiveTag(mod)
+
+  # Inline global imcflow functions back into main
+  class _Inliner(ExprMutator):
+    def __init__(self, mod):
+      super().__init__()
+      self._mod = mod
+
+    def visit_call(self, call):
+      if isinstance(call.op, GlobalVar):
+        func = self._mod[call.op]
+        if isinstance(func, relay.Function):
+          new_args = [self.visit(arg) for arg in call.args]
+          new_body = self.visit(func.body)
+          bind_map = dict(zip(func.params, new_args))
+          return relay.bind(new_body, bind_map)
+      return super().visit_call(call)
+
+  mod["main"] = _Inliner(mod).visit(mod["main"])
+  mod = transform.RemoveUnusedFunctions()(mod)
+  return mod
+
+
+def get_qconv_topo_indices(mod):
+  """
+  Assign stable topological indices to all nn.imcflow_qconv calls in the module.
+  Walks the graph in a deterministic order (visitor post-order) and enumerates
+  all qconv calls. This produces the same indices in both Phase 1 and Phase 2
+  since both start from the same model with the same split_conv_to_atomic result.
+
+  Returns:
+    call_to_idx: Dict[relay.Call, int] - qconv call node -> topo index
+    idx_to_call: Dict[int, relay.Call] - topo index -> qconv call node
+  """
+  class QConvCollector(ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.qconv_calls = []
+
+    def visit_call(self, call):
+      super().visit_call(call)
+      op_node = call.op
+      # Check for qconv inside composite functions
+      if isinstance(op_node, relay.Function) and op_node.attrs and "Composite" in op_node.attrs:
+        # Walk the composite body for qconv
+        inner = _InnerQConvFinder()
+        inner.visit(op_node.body)
+        self.qconv_calls.extend(inner.qconv_calls)
+      elif isinstance(op_node, Op) and op_node.name == "nn.imcflow_qconv":
+        self.qconv_calls.append(call)
+
+  class _InnerQConvFinder(ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.qconv_calls = []
+
+    def visit_call(self, call):
+      super().visit_call(call)
+      if isinstance(call.op, Op) and call.op.name == "nn.imcflow_qconv":
+        self.qconv_calls.append(call)
+
+  all_qconvs = []
+  # Walk all functions (main + imcflow functions) in a stable order
+  for gv in sorted(mod.functions.keys(), key=lambda g: g.name_hint):
+    func = mod[gv]
+    if isinstance(func, relay.Function):
+      collector = QConvCollector()
+      collector.visit(func)
+      all_qconvs.extend(collector.qconv_calls)
+
+  call_to_idx = {call: i for i, call in enumerate(all_qconvs)}
+  idx_to_call = {i: call for i, call in enumerate(all_qconvs)}
+  return call_to_idx, idx_to_call
+
+
 def split_conv_to_atomic(mod, OldParamDict):
 
     #- we never include min_max_quant as conv2d post op. min_max_quant never be split into multiple nodes.
@@ -4901,6 +5116,9 @@ class MemoryAllocator:
           2. Halo regions (overlap with previous tiles that were already processed)
 
           This function trims these regions to get the actual new input data needed.
+          It also fills stride-induced gaps between tiles and extends the last tile
+          to cover the full input height, since the IMCE program is compiled with
+          the full input dimensions and its cursor traverses all input rows.
 
           Args:
               input_bases: List of input tile start positions (may include padding/halo)
@@ -4914,6 +5132,7 @@ class MemoryAllocator:
           trimmed_sizes = []
 
           prev_end = 0  # Track where previous tile ended (for halo removal)
+          num_tiles = len(input_bases)
 
           for i, (in_base, in_size) in enumerate(zip(input_bases, input_sizes)):
             in_end = in_base + in_size
@@ -4927,6 +5146,19 @@ class MemoryAllocator:
               actual_start = max(valid_start, prev_end)
             else:
               actual_start = valid_start
+
+            # Fill stride-induced gaps: when stride > 1 creates a gap between
+            # prev_end and actual_start, extend this tile backward to cover the
+            # gap rows. The IMCE cursor traverses all input rows sequentially,
+            # so gap rows must be sent even if not used for computation.
+            if actual_start > prev_end:
+              actual_start = prev_end
+
+            # Extend last tile to cover remaining input rows up to input_height.
+            # The IMCE program is compiled with full input dimensions, so its
+            # cursor may traverse trailing rows beyond the last tile's range.
+            if i == num_tiles - 1:
+              valid_end = input_height
 
             actual_size = valid_end - actual_start
 
@@ -7092,7 +7324,7 @@ def annotateCustomId(mod):
       self.cnt = self.cnt + 1
       origin_attrs = new_call.attrs
       new_attrs = self.update_attrs(origin_attrs, {"custom_id": self.cnt})
-      new_call = _expr.CallWithFields(new_call, new_call.op, new_call.args, new_attrs, new_call.type_args, new_call.span)
+      new_call = _expr.CallWithFields(new_call, new_call.op, new_call.args, new_attrs, new_call.type_args, None, new_call.span)
       if call in self.layout_map:
         self.layout_map[new_call] = self.layout_map[call]
       return new_call

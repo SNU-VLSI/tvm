@@ -322,18 +322,6 @@ CPU_REQUIRED_OP_LAYOUTS = {
   "nn.bias_add": [
     (
       [
-        [LayoutType.NCHW16C, LayoutType.C],
-      ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW64C, LayoutType.C],
-      ],
-      LayoutType.NCHW64C,
-    ),
-    (
-      [
         [LayoutType.NCHW, LayoutType.C],
       ],
       LayoutType.NCHW,
@@ -346,18 +334,6 @@ CPU_REQUIRED_OP_LAYOUTS = {
     ),
   ],
   "nn.relu": [
-    (
-      [
-        [LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW64C],
-      ],
-      LayoutType.NCHW64C,
-    ),
     (
       [
         [LayoutType.NCHW],
@@ -374,39 +350,6 @@ CPU_REQUIRED_OP_LAYOUTS = {
   "add": [
     (
       [
-        [LayoutType.NCHW16C, LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW64C, LayoutType.NCHW64C],
-      ],
-      LayoutType.NCHW64C,
-    ),
-    (
-      [
-        [LayoutType.NCHW16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW64C],
-      ],
-      LayoutType.NCHW64C,
-    ),
-    (
-      [
-        [LayoutType.NCHW16C, LayoutType.NCHW64C],
-        [LayoutType.NCHW64C, LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW64C,
-    ),
-    (
-      [
         [LayoutType.NCHW, LayoutType.NCHW],
         [LayoutType.NCHW, LayoutType.SCALAR],
         [LayoutType.SCALAR, LayoutType.NCHW],
@@ -420,50 +363,11 @@ CPU_REQUIRED_OP_LAYOUTS = {
         [LayoutType.SCALAR, LayoutType.MK],
       ],
       LayoutType.MK,
-    ),
-    (
-      [
-        [LayoutType.NHWC16C, LayoutType.NHWC16C],
-        [LayoutType.NHWC16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC16C],
-      ],
-      LayoutType.NHWC16C,
-    ),
-    (
-      [
-        [LayoutType.NHWC64C, LayoutType.NHWC64C],
-        [LayoutType.NHWC64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC64C],
-      ],
-      LayoutType.NHWC64C,
     ),
   ],
   "multiply": [
     (
       [
-        [LayoutType.NCHW16C, LayoutType.NCHW16C],
-        [LayoutType.NCHW16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW64C, LayoutType.NCHW64C],
-        [LayoutType.NCHW64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW64C],
-      ],
-      LayoutType.NCHW64C,
-    ),
-    (
-      [
-        [LayoutType.NCHW16C, LayoutType.NCHW64C],
-        [LayoutType.NCHW64C, LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW64C,
-    ),
-    (
-      [
         [LayoutType.NCHW, LayoutType.NCHW],
         [LayoutType.NCHW, LayoutType.SCALAR],
         [LayoutType.SCALAR, LayoutType.NCHW],
@@ -477,42 +381,11 @@ CPU_REQUIRED_OP_LAYOUTS = {
         [LayoutType.SCALAR, LayoutType.MK],
       ],
       LayoutType.MK,
-    ),
-    (
-      [
-        [LayoutType.NHWC16C, LayoutType.NHWC16C],
-        [LayoutType.NHWC16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC16C],
-      ],
-      LayoutType.NHWC16C,
-    ),
-    (
-      [
-        [LayoutType.NHWC64C, LayoutType.NHWC64C],
-        [LayoutType.NHWC64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC64C],
-      ],
-      LayoutType.NHWC64C,
     ),
   ],
   "divide": [
     (
       [
-        [LayoutType.NCHW16C, LayoutType.NCHW16C],
-        [LayoutType.NCHW16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW16C, LayoutType.NCHW64C],
-        [LayoutType.NCHW64C, LayoutType.NCHW16C],
-      ],
-      LayoutType.NCHW64C,
-    ),
-    (
-      [
         [LayoutType.NCHW, LayoutType.NCHW],
         [LayoutType.NCHW, LayoutType.SCALAR],
         [LayoutType.SCALAR, LayoutType.NCHW],
@@ -526,22 +399,6 @@ CPU_REQUIRED_OP_LAYOUTS = {
         [LayoutType.SCALAR, LayoutType.MK],
       ],
       LayoutType.MK,
-    ),
-    (
-      [
-        [LayoutType.NHWC16C, LayoutType.NHWC16C],
-        [LayoutType.NHWC16C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC16C],
-      ],
-      LayoutType.NHWC16C,
-    ),
-    (
-      [
-        [LayoutType.NHWC64C, LayoutType.NHWC64C],
-        [LayoutType.NHWC64C, LayoutType.SCALAR],
-        [LayoutType.SCALAR, LayoutType.NHWC64C],
-      ],
-      LayoutType.NHWC64C,
     ),
   ],
   "split": [
@@ -553,15 +410,9 @@ CPU_REQUIRED_OP_LAYOUTS = {
     ),
     (
       [
-        [LayoutType.NCHW16C],
+        [LayoutType.NCHW],
       ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW64C],
-      ],
-      LayoutType.NCHW64C,
+      LayoutType.NCHW,
     ),
   ],
   "concatenate": [
@@ -573,15 +424,9 @@ CPU_REQUIRED_OP_LAYOUTS = {
     ),
     (
       [
-        [LayoutType.NCHW16C],
+        [LayoutType.NCHW],
       ],
-      LayoutType.NCHW16C,
-    ),
-    (
-      [
-        [LayoutType.NCHW64C],
-      ],
-      LayoutType.NCHW64C,
+      LayoutType.NCHW,
     ),
   ],
   "nn.conv2d" : [
@@ -721,7 +566,40 @@ CPU_REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW
     )
-  ]
+  ],
+  # IMCFlow-specific ops that may end up on CPU in single-qconv mode
+  "qnn.imcflow_min_max_quantize": [
+    (
+      [
+        [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.SCALAR],
+      ],
+      LayoutType.NCHW,
+    ),
+  ],
+  "qnn.imcflow_nu_quantize": [
+    (
+      [
+        [LayoutType.NCHW, LayoutType.SCALAR, LayoutType.SCALAR],
+      ],
+      LayoutType.NCHW,
+    ),
+  ],
+  "nn.imcflow_qdwconv": [
+    (
+      [
+        [LayoutType.NCHW, LayoutType.NCHW, LayoutType.SCALAR],
+      ],
+      LayoutType.NCHW,
+    ),
+  ],
+  "imcflow.fused_batch_norm": [
+    (
+      [
+        [LayoutType.NCHW, LayoutType.C, LayoutType.C],
+      ],
+      LayoutType.NCHW,
+    ),
+  ],
 }
 
 def get_height_dim_index(layout):
@@ -2157,6 +2035,15 @@ class ImcflowLayoutLegalizer:
             for option in inputs_options:
               if len(option) == len(arg_layouts) and base_layout in option:
                 return option
+
+          # If base_layout is a blocked layout and no rule matched, try NCHW
+          blocked_layouts = (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C)
+          if base_layout in blocked_layouts:
+            for rule in rules:
+              inputs_options, _ = rule
+              for option in inputs_options:
+                if len(option) == len(arg_layouts) and LayoutType.NCHW in option:
+                  return option
 
         # Fallback: return first rule's first option
         if rules and rules[0][0]:

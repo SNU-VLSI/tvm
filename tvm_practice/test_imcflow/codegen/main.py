@@ -100,6 +100,12 @@ Examples:
   )
 
   parser.add_argument(
+    "--single-qconv",
+    action="store_true",
+    help="Single-qconv-per-round mode: map one atomic qconv per round to imcflow, all other ops on CPU"
+  )
+
+  parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
@@ -169,6 +175,7 @@ Examples:
       stop_at=stop_at,
       start_at=start_at,
       with_patch=args.with_patch,
+      single_qconv=args.single_qconv,
       input_pattern=args.pattern if args.pattern else "default",
       dataset=args.dataset,
       sample=args.sample,

@@ -886,8 +886,10 @@ class GraphExtractor:
 class JointPnRILP:
     """Joint node mapping and routing ILP solver"""
 
-    def __init__(self, topology: MeshTopology = None):
+    def __init__(self, topology: MeshTopology = None, preassigned_placements: Optional[Dict[str, Dict[Any, 'Coord']]] = None):
         self.topology = topology or MeshTopology(4, 5)
+        # Pre-assigned placements: func_name -> {graph_node_id -> Coord}
+        self.preassigned_placements = preassigned_placements or {}
 
         # ILP model components (set during build)
         self.prob = None
@@ -952,7 +954,8 @@ class JointPnRILP:
                     debug_print(f"[JointPnRILP] Warning: {func_name} not in ImcflowFuncMap, using mod.functions")
 
                 tensor_edge_list = tensor_edge_list_dict[func_name]
-                result = self._run_for_function(actual_func, func_name, tensor_edge_list)
+                func_preassigned = self.preassigned_placements.get(func_name, {})
+                result = self._run_for_function(actual_func, func_name, tensor_edge_list, func_preassigned)
                 results[func_name] = result
 
                 if result.success:
@@ -969,6 +972,7 @@ class JointPnRILP:
         func: relay.Function,
         func_name: str,
         tensor_edge_list: List,
+        preassigned_call_placements: Optional[Dict[Any, Coord]] = None,
     ) -> JointPnRResult:
         """Run joint PnR for a single function.
 
@@ -976,11 +980,17 @@ class JointPnRILP:
             func: Relay function
             func_name: Name of the function
             tensor_edge_list: List of TensorEdge from constructTensorEdgeList()
+            preassigned_call_placements: Optional dict mapping graph_node_id -> Coord
+                for call nodes with pre-determined placements (from Phase 1).
+                When provided, these nodes are fixed at their assigned IMCE coords.
 
         Returns:
             JointPnRResult with mapping and routes
         """
         debug_print(f"[JointPnRILP] Running Joint PnR for function: {func_name}")
+        self._current_preassigned = preassigned_call_placements or {}
+        if self._current_preassigned:
+            debug_print(f"[JointPnRILP] Using {len(self._current_preassigned)} pre-assigned placements")
 
         # Phase 1: Extract graph info using GraphExtractor
         # - Nodes: extracted from relay function (composite = 1 node)
@@ -1057,8 +1067,22 @@ class JointPnRILP:
                 debug_print(f"[JointPnRILP] Split {split_id} has VAR producer {split_node.producer}, "
                            f"pre-assigning to INODE at ({var_inode_coord.row}, {var_inode_coord.col})")
 
+        # Identify call nodes with pre-assigned IMCE placements
+        self.calls_preassigned_to_imce = {}  # call_id -> Coord
+        calls_preassigned = set()
+        for call_id in gi.call_nodes:
+            if call_id in self._current_preassigned:
+                coord = self._current_preassigned[call_id]
+                self.calls_preassigned_to_imce[call_id] = coord
+                calls_preassigned.add(call_id)
+                debug_print(f"[JointPnRILP] Call {call_id} pre-assigned to IMCE ({coord.row}, {coord.col})")
+
         # All placeable nodes (call + split + concat), excluding pre-assigned splits
-        placeable_nodes = gi.call_nodes + [s for s in gi.split_nodes if s not in splits_to_exclude] + gi.concat_nodes
+        placeable_nodes = (
+            [c for c in gi.call_nodes if c not in calls_preassigned] +
+            [s for s in gi.split_nodes if s not in splits_to_exclude] +
+            gi.concat_nodes
+        )
 
         # p[n][v]: placement of call/split/concat node n at IMCE v
         self.p = {}
@@ -1069,6 +1093,18 @@ class JointPnRILP:
                     f"p_{hash(n) % 100000}_{v.row}_{v.col}",
                     cat=pulp.LpBinary
                 )
+
+        # For pre-assigned call nodes, create fixed variables (p[n][assigned_v]=1, rest=0)
+        for call_id, coord in self.calls_preassigned_to_imce.items():
+            self.p[call_id] = {}
+            for v in self.imce_nodes:
+                val = 1 if v == coord else 0
+                self.p[call_id][v] = pulp.LpVariable(
+                    f"p_{hash(call_id) % 100000}_{v.row}_{v.col}",
+                    cat=pulp.LpBinary
+                )
+                self.p[call_id][v].setInitialValue(val)
+                self.p[call_id][v].fixValue()
 
         # x[k][e]: commodity k uses edge e
         self.x = {}
@@ -1562,6 +1598,7 @@ class JointPnRILP:
 def run_joint_pnr(
     mod: tvm.IRModule,
     tensor_edge_list_dict: Dict[str, List],
+    preassigned_placements: Optional[Dict[str, Dict[Any, Coord]]] = None,
 ) -> Dict[str, JointPnRResult]:
     """
     Run joint PnR for all imcflow functions in module.
@@ -1572,11 +1609,13 @@ def run_joint_pnr(
         mod: TVM module containing imcflow functions
         tensor_edge_list_dict: Dict mapping func_name -> List[TensorEdge]
                                Must be constructed via constructTensorEdgeList() first.
+        preassigned_placements: Optional dict mapping func_name -> {graph_node_id -> Coord}
+                                for nodes with pre-determined placements.
 
     Returns:
         Dict mapping function names to JointPnRResult
     """
-    solver = JointPnRILP(topology=MeshTopology(4, 5))
+    solver = JointPnRILP(topology=MeshTopology(4, 5), preassigned_placements=preassigned_placements)
     return solver.run(mod, tensor_edge_list_dict)
 
 
@@ -2180,6 +2219,7 @@ def visualize_all_pnr_results(
 def run_joint_pnr_and_update_config(
     mod: tvm.IRModule,
     tensor_edge_list_dict: Dict[str, List],
+    preassigned_placements: Optional[Dict[str, Dict[Any, Coord]]] = None,
 ) -> Dict[str, JointPnRResult]:
     """
     Run joint PnR and update ImcflowDeviceConfig with results.
@@ -2192,6 +2232,8 @@ def run_joint_pnr_and_update_config(
         mod: TVM module containing imcflow functions
         tensor_edge_list_dict: Dict mapping func_name -> List[TensorEdge]
                                Must be constructed via constructTensorEdgeList() first.
+        preassigned_placements: Optional dict mapping func_name -> {graph_node_id -> Coord}
+                                for nodes with pre-determined placements.
 
     Returns:
         Dict mapping function names to JointPnRResult
@@ -2199,7 +2241,7 @@ def run_joint_pnr_and_update_config(
     config = ImcflowDeviceConfig()
 
     # Run joint PnR
-    results = run_joint_pnr(mod, tensor_edge_list_dict)
+    results = run_joint_pnr(mod, tensor_edge_list_dict, preassigned_placements)
 
     # Update HWNodeMap (pass tensor_edge_list_dict for outer->inner id conversion)
     update_hw_node_map(results, config.HWNodeMap, tensor_edge_list_dict)
@@ -2240,6 +2282,17 @@ def build_policy_tables_from_pnr_result(
         Policy tables dict
     """
     from .policy_table_builder import PolicyTableBuilder
+
+    debug_print(f"[build_policy_tables_from_pnr_result] Starting for {func_name}")
+    debug_print(f"[build_policy_tables_from_pnr_result]   noc_paths keys: "
+               f"{len(noc_paths)} entries")
+    tensor_edge_keys = [k for k in noc_paths.keys() if isinstance(k, TensorEdge)]
+    inst_path_keys = [k for k in noc_paths.keys() if isinstance(k, NodeID)]
+    debug_print(f"[build_policy_tables_from_pnr_result]   TensorEdge paths: {len(tensor_edge_keys)}")
+    debug_print(f"[build_policy_tables_from_pnr_result]   Instruction paths (NodeID): {len(inst_path_keys)} -> {[str(k) for k in inst_path_keys]}")
+    for te in tensor_edge_keys:
+        src, dst, split = noc_paths[te]
+        debug_print(f"[build_policy_tables_from_pnr_result]   DATA: {te} -> ({src}, {dst}, {split})")
 
     # Convert to routing result (extracts HWCommodities from noc_paths)
     routing_result = convert_pnr_result_to_routing_result(pnr_result, noc_paths)
@@ -2386,10 +2439,21 @@ def construct_noc_paths_from_pnr_results(
 
         # Add instruction paths (inode to imce)
         # Each IMCE receives instructions from its corresponding INODE
+        # NOTE: We add instruction paths for ALL IMCEs unconditionally (same as legacy constructNoCPathDict)
+        # This means even IMCEs not mapped for this function get instruction path entries,
+        # which is by design - inodes broadcast instructions to all IMCEs in their row.
+        active_imces = set(
+            v for v in config.HWNodeMap.values()
+            if isinstance(v, NodeID) and v.is_imce()
+        )
+        debug_print(f"[construct_noc_paths] {func_name}: active IMCEs in HWNodeMap = {sorted([str(x) for x in active_imces])}")
         for dst_hwnode_id in NodeID.imces():
             inode_id = NodeID.from_inode_coord(NodeID.to_coord(dst_hwnode_id)[0])
             noc_paths[func_name][dst_hwnode_id] = (inode_id, dst_hwnode_id, None)
+            is_active = dst_hwnode_id in active_imces
+            debug_print(f"[construct_noc_paths]   inst path: {inode_id} -> {dst_hwnode_id} (active={is_active})")
 
-        debug_print(f"[construct_noc_paths] {func_name}: {len(noc_paths[func_name])} entries")
+        debug_print(f"[construct_noc_paths] {func_name}: {len(noc_paths[func_name])} entries total "
+                   f"({len(noc_paths[func_name]) - len(NodeID.imces())} TensorEdge + {len(NodeID.imces())} instruction)")
 
     return noc_paths

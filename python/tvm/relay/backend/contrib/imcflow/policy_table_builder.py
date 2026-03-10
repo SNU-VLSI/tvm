@@ -245,7 +245,15 @@ class PathTreeBuilder:
             if key not in groups:
                 groups[key] = []
             groups[key].append(cid)
+            is_instruction = isinstance(tensor_id, str) and str(tensor_id).startswith("instruction_")
+            debug_print(f"[PathTreeBuilder._group_commodities] func={self.func_name}: "
+                       f"cid={cid}, source={commodity.source}, dest={commodity.destination}, "
+                       f"tensor_id={tensor_id}, type={'INSTRUCTION' if is_instruction else 'DATA'}, "
+                       f"group_size_so_far={len(groups[key])}")
 
+        debug_print(f"[PathTreeBuilder._group_commodities] func={self.func_name}: "
+                   f"{len(groups)} groups total: "
+                   + ", ".join(f"({src},{tid}):{len(cids)}" for (src,tid),cids in groups.items()))
         return groups
 
     def _get_split_idx_from_metadata(self, metadata: Any) -> Optional[int]:
@@ -610,6 +618,22 @@ class PolicyTableGenerator:
 
         # Get destination info for ksel calculation
         dest_info_map = self._collect_destination_info(tree)
+
+        # Debug: show tree structure
+        all_nodes = tree.get_all_nodes()
+        dest_nodes = tree.get_destinations()
+        dest_coords = [str(n.coord) for n in dest_nodes]
+        # Determine if this is instruction or data tree
+        # Check tensor_id: instruction trees have string tensor_ids starting with "instruction_"
+        is_instruction = isinstance(tree.tensor_id, str) and tree.tensor_id.startswith("instruction_")
+        tree_type = "INSTRUCTION" if is_instruction else "DATA"
+        debug_print(f"[PolicyTableGenerator._process_tree] [{tree_type}] tree: source={tree.source}, "
+                   f"tensor_id={tree.tensor_id}, n_nodes={len(all_nodes)}, "
+                   f"destinations={dest_coords}, commodity_ids={tree.commodity_ids}")
+        # Warn if a DATA tree has more than 1 destination (unexpected multicast of data)
+        if not is_instruction and len(dest_nodes) > 1:
+            debug_print(f"[PolicyTableGenerator._process_tree] WARNING: DATA tree has {len(dest_nodes)} destinations "
+                       f"(multicast data path). source={tree.source}, dests={dest_coords}")
 
         # BFS traversal to process nodes level by level
         self._traverse_tree(tree.root, tree, dest_info_map)

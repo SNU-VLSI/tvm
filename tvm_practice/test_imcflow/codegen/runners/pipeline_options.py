@@ -55,6 +55,7 @@ class PipelineOptions:
     start_at: PipelineStage = PipelineStage.TRANSFORM
     skip_stages: Set[PipelineStage] = field(default_factory=set)
     with_patch: bool = False
+    single_qconv: bool = False
     input_pattern: str = "default"
     dataset: Optional[str] = None
     sample: Optional[int] = None
