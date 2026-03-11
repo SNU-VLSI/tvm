@@ -151,7 +151,12 @@ NUM_SAMPLES="${1:-20}"
 
 # Determine the samples argument for the binary
 if [[ -n "$SAMPLE_INDICES" ]]; then
-    SAMPLES_ARG="$SAMPLE_INDICES"
+    # Ensure comma is present so C parser detects indices mode (vs num_samples)
+    if [[ "$SAMPLE_INDICES" != *","* ]]; then
+        SAMPLES_ARG="${SAMPLE_INDICES},"
+    else
+        SAMPLES_ARG="$SAMPLE_INDICES"
+    fi
     SAMPLES_DISPLAY="indices: $SAMPLE_INDICES"
 else
     SAMPLES_ARG="$NUM_SAMPLES"
