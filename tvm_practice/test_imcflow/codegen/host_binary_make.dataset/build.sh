@@ -1,15 +1,19 @@
 #!/bin/bash
 # Build script for execute_graph_for_dataset
-# Usage: ./build.sh <test_evl_dir> [ISA]
+# Usage: ./build.sh <test_evl_dir> [ISA] [RETRY_DISABLE] [MAX_RETRY_COUNT]
 #
 # Example:
 #   ./build.sh /root/project/tvm/tvm_practice/test_imcflow/codegen/resnet8_subset31_pretrained_orig_evl x86
+#   ./build.sh /root/project/tvm/tvm_practice/test_imcflow/codegen/resnet8_subset31_pretrained_orig_evl x86 1
+#   ./build.sh /root/project/tvm/tvm_practice/test_imcflow/codegen/resnet8_subset31_pretrained_orig_evl x86 0 5
 
 set -e
 
 # Arguments
 TEST_EVL_DIR=${1:-""}
 ISA=${2:-""}
+RETRY_DISABLE=${3:-""}
+MAX_RETRY_COUNT=${4:-""}
 
 # Auto-detect ISA from IMCFLOW_HOST_ISA environment variable if not specified
 if [ -z "$ISA" ]; then
@@ -27,8 +31,10 @@ if [ -z "$TEST_EVL_DIR" ]; then
     echo "Usage: $0 <test_evl_dir> [ISA]"
     echo ""
     echo "Arguments:"
-    echo "  test_evl_dir  Path to the test evaluation directory (e.g., resnet8_*_evl)"
-    echo "  ISA           Target ISA: x86 or arm (default: x86)"
+    echo "  test_evl_dir     Path to the test evaluation directory (e.g., resnet8_*_evl)"
+    echo "  ISA              Target ISA: x86 or arm (default: x86)"
+    echo "  RETRY_DISABLE    Set to 1 to disable retry on timeout (default: retry enabled)"
+    echo "  MAX_RETRY_COUNT  Maximum retry count (default: 3, ignored if RETRY_DISABLE=1)"
     echo ""
     echo "Available test directories:"
     find "$(dirname "$0")/../eval_dir" -maxdepth 1 -name "*_evl*" -type d 2>/dev/null | while read dir; do
@@ -70,10 +76,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo "========================================"
 echo "Building execute_graph_for_dataset"
 echo "========================================"
-echo "Test Dir:    $TEST_EVL_DIR"
-echo "MLF Tar:     $MLF_TAR"
-echo "H_OBJ_PATH:  $H_OBJ_PATH"
-echo "ISA:         $ISA_UPPER"
+echo "Test Dir:        $TEST_EVL_DIR"
+echo "MLF Tar:         $MLF_TAR"
+echo "H_OBJ_PATH:      $H_OBJ_PATH"
+echo "ISA:             $ISA_UPPER"
+echo "RETRY_DISABLE:   ${RETRY_DISABLE:-0}"
+echo "MAX_RETRY_COUNT: ${MAX_RETRY_COUNT:-"3 (default)"}"
 echo "========================================"
 
 # Create and enter build directory
@@ -91,6 +99,14 @@ CMAKE_ARGS=(
     -DMLF_TAR="$MLF_TAR"
     -DH_OBJ_PATH="$H_OBJ_PATH"
 )
+
+if [ "$RETRY_DISABLE" = "1" ]; then
+    CMAKE_ARGS+=(-DRETRY_DISABLE=ON)
+fi
+
+if [ -n "$MAX_RETRY_COUNT" ]; then
+    CMAKE_ARGS+=(-DMAX_RETRY_COUNT="$MAX_RETRY_COUNT")
+fi
 
 if [ "$ISA_UPPER" = "ARM" ]; then
     TOOLCHAIN_FILE="$SCRIPT_DIR/cmake/arm-cortex-a53.cmake"

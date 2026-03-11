@@ -59,6 +59,8 @@ class PipelineOptions:
     input_pattern: str = "default"
     dataset: Optional[str] = None
     sample: Optional[int] = None
+    retry_disable: bool = False
+    max_retry_count: Optional[int] = None
     run_mode: RunMode = field(init=False)
 
     def __post_init__(self):

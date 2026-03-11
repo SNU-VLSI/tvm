@@ -106,6 +106,19 @@ Examples:
   )
 
   parser.add_argument(
+    "--retry-disable",
+    action="store_true",
+    help="Disable retry on IMCFlow timeout (compile with -DRETRY_DISABLE)"
+  )
+
+  parser.add_argument(
+    "--max-retry-count",
+    type=int,
+    default=None,
+    help="Max retry count on IMCFlow timeout (default: 3)"
+  )
+
+  parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
@@ -179,6 +192,8 @@ Examples:
       input_pattern=args.pattern if args.pattern else "default",
       dataset=args.dataset,
       sample=args.sample,
+      retry_disable=args.retry_disable,
+      max_retry_count=args.max_retry_count,
     )
   except ValueError as e:
     parser.print_help()

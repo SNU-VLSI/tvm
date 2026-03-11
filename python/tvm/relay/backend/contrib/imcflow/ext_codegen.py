@@ -286,6 +286,41 @@ class KernelCodeGenerator:
     else:
       raise TypeError(f"unsupported node type {checked_type.__class__}")
 
+  def generateRetryMacros(self):
+    """Generate retry control macros."""
+    return ("""
+#ifndef RETRY_DISABLE
+#ifndef MAX_RETRY_COUNT
+#define MAX_RETRY_COUNT 3
+#endif
+#endif
+""")
+
+  def generateRetryCheck(self, location_label):
+    """Generate retry check code after a wait call.
+    On failure: cleanup device pointers, increment retry count, continue loop.
+    With RETRY_DISABLE: exit(1) on failure (original behavior).
+    """
+    code = CodeWriter()
+    code += f"#ifndef RETRY_DISABLE\n"
+    code += f"if (_wait_rc != 0) {{\n"
+    code.nextIndent()
+    code += f'fprintf(stderr, "[RETRY] Timeout at {location_label}, attempt %d/%d\\n", _retry_count+1, MAX_RETRY_COUNT);\n'
+    code += self.generateDevicePointerCleanup()
+    code += f"_retry_count++;\n"
+    code += f"continue;\n"
+    code.prevIndent()
+    code += f"}}\n"
+    code += f"#else\n"
+    code += f"if (_wait_rc != 0) {{\n"
+    code += f'  fprintf(stderr, "[TIMEOUT] {location_label} failed (retry disabled)\\n");\n'
+    code += self.generateDevicePointerCleanup()
+    code += f"  g_imcflow_kernel_failed = 1;\n"
+    code += f"  return;\n"
+    code += f"}}\n"
+    code += f"#endif\n"
+    return code
+
   def generateHeader(self):
     """Generate C header includes."""
     return ("""
@@ -303,6 +338,9 @@ class KernelCodeGenerator:
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <unistd.h>
+
+// Global failure flag: set by kernel on timeout, checked by host loop
+extern volatile int g_imcflow_kernel_failed;
 """)
 
   def generateInterruptUtilities(self):
@@ -319,7 +357,7 @@ static inline void enable_imcflow_interrupt(int fd)
   }
 }
 
-static inline void wait_imcflow_interrupt(int fd)
+static inline int wait_imcflow_interrupt(int fd)
 {
   uint32_t info;
   fd_set readfds;
@@ -334,17 +372,18 @@ static inline void wait_imcflow_interrupt(int fd)
   int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
   if (ret == 0) {
     fprintf(stderr, "ERROR: Interrupt timeout (1s) - IMCFlow not responding\\n");
-    exit(1);
+    return -1;
   } else if (ret < 0) {
     perror("select failed");
-    exit(1);
+    return -1;
   }
 
   ssize_t nb = read(fd, &info, sizeof(info));
   if (nb != (ssize_t)sizeof(info)) {
     perror("read interrupt failed");
-    exit(1);
+    return -1;
   }
+  return 0;
 }
 
 static inline void generate_ack(uint32_t* int_ack_gen)
@@ -359,7 +398,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
 // Poll until ImcFlow returns to IDLE state
 #define POLL_LOG_INTERVAL 1000
 #define MAX_POLL_COUNT 20000
-static void wait_for_idle(volatile uint32_t* npu_pointer) {
+static int wait_for_idle(volatile uint32_t* npu_pointer) {
   uint32_t poll_count = 0;
   uint32_t state;
 
@@ -370,7 +409,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
     if (state == SET_IDLE_CODE) {
       fprintf(stderr,"[POLLING] Operation complete! (polled %u times)\\n", poll_count);
-      return;
+      return 0;
     }
 
     poll_count++;
@@ -378,8 +417,8 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     // Check for timeout
     if (poll_count >= MAX_POLL_COUNT) {
       fprintf(stderr,"[POLLING ERROR] Timeout after %u polls (state: 0x%x)\\n", poll_count, state);
-      fprintf(stderr,"[POLLING ERROR] ImcFlow hardware appears to be stuck. Terminating.\\n");
-      exit(1);
+      fprintf(stderr,"[POLLING ERROR] ImcFlow hardware appears to be stuck.\\n");
+      return -1;
     }
 
     // Log progress every 1000 polls for debugging
@@ -502,7 +541,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       " npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
-      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("wait_for_idle(npu_pointer);" if USE_POLLING else ""),
+      "int _wait_rc = wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("int _wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "int _wait_rc = 0;"),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
       "npu_pointer[INTR_DONE_REG_IDX] = 1;",
     ]
@@ -516,7 +555,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
-      "wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("wait_for_idle(npu_pointer);" if USE_POLLING else ""),
+      "_wait_rc = wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("_wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "_wait_rc = 0;"),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
         "npu_pointer[INTR_DONE_REG_IDX] = 1;"
     ]
@@ -680,6 +719,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     for idx, o_type in enumerate(self.output_node_types):
       args_list.append(f"({dtype_to_cpp(o_type)}*)out{idx}->data")
     code += f"{self.func_name}_kernel({', '.join(args_list)});\n"
+    code += "if (g_imcflow_kernel_failed) return -1;\n"
 
     code += "(void)out_ret_value;\n"
     code += "if (out_ret_tcode) { *out_ret_tcode = kTVMArgInt; }\n"
@@ -708,6 +748,7 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
 
     code = CodeWriter()
     code += self.generateHeader()
+    code += self.generateRetryMacros()
     code += self.generateExternLink()
     code += makeConstArrayDecl(self.func, self.func_name, self.target_func)
     code += self.generateInterruptUtilities()
@@ -718,6 +759,20 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
     code.nextIndent()
     code += f"fprintf(stderr,\"{self.func_name}_kernel called\\n\");\n"
+
+    # Early exit if a previous kernel already failed
+    code += "if (g_imcflow_kernel_failed) return;\n"
+
+    # Retry loop start
+    code += "#ifndef RETRY_DISABLE\n"
+    code += "int _retry_count = 0;\n"
+    code += "do {\n"
+    code.nextIndent()
+    code += "if (_retry_count > 0) {\n"
+    code += f"  fprintf(stderr, \"[RETRY] {self.func_name}_kernel retry attempt %d/%d\\n\", _retry_count, MAX_RETRY_COUNT);\n"
+    code += "}\n"
+    code += "#endif\n"
+
     code += self.generateDevicePointerSetup()
     code += self.emitReset()
     if self.os == "linux":
@@ -725,7 +780,9 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
+    code += self.generateRetryCheck("policy_update")
     code += self.generateInvokeCode() # proceed up to halt
+    code += self.generateRetryCheck("invoke")
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
@@ -736,8 +793,22 @@ static void wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
       code += self.generateInvokeCode() # end of exec
+      code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
+
+    # Retry loop end + cleanup
     code += self.generateDevicePointerCleanup()
+    code += "#ifndef RETRY_DISABLE\n"
+    code += "break; // success\n"
+    code.prevIndent()
+    code += "} while (_retry_count <= MAX_RETRY_COUNT);\n"
+    code += "if (_retry_count > MAX_RETRY_COUNT) {\n"
+    code += '  fprintf(stderr, "[RETRY] Exhausted %d retries.\\n", MAX_RETRY_COUNT);\n'
+    code += "  g_imcflow_kernel_failed = 1;\n"
+    code += "  return;\n"
+    code += "}\n"
+    code += "#endif\n"
+
     code.prevIndent()
     code += '}\n'
 

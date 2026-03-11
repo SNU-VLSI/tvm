@@ -56,6 +56,9 @@
 // Result file handle (global for use by helper functions)
 static FILE* g_result_file = NULL;
 
+// Global failure flag: set by IMCFlow kernel on timeout, checked by main loop
+volatile int g_imcflow_kernel_failed = 0;
+
 #define DEFAULT_RESULT_PATH "/tmp/tvm_dataset_results.txt"
 #define MAX_INDICES 10000
 
@@ -545,9 +548,15 @@ int main(int argc, char** argv) {
   }
 
   int correct = 0;
+  int failed_count = 0;
+  int failed_indices[MAX_INDICES];
+
   for (size_t iter = 0; iter < num_samples; iter++) {
     // Determine actual sample index
     size_t sample_idx = (num_indices > 0) ? (size_t)sample_indices[iter] : iter;
+
+    // Reset failure flag before each inference
+    g_imcflow_kernel_failed = 0;
 
     // Copy image data to input tensor
     void* sample_data = get_sample(&images, sample_idx);
@@ -562,6 +571,16 @@ int main(int argc, char** argv) {
 
     // Run inference
     TVMGraphExecutor_Run(exec);
+
+    // Check if kernel failed (timeout)
+    if (g_imcflow_kernel_failed) {
+      fprintf(stderr, "[SKIP] Sample %zu failed (timeout)\n", sample_idx);
+      if (g_result_file) {
+        fprintf(g_result_file, "\n[Sample %zu] FAILED (timeout)\n", sample_idx);
+      }
+      failed_indices[failed_count++] = (int)sample_idx;
+      continue;
+    }
 
     // Get output
     rc = TVMGraphExecutor_GetOutput(exec, 0, &output_tensor);
@@ -585,13 +604,14 @@ int main(int argc, char** argv) {
     print_class_scores(&output_tensor, num_classes, predicted, label, sample_idx);
 
     // Print progress every 100 samples
+    int evaluated = (int)(iter + 1) - failed_count;
     if ((iter + 1) % 100 == 0 || iter + 1 == num_samples) {
-      double accuracy = 100.0 * correct / (iter + 1);
-      printf("Progress: %zu/%zu, Correct: %d, Accuracy: %.2f%%\n",
-             iter + 1, num_samples, correct, accuracy);
+      double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
+      printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
+             iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
       if (g_result_file) {
-        fprintf(g_result_file, "Progress: %zu/%zu, Correct: %d, Accuracy: %.2f%%\n",
-                iter + 1, num_samples, correct, accuracy);
+        fprintf(g_result_file, "Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
+                iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
         fflush(g_result_file);
       }
     }
@@ -600,23 +620,30 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Final Results
   // ============================================================================
-  double final_accuracy = 100.0 * correct / num_samples;
-  printf("\n========================================\n");
-  printf("  FINAL RESULTS\n");
-  printf("========================================\n");
-  printf("Total Samples: %zu\n", num_samples);
-  printf("Correct:       %d\n", correct);
-  printf("Accuracy:      %.2f%% (%d/%zu)\n", final_accuracy, correct, num_samples);
-  printf("========================================\n\n");
+  int evaluated = (int)num_samples - failed_count;
+  double final_accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
 
-  if (g_result_file) {
-    fprintf(g_result_file, "\n========================================\n");
-    fprintf(g_result_file, "  FINAL RESULTS\n");
-    fprintf(g_result_file, "========================================\n");
-    fprintf(g_result_file, "Total Samples: %zu\n", num_samples);
-    fprintf(g_result_file, "Correct:       %d\n", correct);
-    fprintf(g_result_file, "Accuracy:      %.2f%% (%d/%zu)\n", final_accuracy, correct, num_samples);
-    fprintf(g_result_file, "========================================\n\n");
+  FILE* outs[] = { stdout, g_result_file };
+  int num_outs = g_result_file ? 2 : 1;
+
+  for (int o = 0; o < num_outs; o++) {
+    FILE* f = outs[o];
+    fprintf(f, "\n========================================\n");
+    fprintf(f, "  FINAL RESULTS\n");
+    fprintf(f, "========================================\n");
+    fprintf(f, "Total Samples: %zu\n", num_samples);
+    fprintf(f, "Evaluated:     %d\n", evaluated);
+    fprintf(f, "Failed:        %d\n", failed_count);
+    fprintf(f, "Correct:       %d\n", correct);
+    fprintf(f, "Accuracy:      %.2f%% (%d/%d)\n", final_accuracy, correct, evaluated);
+    if (failed_count > 0) {
+      fprintf(f, "Failed indices:");
+      for (int i = 0; i < failed_count; i++) {
+        fprintf(f, " %d", failed_indices[i]);
+      }
+      fprintf(f, "\n");
+    }
+    fprintf(f, "========================================\n\n");
   }
 
   // ============================================================================

@@ -39,6 +39,9 @@
 #include "test_input_loader.h"
 #include "test_output_writer.h"
 
+// Global failure flag: set by IMCFlow kernel on timeout, checked by host loop
+volatile int g_imcflow_kernel_failed = 0;
+
 // ============================================================================
 // Utility Functions
 // ============================================================================

@@ -17,6 +17,9 @@
 // System lib entry provided by the generated C
 extern const TVMModule* TVMSystemLibEntryPoint(void);
 
+// Global failure flag: set by IMCFlow kernel on timeout
+volatile int g_imcflow_kernel_failed = 0;
+
 // ---- User-provided (embed) graph JSON and params ----
 __attribute__((weak)) const char tvm_graph_json[] = "";
 __attribute__((weak)) const unsigned char tvm_params[] = {0};

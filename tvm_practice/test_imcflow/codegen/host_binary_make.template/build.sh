@@ -3,6 +3,7 @@
 MAIN_SCRIPT=${1:-"execute_graph.c"}
 MAIN_TEST_FOLDER=${2:-"one_relu_evl"}
 ISA=${3:-"x86"}
+shift 3 2>/dev/null || true  # remaining args are extra cmake flags
 
 #check ISA validity
 if [ "$ISA" != "x86" ] && [ "$ISA" != "arm" ]; then
@@ -28,7 +29,8 @@ cmake .. \
     -DMAIN_SCRIPT="$MAIN_SCRIPT" \
     -DMAIN_TEST_FOLDER="$MAIN_TEST_FOLDER" \
     -DISA=${ISA^^} \
-    -C ../cmake/config_imcflow.cmake
+    -C ../cmake/config_imcflow.cmake \
+    "$@"
 
 # Build
 if [ $? -eq 0 ]; then

@@ -136,7 +136,22 @@ target_include_directories(tvm_model PRIVATE
   "${TVM_ROOT}/3rdparty/dmlc-core/include"
 )
 
-target_compile_definitions(tvm_model PRIVATE DMLC_LOG_STACK_TRACE=0)
+# Retry control options
+option(RETRY_DISABLE "Disable retry on timeout (exit on failure)" OFF)
+set(MAX_RETRY_COUNT "" CACHE STRING "Maximum retry count (default: 3 in code)")
+
+set(TVM_MODEL_DEFS DMLC_LOG_STACK_TRACE=0)
+if(RETRY_DISABLE)
+  list(APPEND TVM_MODEL_DEFS RETRY_DISABLE)
+  message(STATUS "Retry: DISABLED (exit on timeout)")
+elseif(MAX_RETRY_COUNT)
+  list(APPEND TVM_MODEL_DEFS MAX_RETRY_COUNT=${MAX_RETRY_COUNT})
+  message(STATUS "Retry: ENABLED (max ${MAX_RETRY_COUNT} retries)")
+else()
+  message(STATUS "Retry: ENABLED (default 3 retries)")
+endif()
+
+target_compile_definitions(tvm_model PRIVATE ${TVM_MODEL_DEFS})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(tvm_model PRIVATE
     -Wno-unused-variable

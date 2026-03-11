@@ -204,6 +204,19 @@ target_include_directories(tvm_model PRIVATE
 )
 
 target_compile_definitions(tvm_model PRIVATE DMLC_LOG_STACK_TRACE=0)
+
+# Retry-on-timeout control (for generated IMCFlow kernel code)
+if(RETRY_DISABLE)
+  target_compile_definitions(tvm_model PRIVATE RETRY_DISABLE)
+  message(STATUS "Retry on timeout: DISABLED")
+else()
+  message(STATUS "Retry on timeout: ENABLED")
+endif()
+if(DEFINED MAX_RETRY_COUNT)
+  target_compile_definitions(tvm_model PRIVATE MAX_RETRY_COUNT=${MAX_RETRY_COUNT})
+  message(STATUS "Max retry count: ${MAX_RETRY_COUNT}")
+endif()
+
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(tvm_model PRIVATE
     -Wno-unused-variable

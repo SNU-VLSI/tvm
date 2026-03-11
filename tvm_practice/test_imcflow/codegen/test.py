@@ -547,7 +547,7 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, run_mode: Ru
   return output
 
 
-def run_simulation(eval_dir, HOST_ISA="x86"):
+def run_simulation(eval_dir, HOST_ISA="x86", options=None):
   """Run simulation by building and executing the graph with proper output streaming
 
   Args:
@@ -584,7 +584,14 @@ def run_simulation(eval_dir, HOST_ISA="x86"):
   os.makedirs(host_build_dir, exist_ok=True)
 
   # Build in the test-specific directory (use current directory "." since eval_dir is now relative)
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", HOST_ISA]
+  extra_cmake_args = []
+  if options is not None:
+    if options.retry_disable:
+      extra_cmake_args.append("-DRETRY_DISABLE=ON")
+    if options.max_retry_count is not None:
+      extra_cmake_args.append(f"-DMAX_RETRY_COUNT={options.max_retry_count}")
+
+  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", HOST_ISA] + extra_cmake_args
   build_log_path = os.path.join(log_dir, "build.log")
 
   with open(build_log_path, "w") as log_file:
@@ -916,7 +923,7 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
   # Run simulation (build + gem5 execution)
   # Note: run_simulation() internally skips gem5 for ARM but still builds the binary
   try:
-    imcflow_output = run_simulation(eval_dir, config.HOST_ISA)
+    imcflow_output = run_simulation(eval_dir, config.HOST_ISA, options=options)
   except KeyboardInterrupt:
     print("\n  Simulation interrupted - skipping output comparison")
     raise  # Re-raise to let pytest handle the interruption
