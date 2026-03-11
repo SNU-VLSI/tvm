@@ -803,6 +803,7 @@ def compile_for_imcflow_single_qconv(mod, param_dict, output_dir, skip_codegen=F
     # Codegen and graph executor output go to top-level output_dir
     # (cmake expects lib_graph_system-lib.tar and build/ in the model's eval dir, not phase2 subdir)
     print("\n--- Running IMCFlow Codegen (Phase 2) ---")
+    DevConfig().single_qconv = True
     run_imcflow_codegen(mod_p2, output_dir, save_intermediate=True, stop_at_codegen=False)
 
     # Apply saturating arithmetic to CPU-side int16 ops (add, subtract, multiply)

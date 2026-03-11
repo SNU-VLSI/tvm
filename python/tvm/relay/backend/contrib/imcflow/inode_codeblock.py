@@ -5,6 +5,8 @@ from textwrap import indent
 import math
 import pdb
 
+NOP_LOOP_CNTS = 10
+
 
 class InodeCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
@@ -340,6 +342,16 @@ class RecvBlockInterleaved(InodeCodeBlock):
     sync_block = SyncPairINode(current_node, pair.all_nodes, pair.uuid, sync_annotation)
     self.body.add(sync_block)
 
+class NopLoopBlock(InodeCodeBlock):
+  """ Code block for a simple loop with NOP body, used for timing or synchronization purposes """
+
+  def __init__(self, loop_count: int, annotation: str = ""):
+    super().__init__(annotation)
+    self.loop_count = loop_count
+    self._build()
+
+  def _build(self):
+    self.body.add(SimpleFor(self.loop_count, TextBlock(f"__asm__ volatile(\"nop\");")))
 
 class SendBlock(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
@@ -364,8 +376,10 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
 
     # Per-packet sync: Send one packet, then sync immediately
-    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id):
+    nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id, nop_delay=nop_delay):
       code = f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
+      code += nop_delay
       # Add sync after each send
       sync_code = self._get_sync_code_str()
       if sync_code:
@@ -398,8 +412,10 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
 
     # Per-packet sync: Send one packet, then sync immediately
-    def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id):
+    nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+    def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id, nop_delay=nop_delay):
       code = f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
+      code += nop_delay
       # Add sync after each send
       sync_code = self._get_sync_code_str()
       if sync_code:
@@ -550,13 +566,14 @@ class SendBlockInterleaved(InodeCodeBlock):
       active_infos = [x for x in info_list if x['recv_count'] > current_base]
 
       # Generate loop for this interval
+      nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
       for x in active_infos:
         # var = UniqueVar("send_offset_address", dtype="int")
         var = UniqueVar(x['owner'], dtype="int")
         self.body.add(TextBlock(f"{var} = {x['offset']};"))
         self.body.add(SimpleFor(duration,
-            lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid']:
-              f"__builtin_INODE_SEND({offset_var} + ({f'{base} + {iter}' if base > 0 else iter})*32, 0, {policy}, {fid});"))
+            lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid'], nop_delay=nop_delay:
+              f"__builtin_INODE_SEND({offset_var} + ({f'{base} + {iter}' if base > 0 else iter})*32, 0, {policy}, {fid});\n" + nop_delay))
 
         # Add sync after each send in interleaved block
         self._add_sync_for_edge(x['owner'], x['edge_info'])

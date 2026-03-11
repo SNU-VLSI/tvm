@@ -729,6 +729,7 @@ class ImcflowDeviceConfig:
     # Flag to control whether to use .patched.cpp files during compilation
     # When True, codegen will look for {base}.patched.cpp before falling back to {base}.cpp
     self.use_patched_cpp = False
+    self.single_qconv = False
     self.MemLayout = MemoryLayout(
         MemoryRegionEntry("state_regs", ImcflowDeviceConfig.INODE_MMREG_SIZE),
         MemoryRegionEntry("inode_0_0_inst", ImcflowDeviceConfig.INODE_INST_MEM_SIZE),
