@@ -395,7 +395,6 @@ void tvmgen_default_tvmgen_default_imcflow_main_46_round_imcflow_region1_main_0(
       // generate: load_block
       // loop ignored with loop count == 0 : load_block
       // endgenerate: load_block
-      __builtin_IMCE_STANDBY(6, 1);
       __builtin_IMCE_SEND(1, 0, 2, 0); // TensorEdge((36, odata), ((37, 32), data)), imce_1_2 -> imce_1_1
       __builtin_IMCE_SEND(1, 0, 2, 0); // TensorEdge((36, odata), ((37, 32), data)), imce_1_2 -> imce_1_1
       __builtin_IMCE_SEND(1, 0, 2, 0); // TensorEdge((36, odata), ((37, 32), data)), imce_1_2 -> imce_1_1
