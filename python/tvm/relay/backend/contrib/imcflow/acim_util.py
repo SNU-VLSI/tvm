@@ -54,6 +54,16 @@ class VMode(Enum):
   QRTR = 2
 
 
+_default_vmode = VMode.HALF
+
+def set_default_vmode(vmode: VMode):
+    global _default_vmode
+    _default_vmode = vmode
+
+def get_default_vmode() -> VMode:
+    return _default_vmode
+
+
 class MultMode(Enum):
   SINGLE = 0
   DOUBLE = 1
@@ -122,8 +132,10 @@ def cast_str_to_enum(s: str, expected_enum_type=None):
 
 class ConfigData(dict):
   def __init__(self, data_shape, weight_shape, padding, stride,
-               adcmode=ADCMode.SIX, vmode=VMode.FULL, multmode_set=MultModeSet.S4,
+               adcmode=ADCMode.SIX, vmode=None, multmode_set=MultModeSet.S4,
                acc_mask=AccMask.BM_0001, use_imcu=1):
+    if vmode is None:
+      vmode = _default_vmode
     
     # Helper function to convert TVM types to Python int
     def to_int(val):
