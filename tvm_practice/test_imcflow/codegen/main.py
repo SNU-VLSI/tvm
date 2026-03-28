@@ -13,6 +13,7 @@ import subprocess
 import os
 from test import MODEL_REGISTRY, INPUT_PATTERNS, run_test_pipeline
 from runners.pipeline_options import PipelineOptions, PipelineStage, parse_stop_at, parse_start_at
+from tvm.relay.backend.contrib.imcflow.acim_util import VMode, set_default_vmode
 
 
 def main():
@@ -119,6 +120,14 @@ Examples:
   )
 
   parser.add_argument(
+    "--vmode",
+    type=str,
+    choices=["FULL", "HALF", "QRTR"],
+    default="HALF",
+    help="Voltage mode for ACIM config (default: HALF)"
+  )
+
+  parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
@@ -135,6 +144,9 @@ Examples:
       print(f"  {model_name:<40} (default: {default_pattern})")
     print(f"\nAvailable input patterns: {', '.join(INPUT_PATTERNS)}")
     return 0
+
+  # Set vmode globally before any model construction
+  set_default_vmode(VMode[args.vmode])
 
   # Require model if not listing
   if not args.model:

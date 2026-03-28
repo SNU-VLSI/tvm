@@ -3,7 +3,7 @@ import numpy as np
 import tvm
 from tvm import relay
 
-from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData, AccMask
+from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData, AccMask, VMode, get_default_vmode
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 import numpy as np
@@ -281,8 +281,15 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
 
   out, var_dict = getModel_([1, 3, iH, iW], until_relay=until_relay)
 
-  # Load checkpoint
-  checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar'
+  # Select checkpoint based on vmode
+  vmode = get_default_vmode()
+  checkpoint_paths = {
+    VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
+    VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/greedy_ch_split/2026-Feb-16-00-09-25/imcflow/2026-Mar-20-00-32-33/checkpoint.pth.tar',
+  }
+  if vmode == VMode.QRTR:
+    raise ValueError("QRTR checkpoint doesn't exist yet")
+  checkpoint_path = checkpoint_paths[vmode]
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']
