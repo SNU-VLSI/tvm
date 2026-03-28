@@ -163,15 +163,29 @@ endif()
 # ============================================================================
 # Build Dataset Evaluation Executable
 # ============================================================================
-add_executable(execute_graph_for_dataset
-  ${CMAKE_CURRENT_LIST_DIR}/src/execute_graph_for_dataset.c
+# If DEBUG_EXE is set (env or cmake var), use debug_execute_graph_for_dataset.c
+if(NOT DEFINED DEBUG_EXE AND DEFINED ENV{DEBUG_EXE})
+  set(DEBUG_EXE "$ENV{DEBUG_EXE}")
+endif()
+
+if(DEBUG_EXE STREQUAL "1")
+  set(DATASET_MAIN_SCRIPT "debug_execute_graph_for_dataset.c")
+  set(DATASET_EXEC_NAME "debug_execute_graph_for_dataset")
+  message(STATUS "DEBUG_EXE=1: Using debug_execute_graph_for_dataset.c (per-node output dumping)")
+else()
+  set(DATASET_MAIN_SCRIPT "execute_graph_for_dataset.c")
+  set(DATASET_EXEC_NAME "execute_graph_for_dataset")
+endif()
+
+add_executable(${DATASET_EXEC_NAME}
+  ${CMAKE_CURRENT_LIST_DIR}/src/${DATASET_MAIN_SCRIPT}
 )
 
-target_link_libraries(execute_graph_for_dataset PRIVATE
+target_link_libraries(${DATASET_EXEC_NAME} PRIVATE
   tvm_model ${CRT_LIBS} m stdc++
 )
 
-target_include_directories(execute_graph_for_dataset PRIVATE
+target_include_directories(${DATASET_EXEC_NAME} PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/src"
   "${CRT_LIB_BASE}/include"
   "${TVM_ROOT}/include"
@@ -181,19 +195,19 @@ target_include_directories(execute_graph_for_dataset PRIVATE
   ${TVM_MODEL_INCLUDE}
 )
 
-target_sources(execute_graph_for_dataset PRIVATE
+target_sources(${DATASET_EXEC_NAME} PRIVATE
   "${TVM_ROOT}/src/runtime/crt/host/platform.cc"
 )
 
-target_compile_definitions(execute_graph_for_dataset PRIVATE
+target_compile_definitions(${DATASET_EXEC_NAME} PRIVATE
   DMLC_LOG_STACK_TRACE=0
   TVM_WORKSPACE_SIZE_BYTES=8388608
   TVM_CRT_LOG_LEVEL=3
 )
 
 # Static linking for portability
-target_compile_options(execute_graph_for_dataset PRIVATE -fno-pie)
-target_link_options(execute_graph_for_dataset PRIVATE
+target_compile_options(${DATASET_EXEC_NAME} PRIVATE -fno-pie)
+target_link_options(${DATASET_EXEC_NAME} PRIVATE
   -no-pie
   -static
   -static-libgcc
@@ -257,5 +271,5 @@ message(STATUS "========================================")
 message(STATUS "ISA:              ${ISA}")
 message(STATUS "TVM Root:         ${TVM_ROOT}")
 message(STATUS "MLF Extracted:    ${MLF_DIR}")
-message(STATUS "Executable:       execute_graph_for_dataset")
+message(STATUS "Executable:       ${DATASET_EXEC_NAME}")
 message(STATUS "========================================")

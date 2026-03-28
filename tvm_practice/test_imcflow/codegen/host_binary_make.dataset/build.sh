@@ -118,6 +118,11 @@ if [ "$ISA_UPPER" = "ARM" ]; then
     echo "Using ARM toolchain: $TOOLCHAIN_FILE"
 fi
 
+# Pass DEBUG_EXE to cmake if set
+if [ "${DEBUG_EXE}" = "1" ]; then
+    CMAKE_ARGS+=(-DDEBUG_EXE=1)
+fi
+
 cmake "$SCRIPT_DIR" "${CMAKE_ARGS[@]}"
 
 # Build

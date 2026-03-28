@@ -250,6 +250,15 @@ target_compile_definitions(${TARGET_LIB_NAME} PUBLIC DMLC_LOG_STACK_TRACE=0)
 option(TVM_BUILD_HOST_RUNNER "Build a host runner executable" OFF)
 
 if(TVM_BUILD_HOST_RUNNER)
+  # If DEBUG_EXE is set (env or cmake var), use debug_execute_graph.c
+  if(NOT DEFINED DEBUG_EXE AND DEFINED ENV{DEBUG_EXE})
+    set(DEBUG_EXE "$ENV{DEBUG_EXE}")
+  endif()
+  if(DEBUG_EXE STREQUAL "1")
+    set(MAIN_SCRIPT "debug_execute_graph.c")
+    message(STATUS "DEBUG_EXE=1: Using debug_execute_graph.c (per-node output dumping)")
+  endif()
+
   # Derive executable name from MAIN_SCRIPT (remove .c or .cc extension)
   string(REGEX REPLACE "\\.(c|cc|cpp)$" "" HOST_RUNNER_NAME "${MAIN_SCRIPT}")
 

@@ -24,12 +24,19 @@ fi
 rm -rf *
 
 # Configure with ${ISA} settings
+# Pass DEBUG_EXE to cmake if set
+DEBUG_EXE_FLAG=""
+if [ "${DEBUG_EXE}" = "1" ]; then
+    DEBUG_EXE_FLAG="-DDEBUG_EXE=1"
+fi
+
 cmake .. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DMAIN_SCRIPT="$MAIN_SCRIPT" \
     -DMAIN_TEST_FOLDER="$MAIN_TEST_FOLDER" \
     -DISA=${ISA^^} \
     -C ../cmake/config_imcflow.cmake \
+    $DEBUG_EXE_FLAG \
     "$@"
 
 # Build

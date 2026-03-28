@@ -13,6 +13,13 @@ load_env
 BINARY_DIR="host_binary_make.dataset"
 GRAPH_PATH="$BINARY_DIR/build/mlf/executor-config/graph/default.graph"
 PARAMS_PATH="$BINARY_DIR/build/mlf/parameters/default.params"
+
+# Select executable based on DEBUG_EXE
+if [[ "${DEBUG_EXE}" == "1" ]]; then
+    DATASET_EXEC_NAME="debug_execute_graph_for_dataset"
+else
+    DATASET_EXEC_NAME="execute_graph_for_dataset"
+fi
 DATASET_DIR="dataset"
 IMAGES_PATH="$DATASET_DIR/cifar10/images.npy"
 LABELS_PATH="$DATASET_DIR/cifar10/labels.npy"
@@ -225,7 +232,7 @@ if [[ "$SKIP_STEP6" == true ]]; then
 else
     echo "Step 6: Executing on remote chip..."
     echo ""
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && $BINARY_DIR/build/execute_graph_for_dataset \
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \

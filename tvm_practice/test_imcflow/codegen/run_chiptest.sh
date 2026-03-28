@@ -141,6 +141,13 @@ DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
 DEFAULT_RUNNER_NAME="."
 NPZ_FILE_PATH="scan_reg_files"
 
+# Select executable based on DEBUG_EXE
+if [[ "${DEBUG_EXE}" == "1" ]]; then
+    EXEC_NAME="debug_execute_graph"
+else
+    EXEC_NAME="execute_graph"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/scan_steps.sh"
 load_env
@@ -197,7 +204,7 @@ else
     echo ""
     sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
                "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./execute_graph \
+                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./$EXEC_NAME \
                 eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"
