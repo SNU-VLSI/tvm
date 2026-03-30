@@ -574,7 +574,7 @@ int main(int argc, char** argv) {
     // Run inference (node-by-node debug mode)
     // Create debug output directory for this sample
     char debug_dir[512];
-    snprintf(debug_dir, sizeof(debug_dir), "/tmp/tvm_debug_nodes/sample_%zu", sample_idx);
+    snprintf(debug_dir, sizeof(debug_dir), "debug_nodes/sample_%zu", sample_idx);
     {
       char mkdir_cmd[600];
       snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", debug_dir);

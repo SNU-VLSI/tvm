@@ -367,15 +367,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   fprintf(stderr, "\n--- Executing Graph (Debug: per-node output) ---\n");
 
-  // Create debug output directory
-  char debug_dir[512];
-  snprintf(debug_dir, sizeof(debug_dir), "%s/debug_nodes", output_dir);
-  {
-    char mkdir_cmd[600];
-    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", debug_dir);
-    system(mkdir_cmd);
-  }
-
   // Execute nodes one by one and save each node's output
   for (uint32_t nid = 0; nid < exec->op_execs_count; nid++) {
     const char* node_name = exec->nodes[nid].name;
@@ -403,14 +394,14 @@ int main(int argc, char** argv) {
         } else {
           snprintf(fname, sizeof(fname), "%03u_%s_%u", nid, node_name, out_idx);
         }
-        save_tensor_to_dir(debug_dir, fname, tensor);
+        save_tensor_to_dir(output_dir, fname, tensor);
       }
     } else {
       fprintf(stderr, "  [%u] Skip (no op): %s\n", nid, node_name);
     }
   }
 
-  fprintf(stderr, "✅ Debug execution completed — node outputs saved to %s/\n", debug_dir);
+  fprintf(stderr, "✅ Debug execution completed — node outputs saved to %s/\n", output_dir);
 
   // ============================================================================
   // Output Retrieval and Saving
