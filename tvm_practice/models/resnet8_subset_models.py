@@ -1,4 +1,5 @@
 import numpy as np
+import os
 
 import tvm
 from tvm import relay
@@ -283,10 +284,20 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
 
   # Select checkpoint based on vmode
   vmode = get_default_vmode()
-  checkpoint_paths = {
-    VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
-    VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/greedy_ch_split/2026-Feb-16-00-09-25/imcflow/2026-Mar-20-00-32-33/checkpoint.pth.tar',
-  }
+  board = os.getenv("BOARD", "UNKNOWN_BOARD")
+  if board == "B1":
+    checkpoint_paths = {
+      VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
+      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/2026-Mar-24-16-01-08/imcflow/2026-Mar-25-15-44-02/checkpoint.pth.tar',
+    }
+  elif board == "B2":
+    checkpoint_paths = {
+      VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
+      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/2026-Mar-24-23-56-13/imcflow/2026-Mar-25-15-46-48/checkpoint.pth.tar',
+    }
+  else:
+    raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")
+
   if vmode == VMode.QRTR:
     raise ValueError("QRTR checkpoint doesn't exist yet")
   checkpoint_path = checkpoint_paths[vmode]
