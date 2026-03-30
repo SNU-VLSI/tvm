@@ -591,7 +591,12 @@ def run_simulation(eval_dir, HOST_ISA="x86", options=None):
     if options.max_retry_count is not None:
       extra_cmake_args.append(f"-DMAX_RETRY_COUNT={options.max_retry_count}")
 
-  build_command = ["direnv", "exec", ".", "../build.sh", "execute_graph.c", ".", HOST_ISA] + extra_cmake_args
+  # Select source file and binary name based on DEBUG_EXE environment variable
+  debug_exe = os.getenv("DEBUG_EXE", "0") == "1"
+  main_script = "debug_execute_graph.c" if debug_exe else "execute_graph.c"
+  binary_name = "debug_execute_graph" if debug_exe else "execute_graph"
+
+  build_command = ["direnv", "exec", ".", "../build.sh", main_script, ".", HOST_ISA] + extra_cmake_args
   build_log_path = os.path.join(log_dir, "build.log")
 
   with open(build_log_path, "w") as log_file:
@@ -648,7 +653,7 @@ def run_simulation(eval_dir, HOST_ISA="x86", options=None):
     simul_err = False
     try:
       runner.run(
-        binary_name="execute_graph",
+        binary_name=binary_name,
         gdb_mode="no",
         test_name=eval_dir,
         eval_dir=eval_dir
@@ -913,6 +918,18 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
     print("\n  Compile only mode: skipping CPU validation and simulation")
     return None
 
+  # Run CPU validation if requested (before simulation so --stop-at validate works)
+  cpu_output = None
+  if input_data_dict is not None and options.should_run(PipelineStage.CPU_VALIDATION):
+    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, options.run_mode)
+    if cpu_output is not None:
+      print("CPU validation completed successfully")
+
+  # If stopping at CPU validation, return without simulation
+  if options.stop_at == PipelineStage.CPU_VALIDATION:
+    print("\n  CPU validation only mode: skipping simulation")
+    return cpu_output
+
   # Skip simulation if not needed
   if not options.should_run(PipelineStage.SIMULATION):
     print("\n  Skipping simulation stage")
@@ -937,12 +954,9 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
     if imcflow_output is None:
       pytest.fail(f"IMCFLOW output file missing, cannot compare outputs")
 
-    # Run CPU validation if input data is provided and stage should run
-    cpu_output = None
-    if input_data_dict is not None and options.should_run(PipelineStage.CPU_VALIDATION):
+    # Run CPU validation if not already done
+    if cpu_output is None and options.should_run(PipelineStage.CPU_VALIDATION):
       cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, options.run_mode)
-      if cpu_output is not None:
-        print("CPU validation completed successfully")
 
     compare_outputs(cpu_output, imcflow_output)
 

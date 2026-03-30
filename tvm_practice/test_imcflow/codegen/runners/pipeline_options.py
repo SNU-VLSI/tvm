@@ -75,7 +75,7 @@ class PipelineOptions:
         # Compute run_mode based on with_patch and start_at
         if self.with_patch:
             self.run_mode = RunMode.PATCH
-        elif self.start_at >= PipelineStage.SIMULATION:
+        elif self.start_at >= PipelineStage.CPU_VALIDATION:
             self.run_mode = RunMode.REUSE
         else:
             self.run_mode = RunMode.FULL
