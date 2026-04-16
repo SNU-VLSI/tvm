@@ -999,7 +999,7 @@ def get_qconv_topo_indices(mod):
   return call_to_idx, idx_to_call
 
 
-def split_conv_to_atomic(mod, OldParamDict):
+def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
 
     #- we never include min_max_quant as conv2d post op. min_max_quant never be split into multiple nodes.
     #- we never include batch_norm as conv2d post op. BN is channel-wise operation, so it can be applied after concat.
@@ -1089,7 +1089,7 @@ def split_conv_to_atomic(mod, OldParamDict):
 
             # Set limits for in and out channels
             in_ch_limit = math.floor(256 / (KH * KW)) if not IsDepthWise else 32
-            out_ch_limit = 64 if not IsDepthWise else 32
+            out_ch_limit = effective_oc if not IsDepthWise else 32
 
             if (IC <= in_ch_limit) and (OC <= out_ch_limit):
                 return expr  # Return original if no splitting is needed
@@ -8797,3 +8797,198 @@ def extract_outputs_by_custom_ids(mod, target_custom_ids):
     # making the target global function return the target node directly
 
     return new_mod, found_ids
+
+
+# ========================================================================
+# Column Disable Shape Pass
+# ========================================================================
+
+def apply_column_disable_shape_pass(mod, func_to_imce):
+    """Apply column-disable transformations to the module.
+
+    For each imcflow function (single qconv), based on the assigned IMCE's
+    disabled columns:
+      - Pad weight from (OC_actual, IC, KH, KW) to (64, IC, KH, KW),
+        placing valid data at valid column positions and zeros elsewhere.
+      - Set qconv channels=64 so the output becomes (N, 64, H, W).
+      - Insert relay.op.take() in @main after the imcflow function call
+        to compact the output back to (N, OC_actual, H, W).
+
+    Args:
+        mod: TVM IRModule after qconv-only partition (before layout legalization).
+        func_to_imce: Dict mapping func_name (str) -> imce_linear_id (int).
+
+    Returns:
+        (mod, func_column_info) where func_column_info maps
+        func_name -> (oc_actual, valid_indices_for_take).
+    """
+    from tvm.relay.backend.contrib.imcflow.transform_utils import isImcflowFunc
+
+    config = ImcflowDeviceConfig()
+    func_column_info = {}  # func_name -> (oc_actual, list[int] valid_indices)
+
+    # ------------------------------------------------------------------
+    # Part A: Modify each imcflow function's qconv
+    # ------------------------------------------------------------------
+    for gv in sorted(mod.functions.keys(), key=lambda g: g.name_hint):
+        func = mod[gv]
+        if not (isinstance(func, relay.Function) and isImcflowFunc(func, mod)):
+            continue
+        func_name = gv.name_hint
+        if func_name not in func_to_imce:
+            continue
+
+        imce_id = func_to_imce[func_name]
+        valid_cols = config.get_valid_columns(imce_id)
+
+        # Find the single qconv call in the function body
+        qconv_call = _find_single_qconv(func.body)
+        if qconv_call is None:
+            continue
+
+        oc_actual = int(qconv_call.attrs.channels)
+
+        # Identify weight argument (args[1] of qconv)
+        weight_arg = qconv_call.args[1]
+        weight_param_idx = None
+        if isinstance(weight_arg, Var):
+            for idx, param in enumerate(func.params):
+                if param == weight_arg or param.name_hint == weight_arg.name_hint:
+                    weight_param_idx = idx
+                    break
+
+        # Build the new qconv call with channels=64
+        if weight_param_idx is not None:
+            # Weight is a function parameter (Var) — update param type.
+            # Actual data padding happens in Part B when we modify @main's call args.
+            old_param = func.params[weight_param_idx]
+            old_shape = [int(d) for d in old_param.type_annotation.shape]
+            new_shape = [64] + old_shape[1:]
+            new_weight_param = relay.Var(
+                old_param.name_hint,
+                relay.TensorType(new_shape, old_param.type_annotation.dtype),
+            )
+            new_params = list(func.params)
+            new_params[weight_param_idx] = new_weight_param
+            new_weight_node = new_weight_param
+        else:
+            # Weight is a Constant inside the function — pad directly.
+            assert isinstance(weight_arg, Constant), \
+                f"Expected weight to be Var or Constant, got {type(weight_arg)}"
+            weight_np = weight_arg.data.numpy()
+            padded = np.zeros((64,) + weight_np.shape[1:], dtype=weight_np.dtype)
+            for i in range(min(oc_actual, len(valid_cols))):
+                padded[valid_cols[i]] = weight_np[i]
+            new_weight_node = Constant(tvm.nd.array(padded))
+            new_params = list(func.params)
+
+        new_qconv = imcflow_qconv2d(
+            qconv_call.args[0],   # data
+            new_weight_node,      # weight (padded or new-typed Var)
+            qconv_call.args[2],   # config
+            channels=64,
+            in_channels=int(qconv_call.attrs.in_channels),
+            strides=tuple(int(s) for s in qconv_call.attrs.strides),
+            padding=tuple(int(p) for p in qconv_call.attrs.padding),
+            dilation=tuple(int(d) for d in qconv_call.attrs.dilation),
+            groups=int(qconv_call.attrs.groups),
+            kernel_size=tuple(int(k) for k in qconv_call.attrs.kernel_size),
+            out_dtype=str(qconv_call.attrs.out_dtype),
+        )
+
+        # Compute new return type: (N, 64, OH, OW) int16
+        # For external codegen functions (Compiler="imcflow"), ret_type must be explicit.
+        data_param = new_params[0]
+        data_shape = [int(d) for d in data_param.type_annotation.shape]
+        strides = tuple(int(s) for s in qconv_call.attrs.strides)
+        padding = tuple(int(p) for p in qconv_call.attrs.padding)
+        kernel_size = tuple(int(k) for k in qconv_call.attrs.kernel_size)
+        oh = (data_shape[2] + padding[0] + padding[2] - kernel_size[0]) // strides[0] + 1
+        ow = (data_shape[3] + padding[1] + padding[3] - kernel_size[1]) // strides[1] + 1
+        new_ret_type = relay.TensorType([data_shape[0], 64, oh, ow], "int16")
+
+        new_func = relay.Function(new_params, new_qconv, ret_type=new_ret_type, attrs=func.attrs)
+        mod[gv] = new_func
+
+        func_column_info[func_name] = (oc_actual, valid_cols[:oc_actual])
+
+    # NOTE: Do NOT call InferType() here (between Part A and Part B).
+    # After Part A, the imcflow functions return 64 channels but @main still
+    # calls them expecting OC_actual channels.  That mismatch causes
+    # InferType to fail.  Part B inserts the take() ops that restore the
+    # correct shapes in @main, so we defer InferType until after Part B.
+
+    # ------------------------------------------------------------------
+    # Part B: Modify @main — pad weight call-args & insert take() compact
+    # ------------------------------------------------------------------
+    class _MainColumnDisableModifier(ExprMutator):
+        def __init__(self, mod_ref, func_column_info, func_to_imce):
+            super().__init__()
+            self._mod = mod_ref
+            self._info = func_column_info
+            self._f2i = func_to_imce
+
+        def visit_call(self, call):
+            new_call = super().visit_call(call)
+
+            if not isinstance(new_call.op, GlobalVar):
+                return new_call
+            func_name = new_call.op.name_hint
+            if func_name not in self._info:
+                return new_call
+
+            oc_actual, take_indices = self._info[func_name]
+            imce_id = self._f2i[func_name]
+            valid_cols = ImcflowDeviceConfig().get_valid_columns(imce_id)
+            target_func = self._mod[new_call.op]
+
+            # Pad weight argument if it's passed as a Constant from @main
+            new_args = list(new_call.args)
+            if isinstance(target_func, relay.Function):
+                qconv_call = _find_single_qconv(target_func.body)
+                if qconv_call is not None:
+                    weight_var = qconv_call.args[1]
+                    if isinstance(weight_var, Var):
+                        for idx, param in enumerate(target_func.params):
+                            if param.name_hint == weight_var.name_hint:
+                                if idx < len(new_args) and isinstance(new_args[idx], Constant):
+                                    w_np = new_args[idx].data.numpy()
+                                    padded = np.zeros((64,) + w_np.shape[1:], dtype=w_np.dtype)
+                                    for i in range(oc_actual):
+                                        padded[valid_cols[i]] = w_np[i]
+                                    new_args[idx] = Constant(tvm.nd.array(padded))
+                                break
+
+            # Preserve call attrs (e.g. __dict__ with custom_id) from the original call
+            new_call = relay.Call(new_call.op, new_args, new_call.attrs, new_call.type_args, new_call.span)
+
+            # Insert take() to compact output: (N, 64, H, W) -> (N, OC_actual, H, W)
+            indices_const = relay.const(np.array(take_indices, dtype="int32"))
+            return relay.op.take(new_call, indices_const, axis=1)
+
+    modifier = _MainColumnDisableModifier(mod, func_column_info, func_to_imce)
+    mod["main"] = modifier.visit(mod["main"])
+    mod = relay.transform.InferType()(mod)
+
+    return mod, func_column_info
+
+
+def _find_single_qconv(expr):
+    """Find the single nn.imcflow_qconv Call in an expression tree.
+    Returns the Call node, or None if not found."""
+    if isinstance(expr, Call):
+        if isinstance(expr.op, Op) and expr.op.name == "nn.imcflow_qconv":
+            return expr
+        # Search in args
+        for arg in expr.args:
+            result = _find_single_qconv(arg)
+            if result is not None:
+                return result
+    elif isinstance(expr, TupleGetItem):
+        return _find_single_qconv(expr.tuple_value)
+    elif isinstance(expr, Tuple):
+        for field in expr.fields:
+            result = _find_single_qconv(field)
+            if result is not None:
+                return result
+    return None

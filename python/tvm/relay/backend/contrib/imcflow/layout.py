@@ -600,6 +600,14 @@ CPU_REQUIRED_OP_LAYOUTS = {
       LayoutType.NCHW,
     ),
   ],
+  "take": [
+    (
+      [
+        [LayoutType.NCHW, LayoutType.C],
+      ],
+      LayoutType.NCHW,
+    ),
+  ],
 }
 
 def get_height_dim_index(layout):

@@ -23,6 +23,7 @@ import copy
 import re
 import math
 import os
+import json
 
 import tvm
 from tvm import relay
@@ -750,9 +751,42 @@ class ImcflowDeviceConfig:
     self.FIFOConflictTable = {}
     self.NoCDeadlockTable = {}
     self.SplitInfo = {} # func_name : {split_node_id : split_info}. split_info = {'is_multi_cast':bool, channels : int, num_splits : int}
+    # Column disable config
+    self.ColumnDisableMap = {}   # imce_linear_id (0-15) -> list[int] of disabled column indices
+    self.NumDisableColumns = 0   # default: no columns disabled
 
   def clear(self):
     self._initialize()
+
+  def load_column_disable_config(self, filepath, num_disable_columns=8):
+    """Load per-IMCU disabled column indices from JSON file.
+
+    File format: {"0": [2,5,11,...], "1": [0,7,14,...], ...}
+    Keys are str(imce_linear_id) for IMCEs 0..IMCE_NUM-1.
+    Values are lists of disabled column indices (each in [0,63]).
+    """
+    self.NumDisableColumns = num_disable_columns
+    with open(filepath, 'r') as f:
+      data = json.load(f)
+    self.ColumnDisableMap = {}
+    for key, indices in data.items():
+      imce_id = int(key)
+      assert 0 <= imce_id < self.IMCE_NUM, \
+          f"IMCE id {imce_id} out of range [0, {self.IMCE_NUM})"
+      assert len(indices) == num_disable_columns, \
+          f"IMCE {imce_id}: expected {num_disable_columns} disabled columns, got {len(indices)}"
+      for idx in indices:
+        assert 0 <= idx < 64, f"Column index {idx} out of range [0, 64)"
+      self.ColumnDisableMap[imce_id] = sorted(indices)
+
+  def get_valid_columns(self, imce_linear_id):
+    """Returns sorted list of valid column indices for the given IMCE."""
+    disabled = set(self.ColumnDisableMap.get(imce_linear_id, []))
+    return sorted(set(range(64)) - disabled)
+
+  def get_effective_oc(self):
+    """Returns effective output channels per IMCU: 64 - NumDisableColumns."""
+    return 64 - self.NumDisableColumns
 
   @ staticmethod
   def is_supported_kernel(KH, KW):
