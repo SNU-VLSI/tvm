@@ -25,6 +25,7 @@ import os
 
 # Import IMCFlow compiler driver
 from tvm.driver.tvmc.imcflow_compiler_driver import compile_for_imcflow, compile_for_imcflow_single_qconv, rebuild_imcflow_cpp_only
+from tvm.driver.tvmc.imcflow_compiler_driver_v2 import compile_for_imcflow_v2
 
 # Import pipeline options
 from runners.pipeline_options import PipelineOptions, PipelineStage, RunMode
@@ -619,6 +620,11 @@ def run_simulation(eval_dir, HOST_ISA="x86", options=None):
 
   print(f"✅ Build completed, log saved to: {build_log_path}")
 
+  # If stopping at compile (GRAPH_EXECUTOR), return after build without simulation
+  if options and options.stop_at == PipelineStage.GRAPH_EXECUTOR:
+    print("\n  Compile only mode: skipping simulation")
+    return None
+
   # Run gem5 simulation
   if (HOST_ISA == "arm"):
     print("\n-- Skipping gem5 simulation for ARM architecture --")
@@ -831,7 +837,16 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
     case RunMode.FULL:
       # Full IMCFlow compilation pipeline (transform, codegen, graph executor)
       skip_codegen = not options.should_run(PipelineStage.CODEGEN)
-      if options.single_qconv:
+      if options.use_v2:
+        mod, param_dict, _ = compile_for_imcflow_v2(
+          mod, param_dict, eval_dir,
+          column_disable_config_path=options.column_disable_config,
+          num_disable_columns=options.num_disable_columns,
+          skip_codegen=skip_codegen,
+          save_intermediate=True,
+          random_seed=options.random_seed,
+        )
+      elif options.single_qconv:
         mod, param_dict, _ = compile_for_imcflow_single_qconv(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
       else:
         mod, param_dict, _ = compile_for_imcflow(mod, param_dict, eval_dir, skip_codegen=skip_codegen)
@@ -912,11 +927,6 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
 
       # Save build metadata (patched)
       save_build_metadata(eval_dir, use_patched=True)
-
-  # If stopping at graph executor (compile_only), skip CPU validation and simulation
-  if options.stop_at == PipelineStage.GRAPH_EXECUTOR:
-    print("\n  Compile only mode: skipping CPU validation and simulation")
-    return None
 
   # Run CPU validation if requested (before simulation so --stop-at validate works)
   cpu_output = None
@@ -1110,7 +1120,16 @@ def test_imcflow_model_with_pattern(test_name, input_pattern, is_default, setup_
   if not should_skip:
     print(f"\n🔧 First run for {test_name}: Running full setup")
     setup_cache[test_name] = True
-    options = PipelineOptions.full_run(input_pattern=input_pattern)
+    if os.getenv("IMCFLOW_DRIVER_V2", "0") == "1":
+      seed_str = os.getenv("IMCFLOW_RANDOM_SEED")
+      options = PipelineOptions(
+        input_pattern=input_pattern,
+        use_v2=True,
+        column_disable_config=os.getenv("IMCFLOW_COLUMN_DISABLE_CONFIG"),
+        random_seed=int(seed_str) if seed_str else None,
+      )
+    else:
+      options = PipelineOptions.full_run(input_pattern=input_pattern)
   else:
     print(f"\n⚡ Reusing compiled model for {test_name}")
     options = PipelineOptions.reuse_compiled(input_pattern=input_pattern)

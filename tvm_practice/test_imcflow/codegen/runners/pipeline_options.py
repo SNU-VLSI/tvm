@@ -56,6 +56,10 @@ class PipelineOptions:
     skip_stages: Set[PipelineStage] = field(default_factory=set)
     with_patch: bool = False
     single_qconv: bool = False
+    use_v2: bool = False
+    column_disable_config: Optional[str] = None
+    num_disable_columns: int = 8
+    random_seed: Optional[int] = None
     input_pattern: str = "default"
     dataset: Optional[str] = None
     sample: Optional[int] = None
@@ -75,7 +79,7 @@ class PipelineOptions:
         # Compute run_mode based on with_patch and start_at
         if self.with_patch:
             self.run_mode = RunMode.PATCH
-        elif self.start_at >= PipelineStage.CPU_VALIDATION:
+        elif self.start_at >= PipelineStage.GRAPH_EXECUTOR:
             self.run_mode = RunMode.REUSE
         else:
             self.run_mode = RunMode.FULL
@@ -94,6 +98,22 @@ class PipelineOptions:
                 f"--start-at ({self.start_at.name.lower()}) cannot be after "
                 f"--stop-at ({self.stop_at.name.lower()}). "
                 f"Nothing would be executed."
+            )
+
+        # v2 driver is mutually exclusive with single_qconv and with_patch
+        if self.use_v2 and self.single_qconv:
+            raise ValueError(
+                "--driver-v2 and --single-qconv are mutually exclusive. "
+                "The v2 driver uses single-qconv mode internally."
+            )
+        if self.use_v2 and self.with_patch:
+            raise ValueError(
+                "--driver-v2 and --with-patch are mutually exclusive. "
+                "Handcraft patching is not supported with the v2 driver."
+            )
+        if self.column_disable_config and not self.use_v2:
+            raise ValueError(
+                "--column-disable-config requires --driver-v2."
             )
 
         # Can't skip transform if stopping at transform
@@ -222,10 +242,17 @@ class PipelineOptions:
         """Human-readable representation."""
         skip_names = [s.name for s in sorted(self.skip_stages)]
         dataset_str = f", dataset={self.dataset}[{self.sample}]" if self.dataset else ""
+        v2_str = ""
+        if self.use_v2:
+            v2_str = ", driver=v2"
+            if self.column_disable_config:
+                v2_str += f", coldis={self.column_disable_config}[{self.num_disable_columns}]"
+            if self.random_seed is not None:
+                v2_str += f", seed={self.random_seed}"
         return (
             f"PipelineOptions(start_at={self.start_at.name}, stop_at={self.stop_at.name}, "
             f"skip={skip_names}, with_patch={self.with_patch}, "
-            f"pattern={self.input_pattern}{dataset_str}, run_mode={self.run_mode.name})"
+            f"pattern={self.input_pattern}{dataset_str}{v2_str}, run_mode={self.run_mode.name})"
         )
 
 

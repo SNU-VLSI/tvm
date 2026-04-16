@@ -46,6 +46,13 @@ Examples:
   # Start at codegen and stop at codegen to observe memlayout changes
   python main.py --model one_relu --start-at codegen --stop-at codegen
 
+  # Run with v2 driver (random IMCE assignment, single-phase)
+  python main.py --model one_conv_big --driver-v2
+
+  # Run with v2 driver + column disable
+  python main.py --model resnet8_subset06_pretrained_orig --driver-v2 \\
+      --column-disable-config column_disable_config.json --random-seed 42
+
   # List available models
   python main.py --list-models
     """
@@ -104,6 +111,33 @@ Examples:
     "--single-qconv",
     action="store_true",
     help="Single-qconv-per-round mode: map one atomic qconv per round to imcflow, all other ops on CPU"
+  )
+
+  parser.add_argument(
+    "--driver-v2",
+    action="store_true",
+    help="Use v2 compiler driver (single-phase, random IMCE assignment, column-disable support)"
+  )
+
+  parser.add_argument(
+    "--column-disable-config",
+    type=str,
+    default=None,
+    help="Path to column-disable JSON config (requires --driver-v2)"
+  )
+
+  parser.add_argument(
+    "--num-disable-columns",
+    type=int,
+    default=8,
+    help="Number of disabled columns per IMCE (default: 8, requires --driver-v2 + --column-disable-config)"
+  )
+
+  parser.add_argument(
+    "--random-seed",
+    type=int,
+    default=None,
+    help="Seed for reproducible random IMCE assignment (requires --driver-v2)"
   )
 
   parser.add_argument(
@@ -201,6 +235,10 @@ Examples:
       start_at=start_at,
       with_patch=args.with_patch,
       single_qconv=args.single_qconv,
+      use_v2=args.driver_v2,
+      column_disable_config=args.column_disable_config,
+      num_disable_columns=args.num_disable_columns,
+      random_seed=args.random_seed,
       input_pattern=args.pattern if args.pattern else "default",
       dataset=args.dataset,
       sample=args.sample,

@@ -265,6 +265,35 @@ cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > 
     fi
 fi
 
+# Step 6.5: Fetch debug_nodes from remote and cleanup (only when DEBUG_EXE=1)
+if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
+    REMOTE_DEBUG_DIR="$REMOTE_BASE_PATH/debug_nodes"
+    LOCAL_DEBUG_DIR="debuggig/fpga"
+
+    echo ""
+    echo "Step 6.5: Fetching debug_nodes from remote (DEBUG_EXE=1)..."
+    echo ""
+    mkdir -p "$LOCAL_DEBUG_DIR"
+
+    # scp -r all sample folders from FPGA to host
+    echo "[CMD] scp -r remote:$REMOTE_DEBUG_DIR/* -> $LOCAL_DEBUG_DIR/"
+    sshpass -p "$REMOTE_PASSWORD" scp -r -P $REMOTE_PORT \
+        "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DEBUG_DIR/*" "$LOCAL_DEBUG_DIR/"
+
+    if [ $? -eq 0 ]; then
+        echo "✅ debug_nodes fetched to $LOCAL_DEBUG_DIR/"
+
+        # Cleanup on FPGA to prevent SD card wear
+        echo "Cleaning up debug_nodes on remote..."
+        sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
+            "rm -rf $REMOTE_DEBUG_DIR/*"
+        echo "✅ Remote debug_nodes cleaned up"
+    else
+        echo "⚠️  Failed to fetch debug_nodes (remote may not have any)"
+    fi
+    echo ""
+fi
+
 # Step 7: Fetch result file from remote
 if [[ "$SKIP_STEP7" == true ]]; then
     echo "Step 7: Skipped."
