@@ -761,23 +761,50 @@ class ImcflowDeviceConfig:
   def load_column_disable_config(self, filepath, num_disable_columns=8):
     """Load per-IMCU disabled column indices from JSON file.
 
-    File format: {"0": [2,5,11,...], "1": [0,7,14,...], ...}
-    Keys are str(imce_linear_id) for IMCEs 0..IMCE_NUM-1.
-    Values are lists of disabled column indices (each in [0,63]).
+    Supports two formats:
+
+    Format A (simple): {"0": [2,5,11,...], "1": [0,7,14,...], ...}
+      Keys are str(imce_linear_id) for IMCEs 0..IMCE_NUM-1.
+
+    Format B (CIM training): {"num_disable": 8, "per_core": true, "cores": [
+        {"h_id": 0, "w_id": 1, "disabled": [7, 42, ...], "active": [...]}, ...]}
+      h_id=row, w_id=col (1-based, 0=INODE). linear_id = h_id * IMCE_W_NUM + (w_id - 1).
     """
-    self.NumDisableColumns = num_disable_columns
     with open(filepath, 'r') as f:
       data = json.load(f)
+
     self.ColumnDisableMap = {}
-    for key, indices in data.items():
-      imce_id = int(key)
-      assert 0 <= imce_id < self.IMCE_NUM, \
-          f"IMCE id {imce_id} out of range [0, {self.IMCE_NUM})"
-      assert len(indices) == num_disable_columns, \
-          f"IMCE {imce_id}: expected {num_disable_columns} disabled columns, got {len(indices)}"
-      for idx in indices:
-        assert 0 <= idx < 64, f"Column index {idx} out of range [0, 64)"
-      self.ColumnDisableMap[imce_id] = sorted(indices)
+
+    if "cores" in data:
+      # Format B: CIM training disabled.json
+      self.NumDisableColumns = data.get("num_disable", num_disable_columns)
+      for core in data["cores"]:
+        h_id = core["h_id"]
+        w_id = core["w_id"]
+        imce_id = h_id * self.IMCE_W_NUM + (w_id - 1)
+        indices = core["disabled"]
+        assert 0 <= imce_id < self.IMCE_NUM, \
+            f"IMCE ({h_id},{w_id}) -> linear {imce_id} out of range [0, {self.IMCE_NUM})"
+        assert len(indices) == self.NumDisableColumns, \
+            f"IMCE {imce_id}: expected {self.NumDisableColumns} disabled columns, got {len(indices)}"
+        for idx in indices:
+          assert 0 <= idx < 64, f"Column index {idx} out of range [0, 64)"
+        self.ColumnDisableMap[imce_id] = sorted(indices)
+    else:
+      # Format A: simple {imce_id: [disabled_cols]}
+      self.NumDisableColumns = num_disable_columns
+      for key, indices in data.items():
+        imce_id = int(key)
+        assert 0 <= imce_id < self.IMCE_NUM, \
+            f"IMCE id {imce_id} out of range [0, {self.IMCE_NUM})"
+        assert len(indices) == num_disable_columns, \
+            f"IMCE {imce_id}: expected {num_disable_columns} disabled columns, got {len(indices)}"
+        for idx in indices:
+          assert 0 <= idx < 64, f"Column index {idx} out of range [0, 64)"
+        self.ColumnDisableMap[imce_id] = sorted(indices)
+
+    print(f"[ColumnDisable] Loaded {len(self.ColumnDisableMap)} IMCEs, "
+          f"{self.NumDisableColumns} disabled cols each from {os.path.basename(filepath)}")
 
   def get_valid_columns(self, imce_linear_id):
     """Returns sorted list of valid column indices for the given IMCE."""
