@@ -30,3 +30,6 @@ core.*
 transcript
 *.wlf
 *.vstf
+
+debuggig/
+eval_results/

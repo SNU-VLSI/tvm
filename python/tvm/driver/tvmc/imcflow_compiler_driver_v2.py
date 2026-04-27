@@ -57,14 +57,28 @@ from tvm.relay.backend.contrib.imcflow.transform_utils import isImcflowFunc
 
 
 def _print_model(result_dir, mod, param_dict, mod_name):
+    # The .txt dump is cheap and always produced.
+    with open(f"{result_dir}/{mod_name}.txt", "w") as f:
+        f.write(mod.astext(show_meta_data=True))
+
+    # Skip the graphviz PDF render when the graph is too large — dot can hang
+    # for many minutes on dense graphs (e.g. column-disable with effective_oc=1
+    # explodes a single conv into hundreds of sub-functions). Set
+    # IMCFLOW_SKIP_RELAY_VIZ=1 to always skip; otherwise auto-skip past the
+    # threshold.
+    skip_viz = os.getenv("IMCFLOW_SKIP_RELAY_VIZ", "0") == "1"
+    num_funcs = len(mod.functions)
+    if skip_viz or num_funcs > 50:
+        if not skip_viz:
+            print(f"[v2] Skipping graphviz render for {mod_name} "
+                  f"({num_funcs} functions > 50; set IMCFLOW_SKIP_RELAY_VIZ=1 to silence)")
+        return
     RelayVisualizer(
         relay_mod=mod,
         relay_param=param_dict,
         plotter=DotPlotter(),
         parser=DotVizParser(),
     ).render(f"{result_dir}/{mod_name}")
-    with open(f"{result_dir}/{mod_name}.txt", "w") as f:
-        f.write(mod.astext(show_meta_data=True))
 
 
 # ========================================================================
@@ -74,16 +88,22 @@ def _print_model(result_dir, mod, param_dict, mod_name):
 def _build_random_func_to_imce(mod, seed=None):
     """Assign each imcflow function a random IMCE.
 
+    The candidate IMCE pool is restricted to ``DevConfig().get_active_imce_ids()``,
+    which honors the column-disable JSON: when the JSON only mentions a subset of
+    cores, that subset becomes the active pool. Multiple functions may collide on
+    the same IMCE; the per-function PnR runs serialize execution.
+
     Returns:
-        func_to_imce: dict  func_name (str) -> imce_linear_id (int, 0..IMCE_NUM-1)
+        func_to_imce: dict  func_name (str) -> imce_linear_id (int)
     """
     rng = random.Random(seed)
-    num_imce = DevConfig.IMCE_NUM
+    active_ids = DevConfig().get_active_imce_ids()
+    print(f"[v2] Active IMCE set: {active_ids}")
     func_to_imce = {}
     for gv in sorted(mod.functions.keys(), key=lambda g: g.name_hint):
         func = mod[gv]
         if isinstance(func, relay.Function) and isImcflowFunc(func, mod):
-            func_to_imce[gv.name_hint] = rng.randrange(num_imce)
+            func_to_imce[gv.name_hint] = rng.choice(active_ids)
     return func_to_imce
 
 
