@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/scan_steps.sh"
 load_env
 
-# Paths
+# Paths (BINARY_DIR may be overridden by --binary-dir option)
 BINARY_DIR="host_binary_make.dataset"
 GRAPH_PATH="$BINARY_DIR/build/mlf/executor-config/graph/default.graph"
 PARAMS_PATH="$BINARY_DIR/build/mlf/parameters/default.params"
@@ -42,12 +42,13 @@ show_help() {
     echo "  7. Fetch result file from remote to local"
     echo ""
     echo "Options:"
-    echo "  -m, --model DIR    Evl dir name for build step (default: resnet8_subset31_pretrained_orig_evl.linux)"
-    echo "  -s, --skip LIST    Comma-separated step numbers to skip (e.g., 1,2,7)"
-    echo "  -i, --indices LIST Comma-separated sample indices (e.g., 0,5,10,15). Overrides num_samples."
-    echo "  -q, --quiet        Quiet mode: suppress remote stdout during evaluation"
-    echo "  -o, --output DIR   Local directory to save result file (default: eval_results)"
-    echo "  -h, --help         Show this help message"
+    echo "  -b, --binary-dir DIR  Binary directory (default: host_binary_make.dataset)"
+    echo "  -m, --model DIR       Evl dir name for build step (default: resnet8_subset31_pretrained_orig_evl.linux)"
+    echo "  -s, --skip LIST       Comma-separated step numbers to skip (e.g., 1,2,7)"
+    echo "  -i, --indices LIST    Comma-separated sample indices (e.g., 0,5,10,15). Overrides num_samples."
+    echo "  -q, --quiet           Quiet mode: suppress remote stdout during evaluation"
+    echo "  -o, --output DIR      Local directory to save result file (default: eval_results)"
+    echo "  -h, --help            Show this help message"
     echo ""
     echo "Arguments:"
     echo "  num_samples    Number of samples to evaluate (default: 20)"
@@ -59,6 +60,7 @@ show_help() {
     echo "  $0 -q 100               # Quiet mode, 100 samples"
     echo "  $0 -m my_model_evl.linux 20  # Use different evl dir for build"
     echo "  $0 -i 0,5,10,15,20      # Evaluate specific sample indices"
+    echo "  $0 -b host_binary_make.dataset.v1 20  # Use tagged binary directory"
     echo ""
     echo "Remote configuration is loaded from .env file."
     exit 0
@@ -81,6 +83,14 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             show_help
+            ;;
+        -b|--binary-dir)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            BINARY_DIR="$2"
+            shift 2
             ;;
         -m|--model)
             if [[ -z "$2" ]]; then
@@ -156,6 +166,15 @@ fi
 # Positional arguments
 NUM_SAMPLES="${1:-20}"
 
+# Extract TAG from BINARY_DIR for result filename
+# e.g., host_binary_make.dataset.v1 -> TAG="v1"
+DEFAULT_BINARY_DIR="host_binary_make.dataset"
+if [[ "$BINARY_DIR" == "${DEFAULT_BINARY_DIR}."* ]]; then
+    BINARY_TAG="${BINARY_DIR#${DEFAULT_BINARY_DIR}.}"
+else
+    BINARY_TAG=""
+fi
+
 # Determine the samples argument for the binary
 if [[ -n "$SAMPLE_INDICES" ]]; then
     # Ensure comma is present so C parser detects indices mode (vs num_samples)
@@ -172,6 +191,7 @@ fi
 
 echo "=========================================="
 echo "Running dataset evaluation on remote chip"
+echo "Binary dir:       $BINARY_DIR"
 echo "Model (evl dir): $MODEL_EVL_DIR"
 echo "Samples: $SAMPLES_DISPLAY"
 echo "Remote host: $REMOTE_HOST"
@@ -303,7 +323,11 @@ else
     echo "Step 7: Fetching result file from remote..."
     echo ""
     mkdir -p "$LOCAL_RESULT_DIR"
-    LOCAL_RESULT_FILE="$LOCAL_RESULT_DIR/dataset_results_$(date +%Y%m%d_%H%M%S).txt"
+    if [[ -n "$BINARY_TAG" ]]; then
+        LOCAL_RESULT_FILE="$LOCAL_RESULT_DIR/dataset_results_${BINARY_TAG}_$(date +%Y%m%d_%H%M%S).txt"
+    else
+        LOCAL_RESULT_FILE="$LOCAL_RESULT_DIR/dataset_results_$(date +%Y%m%d_%H%M%S).txt"
+    fi
     echo "[CMD] sshpass -p \"$REMOTE_PASSWORD\" scp -P $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST:$REMOTE_RESULT_PATH $LOCAL_RESULT_FILE"
     sshpass -p "$REMOTE_PASSWORD" scp -P $REMOTE_PORT \
         "$REMOTE_USER@$REMOTE_HOST:$REMOTE_RESULT_PATH" "$LOCAL_RESULT_FILE"

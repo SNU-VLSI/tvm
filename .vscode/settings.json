@@ -84,6 +84,8 @@
     "filesystem": "c"
   },
   "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "python.venvFolders": ["tvm_practice"],
+  "python.defaultInterpreterPath": "${workspaceFolder}/tvm_practice/tvm_env/bin/python",
   "python-envs.defaultEnvManager": "ms-python.python:conda",
   "python-envs.defaultPackageManager": "ms-python.python:conda",
   "files.exclude": {

@@ -2,6 +2,7 @@
 core*
 big/
 eval_dir/
+eval_results/
 *_ref/
 logs/
 test_inputs/*
