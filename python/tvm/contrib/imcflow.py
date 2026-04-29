@@ -754,6 +754,7 @@ class ImcflowDeviceConfig:
     # Column disable config
     self.ColumnDisableMap = {}   # imce_linear_id (0-15) -> list[int] of disabled column indices
     self.NumDisableColumns = 0   # default: no columns disabled
+    self.ActiveIMCESet = None    # None = all IMCE_NUM cores active; otherwise set[int] of allowed linear IDs
 
   def clear(self):
     self._initialize()
@@ -761,50 +762,59 @@ class ImcflowDeviceConfig:
   def load_column_disable_config(self, filepath, num_disable_columns=8):
     """Load per-IMCU disabled column indices from JSON file.
 
-    Supports two formats:
+    Schema (CIM training disabled.json):
 
-    Format A (simple): {"0": [2,5,11,...], "1": [0,7,14,...], ...}
-      Keys are str(imce_linear_id) for IMCEs 0..IMCE_NUM-1.
+        {
+          "num_disable": <int>,
+          "per_core": true,
+          "cores": [
+            {"h_id": <int>, "w_id": <int>, "disabled": [<col>, ...], "active": [<col>, ...]},
+            ...
+          ]
+        }
 
-    Format B (CIM training): {"num_disable": 8, "per_core": true, "cores": [
-        {"h_id": 0, "w_id": 1, "disabled": [7, 42, ...], "active": [...]}, ...]}
-      h_id=row, w_id=col (1-based, 0=INODE). linear_id = h_id * IMCE_W_NUM + (w_id - 1).
+    h_id is the row (0..IMCE_H_NUM-1), w_id is the IMCE column (1..IMCE_W_NUM,
+    where 0 is the INODE column). linear_id = h_id * IMCE_W_NUM + (w_id - 1).
+
+    The ``cores`` list may cover all IMCEs or only a subset; if a subset, the
+    listed cores become the active set for PnR (see ``ActiveIMCESet``).
     """
     with open(filepath, 'r') as f:
       data = json.load(f)
 
-    self.ColumnDisableMap = {}
+    if "cores" not in data:
+      raise ValueError(
+        f"{filepath}: column-disable JSON must have a 'cores' list "
+        f"({{num_disable, per_core, cores: [{{h_id, w_id, disabled, active}}, ...]}}). "
+        f"The legacy linear-id keyed format is no longer supported."
+      )
 
-    if "cores" in data:
-      # Format B: CIM training disabled.json
-      self.NumDisableColumns = data.get("num_disable", num_disable_columns)
-      for core in data["cores"]:
-        h_id = core["h_id"]
-        w_id = core["w_id"]
-        imce_id = h_id * self.IMCE_W_NUM + (w_id - 1)
-        indices = core["disabled"]
-        assert 0 <= imce_id < self.IMCE_NUM, \
-            f"IMCE ({h_id},{w_id}) -> linear {imce_id} out of range [0, {self.IMCE_NUM})"
-        assert len(indices) == self.NumDisableColumns, \
-            f"IMCE {imce_id}: expected {self.NumDisableColumns} disabled columns, got {len(indices)}"
-        for idx in indices:
-          assert 0 <= idx < 64, f"Column index {idx} out of range [0, 64)"
-        self.ColumnDisableMap[imce_id] = sorted(indices)
-    else:
-      # Format A: simple {imce_id: [disabled_cols]}
-      self.NumDisableColumns = num_disable_columns
-      for key, indices in data.items():
-        imce_id = int(key)
-        assert 0 <= imce_id < self.IMCE_NUM, \
-            f"IMCE id {imce_id} out of range [0, {self.IMCE_NUM})"
-        assert len(indices) == num_disable_columns, \
-            f"IMCE {imce_id}: expected {num_disable_columns} disabled columns, got {len(indices)}"
-        for idx in indices:
-          assert 0 <= idx < 64, f"Column index {idx} out of range [0, 64)"
-        self.ColumnDisableMap[imce_id] = sorted(indices)
+    self.ColumnDisableMap = {}
+    self.ActiveIMCESet = None
+    self.NumDisableColumns = data.get("num_disable", num_disable_columns)
+    for core in data["cores"]:
+      h_id = core["h_id"]
+      w_id = core["w_id"]
+      imce_id = h_id * self.IMCE_W_NUM + (w_id - 1)
+      indices = core["disabled"]
+      assert 0 <= imce_id < self.IMCE_NUM, \
+          f"IMCE ({h_id},{w_id}) -> linear {imce_id} out of range [0, {self.IMCE_NUM})"
+      assert len(indices) == self.NumDisableColumns, \
+          f"IMCE {imce_id}: expected {self.NumDisableColumns} disabled columns, got {len(indices)}"
+      for idx in indices:
+        assert 0 <= idx < 64, f"Column index {idx} out of range [0, 64)"
+      self.ColumnDisableMap[imce_id] = sorted(indices)
+
+    # If the JSON only mentions a subset of cores, treat that as the active core set
+    # for PnR. When all IMCE_NUM cores are listed, leave ActiveIMCESet=None to preserve
+    # the legacy "use all cores" behavior.
+    if 0 < len(self.ColumnDisableMap) < self.IMCE_NUM:
+      self.ActiveIMCESet = set(self.ColumnDisableMap.keys())
 
     print(f"[ColumnDisable] Loaded {len(self.ColumnDisableMap)} IMCEs, "
           f"{self.NumDisableColumns} disabled cols each from {os.path.basename(filepath)}")
+    if self.ActiveIMCESet is not None:
+      print(f"[ColumnDisable] Active IMCE subset: {sorted(self.ActiveIMCESet)}")
 
   def get_valid_columns(self, imce_linear_id):
     """Returns sorted list of valid column indices for the given IMCE."""
@@ -814,6 +824,16 @@ class ImcflowDeviceConfig:
   def get_effective_oc(self):
     """Returns effective output channels per IMCU: 64 - NumDisableColumns."""
     return 64 - self.NumDisableColumns
+
+  def get_active_imce_ids(self):
+    """Returns sorted list of IMCE linear IDs available for placement.
+
+    When ActiveIMCESet is None (no JSON or full-16 JSON), returns 0..IMCE_NUM-1.
+    Otherwise returns only the cores listed in the column-disable JSON.
+    """
+    if self.ActiveIMCESet is None:
+      return list(range(self.IMCE_NUM))
+    return sorted(self.ActiveIMCESet)
 
   @ staticmethod
   def is_supported_kernel(KH, KW):

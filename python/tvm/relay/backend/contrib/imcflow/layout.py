@@ -604,6 +604,9 @@ CPU_REQUIRED_OP_LAYOUTS = {
     (
       [
         [LayoutType.NCHW, LayoutType.C],
+        # When effective_oc==1 (heavy column-disable), the indices constant is
+        # shape-(1,) and gets classified as SCALAR rather than C.
+        [LayoutType.NCHW, LayoutType.SCALAR],
       ],
       LayoutType.NCHW,
     ),
@@ -1975,6 +1978,17 @@ class ImcflowLayoutLegalizer:
           expr = relay.op.layout_transform(expr, "NCHW64c", "NCHW16c")
           self.layout_map[expr] = target_layout
           return expr, target_layout
+
+        # SCALAR <-> C are interchangeable for shape-(1,) tensors: the storage
+        # layout is identical, only the semantic label differs. This shows up
+        # whenever effective_oc==1 (e.g. heavy column-disable) makes per-channel
+        # parameters or take-indices constants of shape (1,) get classified as
+        # SCALAR by infer_cpu_layout_from_type, while their consumer expects C.
+        if {curr_layout, target_layout} == {LayoutType.SCALAR, LayoutType.C}:
+          ttype = get_type(self.module, expr)
+          if isinstance(ttype, TensorType) and len(ttype.shape) <= 1:
+            self.layout_map[expr] = target_layout
+            return expr, target_layout
 
         raise ValueError(f"node : {getNodeDebugID(expr)}. Unsupported layout conversion from {curr_layout} to {target_layout}")
 
