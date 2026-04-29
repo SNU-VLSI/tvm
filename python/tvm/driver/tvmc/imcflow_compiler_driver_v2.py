@@ -152,6 +152,133 @@ def _build_preassigned_from_func_to_imce(mod, func_to_imce):
 
 
 # ========================================================================
+# Column-disable debug logging
+# ========================================================================
+
+def _find_qconv_in_func(func):
+    """Return the single nn.imcflow_qconv Call inside ``func.body``, or None."""
+    found = [None]
+
+    class _F(relay.ExprVisitor):
+        def visit_call(self, call):
+            if found[0] is None and isinstance(call.op, tvm.ir.Op) \
+                    and call.op.name == "nn.imcflow_qconv":
+                found[0] = call
+            super().visit_call(call)
+
+    _F().visit(func.body)
+    return found[0]
+
+
+def _collect_main_take_indices(mod):
+    """Walk @main and return a list of (callee_name, axis, indices) tuples
+    for every relay.op.take whose first arg is a GlobalVar Call.
+
+    The column-disable pass inserts exactly this pattern:
+        take( @imcflow_func(...), const(indices), axis=1 ).
+    Walking the IR after the pass lets us *verify* the indices we expected.
+    """
+    records = []
+
+    class _V(relay.ExprVisitor):
+        def visit_call(self, call):
+            super().visit_call(call)
+            if isinstance(call.op, tvm.ir.Op) and call.op.name == "take":
+                src = call.args[0]
+                idx = call.args[1]
+                if isinstance(src, relay.Call) and isinstance(src.op, relay.GlobalVar) \
+                        and isinstance(idx, relay.Constant):
+                    callee = src.op.name_hint
+                    axis = int(call.attrs.axis) if call.attrs is not None else None
+                    indices = idx.data.numpy().tolist()
+                    records.append((callee, axis, indices))
+
+    _V().visit(mod["main"])
+    return records
+
+
+def _log_column_disable_mapping(mod, func_to_imce, func_column_info,
+                                output_dir, save_intermediate):
+    """Print a single consolidated table linking each conv → IMCE coord →
+    valid columns → CPU-side take() indices, and write it to
+    ``column_disable_summary.txt``.
+
+    Called right after the column-disable shape pass so the freshly inserted
+    take() ops are present in @main.
+    """
+    config = DevConfig()
+    h_num, w_num = config.IMCE_H_NUM, config.IMCE_W_NUM
+
+    # 1) JSON-side: per-IMCE disabled columns (sorted by linear id).
+    cd_lines = ["[v2] Per-IMCE disabled columns (from column-disable JSON):"]
+    if not config.ColumnDisableMap:
+        cd_lines.append("  (none — column-disable not loaded)")
+    else:
+        for imce_id in sorted(config.ColumnDisableMap.keys()):
+            row = imce_id // w_num
+            col = imce_id % w_num
+            disabled = config.ColumnDisableMap[imce_id]
+            cd_lines.append(
+                f"  IMCE linear={imce_id:2d} (h={row}, w={col + 1}): "
+                f"disabled={disabled}"
+            )
+
+    # 2) Per-conv mapping.  func_column_info already carries (oc_actual,
+    # valid_cols[:oc_actual]); valid_cols[:oc_actual] is exactly the set of
+    # output rows the qconv writes weights into AND the take() indices that
+    # compact those rows back on CPU.  Logging both makes the end-to-end
+    # path visible at a glance.
+    map_lines = ["", "[v2] Per-conv column-disable mapping:"]
+    header = (f"  {'func_name':<30} {'imce':>5}  {'h,w':<7} "
+              f"{'oc':>3}  {'kernel':<8}  valid_cols (= take indices)")
+    map_lines.append(header)
+    map_lines.append("  " + "-" * (len(header) - 2))
+
+    for func_name in sorted(func_to_imce.keys()):
+        imce_id = func_to_imce[func_name]
+        row = imce_id // w_num
+        col = imce_id % w_num + 1  # JSON convention: 0=INODE, 1..=IMCE
+        gv = next((g for g in mod.functions.keys() if g.name_hint == func_name), None)
+        kernel_str = "?"
+        if gv is not None:
+            qconv = _find_qconv_in_func(mod[gv])
+            if qconv is not None and qconv.attrs is not None:
+                ks = tuple(int(k) for k in qconv.attrs.kernel_size)
+                kernel_str = f"{ks[0]}x{ks[1]}"
+        oc_actual, valid_cols = func_column_info.get(func_name, (None, []))
+        oc_str = str(oc_actual) if oc_actual is not None else "-"
+        map_lines.append(
+            f"  {func_name:<30} {imce_id:>5}  ({row},{col})   "
+            f"{oc_str:>3}  {kernel_str:<8}  {valid_cols}"
+        )
+
+    # 3) CPU side: walk @main and dump every take() actually inserted.
+    #    Compare against func_column_info to catch silent drift.
+    take_records = _collect_main_take_indices(mod)
+    take_lines = ["", "[v2] CPU-side take() ops in @main (inserted by column-disable pass):"]
+    if not take_records:
+        take_lines.append("  (none — pass inserted no take() calls)")
+    else:
+        for callee, axis, indices in take_records:
+            expected = func_column_info.get(callee, (None, None))[1]
+            mark = "OK" if expected is not None and list(indices) == list(expected) else "!!"
+            take_lines.append(
+                f"  [{mark}] @main -> take({callee}, axis={axis}, "
+                f"indices={indices})"
+            )
+            if mark == "!!" and expected is not None:
+                take_lines.append(f"        expected indices: {expected}")
+
+    summary = "\n".join(["=" * 72,
+                        "Column-Disable Mapping Summary",
+                        "=" * 72] + cd_lines + map_lines + take_lines + ["=" * 72])
+    print(summary)
+    if save_intermediate:
+        with open(f"{output_dir}/column_disable_summary.txt", "w") as f:
+            f.write(summary + "\n")
+
+
+# ========================================================================
 # Main entry point
 # ========================================================================
 
@@ -267,6 +394,9 @@ def compile_for_imcflow_v2(
         if save_intermediate:
             with open(f"{output_dir}/func_column_info.txt", "w") as f:
                 pprint.pprint(func_column_info, stream=f)
+        _log_column_disable_mapping(
+            mod, func_to_imce, func_column_info, output_dir, save_intermediate
+        )
 
     # ------------------------------------------------------------------
     # 10. Layout legalization

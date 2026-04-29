@@ -133,7 +133,7 @@ def cast_str_to_enum(s: str, expected_enum_type=None):
 class ConfigData(dict):
   def __init__(self, data_shape, weight_shape, padding, stride,
                 adcmode=ADCMode.SIX, vmode=None, multmode_set=MultModeSet.S4,
-               acc_mask=AccMask.BM_0001, use_imcu=1):
+               acc_mask=AccMask.BM_0000, use_imcu=1):
     if vmode is None:
       vmode = _default_vmode
     
