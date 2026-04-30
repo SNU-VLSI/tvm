@@ -162,6 +162,18 @@ Examples:
   )
 
   parser.add_argument(
+    "--ref-models",
+    nargs="+",
+    choices=["float", "transformed"],
+    default=["transformed"],
+    help="Reference model(s) for CPU validation. "
+         "'float' = original model with no transforms applied (raw inference). "
+         "'transformed' = full v2-transformed (column-disable applied) model + make_cpu_runnable. "
+         "Multiple values run each variant on CPU and compare ALL of them against the simulation output. "
+         "Default: transformed"
+  )
+
+  parser.add_argument(
     "--list-models", "-l",
     action="store_true",
     help="List available models and their default input patterns"
@@ -244,6 +256,7 @@ Examples:
       sample=args.sample,
       retry_disable=args.retry_disable,
       max_retry_count=args.max_retry_count,
+      ref_models=args.ref_models,
     )
   except ValueError as e:
     parser.print_help()

@@ -470,44 +470,15 @@ def printModel(result_dir, mod, param_dict, mod_name):
     # f.write(pretty_print(mod))
     f.write(mod.astext(show_meta_data=True))
 
-def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, run_mode: RunMode = RunMode.FULL):
-  """Run transformed model on CPU for validation
-
-  Args:
-    mod: The TVM relay module
-    param_dict: Model parameters
-    input_data_dict: Dictionary of input name -> numpy array
-    model_dir: Directory to save CPU outputs
-    run_mode: Execution mode (FULL transforms model, REUSE/PATCH loads from file)
-
-  Returns:
-    output: The CPU execution output as numpy array
-  """
-  print("\n" + "="*40)
-  print("RUNNING CPU VALIDATION")
-  print("="*40)
-
+def _build_and_run_on_cpu(cpu_mod, cpu_params, input_data_dict, model_dir, label):
+  """Build cpu_mod with LLVM target, run inference, return output ndarray."""
   target = "llvm"
   ctx = tvm.cpu(0)
-
-  if run_mode == RunMode.FULL or run_mode == RunMode.PATCH:
-    # Transform model to be CPU runnable
-    # PATCH mode also needs to generate CPU model (patching only affects IMCFlow cpp, not CPU)
-    cpu_mod = copy.copy(mod)
-    cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
-    printModel(model_dir, cpu_mod, param_dict, "cpu_runnable_model")
-
-    # Save the CPU runnable model
-    save_transformed_model(cpu_mod, param_dict, model_dir, pkl_name="transformed_cpu_model.pkl")
-  else:
-    # REUSE mode: load previously transformed CPU model
-    print("  Skipping CPU model transformation, loading from file...")
-    cpu_mod, param_dict = load_transformed_model(model_dir, pkl_name="transformed_cpu_model.pkl")
 
   executor_ = Executor("graph")
   runtime_  = Runtime("crt", {"system-lib": True})
   with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
-    graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=param_dict,
+    graph, lib, params = tvm.relay.build(cpu_mod, target=target, params=cpu_params,
                                          executor=executor_, runtime=runtime_)
 
   if DEBUG_EXECUTOR:
@@ -515,37 +486,111 @@ def run_cpu_validation(mod, param_dict, input_data_dict, model_dir, run_mode: Ru
   else:
     executor = graph_executor.create(graph, lib, device=ctx)
 
-  # Load constant parameters
   if params:
     executor.load_params(tvm.runtime.save_param_dict(params))
 
-  # Set input data
   if input_data_dict:
     for name, data in input_data_dict.items():
       executor.set_input(name, data)
 
-  # Run inference
   executor.run()
 
   if DEBUG_EXECUTOR:
-    print("Debug executor output tensors:")
+    print(f"Debug executor output tensors ({label}):")
     tvm_dict = executor.debug_datum.get_output_tensors()
     print(tvm_dict)
-    np_dict = {}
-    for k, v in tvm_dict.items():
-      np_dict[k] = v.asnumpy()
-    pickle.dump(np_dict, open(f"{model_dir}/debug_executor_output_tensors.pkl", "wb"))
+    np_dict = {k: v.asnumpy() for k, v in tvm_dict.items()}
+    pickle.dump(np_dict,
+                open(f"{model_dir}/debug_executor_output_tensors_{label}.pkl", "wb"))
 
-  # Get output
-  output = executor.get_output(0).asnumpy()
+  return executor.get_output(0).asnumpy()
 
-  # Save output for reference
+
+def run_cpu_validation(orig_mod, orig_param_dict,
+                       transformed_mod, transformed_param_dict,
+                       input_data_dict, model_dir,
+                       run_mode: RunMode = RunMode.FULL,
+                       ref_models=None):
+  """Run CPU inference for each requested reference variant.
+
+  Variants:
+    - "float":       original model exactly as authored, no transforms applied.
+                     Useful as a "no-op" baseline that ignores all imcflow
+                     transformations.
+    - "transformed": fully v2-transformed module (column-disable applied) run
+                     through make_cpu_runnable.  Output should match imcflow
+                     simulation bitwise when the transform pipeline is correct.
+
+  Args:
+    orig_mod, orig_param_dict: the original (un-transformed) model.
+    transformed_mod, transformed_param_dict: the post-v2 transformed model.
+    input_data_dict: dict input_name -> numpy array.
+    model_dir: directory to save CPU outputs.
+    run_mode: FULL/PATCH transforms fresh; REUSE loads previously saved CPU model.
+    ref_models: list of variant names to run.  Defaults to ["transformed"].
+
+  Returns:
+    dict mapping variant name -> output ndarray.
+  """
+  if not ref_models:
+    ref_models = ["transformed"]
+
   output_dir = os.path.abspath(os.path.join(model_dir, "test_references"))
-  np.save(f"{output_dir}/cpu_reference_output.npy", output)
-  print(f"CPU output saved to: {output_dir}/cpu_reference_output.npy")
-  print(f"CPU output shape: {output.shape}, dtype: {output.dtype}")
+  os.makedirs(output_dir, exist_ok=True)
 
-  return output
+  outputs = {}
+  for ref_name in ref_models:
+    print("\n" + "="*40)
+    print(f"RUNNING CPU VALIDATION ({ref_name})")
+    print("="*40)
+
+    if ref_name == "float":
+      # Original model.  We apply make_cpu_runnable so that:
+      #   (a) saturating arithmetic gets attached to relay-level int16 add/sub
+      #       ops, matching the saturating semantics that
+      #       apply_saturating_arithmetic gives the transformed-ref path.
+      #   (b) the imcflow_qconv2d TE compute (which now does atom-IC chunking
+      #       and an int32-accumulate-then-clip cross-chunk sum internally)
+      #       is what relay.build picks up, so the un-split full-IC qconv
+      #       calls in the original mod produce the same answer as the
+      #       transformed-ref's split-and-add path.
+      # Weights here are int8/float (not uint32-packed), so the WeightReverter
+      # inside make_cpu_runnable is a no-op for this path.
+      cpu_mod = copy.copy(orig_mod)
+      cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
+      printModel(model_dir, cpu_mod, orig_param_dict, "cpu_runnable_model_float")
+      cpu_params = orig_param_dict
+    elif ref_name == "transformed":
+      if run_mode == RunMode.FULL or run_mode == RunMode.PATCH:
+        cpu_mod = copy.copy(transformed_mod)
+        cpu_mod = cpu_run.make_cpu_runnable(cpu_mod)
+        printModel(model_dir, cpu_mod, transformed_param_dict, "cpu_runnable_model")
+        save_transformed_model(cpu_mod, transformed_param_dict, model_dir,
+                               pkl_name="transformed_cpu_model.pkl")
+        cpu_params = transformed_param_dict
+      else:
+        # REUSE: previously saved CPU-runnable transformed model
+        print("  Loading previously transformed CPU model...")
+        cpu_mod, cpu_params = load_transformed_model(model_dir,
+                                                     pkl_name="transformed_cpu_model.pkl")
+    else:
+      raise ValueError(f"Unknown ref_models entry: {ref_name!r}")
+
+    output = _build_and_run_on_cpu(cpu_mod, cpu_params, input_data_dict,
+                                   model_dir, ref_name)
+
+    out_path = f"{output_dir}/cpu_reference_output_{ref_name}.npy"
+    np.save(out_path, output)
+    print(f"CPU output saved to: {out_path}")
+    print(f"CPU output ({ref_name}) shape: {output.shape}, dtype: {output.dtype}")
+
+    outputs[ref_name] = output
+
+  # Backward-compat canonical name: prefer 'transformed', else first variant.
+  canonical = outputs["transformed"] if "transformed" in outputs else outputs[ref_models[0]]
+  np.save(f"{output_dir}/cpu_reference_output.npy", canonical)
+
+  return outputs
 
 
 def run_simulation(eval_dir, HOST_ISA="x86", options=None):
@@ -758,59 +803,76 @@ def _compare_runner_outputs(outputs):
     print(f"⚠️  Runner outputs differ")
 
 
-def compare_outputs(cpu_output, imcflow_output):
-  """Compare CPU reference output with IMCFLOW simulation output
+def _compare_one_reference(ref_name, cpu_output, imcflow_output, max_print_cnt=10):
+  """Compare a single CPU reference against the IMCFLOW output.
+
+  Returns:
+    (ok: bool, reason: Optional[str])
+  """
+  print(f"\n--- {ref_name} reference vs IMCFLOW ---")
+  print(f"CPU ({ref_name}) shape: {cpu_output.shape}, dtype: {cpu_output.dtype}")
+
+  if cpu_output.shape != imcflow_output.shape:
+    print(f"❌ Shape mismatch: CPU {cpu_output.shape} vs IMCFLOW {imcflow_output.shape}")
+    return False, "shape_mismatch"
+
+  if cpu_output.dtype != imcflow_output.dtype:
+    print(f"❌ Dtype mismatch: CPU {cpu_output.dtype} vs IMCFLOW {imcflow_output.dtype}")
+    return False, "dtype_mismatch"
+
+  if cpu_output.dtype in [np.float32, np.float64]:
+    if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
+      print(f"✅ IMCFLOW matches {ref_name} reference (within fp tolerance)")
+      return True, None
+    fail_indices = np.where(~np.isclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8))
+  elif np.array_equal(cpu_output, imcflow_output):
+    print(f"✅ IMCFLOW matches {ref_name} reference (exact match)")
+    return True, None
+  else:
+    fail_indices = np.where(cpu_output != imcflow_output)
+
+  print(f"❌ {ref_name}: values differ at {len(fail_indices[0])} locations. "
+        f"Showing up to {max_print_cnt} mismatches:")
+  for i in range(min(len(fail_indices[0]), max_print_cnt)):
+    idx = tuple(index[i] for index in fail_indices)
+    print(f"  Index {idx}: CPU({ref_name})={cpu_output[idx]}, IMCFLOW={imcflow_output[idx]}")
+  return False, "value_mismatch"
+
+
+def compare_outputs(cpu_outputs, imcflow_output):
+  """Compare each CPU reference output against the IMCFLOW simulation output.
 
   Args:
-    cpu_output: CPU reference output as numpy array
-    imcflow_output: IMCFLOW simulation output as numpy array
+    cpu_outputs: dict[str, np.ndarray] mapping ref-model name -> CPU output.
+                 (Single-array fallback is also accepted for backward compat.)
+    imcflow_output: IMCFLOW simulation output as numpy array.
 
   Raises:
-    pytest.fail: If outputs don't match
+    pytest.fail: If any specified reference does not match IMCFLOW.
   """
   print("\n" + "="*60)
   print("COMPARING OUTPUTS")
   print("="*60)
 
-  print(f"\n--- Output Comparison ---")
-  print(f"CPU output shape: {cpu_output.shape}, dtype: {cpu_output.dtype}")
-  print(f"IMCFLOW output shape: {imcflow_output.shape}, dtype: {imcflow_output.dtype}")
+  if not isinstance(cpu_outputs, dict):
+    # Backward compat: single ndarray treated as the (transformed) reference.
+    cpu_outputs = {"transformed": cpu_outputs}
 
-  # Shape check
-  if cpu_output.shape != imcflow_output.shape:
-    pytest.fail(f"Output shape mismatch: CPU {cpu_output.shape} vs IMCFLOW {imcflow_output.shape}")
+  print(f"\nIMCFLOW output shape: {imcflow_output.shape}, dtype: {imcflow_output.dtype}")
+  print(f"References: {list(cpu_outputs.keys())}")
 
-  # Dtype check
-  if cpu_output.dtype != imcflow_output.dtype:
-    pytest.fail(f"Output dtype mismatch: CPU {cpu_output.dtype} vs IMCFLOW {imcflow_output.dtype}")
+  failures = []
+  for ref_name, cpu_output in cpu_outputs.items():
+    ok, reason = _compare_one_reference(ref_name, cpu_output, imcflow_output)
+    if not ok:
+      failures.append((ref_name, reason))
 
-  # Value comparison
-  fail = False
-  if cpu_output.dtype in [np.float32, np.float64]:
-    if np.allclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8):
-      print("✅ IMCFLOW output matches CPU reference fp output (within tolerance)")
-      print(f"IMCFLOW == CPU reference output: {cpu_output}")
-    else:
-      fail_indices = np.where(~np.isclose(cpu_output, imcflow_output, rtol=1e-5, atol=1e-8))
-      fail = True
-  elif np.array_equal(cpu_output, imcflow_output):
-    print("✅ IMCFLOW output matches CPU reference output (exact match)")
-    print(f"IMCFLOW == CPU reference output: {cpu_output}")
-  else:
-    fail_indices = np.where(cpu_output != imcflow_output)
-    fail = True
-  
-  if fail:
-    max_print_cnt = 10
-    print(f"❌ Output values do not match at {len(fail_indices[0])} locations. Showing up to {max_print_cnt} mismatches:")
-    for i in range(min(len(fail_indices[0]), max_print_cnt)):
-      idx = tuple(index[i] for index in fail_indices)
-      print(f"  Index {idx}: CPU={cpu_output[idx]}, IMCFLOW={imcflow_output[idx]}")
-    # Flush stdout to ensure tee logger captures everything before pytest.fail raises exception
+  if failures:
     sys.stdout.flush()
-    pytest.fail(f"Output comparison failed.\nReference output: {cpu_output}\nIMCFLOW output: {imcflow_output}")
+    msg = ", ".join(f"{n}({r})" for n, r in failures)
+    pytest.fail(f"Output comparison failed for: {msg}")
   else:
-    print("\n✅ Test completed successfully")
+    print(f"\n✅ All {len(cpu_outputs)} reference comparison(s) passed")
 
 def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, input_data_dict=None):
   """Generate IMCFLOW evaluation results with optional CPU validation
@@ -830,6 +892,13 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
   print(f"GENERATING EVALUATION RESULTS FOR: {test_name}")
   print(f"Options: {options}")
   print(f"{'='*60}")
+
+  # Capture original (un-transformed) model for the "float" reference variant.
+  # In FULL/PATCH modes the local `mod` is overwritten with the transformed
+  # module a few lines below; in REUSE mode the loaded mod replaces it.  This
+  # snapshot is the only thing that survives both paths.
+  orig_mod = mod
+  orig_param_dict = param_dict
 
   stop_at_codegen = options.stop_at == PipelineStage.CODEGEN
 
@@ -929,16 +998,22 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       save_build_metadata(eval_dir, use_patched=True)
 
   # Run CPU validation if requested (before simulation so --stop-at validate works)
-  cpu_output = None
+  cpu_outputs = None
   if input_data_dict is not None and options.should_run(PipelineStage.CPU_VALIDATION):
-    cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, options.run_mode)
-    if cpu_output is not None:
-      print("CPU validation completed successfully")
+    cpu_outputs = run_cpu_validation(
+      orig_mod, orig_param_dict,
+      mod, param_dict,
+      input_data_dict, eval_dir,
+      run_mode=options.run_mode,
+      ref_models=options.ref_models,
+    )
+    if cpu_outputs:
+      print(f"CPU validation completed successfully ({len(cpu_outputs)} reference(s))")
 
   # If stopping at CPU validation, return without simulation
   if options.stop_at == PipelineStage.CPU_VALIDATION:
     print("\n  CPU validation only mode: skipping simulation")
-    return cpu_output
+    return cpu_outputs
 
   # Skip simulation if not needed
   if not options.should_run(PipelineStage.SIMULATION):
@@ -965,10 +1040,16 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       pytest.fail(f"IMCFLOW output file missing, cannot compare outputs")
 
     # Run CPU validation if not already done
-    if cpu_output is None and options.should_run(PipelineStage.CPU_VALIDATION):
-      cpu_output = run_cpu_validation(mod, param_dict, input_data_dict, eval_dir, options.run_mode)
+    if cpu_outputs is None and options.should_run(PipelineStage.CPU_VALIDATION):
+      cpu_outputs = run_cpu_validation(
+        orig_mod, orig_param_dict,
+        mod, param_dict,
+        input_data_dict, eval_dir,
+        run_mode=options.run_mode,
+        ref_models=options.ref_models,
+      )
 
-    compare_outputs(cpu_output, imcflow_output)
+    compare_outputs(cpu_outputs, imcflow_output)
 
   return None
 

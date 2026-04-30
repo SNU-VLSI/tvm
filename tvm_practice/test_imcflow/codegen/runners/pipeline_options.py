@@ -8,7 +8,10 @@ approach.
 
 from enum import IntEnum, Enum, auto
 from dataclasses import dataclass, field
-from typing import Set, Optional
+from typing import Set, Optional, List
+
+
+VALID_REF_MODELS = ("float", "transformed")
 
 
 class RunMode(Enum):
@@ -65,6 +68,7 @@ class PipelineOptions:
     sample: Optional[int] = None
     retry_disable: bool = False
     max_retry_count: Optional[int] = None
+    ref_models: List[str] = field(default_factory=lambda: ["transformed"])
     run_mode: RunMode = field(init=False)
 
     def __post_init__(self):
@@ -122,6 +126,24 @@ class PipelineOptions:
                 "Cannot skip transform stage when stopping at transform. "
                 "Nothing would be executed."
             )
+
+        # ref_models validation
+        if not self.ref_models:
+            raise ValueError("--ref-models cannot be empty.")
+        invalid = [r for r in self.ref_models if r not in VALID_REF_MODELS]
+        if invalid:
+            raise ValueError(
+                f"Invalid --ref-models entries: {invalid}. "
+                f"Valid choices: {list(VALID_REF_MODELS)}."
+            )
+        # Deduplicate while preserving user-specified order
+        seen = set()
+        deduped = []
+        for r in self.ref_models:
+            if r not in seen:
+                deduped.append(r)
+                seen.add(r)
+        self.ref_models = deduped
 
     def should_run(self, stage: PipelineStage) -> bool:
         """Check if a given stage should run.
@@ -252,7 +274,8 @@ class PipelineOptions:
         return (
             f"PipelineOptions(start_at={self.start_at.name}, stop_at={self.stop_at.name}, "
             f"skip={skip_names}, with_patch={self.with_patch}, "
-            f"pattern={self.input_pattern}{dataset_str}{v2_str}, run_mode={self.run_mode.name})"
+            f"pattern={self.input_pattern}{dataset_str}{v2_str}, "
+            f"ref_models={self.ref_models}, run_mode={self.run_mode.name})"
         )
 
 
