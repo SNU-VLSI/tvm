@@ -46,6 +46,7 @@ show_help() {
     echo "  -m, --model DIR       Evl dir name for build step (default: resnet8_subset31_pretrained_orig_evl.linux)"
     echo "  -s, --skip LIST       Comma-separated step numbers to skip (e.g., 1,2,7)"
     echo "  -i, --indices LIST    Comma-separated sample indices (e.g., 0,5,10,15). Overrides num_samples."
+    echo "  -l, --log-level LVL   Console log level: DEBUG (verbose, default) or INFO (progress bar)"
     echo "  -q, --quiet           Quiet mode: suppress remote stdout during evaluation"
     echo "  -o, --output DIR      Local directory to save result file (default: eval_results)"
     echo "  -h, --help            Show this help message"
@@ -61,6 +62,8 @@ show_help() {
     echo "  $0 -m my_model_evl.linux 20  # Use different evl dir for build"
     echo "  $0 -i 0,5,10,15,20      # Evaluate specific sample indices"
     echo "  $0 -b host_binary_make.dataset.v1 20  # Use tagged binary directory"
+    echo "  $0 -l INFO 100               # Progress bar only (less verbose)"
+    echo "  CONSOLE_LOG_LEVEL=INFO $0 100 # Same via env var"
     echo ""
     echo "Remote configuration is loaded from .env file."
     exit 0
@@ -77,6 +80,7 @@ SKIP_STEP7=false
 SKIP_LIST=""
 QUIET_MODE=false
 SAMPLE_INDICES=""
+CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-DEBUG}"
 MODEL_EVL_DIR="resnet8_subset31_pretrained_orig_evl.linux"
 
 while [[ $# -gt 0 ]]; do
@@ -114,6 +118,18 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             SAMPLE_INDICES="$2"
+            shift 2
+            ;;
+        -l|--log-level)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            CONSOLE_LOG_LEVEL="$(echo "$2" | tr '[:lower:]' '[:upper:]')"
+            if [[ "$CONSOLE_LOG_LEVEL" != "DEBUG" && "$CONSOLE_LOG_LEVEL" != "INFO" ]]; then
+                echo "Error: Invalid log level '$2'. Must be DEBUG or INFO."
+                exit 1
+            fi
             shift 2
             ;;
         -q|--quiet)
@@ -195,6 +211,7 @@ echo "Binary dir:       $BINARY_DIR"
 echo "Model (evl dir): $MODEL_EVL_DIR"
 echo "Samples: $SAMPLES_DISPLAY"
 echo "Remote host: $REMOTE_HOST"
+echo "Log level: $CONSOLE_LOG_LEVEL"
 echo "Quiet mode: $QUIET_MODE"
 echo "Result file (remote): $REMOTE_RESULT_PATH"
 echo "Result dir (local):   $LOCAL_RESULT_DIR/"
@@ -266,12 +283,18 @@ cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > 
         echo "(Quiet mode: remote output suppressed, results saved to $REMOTE_RESULT_PATH)"
         sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
             "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" > /dev/null 2>&1
+        EVAL_STATUS=$?
+    elif [[ "$CONSOLE_LOG_LEVEL" == "INFO" ]]; then
+        echo "(INFO mode: showing progress bar only)"
+        sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
+            "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" 2>&1 | "$SCRIPT_DIR/scripts/filter_eval_output.sh"
+        EVAL_STATUS=${PIPESTATUS[0]}
     else
         sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
             "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status"
+        EVAL_STATUS=$?
     fi
-
-    if [ $? -eq 0 ]; then
+    if [ $EVAL_STATUS -eq 0 ]; then
         echo ""
         echo "=========================================="
         echo "Dataset evaluation completed successfully!"
@@ -333,6 +356,41 @@ else
         "$REMOTE_USER@$REMOTE_HOST:$REMOTE_RESULT_PATH" "$LOCAL_RESULT_FILE"
 
     if [ $? -eq 0 ]; then
+        # Prepend build configuration metadata to result file
+        METADATA_FILE="eval_dir/${MODEL_EVL_DIR}/build_metadata.json"
+        SCAN_REG_LINK="scan_gen/${NPZ_FILE_PATH}"
+
+        if [[ -f "$METADATA_FILE" ]]; then
+            # Resolve scan_reg_files symlink target
+            SCAN_REG_TARGET=""
+            if [[ -L "$SCAN_REG_LINK" ]]; then
+                SCAN_REG_TARGET="$(readlink -f "$SCAN_REG_LINK")"
+            elif [[ -d "$SCAN_REG_LINK" ]]; then
+                SCAN_REG_TARGET="$(cd "$SCAN_REG_LINK" && pwd)"
+            fi
+
+            {
+                echo "========================================"
+                echo "  BUILD CONFIGURATION"
+                echo "========================================"
+                python3 -c "
+import json, sys
+m = json.load(open(sys.argv[1]))
+for k, v in m.items():
+    if v is None:
+        v = '-'
+    print(f'{k:.<30s} {v}')
+" "$METADATA_FILE"
+                if [[ -n "$SCAN_REG_TARGET" ]]; then
+                    printf "%-30s %s\n" "scan_reg_files................" "$SCAN_REG_TARGET"
+                fi
+                echo "========================================"
+                echo ""
+                cat "$LOCAL_RESULT_FILE"
+            } > "${LOCAL_RESULT_FILE}.tmp"
+            mv "${LOCAL_RESULT_FILE}.tmp" "$LOCAL_RESULT_FILE"
+        fi
+
         echo ""
         echo "=========================================="
         echo "Result file saved to: $LOCAL_RESULT_FILE"

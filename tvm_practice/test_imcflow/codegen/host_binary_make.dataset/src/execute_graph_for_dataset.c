@@ -579,6 +579,12 @@ int main(int argc, char** argv) {
         fprintf(g_result_file, "\n[Sample %zu] FAILED (timeout)\n", sample_idx);
       }
       failed_indices[failed_count++] = (int)sample_idx;
+      // Print progress after skip so progress bar stays updated
+      int evaluated = (int)(iter + 1) - failed_count;
+      double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
+      printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
+             iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
+      fflush(stdout);
       continue;
     }
 
@@ -603,17 +609,17 @@ int main(int argc, char** argv) {
     // Debug: Print class scores for each sample
     print_class_scores(&output_tensor, num_classes, predicted, label, sample_idx);
 
-    // Print progress every 100 samples
+    // Print progress every sample to stdout (for progress bar filtering)
+    // and every 100 samples to result file
     int evaluated = (int)(iter + 1) - failed_count;
-    if ((iter + 1) % 100 == 0 || iter + 1 == num_samples) {
-      double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
-      printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
-             iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
-      if (g_result_file) {
-        fprintf(g_result_file, "Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
-                iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
-        fflush(g_result_file);
-      }
+    double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
+    printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
+           iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
+    fflush(stdout);
+    if (g_result_file && ((iter + 1) % 100 == 0 || iter + 1 == num_samples)) {
+      fprintf(g_result_file, "Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
+              iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
+      fflush(g_result_file);
     }
   }
 
