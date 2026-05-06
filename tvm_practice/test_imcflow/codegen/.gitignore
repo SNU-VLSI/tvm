@@ -8,6 +8,7 @@ logs/
 test_inputs/*
 test_mem_alloc_*/
 test.sh
+host_binary_make.dataset.*
 
 # VCS files
 *.key

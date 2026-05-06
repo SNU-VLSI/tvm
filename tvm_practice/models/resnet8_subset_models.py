@@ -15,6 +15,12 @@ from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 from .utils import get_param_info_from_relay_func
 
+_last_checkpoint_path = None
+
+def get_last_checkpoint_path():
+  """Return the checkpoint path used by the most recent getModel_from_pretrained_weight() call."""
+  return _last_checkpoint_path
+
 def get_height(H, KH, padding, stride):
     pad_h = padding
     out_h = (H + 2 * pad_h - KH) // stride + 1
@@ -300,9 +306,10 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/col_disabled/imcflow/2026-Apr-21-13-25-43/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-24-10-14-04/imcflow/2026-Apr-27-11-08-21/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-12-06-15/imcflow/2026-Apr-27-20-32-53/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar',
+      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-20-55-16/imcflow/2026-Apr-28-12-59-11/checkpoint.pth.tar',  # num_disabled=32
-      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar', # num_disabled=0
+      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar', # num_disabled=0
+      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-06-58/imcflow/2026-Apr-30-21-24-22/checkpoint.pth.tar',  # num_disabled=32, mode=column
     }
   else:
     raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")
@@ -310,6 +317,8 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
   if vmode == VMode.QRTR:
     raise ValueError("QRTR checkpoint doesn't exist yet")
   checkpoint_path = checkpoint_paths[vmode]
+  global _last_checkpoint_path
+  _last_checkpoint_path = checkpoint_path
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']

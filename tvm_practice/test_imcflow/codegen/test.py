@@ -367,12 +367,16 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
   return save_data["mod"], param_dict
 
 
-def save_build_metadata(eval_dir, use_patched: bool):
-  """Save build metadata to track whether patched cpp files were used
+def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
+                        options: 'PipelineOptions' = None, checkpoint_path: str = None):
+  """Save build metadata including compilation configuration.
 
   Args:
     eval_dir: Directory to save metadata
     use_patched: Whether .patched.cpp files were used for compilation
+    test_name: Model/test name from MODEL_REGISTRY
+    options: PipelineOptions with all compilation settings
+    checkpoint_path: Path to the checkpoint file used for weights
   """
   import json
   from datetime import datetime
@@ -381,6 +385,33 @@ def save_build_metadata(eval_dir, use_patched: bool):
     "use_patched_cpp": use_patched,
     "build_timestamp": datetime.now().isoformat(),
   }
+
+  if test_name is not None:
+    metadata["model_name"] = test_name
+
+  if checkpoint_path is not None:
+    metadata["checkpoint_path"] = checkpoint_path
+
+  # Save board and vmode from environment / runtime
+  metadata["board"] = os.getenv("BOARD", None)
+  try:
+    from tvm.relay.backend.contrib.imcflow.acim_util import get_default_vmode
+    metadata["vmode"] = str(get_default_vmode().name)
+  except Exception:
+    metadata["vmode"] = os.getenv("VMODE", None)
+
+  if options is not None:
+    metadata["driver_v2"] = options.use_v2
+    metadata["column_disable_config"] = options.column_disable_config
+    metadata["num_disable_columns"] = options.num_disable_columns
+    metadata["random_seed"] = options.random_seed
+    metadata["single_qconv"] = options.single_qconv
+    metadata["retry_disable"] = options.retry_disable
+    metadata["max_retry_count"] = options.max_retry_count
+    metadata["with_patch"] = options.with_patch
+
+  # Save the command line that invoked main.py
+  metadata["command_line"] = " ".join(sys.argv)
 
   metadata_path = os.path.join(eval_dir, "build_metadata.json")
   with open(metadata_path, "w") as f:
@@ -926,7 +957,13 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
 
       # Save build metadata (original, not patched)
       if not skip_codegen:
-        save_build_metadata(eval_dir, use_patched=False)
+        ckpt_path = None
+        try:
+          ckpt_path = resnet8_subset_models.get_last_checkpoint_path()
+        except AttributeError:
+          pass
+        save_build_metadata(eval_dir, use_patched=False, test_name=test_name,
+                            options=options, checkpoint_path=ckpt_path)
 
       # If stopping at transform, return after frontend transformation
       if options.stop_at == PipelineStage.TRANSFORM:
@@ -996,7 +1033,13 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       mod, param_dict, _ = rebuild_imcflow_cpp_only(mod, param_dict, eval_dir, stop_at_codegen=False)
 
       # Save build metadata (patched)
-      save_build_metadata(eval_dir, use_patched=True)
+      ckpt_path = None
+      try:
+        ckpt_path = resnet8_subset_models.get_last_checkpoint_path()
+      except AttributeError:
+        pass
+      save_build_metadata(eval_dir, use_patched=True, test_name=test_name,
+                          options=options, checkpoint_path=ckpt_path)
 
   # Run CPU validation if requested (before simulation so --stop-at validate works)
   cpu_outputs = None
