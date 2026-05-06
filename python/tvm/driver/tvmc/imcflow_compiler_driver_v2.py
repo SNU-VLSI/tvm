@@ -335,6 +335,9 @@ def compile_for_imcflow_v2(
     # ------------------------------------------------------------------
     # 1. Bind parameters
     # ------------------------------------------------------------------
+    # Capture conv weight Var names BEFORE bind_params strips them by
+    # converting Vars to Constants.
+    imcflow_transform.capture_orig_conv_names(mod, param_dict)
     mod["main"] = bind_params_by_name(mod["main"], param_dict)
     mod = transform.InferType()(mod)
     _save("01_after_bind")
@@ -397,6 +400,10 @@ def compile_for_imcflow_v2(
         _log_column_disable_mapping(
             mod, func_to_imce, func_column_info, output_dir, save_intermediate
         )
+
+    # Resolve AtomicSplitInfo by function name BEFORE layout legalization
+    # rewrites the weight Constants (which would invalidate the bytes hash).
+    imcflow_transform.remap_atomic_split_info_by_func(mod)
 
     # ------------------------------------------------------------------
     # 10. Layout legalization
@@ -498,6 +505,15 @@ def compile_for_imcflow_v2(
             pprint.pprint(config.HWNodeMap, stream=f)
         with open(f"{output_dir}/final_config_MemLayout.txt", "w") as f:
             pprint.pprint(config.MemLayout, stream=f)
+
+    # Optional: dump psum tensor -> IMCU/column mapping when env-gated.
+    if os.environ.get("IMCFLOW_DUMP_PSUM_MAP", "0") == "1":
+        from tvm.relay.backend.contrib.imcflow.psum_mapping import dump_psum_mapping
+        psum_npz = os.path.join(output_dir, "psum_imcu_column_map.npz")
+        try:
+            dump_psum_mapping(mod, psum_npz, func_column_info=func_column_info)
+        except Exception as e:
+            print(f"[psum_mapping] dump failed (v2): {e}")
 
     _save("14_final_transformed")
 

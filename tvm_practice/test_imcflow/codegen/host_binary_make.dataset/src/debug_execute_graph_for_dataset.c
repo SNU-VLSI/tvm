@@ -594,6 +594,9 @@ int main(int argc, char** argv) {
         }
 
         // Save each output of this node
+        // if(nid != 164) {
+        //   continue;  // Only save outputs for node 164 (for now)
+        // }
         for (uint32_t out_idx = 0; out_idx < exec->nodes[nid].param.num_outputs; out_idx++) {
           uint32_t eid = TVMGraphExecutor_GetEntryId(exec, nid, out_idx);
           DLTensor* tensor = &(exec->data_entry[eid].dl_tensor);

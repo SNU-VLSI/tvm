@@ -999,6 +999,61 @@ def get_qconv_topo_indices(mod):
   return call_to_idx, idx_to_call
 
 
+def _weight_bytes_hash(weight_ndarray):
+    """Stable fingerprint of a weight tensor.
+
+    Used by both ``capture_orig_conv_names`` (pre-bind, given the param_dict
+    NDArray for a weight Var) and split_conv_to_atomic (post-bind, given the
+    Constant attached to a conv2d/qconv). Hashing shape + dtype + bytes
+    avoids collisions between same-shape weights.
+    """
+    import hashlib
+    if hasattr(weight_ndarray, "asnumpy"):
+        arr = weight_ndarray.asnumpy()
+    elif hasattr(weight_ndarray, "numpy"):
+        arr = weight_ndarray.numpy()
+    else:
+        arr = weight_ndarray  # already an ndarray
+    h = hashlib.sha1()
+    h.update(str(arr.shape).encode())
+    h.update(str(arr.dtype).encode())
+    h.update(arr.tobytes())
+    return h.hexdigest()
+
+
+def capture_orig_conv_names(mod, param_dict):
+    """Walk ``mod`` BEFORE bind_params_by_name converts conv weight Vars to
+    Constants. For each conv (nn.conv2d / nn.imcflow_qconv / nn.imcflow_qdwconv)
+    whose weight is a Var present in ``param_dict``, hash the weight NDArray
+    and record ``hash -> weight_var_name`` in DevConfig().OrigConvNameMap.
+
+    split_conv_to_atomic later hashes the (post-bind) Constant weight and
+    looks up this map to replace synthetic ``conv_N`` names with the original
+    weight Var name.
+    """
+    config = ImcflowDeviceConfig()
+    name_map = {}
+    conv_ops = {"nn.conv2d", "nn.imcflow_qconv", "nn.imcflow_qdwconv"}
+
+    class _V(relay.ExprVisitor):
+        def visit_call(self, call):
+            super().visit_call(call)
+            if isinstance(call.op, tvm.ir.Op) and call.op.name in conv_ops:
+                w = call.args[1]
+                if isinstance(w, relay.Var) and w.name_hint in param_dict:
+                    nd = param_dict[w.name_hint]
+                    name_map[_weight_bytes_hash(nd)] = w.name_hint
+
+    for gv in sorted(mod.functions.keys(), key=lambda g: g.name_hint):
+        func = mod[gv]
+        if isinstance(func, relay.Function):
+            _V().visit(func)
+
+    config.OrigConvNameMap = name_map
+    print(f"[capture_orig_conv_names] captured {len(name_map)} weight names "
+          f"({sorted(name_map.values())[:5]}{'...' if len(name_map) > 5 else ''})")
+
+
 def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
 
     #- we never include min_max_quant as conv2d post op. min_max_quant never be split into multiple nodes.
@@ -1009,6 +1064,9 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
       def __init__(self, OldParamDict):
         self.OldParamDict = OldParamDict
         self.NewParamDict = {}
+        # Shared counter so each conv across all imcflow functions in this mod
+        # gets a unique orig_conv_id in AtomicSplitInfo.
+        self.conv_counter = [0]
 
       def transform_function(self, func, mod):
         class _RedundantTupleRemover(tvm.relay.ExprMutator):
@@ -1028,14 +1086,46 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
         class Spliter(tvm.relay.ExprMutator):
           """Split large conv2d into smaller conv2d, split, concat, add, etc"""
 
-          def __init__(self, OldParamDict):
+          def __init__(self, OldParamDict, conv_counter):
             super().__init__()
             self.OldParamDict = OldParamDict
             self.NewParamDict = {k:v for k,v in OldParamDict.items()}
             self.DeleteArgs = []
             self.AddArgs = []
             self.PostProcess = []
+            # Tracks the original conv index across the entire module so that
+            # each call to split_and_optimize_conv2d sees a unique id even when
+            # multiple imcflow functions (and therefore multiple Spliter
+            # instances) are mutated in turn. The caller passes a list[int] of
+            # length 1 so the increment is shared.
+            self.conv_counter = conv_counter
             # self.IsSplitedPostNode = []
+
+          def _record_atomic_split(self, weight_const, *, orig_conv_id, orig_conv_name,
+                                   oc_id, ic_id, oc_block, ic_block,
+                                   total_oc, total_ic, kernel, is_depthwise):
+            """Register an atomic qconv's split metadata in DevConfig().AtomicSplitInfo.
+
+            ``weight_const`` may be either a relay.Constant (post-split) or an
+            ndarray; we hash its bytes to produce the lookup key.
+            """
+            if isinstance(weight_const, relay.Constant):
+                data = weight_const.data
+            else:
+                data = weight_const  # ndarray-like
+            key = _weight_bytes_hash(data)
+            ImcflowDeviceConfig().AtomicSplitInfo[key] = {
+                "orig_conv_id": orig_conv_id,
+                "orig_conv_name": orig_conv_name,
+                "oc_id": oc_id,
+                "ic_id": ic_id,
+                "oc_block": oc_block,
+                "ic_block": ic_block,
+                "total_oc": total_oc,
+                "total_ic": total_ic,
+                "kernel": tuple(kernel),
+                "is_depthwise": is_depthwise,
+            }
 
           def removeSplitedArg(self, node):
             if isinstance(node, relay.Var):
@@ -1091,7 +1181,37 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
             in_ch_limit = math.floor(256 / (KH * KW)) if not IsDepthWise else 32
             out_ch_limit = effective_oc if not IsDepthWise else 32
 
+            # Allocate this conv an id even when no split is needed so the
+            # AtomicSplitInfo key set covers every original conv uniformly.
+            self.conv_counter[0] += 1
+            orig_conv_id = self.conv_counter[0] - 1
+            if isinstance(expr.args[1], relay.Var):
+                orig_conv_name = expr.args[1].name_hint
+            elif isinstance(expr.args[1], relay.Constant):
+                # Recover the weight's original Var name (set by the model
+                # builder before bind_params) via the bytes-hash captured by
+                # capture_orig_conv_names() pre-bind.
+                orig_name_map = ImcflowDeviceConfig().OrigConvNameMap
+                wkey = _weight_bytes_hash(expr.args[1].data)
+                orig_conv_name = orig_name_map.get(wkey, f"conv_{orig_conv_id}")
+            else:
+                orig_conv_name = f"conv_{orig_conv_id}"
+
             if (IC <= in_ch_limit) and (OC <= out_ch_limit):
+                # No split: the original weight IS the atomic qconv weight.
+                # Record (oc_id=0, ic_id=0) covering the full (OC, IC) so the
+                # downstream npz still gets a 2-D table for this conv.
+                if isinstance(expr.args[1], relay.Constant):
+                    self._record_atomic_split(
+                        expr.args[1],
+                        orig_conv_id=orig_conv_id,
+                        orig_conv_name=orig_conv_name,
+                        oc_id=0, ic_id=0,
+                        oc_block=OC, ic_block=IC,
+                        total_oc=OC, total_ic=IC,
+                        kernel=(KH, KW),
+                        is_depthwise=IsDepthWise,
+                    )
                 return expr  # Return original if no splitting is needed
 
             # Determine split counts
@@ -1185,6 +1305,27 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
                         groups=oc_size,
                         out_dtype="int16"
                       )
+
+                    # Register the atomic qconv's split metadata so psum_mapping
+                    # can recover (oc_id, ic_id, orig_conv) from the weight
+                    # Constant alone. Only Constant weights are addressable by
+                    # bytes-hash; Var weights (rare here, since bind_params is
+                    # already done) fall back to the existing name-parsing path.
+                    split_w = split_conv_weights[oc_id][ic_id]
+                    if isinstance(split_w, relay.Constant):
+                        self._record_atomic_split(
+                            split_w,
+                            orig_conv_id=orig_conv_id,
+                            orig_conv_name=orig_conv_name,
+                            oc_id=oc_id,
+                            ic_id=ic_id,
+                            oc_block=out_ch_limit,
+                            ic_block=(1 if IsDepthWise else in_ch_limit),
+                            total_oc=OC,
+                            total_ic=(OC if IsDepthWise else IC),
+                            kernel=(KH, KW),
+                            is_depthwise=IsDepthWise,
+                        )
 
             # If input channels were split, sum the resulting conv2d outputs for each out channel slice
             if IsICSplited and (not IsDepthWise):
@@ -1314,7 +1455,7 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
               self.PostProcess = []
               return super().visit_call(call)
 
-        Spliter_ = Spliter(self.OldParamDict)
+        Spliter_ = Spliter(self.OldParamDict, self.conv_counter)
         NewFunc = Spliter_.visit(func)
         OldArgs = func.params
         NewArgs = OldArgs[:]
@@ -1335,7 +1476,71 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
       if isinstance(func, relay.Function) and "global_symbol" in func.attrs and "imcflow" in func.attrs["global_symbol"]:
         mod[global_var] = worker.transform_function(func, mod)
 
+    print(f"[split_conv_to_atomic] AtomicSplitInfo populated with "
+          f"{len(ImcflowDeviceConfig().AtomicSplitInfo)} entries "
+          f"(unique conv_ids={worker.conv_counter[0]})")
+
     return mod, worker.NewParamDict
+
+
+def remap_atomic_split_info_by_func(mod):
+  """Resolve AtomicSplitInfo (weight-hash keyed) into AtomicSplitInfoByFunc
+  (function-name keyed) **before** layout legalization rewrites the weight
+  Constants.
+
+  Call this once after partitionImcflowSubGraph_qconv_only — at that point
+  each atomic qconv lives in its own imcflow function with its original
+  (un-legalized) weight Constant, so the hash from split_conv_to_atomic
+  still matches. Function names then survive layout legalization, the
+  re-annotation pass, and PnR.
+  """
+  import hashlib
+
+  def _hash(weight_const):
+    if not isinstance(weight_const, relay.Constant):
+      return None
+    data = weight_const.data
+    arr = data.asnumpy() if hasattr(data, "asnumpy") \
+        else (data.numpy() if hasattr(data, "numpy") else data)
+    h = hashlib.sha1()
+    h.update(str(arr.shape).encode())
+    h.update(str(arr.dtype).encode())
+    h.update(arr.tobytes())
+    return h.hexdigest()
+
+  class _QConvFinder(relay.ExprVisitor):
+    def __init__(self):
+      super().__init__()
+      self.found = None
+
+    def visit_call(self, call):
+      if self.found is None and isinstance(call.op, tvm.ir.Op) \
+          and call.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv"):
+        self.found = call
+      super().visit_call(call)
+
+  config = ImcflowDeviceConfig()
+  by_func = {}
+  for gv in sorted(mod.functions.keys(), key=lambda g: g.name_hint):
+    func = mod[gv]
+    if not isinstance(func, relay.Function):
+      continue
+    if "imcflow" not in gv.name_hint:
+      continue
+    finder = _QConvFinder()
+    finder.visit(func.body)
+    if finder.found is None:
+      continue
+    wkey = _hash(finder.found.args[1])
+    if wkey is None:
+      continue
+    info = config.AtomicSplitInfo.get(wkey)
+    if info is not None:
+      by_func[gv.name_hint] = info
+  config.AtomicSplitInfoByFunc = by_func
+  print(f"[remap_atomic_split_info_by_func] resolved "
+        f"{len(by_func)} / {len(config.AtomicSplitInfo)} atomic qconvs "
+        f"to imcflow function names")
 
 def merge_composite_ops(mod):
     compositer = MergeCompositer("imcflow")

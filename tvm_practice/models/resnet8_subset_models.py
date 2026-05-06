@@ -310,6 +310,8 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-20-55-16/imcflow/2026-Apr-28-12-59-11/checkpoint.pth.tar',  # num_disabled=32
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar', # num_disabled=0
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-06-58/imcflow/2026-Apr-30-21-24-22/checkpoint.pth.tar',  # num_disabled=32, mode=column
+      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-03-22/imcflow/2026-Apr-30-18-07-14/checkpoint.pth.tar',  # num_disabled=32, hid0_wid1
+      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/hid0_wid1_col_disable63_ch41/imcflow/2026-Apr-25-22-42-48/checkpoint.pth.tar',
     }
   else:
     raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")
@@ -516,3 +518,73 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
     params_dict[name] = _get_tensor_from_checkpoint(name, info["dtype"], info["shape"])
 
   return out, params_dict
+
+
+# ============================================================================
+# PyTorch <-> Relay weight name map  (PsumResNet8_cifar)
+# ============================================================================
+# Each entry: PyTorch dotted module name (as it appears in model.named_modules()
+# for PsumResNet8_cifar — see CIM/.../model.txt) -> the relay.var() name used
+# for that conv's weight in getModel_(). Use this in training code to look up
+# which relay weight a given nn.Module instance corresponds to (e.g. for
+# psum/IMCU dump correlation against psum_imcu_column_map.npz).
+#
+# The model has 9 conv weights total: 1 floating-point conv1 + 8 TPsumQConv.
+# Shapes / kernel sizes / TPsumQConv.layer_idx all match between the two
+# representations (verified against model.txt).
+PYTORCH_TO_RELAY_WEIGHT_NAME = {
+    # Initial floating-point conv (Sequential[Identity, Conv2d])
+    "conv1.1":                "weight1",       # 3 ->16, 3x3
+    # layer1 BasicTBlock
+    "layer1.0.conv1":         "weight2_1",     # 16->16, 3x3   (layer_idx=0)
+    "layer1.0.conv2":         "weight2_2",     # 16->16, 3x3   (layer_idx=1)
+    # layer2 BasicTBlock
+    "layer2.0.conv1":         "weight3_1",     # 16->32, 3x3   (layer_idx=2)
+    "layer2.0.conv2":         "weight3_2",     # 32->32, 3x3   (layer_idx=3)
+    "layer2.0.downsample.1":  "weight3_0",     # 16->32, 1x1   (layer_idx=4)
+    # layer3 BasicTBlock
+    "layer3.0.conv1":         "weight4_1",     # 32->64, 3x3   (layer_idx=5)
+    "layer3.0.conv2":         "weight4_2",     # 64->64, 3x3   (layer_idx=6)
+    "layer3.0.downsample.1":  "weight4_0",     # 32->64, 1x1   (layer_idx=7)
+}
+
+# Inverse: relay.var() weight name -> PyTorch dotted module name.
+RELAY_TO_PYTORCH_WEIGHT_NAME = {v: k for k, v in PYTORCH_TO_RELAY_WEIGHT_NAME.items()}
+
+# TPsumQConv carries an explicit layer_idx attribute; expose a parallel index
+# -> relay-name table so training code that already keys on layer_idx (e.g.
+# logging hooks) doesn't need to walk module names. layer_idx is only defined
+# for TPsumQConv layers; the floating-point conv1 is left out.
+LAYER_IDX_TO_RELAY_WEIGHT_NAME = {
+    0: "weight2_1",
+    1: "weight2_2",
+    2: "weight3_1",
+    3: "weight3_2",
+    4: "weight3_0",
+    5: "weight4_1",
+    6: "weight4_2",
+    7: "weight4_0",
+}
+
+
+def relay_weight_name_for_pytorch_module(pytorch_dotted_name: str):
+    """Look up the relay weight Var name for a PyTorch nn.Module dotted name.
+
+    Returns None if the module is not a conv that maps onto a relay weight
+    (e.g. BatchNorm2d, ReLU, LSQ).
+
+    Example:
+        >>> relay_weight_name_for_pytorch_module("layer2.0.conv2")
+        'weight3_2'
+    """
+    return PYTORCH_TO_RELAY_WEIGHT_NAME.get(pytorch_dotted_name)
+
+
+def relay_weight_name_for_layer_idx(layer_idx: int):
+    """Look up the relay weight Var name for a TPsumQConv.layer_idx.
+
+    Example:
+        >>> relay_weight_name_for_layer_idx(3)
+        'weight3_2'
+    """
+    return LAYER_IDX_TO_RELAY_WEIGHT_NAME.get(layer_idx)

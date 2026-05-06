@@ -751,6 +751,25 @@ class ImcflowDeviceConfig:
     self.FIFOConflictTable = {}
     self.NoCDeadlockTable = {}
     self.SplitInfo = {} # func_name : {split_node_id : split_info}. split_info = {'is_multi_cast':bool, channels : int, num_splits : int}
+    # Atomic-qconv split metadata, keyed by a hash of the weight Constant bytes.
+    # Populated by split_conv_to_atomic; consumed by psum_mapping to project
+    # atomic qconvs back onto their original conv's (OC, IC) grid.
+    # Each value: dict(orig_conv_id, orig_conv_name, oc_id, ic_id, oc_block,
+    #                  ic_block, total_oc, total_ic, kernel)
+    self.AtomicSplitInfo = {}
+    # Same metadata as AtomicSplitInfo, but keyed by the imcflow function
+    # name that wraps each atomic qconv (one qconv per function in
+    # single_qconv / v2 mode). Populated by remap_atomic_split_info_by_func()
+    # right after qconv_only_partition, BEFORE layout legalization rewrites
+    # the weight Constants. Function names are stable through layout
+    # legalization and PnR, so this is the source psum_mapping consumes.
+    self.AtomicSplitInfoByFunc = {}
+    # weight-bytes-hash -> original conv weight Var name. Captured by
+    # capture_orig_conv_names() right before bind_params_by_name converts
+    # weight Vars to Constants; consumed by split_conv_to_atomic to replace
+    # synthetic 'conv_N' with the model-side weight name (e.g. the relay-level
+    # name assigned when building the model).
+    self.OrigConvNameMap = {}
     # Column disable config
     self.ColumnDisableMap = {}   # imce_linear_id (0-15) -> list[int] of disabled column indices
     self.NumDisableColumns = 0   # default: no columns disabled
@@ -1090,6 +1109,9 @@ class ImcflowDeviceConfig:
         'LayoutMap': self.LayoutMap,
         'FIFOConflictTable': self.FIFOConflictTable,
         'NoCDeadlockTable': self.NoCDeadlockTable,
+        'AtomicSplitInfo': self.AtomicSplitInfo,
+        'AtomicSplitInfoByFunc': self.AtomicSplitInfoByFunc,
+        'OrigConvNameMap': self.OrigConvNameMap,
         # Save singleton state for rebuild_modified_cpp
         'HashToCustomID': dict(HashToCustomID()),
         'CustomIDToName': dict(CustomIDToName()),
@@ -1138,6 +1160,9 @@ class ImcflowDeviceConfig:
     self.LayoutMap = state['LayoutMap']
     self.FIFOConflictTable = state['FIFOConflictTable']
     self.NoCDeadlockTable = state['NoCDeadlockTable']
+    self.AtomicSplitInfo = state.get('AtomicSplitInfo', {})
+    self.AtomicSplitInfoByFunc = state.get('AtomicSplitInfoByFunc', {})
+    self.OrigConvNameMap = state.get('OrigConvNameMap', {})
 
     # Restore singleton state
     # Must use clear() + update() since these are singleton instances

@@ -522,6 +522,11 @@ def transform_model_single_qconv(mod, param_dict, output_dir, placements, top_ou
 
     _print("0_origin_p2")
 
+    # Capture conv weight Var names BEFORE bind_params converts them to
+    # Constants (which strips the names). Used by split_conv_to_atomic to
+    # populate orig_conv with the model-defined weight name.
+    imcflow_transform.capture_orig_conv_names(mod, param_dict)
+
     # Step 1: Bind parameters
     mod["main"] = bind_params_by_name(mod["main"], param_dict)
     mod = transform.InferType()(mod)
@@ -563,6 +568,10 @@ def transform_model_single_qconv(mod, param_dict, output_dir, placements, top_ou
     # Step 11: Annotate custom IDs
     mod = imcflow_transform.annotateCustomId(mod)
     imcflow_transform.constructUsefulMappings(mod)
+
+    # Resolve AtomicSplitInfo by function name BEFORE layout legalization
+    # rewrites the weight Constants (which would invalidate the bytes hash).
+    imcflow_transform.remap_atomic_split_info_by_func(mod)
 
     if save_intermediate:
         with open(f"{output_dir}/custom_id_to_name_p2.txt", "w") as f:
@@ -731,6 +740,16 @@ def transform_model_single_qconv(mod, param_dict, output_dir, placements, top_ou
     _top_dir = top_output_dir if top_output_dir else output_dir
     devconfig_state_path = os.path.join(_top_dir, "devconfig_state.pkl")
     config.save_state(devconfig_state_path)
+
+    # Optional: dump psum tensor -> IMCU/column mapping when env-gated.
+    # v1 single_qconv path has no column-disable, so func_column_info=None.
+    if os.environ.get("IMCFLOW_DUMP_PSUM_MAP", "0") == "1":
+        from tvm.relay.backend.contrib.imcflow.psum_mapping import dump_psum_mapping
+        psum_npz = os.path.join(_top_dir, "psum_imcu_column_map.npz")
+        try:
+            dump_psum_mapping(mod, psum_npz)
+        except Exception as e:
+            print(f"[psum_mapping] dump failed (single_qconv v1): {e}")
 
     return mod, param_dict
 
