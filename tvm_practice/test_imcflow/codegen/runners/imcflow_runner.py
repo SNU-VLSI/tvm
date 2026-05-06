@@ -165,7 +165,8 @@ class ImcFlowRunner(ABC):
         """Perform any necessary setup before running (e.g., VCS compilation)"""
         pass
 
-    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str) -> None:
+    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str,
+            noise_csv: Optional[str] = None) -> None:
         """Run the simulation
 
         Args:
@@ -173,6 +174,10 @@ class ImcFlowRunner(ABC):
             gdb_mode: "yes" or "no" to enable/disable GDB
             test_name: Name of the test for output directory
             eval_dir: Evaluation directory containing the model
+            noise_csv: Optional path to the ADC noise CSV. Forwarded to
+                py_runner's run.sh as the 6th positional arg, which gem5's
+                run_imcflow.py turns into --noise-csv → IMCFLOW_NOISE_CSV.
+                Ignored by RTL runner (RTL doesn't run the Python IMCU model).
 
         Raises:
             subprocess.CalledProcessError: If simulation fails
@@ -203,8 +208,11 @@ class ImcFlowRunner(ABC):
         env = os.environ.copy()
         env["SRAM_BACKDOOR"] = sram_backdoor
 
-        # Pass absolute log directory as 4th argument, imc_size as 5th argument to run.sh
-        sim_command = ["direnv", "exec", ".", "./run.sh", binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size]
+        # run.sh positional args: binary, gdb, test_name, log_dir, imc_size, noise_csv
+        # Empty string in slot 6 means "no noise CSV"; run.sh skips --noise-csv in that case.
+        sim_command = ["direnv", "exec", ".", "./run.sh",
+                       binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size,
+                       noise_csv or ""]
 
         try:
             self._stream_command_output(
@@ -254,6 +262,17 @@ class ImcFlowRunner(ABC):
             subprocess.CalledProcessError: If command fails
             subprocess.TimeoutExpired: If command times out
         """
+        # Strip direnv bookkeeping (DIRENV_DIFF / DIRENV_FILE / ...) when invoking
+        # 'direnv exec'.  Without this, direnv reverts variables that were exported
+        # by an upstream .envrc (e.g. codegen/.envrc's IMCFLOW_DEBUG_COMPUTE) on
+        # transition into the target chain — those vars then disappear inside the
+        # subprocess.  Stripping makes the target dir's .envrc evaluate from
+        # scratch, preserving every other inherited env var.
+        if command and command[0] == "direnv":
+            env = (dict(env) if env is not None else os.environ.copy())
+            for k in [k for k in env if k.startswith("DIRENV_")]:
+                env.pop(k, None)
+
         with open(log_path, "w") as log_file:
             process = subprocess.Popen(
                 command,
@@ -365,12 +384,20 @@ class RTLRunner(ImcFlowRunner):
     def main_log_filename(self) -> str:
         return "gem5_rtl.log"
 
-    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str) -> None:
+    def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str,
+            noise_csv: Optional[str] = None) -> None:
         """Run the RTL simulation with automatic port allocation.
 
         Allocates a unique socket port for VCS-gem5 communication to enable
         concurrent simulations.
+
+        ``noise_csv`` is accepted for interface parity with PyRunner but
+        ignored — the RTL path forwards MMIO to VCS, not to the Python IMCU
+        model where the noise CSV is consumed.
         """
+        if noise_csv:
+            print(f"[RTLRunner] Ignoring --noise-csv={noise_csv} (RTL path "
+                  f"does not exercise the Python IMCU noise model)")
         # Allocate unique port for this test
         self._allocated_port = PortAllocator.get_port_for_test(test_name)
         print(f"Allocated socket port {self._allocated_port} for test '{test_name}'")

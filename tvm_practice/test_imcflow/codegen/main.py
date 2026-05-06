@@ -162,6 +162,15 @@ Examples:
   )
 
   parser.add_argument(
+    "--noise-csv",
+    type=str,
+    default=None,
+    help="Path to ADC noise probability CSV. Threaded to py_runner gem5 config "
+         "as --noise-csv (which exports IMCFLOW_NOISE_CSV before bridge.py "
+         "constructs Imcflow). Ignored by rtl_runner."
+  )
+
+  parser.add_argument(
     "--ref-models",
     nargs="+",
     choices=["float", "transformed"],
@@ -257,6 +266,7 @@ Examples:
       retry_disable=args.retry_disable,
       max_retry_count=args.max_retry_count,
       ref_models=args.ref_models,
+      noise_csv=os.path.abspath(args.noise_csv) if args.noise_csv else None,
     )
   except ValueError as e:
     parser.print_help()

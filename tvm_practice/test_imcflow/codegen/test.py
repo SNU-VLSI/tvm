@@ -707,7 +707,8 @@ def run_simulation(eval_dir, HOST_ISA="x86", options=None):
         binary_name=binary_name,
         gdb_mode="no",
         test_name=eval_dir,
-        eval_dir=eval_dir
+        eval_dir=eval_dir,
+        noise_csv=options.noise_csv if options else None,
       )
     except KeyboardInterrupt:
       interrupted = True
