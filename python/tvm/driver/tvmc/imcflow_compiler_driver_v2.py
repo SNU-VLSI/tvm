@@ -387,6 +387,12 @@ def compile_for_imcflow_v2(
         with open(f"{output_dir}/func_to_imce.txt", "w") as f:
             pprint.pprint(func_to_imce, stream=f)
 
+    # Resolve AtomicSplitInfo by function name BEFORE any pass that rewrites
+    # weight Constants (column-disable pads weights to OC=64, layout
+    # legalization repacks them). Both invalidate the bytes hash that
+    # AtomicSplitInfo is keyed on, so this remap MUST run first.
+    imcflow_transform.remap_atomic_split_info_by_func(mod)
+
     # ------------------------------------------------------------------
     # 9. Column disable shape pass (if enabled)
     # ------------------------------------------------------------------
@@ -400,10 +406,6 @@ def compile_for_imcflow_v2(
         _log_column_disable_mapping(
             mod, func_to_imce, func_column_info, output_dir, save_intermediate
         )
-
-    # Resolve AtomicSplitInfo by function name BEFORE layout legalization
-    # rewrites the weight Constants (which would invalidate the bytes hash).
-    imcflow_transform.remap_atomic_split_info_by_func(mod)
 
     # ------------------------------------------------------------------
     # 10. Layout legalization

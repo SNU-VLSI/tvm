@@ -206,6 +206,14 @@ def _build_records(
         op_name = qconv.op.name
         is_depthwise = (op_name == "nn.imcflow_qdwconv")
 
+        # column-disable pass pads qconv.channels to 64 (with zero rows at
+        # disabled columns) but the *real* output channel count is oc_actual
+        # stored in func_column_info. Use that to recover the un-padded
+        # oc_size; otherwise 2-D tables overflow the [total_oc, total_ic] grid.
+        if func_column_info and gv.name_hint in func_column_info:
+            oc_actual_from_info, _ = func_column_info[gv.name_hint]
+            oc_size = int(oc_actual_from_info)
+
         # Primary path: function-name keyed lookup. This dict is populated
         # before layout legalization and survives all subsequent rewrites,
         # so it's the most reliable source.
