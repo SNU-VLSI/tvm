@@ -272,6 +272,13 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Ensure output_dir (and any new per-sample sub-dir) exists before any
+  // save_tensor_to_dir / fopen call.
+  if (mkdir_p(output_dir) != 0) {
+    fprintf(stderr, "❌ Failed to create output directory: %s\n", output_dir);
+    return 1;
+  }
+
   fprintf(stderr, "\n");
   fprintf(stderr, "========================================\n");
   fprintf(stderr, "  TVM Unified Graph Executor\n");
