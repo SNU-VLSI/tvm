@@ -166,7 +166,9 @@ class ImcFlowRunner(ABC):
         pass
 
     def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str,
-            noise_csv: Optional[str] = None) -> None:
+            noise_csv: Optional[str] = None,
+            noise_layout_json: Optional[str] = None,
+            noise_mode: Optional[str] = None) -> None:
         """Run the simulation
 
         Args:
@@ -178,6 +180,13 @@ class ImcFlowRunner(ABC):
                 py_runner's run.sh as the 6th positional arg, which gem5's
                 run_imcflow.py turns into --noise-csv → IMCFLOW_NOISE_CSV.
                 Ignored by RTL runner (RTL doesn't run the Python IMCU model).
+            noise_layout_json: Optional path to imce_map noise layout JSON
+                (concat_per_core.json). Forwarded as the 7th positional arg;
+                run_imcflow.py exports IMCFLOW_NOISE_LAYOUT_JSON for IMCU.
+            noise_mode: Optional ADC noise sampling mode. 'sample' (default
+                empirical) or 'greedy' (argmax over diff_bin). Forwarded as
+                the 8th positional arg; run_imcflow.py exports
+                IMCFLOW_NOISE_MODE for IMCU.
 
         Raises:
             subprocess.CalledProcessError: If simulation fails
@@ -208,11 +217,11 @@ class ImcFlowRunner(ABC):
         env = os.environ.copy()
         env["SRAM_BACKDOOR"] = sram_backdoor
 
-        # run.sh positional args: binary, gdb, test_name, log_dir, imc_size, noise_csv
-        # Empty string in slot 6 means "no noise CSV"; run.sh skips --noise-csv in that case.
+        # run.sh positional args: binary, gdb, test_name, log_dir, imc_size, noise_csv, noise_layout_json, noise_mode
+        # Empty string in slots 6/7/8 means "skip"; run.sh omits the corresponding --noise-* flag.
         sim_command = ["direnv", "exec", ".", "./run.sh",
                        binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size,
-                       noise_csv or ""]
+                       noise_csv or "", noise_layout_json or "", noise_mode or ""]
 
         try:
             self._stream_command_output(
@@ -385,18 +394,26 @@ class RTLRunner(ImcFlowRunner):
         return "gem5_rtl.log"
 
     def run(self, binary_name: str, gdb_mode: str, test_name: str, eval_dir: str,
-            noise_csv: Optional[str] = None) -> None:
+            noise_csv: Optional[str] = None,
+            noise_layout_json: Optional[str] = None,
+            noise_mode: Optional[str] = None) -> None:
         """Run the RTL simulation with automatic port allocation.
 
         Allocates a unique socket port for VCS-gem5 communication to enable
         concurrent simulations.
 
-        ``noise_csv`` is accepted for interface parity with PyRunner but
-        ignored — the RTL path forwards MMIO to VCS, not to the Python IMCU
-        model where the noise CSV is consumed.
+        ``noise_csv`` / ``noise_layout_json`` / ``noise_mode`` are accepted for
+        interface parity with PyRunner but ignored — the RTL path forwards
+        MMIO to VCS, not to the Python IMCU model.
         """
         if noise_csv:
             print(f"[RTLRunner] Ignoring --noise-csv={noise_csv} (RTL path "
+                  f"does not exercise the Python IMCU noise model)")
+        if noise_layout_json:
+            print(f"[RTLRunner] Ignoring --noise-layout-json={noise_layout_json} "
+                  f"(RTL path does not exercise the Python IMCU noise model)")
+        if noise_mode:
+            print(f"[RTLRunner] Ignoring --noise-mode={noise_mode} (RTL path "
                   f"does not exercise the Python IMCU noise model)")
         # Allocate unique port for this test
         self._allocated_port = PortAllocator.get_port_for_test(test_name)

@@ -306,12 +306,15 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/col_disabled/imcflow/2026-Apr-21-13-25-43/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-24-10-14-04/imcflow/2026-Apr-27-11-08-21/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-12-06-15/imcflow/2026-Apr-27-20-32-53/checkpoint.pth.tar',
-      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar',
+      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-20-55-16/imcflow/2026-Apr-28-12-59-11/checkpoint.pth.tar',  # num_disabled=32
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar', # num_disabled=0
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-06-58/imcflow/2026-Apr-30-21-24-22/checkpoint.pth.tar',  # num_disabled=32, mode=column
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-03-22/imcflow/2026-Apr-30-18-07-14/checkpoint.pth.tar',  # num_disabled=32, hid0_wid1
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/hid0_wid1_col_disable63_ch41/imcflow/2026-Apr-25-22-42-48/checkpoint.pth.tar',
+      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-12-11-39-35/checkpoint.pth.tar',
+      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-13-09-42-18/checkpoint.pth.tar', # acc_mask enabled, mapping aware, N32
+      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-13-10-11-49/imcflow/2026-May-13-19-05-07/checkpoint.pth.tar', # acc_mask enabled + bug fix, mapping aware, N32
     }
   else:
     raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")

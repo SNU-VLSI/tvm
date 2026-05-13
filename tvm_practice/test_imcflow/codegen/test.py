@@ -740,6 +740,8 @@ def run_simulation(eval_dir, HOST_ISA="x86", options=None):
         test_name=eval_dir,
         eval_dir=eval_dir,
         noise_csv=options.noise_csv if options else None,
+        noise_layout_json=options.noise_layout_json if options else None,
+        noise_mode=options.noise_mode if options else None,
       )
     except KeyboardInterrupt:
       interrupted = True
@@ -946,6 +948,7 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
           skip_codegen=skip_codegen,
           save_intermediate=True,
           random_seed=options.random_seed,
+          noise_layout_json_path=options.noise_layout_json,
         )
       elif options.single_qconv:
         mod, param_dict, _ = compile_for_imcflow_single_qconv(mod, param_dict, eval_dir, skip_codegen=skip_codegen)

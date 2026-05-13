@@ -171,6 +171,26 @@ Examples:
   )
 
   parser.add_argument(
+    "--noise-layout-json",
+    type=str,
+    default=None,
+    help="Path to imce_map noise layout JSON (concat_per_core.json). Threaded "
+         "to py_runner gem5 config as --noise-layout-json (which exports "
+         "IMCFLOW_NOISE_LAYOUT_JSON). Required when --noise-csv has "
+         "n_cores*n_per_core channels (e.g. 512 for N32). Ignored by rtl_runner."
+  )
+
+  parser.add_argument(
+    "--noise-mode",
+    choices=["sample", "greedy"],
+    default=None,
+    help="ADC noise sampling mode. 'sample' (default): empirical inverse-CDF "
+         "draw from the per-(channel, wpattern, ref) distribution. 'greedy': "
+         "deterministic argmax over diff_bin (highest-probability noise level). "
+         "Exported as IMCFLOW_NOISE_MODE for IMCU. Ignored by rtl_runner."
+  )
+
+  parser.add_argument(
     "--ref-models",
     nargs="+",
     choices=["float", "transformed"],
@@ -267,6 +287,8 @@ Examples:
       max_retry_count=args.max_retry_count,
       ref_models=args.ref_models,
       noise_csv=os.path.abspath(args.noise_csv) if args.noise_csv else None,
+      noise_layout_json=os.path.abspath(args.noise_layout_json) if args.noise_layout_json else None,
+      noise_mode=args.noise_mode,
     )
   except ValueError as e:
     parser.print_help()

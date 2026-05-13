@@ -70,6 +70,8 @@ class PipelineOptions:
     max_retry_count: Optional[int] = None
     ref_models: List[str] = field(default_factory=lambda: ["transformed"])
     noise_csv: Optional[str] = None
+    noise_layout_json: Optional[str] = None
+    noise_mode: Optional[str] = None
     run_mode: RunMode = field(init=False)
 
     def __post_init__(self):

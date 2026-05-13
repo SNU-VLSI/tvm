@@ -291,6 +291,7 @@ def compile_for_imcflow_v2(
     skip_codegen=False,
     save_intermediate=True,
     random_seed=None,
+    noise_layout_json_path=None,
 ):
     """Single-phase compilation for IMCFlow with column-disable support.
 
@@ -304,6 +305,12 @@ def compile_for_imcflow_v2(
         skip_codegen: if True, skip codegen + graph executor generation.
         save_intermediate: if True, dump intermediate relay at each step.
         random_seed: optional seed for reproducible IMCE assignment.
+        noise_layout_json_path: optional path to imce_map noise layout JSON
+            (concat_per_core.json). Used ONLY for fail-fast cross-validation
+            against ``column_disable_config_path`` at compile start — the JSON
+            is forwarded to the simulator separately (env var / runner kwarg).
+            Set both to make sure weight loading and noise sampling agree on
+            which columns are disabled per IMCE.
 
     Returns:
         (mod, param_dict, tar_path)
@@ -327,6 +334,18 @@ def compile_for_imcflow_v2(
         config.load_column_disable_config(column_disable_config_path, num_disable_columns)
     effective_oc = config.get_effective_oc() if column_disable_enabled else 64
     print(f"[v2] effective_oc={effective_oc}  column_disable={column_disable_enabled}")
+
+    # Fail-fast cross-validation: when both configs are supplied, the disabled
+    # column set per IMCE must agree, otherwise weight placement and noise
+    # sampling would silently use different "enabled" sets.
+    if noise_layout_json_path is not None:
+        if not column_disable_enabled:
+            raise RuntimeError(
+                f"noise_layout_json_path='{noise_layout_json_path}' was provided "
+                f"but no column-disable config — imce_map noise mode is only "
+                f"meaningful with column-disable. Pass --column-disable-config too."
+            )
+        config.validate_noise_layout(noise_layout_json_path)
 
     def _save(name):
         if save_intermediate:

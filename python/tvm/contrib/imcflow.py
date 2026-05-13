@@ -835,6 +835,81 @@ class ImcflowDeviceConfig:
     if self.ActiveIMCESet is not None:
       print(f"[ColumnDisable] Active IMCE subset: {sorted(self.ActiveIMCESet)}")
 
+  def validate_noise_layout(self, noise_layout_json_path):
+    """Fail-fast if a noise layout JSON's disabled set disagrees with the
+    column-disable config loaded by ``load_column_disable_config``.
+
+    ``noise_layout_json_path`` is the path to ``concat_per_core.json`` (the
+    imce_map noise layout). For every IMCE present in BOTH configs, this
+    asserts that ``set(column_disable_config[linear]) == set(noise_layout[linear])``.
+
+    The column-disable JSON may list a subset of cores (PnR's ActiveIMCESet);
+    only the listed cores are required to match the noise layout — extra cores
+    in the noise layout for inactive IMCEs are tolerated.
+    """
+    if not self.ColumnDisableMap:
+      raise RuntimeError(
+        f"validate_noise_layout('{noise_layout_json_path}') called before "
+        f"load_column_disable_config — nothing to compare against."
+      )
+
+    with open(noise_layout_json_path, 'r') as f:
+      layout = json.load(f)
+
+    disabled_by_core = layout.get("disabled_by_core")
+    if not disabled_by_core:
+      raise RuntimeError(
+        f"Noise layout '{noise_layout_json_path}': missing 'disabled_by_core' "
+        f"(cannot cross-validate against column-disable config)."
+      )
+
+    layout_disabled = {}   # linear_id -> set(int)
+    for core_key, indices in disabled_by_core.items():
+      h_str, w_str = str(core_key).split("_")
+      h_id = int(h_str)
+      w_id = int(w_str)
+      linear = h_id * self.IMCE_W_NUM + (w_id - 1)
+      layout_disabled[linear] = set(int(i) for i in indices)
+
+    # Per-core diff
+    mismatches = []
+    cfg_n = layout.get("num_disable")
+    if cfg_n is not None and int(cfg_n) != self.NumDisableColumns:
+      mismatches.append(
+        f"num_disable: column_disable_config={self.NumDisableColumns} "
+        f"vs noise_layout={cfg_n}"
+      )
+
+    for linear, cfg_disabled in self.ColumnDisableMap.items():
+      cfg_set = set(int(i) for i in cfg_disabled)
+      lay_set = layout_disabled.get(linear)
+      if lay_set is None:
+        mismatches.append(
+          f"IMCE linear={linear}: present in column-disable config but "
+          f"absent from noise_layout"
+        )
+        continue
+      if cfg_set != lay_set:
+        only_cfg = sorted(cfg_set - lay_set)
+        only_lay = sorted(lay_set - cfg_set)
+        mismatches.append(
+          f"IMCE linear={linear}: disabled sets differ "
+          f"(only in column-disable: {only_cfg}; only in noise_layout: {only_lay})"
+        )
+
+    if mismatches:
+      detail = "\n  - " + "\n  - ".join(mismatches)
+      raise RuntimeError(
+        f"Noise layout '{noise_layout_json_path}' does not match the column-"
+        f"disable config:{detail}\n"
+        f"Weight loading and noise sampling would use different enabled column "
+        f"sets — outputs would be silently wrong. Regenerate one of the configs "
+        f"so the disabled sets agree per IMCE."
+      )
+
+    print(f"[ColumnDisable] noise layout '{os.path.basename(noise_layout_json_path)}' "
+          f"matches column-disable config across {len(self.ColumnDisableMap)} active IMCEs.")
+
   def get_valid_columns(self, imce_linear_id):
     """Returns sorted list of valid column indices for the given IMCE."""
     disabled = set(self.ColumnDisableMap.get(imce_linear_id, []))
