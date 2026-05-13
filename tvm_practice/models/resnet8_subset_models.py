@@ -7,15 +7,48 @@ from tvm import relay
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData, AccMask, VMode, get_default_vmode
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
-import numpy as np
-import tvm
-from tvm import relay
-from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
-from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
-from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 from .utils import get_param_info_from_relay_func
 
 _last_checkpoint_path = None
+
+_B2_HALF_BASE = '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2'
+B2_HALF_CHECKPOINTS = {
+    # --- ordered (per_ch_ordered) ---
+    "ordered_ndis32":  f"{_B2_HALF_BASE}/2026-Apr-27-20-55-16/imcflow/2026-Apr-28-12-59-11/checkpoint.pth.tar",   # N32
+    "ordered_ndis16":  f"{_B2_HALF_BASE}/2026-Apr-27-20-55-25/imcflow/2026-Apr-28-19-17-02/checkpoint.pth.tar",   # N16
+    "ordered_ndis8":   f"{_B2_HALF_BASE}/2026-Apr-28-02-34-06/imcflow/2026-Apr-29-15-19-18/checkpoint.pth.tar",   # N8
+    "ordered_ndis4":   f"{_B2_HALF_BASE}/2026-Apr-28-02-33-56/imcflow/2026-Apr-29-15-00-15/checkpoint.pth.tar",   # N4
+    "ordered_ndis2":   f"{_B2_HALF_BASE}/2026-Apr-28-08-11-57/imcflow/2026-Apr-29-15-40-53/checkpoint.pth.tar",   # N2
+    "ordered_ndis0":   f"{_B2_HALF_BASE}/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar",   # N0
+    # --- column (per_ch) ---
+    "col_ndis32":      f"{_B2_HALF_BASE}/2026-Apr-30-11-06-58/imcflow/2026-Apr-30-21-24-22/checkpoint.pth.tar",   # N32
+    "col_ndis16":      f"{_B2_HALF_BASE}/2026-Apr-30-11-07-04/imcflow/2026-Apr-30-22-16-04/checkpoint.pth.tar",   # N16
+    "col_ndis8":       f"{_B2_HALF_BASE}/2026-Apr-30-16-46-46/imcflow/2026-Apr-30-23-04-12/checkpoint.pth.tar",   # N8
+    "col_ndis4":       f"{_B2_HALF_BASE}/2026-Apr-30-16-47-07/imcflow/2026-Apr-30-23-32-17/checkpoint.pth.tar",   # N4
+    "col_ndis2":       f"{_B2_HALF_BASE}/2026-Apr-30-22-27-44/imcflow/2026-May-01-10-58-06/checkpoint.pth.tar",   # N2
+    "col_ndis0":       f"{_B2_HALF_BASE}/2026-Apr-30-22-27-25/imcflow/2026-May-01-10-34-24/checkpoint.pth.tar",   # N0
+    # --- grid (per_ch_grid) ---
+    "grid_ndis56":     f"{_B2_HALF_BASE}/2026-May-07-05-33-09/imcflow/2026-May-07-12-53-24/checkpoint.pth.tar",   # N56
+    "grid_ndis48":     f"{_B2_HALF_BASE}/2026-May-06-23-54-22/imcflow/2026-May-07-12-47-52/checkpoint.pth.tar",   # N48
+    "grid_ndis32":     f"{_B2_HALF_BASE}/2026-May-06-18-13-53/imcflow/2026-May-07-12-41-46/checkpoint.pth.tar",   # N32
+    "grid_ndis16":     f"{_B2_HALF_BASE}/2026-May-06-23-55-11/imcflow/2026-May-07-12-51-03/checkpoint.pth.tar",   # N16
+    "grid_ndis8":      f"{_B2_HALF_BASE}/2026-May-07-05-36-46/imcflow/2026-May-07-12-56-51/checkpoint.pth.tar",   # N8
+    "grid_ndis0":      f"{_B2_HALF_BASE}/2026-May-06-18-14-02/imcflow/2026-May-07-12-45-22/checkpoint.pth.tar",   # N0
+    # --- concat (per_ch_concat) ---
+    "concat_ndis32":   f"{_B2_HALF_BASE}/2026-May-07-18-46-15/imcflow/2026-May-08-11-23-54/checkpoint.pth.tar",   # N32
+    "concat_ndis16":   f"{_B2_HALF_BASE}/2026-May-07-18-46-18/imcflow/2026-May-08-11-40-28/checkpoint.pth.tar",   # N16
+    "concat_ndis8":    f"{_B2_HALF_BASE}/2026-May-08-00-24-56/imcflow/2026-May-08-12-12-44/checkpoint.pth.tar",   # N8
+    "concat_ndis4":    f"{_B2_HALF_BASE}/2026-May-08-00-28-36/imcflow/2026-May-08-12-46-19/checkpoint.pth.tar",   # N4
+    # --- misc ---
+    "base":            f"{_B2_HALF_BASE}/2026-Apr-24-10-14-04/imcflow/2026-Apr-27-11-08-21/checkpoint.pth.tar",   # per_ch base
+    "accum_grads":     f"{_B2_HALF_BASE}/2026-Apr-27-12-06-15/imcflow/2026-Apr-27-20-32-53/checkpoint.pth.tar",   # accumulate_grads=1
+    "temp2.0":         f"{_B2_HALF_BASE}/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar",   # per_ch_noise_temperature=2.0
+    # --- mapping-aware (acc_mask) ---
+    "mapaware_ndis32":          f"{_B2_HALF_BASE}/2026-May-11-22-16-01/imcflow/2026-May-13-09-42-18/checkpoint.pth.tar",   # acc_mask enabled, mapping aware, N32
+    "mapaware_bugfix_ndis32":   f"{_B2_HALF_BASE}/2026-May-13-10-11-49/imcflow/2026-May-13-19-05-07/checkpoint.pth.tar",   # acc_mask enabled + bug fix, mapping aware, N32
+}
+
+B2_HALF_DEFAULT_CKPT = "mapaware_bugfix_ndis32"
 
 def get_last_checkpoint_path():
   """Return the checkpoint path used by the most recent getModel_from_pretrained_weight() call."""
@@ -295,33 +328,25 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
     checkpoint_paths = {
       VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
       VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/col_disabled/imcflow/2026-Apr-21-11-45-31/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/MSB_std_min/2026-Apr-08-19-21-24/imcflow/2026-Apr-11-02-18-20/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/2026-Mar-24-16-01-08/imcflow/2026-Mar-25-15-44-02/checkpoint.pth.tar',
-
     }
+    if vmode == VMode.QRTR:
+      raise ValueError("QRTR checkpoint doesn't exist yet")
+    checkpoint_path = checkpoint_paths[vmode]
   elif board == "B2":
-    checkpoint_paths = {
-      VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/2026-Mar-24-23-56-13/imcflow/2026-Mar-25-15-46-48/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/col_disabled/imcflow/2026-Apr-21-13-25-43/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-24-10-14-04/imcflow/2026-Apr-27-11-08-21/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-12-06-15/imcflow/2026-Apr-27-20-32-53/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-20-55-16/imcflow/2026-Apr-28-12-59-11/checkpoint.pth.tar',  # num_disabled=32
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar', # num_disabled=0
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-06-58/imcflow/2026-Apr-30-21-24-22/checkpoint.pth.tar',  # num_disabled=32, mode=column
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-03-22/imcflow/2026-Apr-30-18-07-14/checkpoint.pth.tar',  # num_disabled=32, hid0_wid1
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/hid0_wid1_col_disable63_ch41/imcflow/2026-Apr-25-22-42-48/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-12-11-39-35/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-13-09-42-18/checkpoint.pth.tar', # acc_mask enabled, mapping aware, N32
-      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-13-10-11-49/imcflow/2026-May-13-19-05-07/checkpoint.pth.tar', # acc_mask enabled + bug fix, mapping aware, N32
-    }
+    if vmode == VMode.FULL:
+      checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar'
+    elif vmode == VMode.HALF:
+      ckpt_key = os.getenv("CKPT", "")
+      if not ckpt_key:
+        ckpt_key = B2_HALF_DEFAULT_CKPT
+        print(f"\033[93m[WARNING] CKPT not set. Defaulting to '{ckpt_key}'. Set CKPT env var to choose. Available: {list(B2_HALF_CHECKPOINTS.keys())}\033[0m")
+      if ckpt_key not in B2_HALF_CHECKPOINTS:
+        raise ValueError(f"Unknown CKPT='{ckpt_key}'. Available: {list(B2_HALF_CHECKPOINTS.keys())}")
+      checkpoint_path = B2_HALF_CHECKPOINTS[ckpt_key]
+    else:
+      raise ValueError("QRTR checkpoint doesn't exist yet")
   else:
     raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")
-
-  if vmode == VMode.QRTR:
-    raise ValueError("QRTR checkpoint doesn't exist yet")
-  checkpoint_path = checkpoint_paths[vmode]
   global _last_checkpoint_path
   _last_checkpoint_path = checkpoint_path
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
