@@ -232,18 +232,42 @@ int main(int argc, char** argv) {
   const char* graph_path = argc > 3 ? argv[3] : "mlf/executor-config/graph/default.graph";
   const char* params_path = argc > 4 ? argv[4] : "mlf/parameters/default.params";
   const char* runner_name = argc > 5 ? argv[5] : "";
+  // Optional sample index for per-sample input/output sub-dirs (see
+  // debug_execute_graph.c for the layout convention).
+  const char* sample_idx = argc > 6 ? argv[6] : "";
+  int has_sample = (sample_idx && strlen(sample_idx) > 0);
 
-  // Construct input and output directories based on test name
+  // Construct input and output directories based on test name (and sample idx).
   char input_dir[256];
   char output_dir[256];
-  snprintf(input_dir, sizeof(input_dir), "%s/%s/test_inputs", eval_dir, test_name);
+  if (has_sample) {
+    snprintf(input_dir, sizeof(input_dir),
+             "%s/%s/test_inputs/sample_%s", eval_dir, test_name, sample_idx);
+  } else {
+    snprintf(input_dir, sizeof(input_dir),
+             "%s/%s/test_inputs", eval_dir, test_name);
+  }
 
   // If runner_name is provided, save outputs to test_outputs/<runner_name>/
   // Otherwise, save to test_outputs/ for backward compatibility
   if (runner_name && strlen(runner_name) > 0) {
-    snprintf(output_dir, sizeof(output_dir), "%s/%s/test_outputs/%s", eval_dir, test_name, runner_name);
+    if (has_sample) {
+      snprintf(output_dir, sizeof(output_dir),
+               "%s/%s/test_outputs/%s/sample_%s",
+               eval_dir, test_name, runner_name, sample_idx);
+    } else {
+      snprintf(output_dir, sizeof(output_dir),
+               "%s/%s/test_outputs/%s", eval_dir, test_name, runner_name);
+    }
   } else {
-    snprintf(output_dir, sizeof(output_dir), "%s/%s/test_outputs", eval_dir, test_name);
+    if (has_sample) {
+      snprintf(output_dir, sizeof(output_dir),
+               "%s/%s/test_outputs/sample_%s",
+               eval_dir, test_name, sample_idx);
+    } else {
+      snprintf(output_dir, sizeof(output_dir),
+               "%s/%s/test_outputs", eval_dir, test_name);
+    }
   }
 
   fprintf(stderr, "\n");

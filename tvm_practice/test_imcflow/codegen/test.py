@@ -20,6 +20,7 @@ import pprint
 import glob
 import pickle
 import sys
+from typing import Optional
 from contextlib import contextmanager
 import os
 
@@ -541,7 +542,8 @@ def run_cpu_validation(orig_mod, orig_param_dict,
                        transformed_mod, transformed_param_dict,
                        input_data_dict, model_dir,
                        run_mode: RunMode = RunMode.FULL,
-                       ref_models=None):
+                       ref_models=None,
+                       sample_idx: Optional[int] = None):
   """Run CPU inference for each requested reference variant.
 
   Variants:
@@ -566,7 +568,13 @@ def run_cpu_validation(orig_mod, orig_param_dict,
   if not ref_models:
     ref_models = ["transformed"]
 
-  output_dir = os.path.abspath(os.path.join(model_dir, "test_references"))
+  # Per-sample isolation: keep references for each dataset sample in a
+  # dedicated sub-dir so a sweep doesn't overwrite earlier outputs.
+  if sample_idx is not None:
+    output_dir = os.path.abspath(os.path.join(
+      model_dir, "test_references", f"sample_{int(sample_idx)}"))
+  else:
+    output_dir = os.path.abspath(os.path.join(model_dir, "test_references"))
   os.makedirs(output_dir, exist_ok=True)
 
   outputs = {}
@@ -742,6 +750,7 @@ def run_simulation(eval_dir, HOST_ISA="x86", options=None):
         noise_csv=options.noise_csv if options else None,
         noise_layout_json=options.noise_layout_json if options else None,
         noise_mode=options.noise_mode if options else None,
+        sample_idx=options.sample if options else None,
       )
     except KeyboardInterrupt:
       interrupted = True
@@ -758,7 +767,10 @@ def run_simulation(eval_dir, HOST_ISA="x86", options=None):
       raise KeyboardInterrupt("Simulation interrupted by user")
 
     # Load the output from this runner
-    runner_output_path = runner.get_output_path(test_name=eval_dir)
+    runner_output_path = runner.get_output_path(
+      test_name=eval_dir,
+      sample_idx=(options.sample if options else None),
+    )
 
     if not simul_err:
       if os.path.exists(runner_output_path):
@@ -1053,6 +1065,7 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       input_data_dict, eval_dir,
       run_mode=options.run_mode,
       ref_models=options.ref_models,
+      sample_idx=options.sample,
     )
     if cpu_outputs:
       print(f"CPU validation completed successfully ({len(cpu_outputs)} reference(s))")
@@ -1094,6 +1107,7 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
         input_data_dict, eval_dir,
         run_mode=options.run_mode,
         ref_models=options.ref_models,
+        sample_idx=options.sample,
       )
 
     compare_outputs(cpu_outputs, imcflow_output)
@@ -1148,7 +1162,11 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
         f"Run without --start-at first to compile the model."
       )
     # Ensure test_inputs directory exists for new input files
-    os.makedirs(os.path.join(dir_name, "test_inputs"), exist_ok=True)
+    _ti_base = os.path.join(dir_name, "test_inputs")
+    if options.sample is not None:
+      os.makedirs(os.path.join(_ti_base, f"sample_{int(options.sample)}"), exist_ok=True)
+    else:
+      os.makedirs(_ti_base, exist_ok=True)
     print(f"  Reusing existing directory: {dir_name}")
 
   # Setup log file path in the test directory's logs folder
@@ -1165,8 +1183,13 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
     # This is lightweight compared to transformation/codegen
     mod, param_dict = model_getter()
 
-    # Generate and save test inputs
-    input_dir = f"./{dir_name}/test_inputs"
+    # Generate and save test inputs. When a dataset sample is selected, isolate
+    # the inputs under test_inputs/sample_<N>/ so one compiled binary can be
+    # swept over many samples without each one overwriting the previous.
+    if options.sample is not None:
+      input_dir = f"./{dir_name}/test_inputs/sample_{int(options.sample)}"
+    else:
+      input_dir = f"./{dir_name}/test_inputs"
     known_keys = param_dict.keys() if param_dict is not None else []
     gen = InputGenerator(mod=mod, known_keys=known_keys, seed=42)
 

@@ -83,4 +83,13 @@ python main.py --model resnet8_subset31_pretrained_orig --driver-v2 --ref-models
       --noise-mode greedy \
       --start-at simulate --stop-at simulate
 
+for s in 1 2 3 4 5; do                                                                                                                                                                                  
+  python main.py --model resnet8_subset31_pretrained_orig --driver-v2 --ref-models transformed \                                                                                                        
+    --num-disable-columns 32 --column-disable-config /root/project/CIM/noise/noise_df/B2_out/N32/disabled.json --random-seed 42 \                                                                       
+    --noise-csv /root/project/CIM/noise/noise_df/B2_out/N32/B2_noise_matrix_per_ch_concat.csv \                                                                                                         
+    --noise-layout-json /root/project/CIM/noise/noise_df/B2_out/N32/concat_per_core.json \                                                                                                              
+    --dataset cifar10 --sample $s --noise-mode greedy \                                                                                                                                                 
+    --start-at simulate --stop-at simulate                                                                                                                                                              
+done
+
 # --------------------------------------------------------------------------------------------------------------------
