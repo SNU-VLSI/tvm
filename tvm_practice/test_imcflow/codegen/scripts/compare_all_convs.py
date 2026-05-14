@@ -209,6 +209,57 @@ def main():
             agg_s = aggregate(npz, orig_conv, dump_dir, saturated=True)
             diff('int16 saturated sum', agg_s, dep_out)
 
+    # ── final output (logit) ───────────────────────────────────────────────
+    # TVM side: host binary writes the final GraphExecutor output as
+    # ``output.npy`` in the same dump_dir. CIM side stores the post-Int16
+    # path logits at ('Int16', sample, 'logit'). Both are (1, 10) float for
+    # the classification model.
+    print(f'\n--- final output (logit) ---')
+    tvm_out_path = os.path.join(dump_dir, 'output.npy')
+    cim_key = ('Int16', sample_idx, 'logit')
+    if not os.path.exists(tvm_out_path):
+        print(f'  py_runner output missing: {tvm_out_path}')
+    elif cim_key not in dep:
+        print(f'  pkl key missing: {cim_key}')
+    else:
+        tvm_out = np.load(tvm_out_path)
+        cim_out = dep[cim_key].numpy()
+        print(f'  pyrun     : {tvm_out.shape} {tvm_out.dtype}  '
+              f'min={tvm_out.min():.4f} max={tvm_out.max():.4f} mean={tvm_out.mean():.4f}')
+        print(f'  deploy    : {cim_out.shape} {cim_out.dtype}  '
+              f'min={cim_out.min():.4f} max={cim_out.max():.4f} mean={cim_out.mean():.4f}')
+        if tvm_out.shape != cim_out.shape:
+            print(f'  SHAPE MISMATCH: pyrun {tvm_out.shape} vs deploy {cim_out.shape}')
+        else:
+            # Cast both to float64 for a uniform diff regardless of dtype mix
+            # (TVM may emit int8/float32 depending on the head op; deploy is fp32).
+            a = tvm_out.astype(np.float64)
+            b = cim_out.astype(np.float64)
+            d = a - b
+            ad = np.abs(d)
+            n = a.size
+            eq = int((a == b).sum())
+            # fp32 round-trip can leave sub-ULP noise even when the int psum path
+            # was bitwise identical, so also report tolerance-based agreement.
+            close_tol = max(1e-6, np.finfo(np.float32).eps)
+            n_close = int((ad <= close_tol).sum())
+            rmse = float(np.sqrt((d ** 2).mean()))
+            a_f = a.flatten()
+            b_f = b.flatten()
+            cos = float((a_f @ b_f) /
+                        (np.linalg.norm(a_f) * np.linalg.norm(b_f) + 1e-12))
+            print(f'  [pyrun vs deploy logit] max_abs={ad.max():.3e}  '
+                  f'mean_abs={ad.mean():.3e}  rmse={rmse:.3e}  '
+                  f'exact={eq}/{n}  close(<={close_tol:.0e})={n_close}/{n}  '
+                  f'cos={cos:.6f}')
+            # Top-1 class agreement
+            print(f'  top1 pyrun={int(np.argmax(a))}  deploy={int(np.argmax(b))}  '
+                  f'{"AGREE" if np.argmax(a) == np.argmax(b) else "DISAGREE"}')
+            # Show full vectors when small (use more digits so micro-diffs are visible)
+            if n <= 32:
+                print(f'  pyrun  vec: {[float(x) for x in a.flatten()]}')
+                print(f'  deploy vec: {[float(x) for x in b.flatten()]}')
+
     print('\n' + '=' * 90)
 
 

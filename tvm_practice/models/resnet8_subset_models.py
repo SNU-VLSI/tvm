@@ -314,7 +314,7 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/hid0_wid1_col_disable63_ch41/imcflow/2026-Apr-25-22-42-48/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-12-11-39-35/checkpoint.pth.tar',
       # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-13-09-42-18/checkpoint.pth.tar', # acc_mask enabled, mapping aware, N32
-      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-13-10-11-49/imcflow/2026-May-13-19-05-07/checkpoint.pth.tar', # acc_mask enabled + bug fix, mapping aware, N32
+      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-13-10-11-49/imcflow/2026-May-14-16-04-08/checkpoint.pth.tar', # acc_mask enabled + bug fix, mapping aware, N32
     }
   else:
     raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")
