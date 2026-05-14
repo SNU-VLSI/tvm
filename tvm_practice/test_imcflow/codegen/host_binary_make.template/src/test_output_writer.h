@@ -9,7 +9,41 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <dlpack/dlpack.h>
+
+/**
+ * Create a directory and any missing parents (like `mkdir -p`).
+ *
+ * @param path Absolute or relative directory path
+ * @return 0 on success (already-exists is OK), -1 on failure
+ */
+static int mkdir_p(const char* path) {
+  if (!path || !*path) return 0;
+  char tmp[1024];
+  size_t plen = strlen(path);
+  if (plen >= sizeof(tmp)) return -1;
+  memcpy(tmp, path, plen + 1);  // includes terminator
+  if (tmp[plen - 1] == '/') tmp[plen - 1] = '\0';
+
+  for (char* p = tmp + 1; *p; p++) {
+    if (*p == '/') {
+      *p = '\0';
+      if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "mkdir_p failed at '%s': %s\n", tmp, strerror(errno));
+        return -1;
+      }
+      *p = '/';
+    }
+  }
+  if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+    fprintf(stderr, "mkdir_p failed at '%s': %s\n", tmp, strerror(errno));
+    return -1;
+  }
+  return 0;
+}
 
 /**
  * Get NumPy dtype string for DLDataType

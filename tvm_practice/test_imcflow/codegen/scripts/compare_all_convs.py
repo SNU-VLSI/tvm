@@ -22,11 +22,30 @@ from collections import defaultdict
 import numpy as np
 
 CODEGEN = '/root/project/tvm/tvm_practice/test_imcflow/codegen'
-DUMP_DIR = os.path.join(CODEGEN,
+PY_RUNNER_DIR = os.path.join(CODEGEN,
     'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/test_outputs/py_runner')
 PSUM_NPZ = os.path.join(CODEGEN,
     'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/psum_imcu_column_map.npz')
 DEPLOY_PKL = os.path.join(CODEGEN, 'debuggig/debug_model.with_noise.pkl')
+
+
+def resolve_dump_dir(sample_idx: int) -> str:
+    """py_runner now writes per-sample subdirs (sample_<N>/). Prefer that
+    layout; fall back to the flat dir if no sample subdir is present (legacy
+    binaries that don't honor argv[6])."""
+    sample_dir = os.path.join(PY_RUNNER_DIR, f'sample_{sample_idx}')
+    if os.path.isdir(sample_dir):
+        return sample_dir
+    # Legacy fallback: dumps live directly under py_runner/ — print a warning
+    # so the user knows the sim was likely run with an old binary.
+    if os.path.isdir(PY_RUNNER_DIR) and glob.glob(os.path.join(PY_RUNNER_DIR, '???_*.npy')):
+        print(f'[warn] no {sample_dir}; falling back to flat layout {PY_RUNNER_DIR}/.'
+              f' Re-run sim with the updated host binary to isolate per-sample dumps.')
+        return PY_RUNNER_DIR
+    raise SystemExit(
+        f'no py_runner dumps for sample {sample_idx}. Expected {sample_dir}/ or '
+        f'flat {PY_RUNNER_DIR}/. Re-run simulator with --sample {sample_idx} first.'
+    )
 
 # orig_conv (relay) ↔ deploy pkl layer name
 CONV_NAME = [
@@ -52,15 +71,15 @@ def normalize(raw, valid_cols, oc_size):
     return a.astype(np.int32)
 
 
-def find_npy(func_name):
+def find_npy(dump_dir, func_name):
     """py_runner dump files are prefixed with a 3-digit node id."""
-    matches = glob.glob(os.path.join(DUMP_DIR, f'???_{func_name}.npy'))
+    matches = glob.glob(os.path.join(dump_dir, f'???_{func_name}.npy'))
     if not matches:
         return None
     return matches[0]
 
 
-def aggregate(npz, orig_conv, saturated=False):
+def aggregate(npz, orig_conv, dump_dir, saturated=False):
     """Sum all atomics belonging to ``orig_conv`` into (1, total_oc, OH, OW).
 
     ``saturated``: if True, clamp result to int16 after each per-atomic add
@@ -75,7 +94,7 @@ def aggregate(npz, orig_conv, saturated=False):
     oc_block = int(npz['oc_block'][atomics[0]])
 
     # Determine OH/OW from the first atomic's npy
-    first = find_npy(str(npz['func_names'][atomics[0]]))
+    first = find_npy(dump_dir, str(npz['func_names'][atomics[0]]))
     if first is None:
         return None
     s = np.load(first).shape  # (1, 1, OH, OW, 64)
@@ -90,7 +109,7 @@ def aggregate(npz, orig_conv, saturated=False):
         func = str(npz['func_names'][i])
         oc_size = int(npz['oc_size'][i])
         oc_id = int(npz['oc_id'][i])
-        path = find_npy(func)
+        path = find_npy(dump_dir, func)
         if path is None:
             return None
         raw = np.load(path)
@@ -148,8 +167,10 @@ def main():
             f'(n={len(avail_samples)})'
         )
 
+    dump_dir = resolve_dump_dir(sample_idx)
+
     print('=' * 90)
-    print(f'  PY_RUNNER : {DUMP_DIR}')
+    print(f'  PY_RUNNER : {dump_dir}')
     print(f'  DEPLOY    : {DEPLOY_PKL}')
     print(f'  SAMPLE    : {sample_idx} (of {len(avail_samples)} stored)')
     print('=' * 90)
@@ -170,7 +191,7 @@ def main():
         dep_out = dep[key].numpy().astype(np.int32)
 
         # Try plain sum first
-        agg = aggregate(npz, orig_conv, saturated=False)
+        agg = aggregate(npz, orig_conv, dump_dir, saturated=False)
         if agg is None:
             print(f'  aggregate failed for {orig_conv} (missing atomic .npy?)')
             continue
@@ -185,7 +206,7 @@ def main():
 
         diff('plain int32 sum    ', agg, dep_out)
         if n_atomics > 1:
-            agg_s = aggregate(npz, orig_conv, saturated=True)
+            agg_s = aggregate(npz, orig_conv, dump_dir, saturated=True)
             diff('int16 saturated sum', agg_s, dep_out)
 
     print('\n' + '=' * 90)
