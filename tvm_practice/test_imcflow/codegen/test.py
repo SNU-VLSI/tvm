@@ -369,7 +369,8 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
 
 
 def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
-                        options: 'PipelineOptions' = None, checkpoint_path: str = None):
+                        options: 'PipelineOptions' = None, checkpoint_path: str = None,
+                        checkpoint_alias: str = None):
   """Save build metadata including compilation configuration.
 
   Args:
@@ -392,6 +393,9 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
 
   if checkpoint_path is not None:
     metadata["checkpoint_path"] = checkpoint_path
+
+  if checkpoint_alias is not None:
+    metadata["checkpoint_alias"] = checkpoint_alias
 
   # Save board and vmode from environment / runtime
   metadata["board"] = os.getenv("BOARD", None)
@@ -973,12 +977,15 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       # Save build metadata (original, not patched)
       if not skip_codegen:
         ckpt_path = None
+        ckpt_alias = None
         try:
           ckpt_path = resnet8_subset_models.get_last_checkpoint_path()
+          ckpt_alias = resnet8_subset_models.get_last_checkpoint_alias()
         except AttributeError:
           pass
         save_build_metadata(eval_dir, use_patched=False, test_name=test_name,
-                            options=options, checkpoint_path=ckpt_path)
+                            options=options, checkpoint_path=ckpt_path,
+                            checkpoint_alias=ckpt_alias)
 
       # If stopping at transform, return after frontend transformation
       if options.stop_at == PipelineStage.TRANSFORM:

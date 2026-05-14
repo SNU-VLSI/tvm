@@ -10,49 +10,33 @@ from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from .utils import get_param_info_from_relay_func
 
 _last_checkpoint_path = None
+_last_checkpoint_alias = None
 
-_B2_HALF_BASE = '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2'
-B2_HALF_CHECKPOINTS = {
-    # --- ordered (per_ch_ordered) ---
-    "ordered_ndis32":  f"{_B2_HALF_BASE}/2026-Apr-27-20-55-16/imcflow/2026-Apr-28-12-59-11/checkpoint.pth.tar",   # N32
-    "ordered_ndis16":  f"{_B2_HALF_BASE}/2026-Apr-27-20-55-25/imcflow/2026-Apr-28-19-17-02/checkpoint.pth.tar",   # N16
-    "ordered_ndis8":   f"{_B2_HALF_BASE}/2026-Apr-28-02-34-06/imcflow/2026-Apr-29-15-19-18/checkpoint.pth.tar",   # N8
-    "ordered_ndis4":   f"{_B2_HALF_BASE}/2026-Apr-28-02-33-56/imcflow/2026-Apr-29-15-00-15/checkpoint.pth.tar",   # N4
-    "ordered_ndis2":   f"{_B2_HALF_BASE}/2026-Apr-28-08-11-57/imcflow/2026-Apr-29-15-40-53/checkpoint.pth.tar",   # N2
-    "ordered_ndis0":   f"{_B2_HALF_BASE}/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar",   # N0
-    # --- column (per_ch) ---
-    "col_ndis32":      f"{_B2_HALF_BASE}/2026-Apr-30-11-06-58/imcflow/2026-Apr-30-21-24-22/checkpoint.pth.tar",   # N32
-    "col_ndis16":      f"{_B2_HALF_BASE}/2026-Apr-30-11-07-04/imcflow/2026-Apr-30-22-16-04/checkpoint.pth.tar",   # N16
-    "col_ndis8":       f"{_B2_HALF_BASE}/2026-Apr-30-16-46-46/imcflow/2026-Apr-30-23-04-12/checkpoint.pth.tar",   # N8
-    "col_ndis4":       f"{_B2_HALF_BASE}/2026-Apr-30-16-47-07/imcflow/2026-Apr-30-23-32-17/checkpoint.pth.tar",   # N4
-    "col_ndis2":       f"{_B2_HALF_BASE}/2026-Apr-30-22-27-44/imcflow/2026-May-01-10-58-06/checkpoint.pth.tar",   # N2
-    "col_ndis0":       f"{_B2_HALF_BASE}/2026-Apr-30-22-27-25/imcflow/2026-May-01-10-34-24/checkpoint.pth.tar",   # N0
-    # --- grid (per_ch_grid) ---
-    "grid_ndis56":     f"{_B2_HALF_BASE}/2026-May-07-05-33-09/imcflow/2026-May-07-12-53-24/checkpoint.pth.tar",   # N56
-    "grid_ndis48":     f"{_B2_HALF_BASE}/2026-May-06-23-54-22/imcflow/2026-May-07-12-47-52/checkpoint.pth.tar",   # N48
-    "grid_ndis32":     f"{_B2_HALF_BASE}/2026-May-06-18-13-53/imcflow/2026-May-07-12-41-46/checkpoint.pth.tar",   # N32
-    "grid_ndis16":     f"{_B2_HALF_BASE}/2026-May-06-23-55-11/imcflow/2026-May-07-12-51-03/checkpoint.pth.tar",   # N16
-    "grid_ndis8":      f"{_B2_HALF_BASE}/2026-May-07-05-36-46/imcflow/2026-May-07-12-56-51/checkpoint.pth.tar",   # N8
-    "grid_ndis0":      f"{_B2_HALF_BASE}/2026-May-06-18-14-02/imcflow/2026-May-07-12-45-22/checkpoint.pth.tar",   # N0
-    # --- concat (per_ch_concat) ---
-    "concat_ndis32":   f"{_B2_HALF_BASE}/2026-May-07-18-46-15/imcflow/2026-May-08-11-23-54/checkpoint.pth.tar",   # N32
-    "concat_ndis16":   f"{_B2_HALF_BASE}/2026-May-07-18-46-18/imcflow/2026-May-08-11-40-28/checkpoint.pth.tar",   # N16
-    "concat_ndis8":    f"{_B2_HALF_BASE}/2026-May-08-00-24-56/imcflow/2026-May-08-12-12-44/checkpoint.pth.tar",   # N8
-    "concat_ndis4":    f"{_B2_HALF_BASE}/2026-May-08-00-28-36/imcflow/2026-May-08-12-46-19/checkpoint.pth.tar",   # N4
-    # --- misc ---
-    "base":            f"{_B2_HALF_BASE}/2026-Apr-24-10-14-04/imcflow/2026-Apr-27-11-08-21/checkpoint.pth.tar",   # per_ch base
-    "accum_grads":     f"{_B2_HALF_BASE}/2026-Apr-27-12-06-15/imcflow/2026-Apr-27-20-32-53/checkpoint.pth.tar",   # accumulate_grads=1
-    "temp2.0":         f"{_B2_HALF_BASE}/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar",   # per_ch_noise_temperature=2.0
-    # --- mapping-aware (acc_mask) ---
-    "mapaware_ndis32":          f"{_B2_HALF_BASE}/2026-May-11-22-16-01/imcflow/2026-May-13-09-42-18/checkpoint.pth.tar",   # acc_mask enabled, mapping aware, N32
-    "mapaware_bugfix_ndis32":   f"{_B2_HALF_BASE}/2026-May-13-10-11-49/imcflow/2026-May-13-19-05-07/checkpoint.pth.tar",   # acc_mask enabled + bug fix, mapping aware, N32
-}
+# Checkpoint registry: loaded from CIM/checkpoints/b2_half.json (single source of truth).
+# Falls back to CIM_DIR env var, then to /root/project/CIM.
+import json as _json
 
-B2_HALF_DEFAULT_CKPT = "mapaware_bugfix_ndis32"
+def _load_b2_half_checkpoints():
+    cim_dir = os.environ.get("CIM_DIR", "/root/project/CIM")
+    registry_path = os.path.join(cim_dir, "checkpoints", "b2_half.json")
+    with open(registry_path) as f:
+        reg = _json.load(f)
+    base = os.path.join(cim_dir, reg["_base"])
+    checkpoints = {
+        k: os.path.join(base, v, "checkpoint.pth.tar")
+        for k, v in reg["entries"].items()
+    }
+    return checkpoints, reg.get("default", "")
+
+B2_HALF_CHECKPOINTS, B2_HALF_DEFAULT_CKPT = _load_b2_half_checkpoints()
 
 def get_last_checkpoint_path():
   """Return the checkpoint path used by the most recent getModel_from_pretrained_weight() call."""
   return _last_checkpoint_path
+
+def get_last_checkpoint_alias():
+  """Return the checkpoint alias used by the most recent getModel_from_pretrained_weight() call."""
+  return _last_checkpoint_alias
 
 def get_height(H, KH, padding, stride):
     pad_h = padding
@@ -347,8 +331,9 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
       raise ValueError("QRTR checkpoint doesn't exist yet")
   else:
     raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")
-  global _last_checkpoint_path
+  global _last_checkpoint_path, _last_checkpoint_alias
   _last_checkpoint_path = checkpoint_path
+  _last_checkpoint_alias = ckpt_key
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']
