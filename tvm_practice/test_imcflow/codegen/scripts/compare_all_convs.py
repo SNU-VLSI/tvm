@@ -14,19 +14,55 @@ get overwritten on every run, so the simulator side must be re-run for the
 matching sample_idx before invoking this script.
 
 Usage:
-    python scripts/compare_all_convs.py [--sample N]
+    python scripts/compare_all_convs.py [--sample N] [--ckpt ALIAS]
+
+If --ckpt is omitted, the alias is read from build_metadata.json
+(recorded at compile time), then falls back to the registry default.
 """
 import argparse
-import os, pickle, glob
+import json
+import os, sys, pickle, glob
 from collections import defaultdict
 import numpy as np
 
 CODEGEN = '/root/project/tvm/tvm_practice/test_imcflow/codegen'
-PY_RUNNER_DIR = os.path.join(CODEGEN,
-    'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/test_outputs/py_runner')
-PSUM_NPZ = os.path.join(CODEGEN,
-    'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/psum_imcu_column_map.npz')
-DEPLOY_PKL = os.path.join(CODEGEN, 'debuggig/debug_model.with_noise.pkl')
+CIM_DIR = os.environ.get('CIM_DIR', '/root/project/CIM')
+EVAL_DIR = os.path.join(CODEGEN,
+    'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal')
+PY_RUNNER_DIR = os.path.join(EVAL_DIR, 'test_outputs/py_runner')
+PSUM_NPZ = os.path.join(EVAL_DIR, 'psum_imcu_column_map.npz')
+BUILD_METADATA = os.path.join(EVAL_DIR, 'build_metadata.json')
+
+
+def _alias_from_metadata():
+    """Read checkpoint_alias directly from build_metadata.json."""
+    if not os.path.isfile(BUILD_METADATA):
+        return None
+    with open(BUILD_METADATA) as f:
+        meta = json.load(f)
+    return meta.get('checkpoint_alias')
+
+
+def resolve_deploy_pkl(ckpt_alias=None, board='B2', vmode='half'):
+    """Resolve checkpoint alias to debugging/<alias>/debug_model.with_noise.pkl.
+
+    If no alias is given, read from build_metadata.json, then fall back
+    to the registry default.
+    """
+    if not ckpt_alias:
+        ckpt_alias = _alias_from_metadata()
+    if not ckpt_alias:
+        sys.path.insert(0, CIM_DIR)
+        from checkpoints import get_default
+        ckpt_alias = get_default(board, vmode)
+
+    pkl_path = os.path.join(CODEGEN, 'debugging', ckpt_alias, 'debug_model.with_noise.pkl')
+    if not os.path.isfile(pkl_path):
+        raise SystemExit(
+            f'Deploy pkl not found: {pkl_path}\n'
+            f'Run: ./scripts/sync_artifacts.sh {ckpt_alias}'
+        )
+    return pkl_path, ckpt_alias
 
 
 def resolve_dump_dir(sample_idx: int) -> str:
@@ -47,7 +83,7 @@ def resolve_dump_dir(sample_idx: int) -> str:
         f'flat {PY_RUNNER_DIR}/. Re-run simulator with --sample {sample_idx} first.'
     )
 
-# orig_conv (relay) ↔ deploy pkl layer name
+# orig_conv (relay) <-> deploy pkl layer name
 CONV_NAME = [
     ('weight2_1', 'layer1.block_int16.conv1'),
     ('weight2_2', 'layer1.block_int16.conv2'),
@@ -149,11 +185,18 @@ def main():
                         help='Sample index into the deploy pkl (second element of '
                              'the key tuple). The py_runner side must already be '
                              're-run for this sample. Default: 0')
+    parser.add_argument('--ckpt', type=str, default=None,
+                        help='Checkpoint alias (e.g. mapaware_bugfix_ndis32). '
+                             'If omitted, read from build_metadata.json.')
+    parser.add_argument('--board', type=str, default='B2')
+    parser.add_argument('--vmode', type=str, default='half')
     args = parser.parse_args()
     sample_idx = int(args.sample)
 
+    deploy_pkl, ckpt_alias = resolve_deploy_pkl(args.ckpt, args.board, args.vmode)
+
     npz = np.load(PSUM_NPZ, allow_pickle=True)
-    with open(DEPLOY_PKL, 'rb') as f:
+    with open(deploy_pkl, 'rb') as f:
         dep = pickle.load(f)
 
     # Sanity: confirm the requested sample idx exists in the pkl.
@@ -171,7 +214,8 @@ def main():
 
     print('=' * 90)
     print(f'  PY_RUNNER : {dump_dir}')
-    print(f'  DEPLOY    : {DEPLOY_PKL}')
+    print(f'  DEPLOY    : {deploy_pkl}')
+    print(f'  CKPT      : {ckpt_alias}')
     print(f'  SAMPLE    : {sample_idx} (of {len(avail_samples)} stored)')
     print('=' * 90)
 

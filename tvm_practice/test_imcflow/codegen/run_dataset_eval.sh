@@ -311,7 +311,7 @@ fi
 # Step 6.5: Fetch debug_nodes from remote and cleanup (only when DEBUG_EXE=1)
 if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
     REMOTE_DEBUG_DIR="$REMOTE_BASE_PATH/debug_nodes"
-    LOCAL_DEBUG_DIR="debuggig/fpga"
+    LOCAL_DEBUG_DIR="debugging/fpga"
 
     echo ""
     echo "Step 6.5: Fetching debug_nodes from remote (DEBUG_EXE=1)..."

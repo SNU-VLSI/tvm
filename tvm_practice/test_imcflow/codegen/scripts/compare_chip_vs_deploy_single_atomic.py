@@ -14,7 +14,7 @@ import pickle
 import numpy as np
 
 CODEGEN_DIR = '/root/project/tvm/tvm_practice/test_imcflow/codegen'
-CHIP_DUMP_DIR = os.path.join(CODEGEN_DIR, 'debuggig/fpga/sample_0')
+CHIP_DUMP_DIR = os.path.join(CODEGEN_DIR, 'debugging/fpga/sample_0')
 PSUM_NPZ_PATH = os.path.join(
     CODEGEN_DIR, 'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/psum_imcu_column_map.npz')
 

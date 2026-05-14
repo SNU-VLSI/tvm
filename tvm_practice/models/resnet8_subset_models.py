@@ -7,19 +7,36 @@ from tvm import relay
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData, AccMask, VMode, get_default_vmode
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
-import numpy as np
-import tvm
-from tvm import relay
-from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
-from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
-from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 from .utils import get_param_info_from_relay_func
 
 _last_checkpoint_path = None
+_last_checkpoint_alias = None
+
+# Checkpoint registry: loaded from CIM/checkpoints/b2_half.json (single source of truth).
+# Falls back to CIM_DIR env var, then to /root/project/CIM.
+import json as _json
+
+def _load_b2_half_checkpoints():
+    cim_dir = os.environ.get("CIM_DIR", "/root/project/CIM")
+    registry_path = os.path.join(cim_dir, "checkpoints", "b2_half.json")
+    with open(registry_path) as f:
+        reg = _json.load(f)
+    base = os.path.join(cim_dir, reg["_base"])
+    checkpoints = {
+        k: os.path.join(base, v, "checkpoint.pth.tar")
+        for k, v in reg["entries"].items()
+    }
+    return checkpoints, reg.get("default", "")
+
+B2_HALF_CHECKPOINTS, B2_HALF_DEFAULT_CKPT = _load_b2_half_checkpoints()
 
 def get_last_checkpoint_path():
   """Return the checkpoint path used by the most recent getModel_from_pretrained_weight() call."""
   return _last_checkpoint_path
+
+def get_last_checkpoint_alias():
+  """Return the checkpoint alias used by the most recent getModel_from_pretrained_weight() call."""
+  return _last_checkpoint_alias
 
 def get_height(H, KH, padding, stride):
     pad_h = padding
@@ -295,35 +312,28 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
     checkpoint_paths = {
       VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
       VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/col_disabled/imcflow/2026-Apr-21-11-45-31/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/MSB_std_min/2026-Apr-08-19-21-24/imcflow/2026-Apr-11-02-18-20/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/2026-Mar-24-16-01-08/imcflow/2026-Mar-25-15-44-02/checkpoint.pth.tar',
-
     }
+    if vmode == VMode.QRTR:
+      raise ValueError("QRTR checkpoint doesn't exist yet")
+    checkpoint_path = checkpoint_paths[vmode]
   elif board == "B2":
-    checkpoint_paths = {
-      VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/2026-Mar-24-23-56-13/imcflow/2026-Mar-25-15-46-48/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/col_disabled/imcflow/2026-Apr-21-13-25-43/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-24-10-14-04/imcflow/2026-Apr-27-11-08-21/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-12-06-15/imcflow/2026-Apr-27-20-32-53/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-13-59-52/imcflow/2026-Apr-28-11-46-42/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-27-20-55-16/imcflow/2026-Apr-28-12-59-11/checkpoint.pth.tar',  # num_disabled=32
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-28-08-14-59/imcflow/2026-Apr-28-19-42-52/checkpoint.pth.tar', # num_disabled=0
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-06-58/imcflow/2026-Apr-30-21-24-22/checkpoint.pth.tar',  # num_disabled=32, mode=column
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-Apr-30-11-03-22/imcflow/2026-Apr-30-18-07-14/checkpoint.pth.tar',  # num_disabled=32, hid0_wid1
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B2/hid0_wid1_col_disable63_ch41/imcflow/2026-Apr-25-22-42-48/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-12-11-39-35/checkpoint.pth.tar',
-      # VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-11-22-16-01/imcflow/2026-May-13-09-42-18/checkpoint.pth.tar', # acc_mask enabled, mapping aware, N32
-      VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT_PER_CH/prange_half_psum_duplication_1/B2/2026-May-13-10-11-49/imcflow/2026-May-14-16-04-08/checkpoint.pth.tar', # acc_mask enabled + bug fix, mapping aware, N32
-    }
+    if vmode == VMode.FULL:
+      checkpoint_path = '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar'
+    elif vmode == VMode.HALF:
+      ckpt_key = os.getenv("CKPT", "")
+      if not ckpt_key:
+        ckpt_key = B2_HALF_DEFAULT_CKPT
+        print(f"\033[93m[WARNING] CKPT not set. Defaulting to '{ckpt_key}'. Set CKPT env var to choose. Available: {list(B2_HALF_CHECKPOINTS.keys())}\033[0m")
+      if ckpt_key not in B2_HALF_CHECKPOINTS:
+        raise ValueError(f"Unknown CKPT='{ckpt_key}'. Available: {list(B2_HALF_CHECKPOINTS.keys())}")
+      checkpoint_path = B2_HALF_CHECKPOINTS[ckpt_key]
+    else:
+      raise ValueError("QRTR checkpoint doesn't exist yet")
   else:
     raise ValueError(f"Unsupported BOARD {board} for loading checkpoints")
-
-  if vmode == VMode.QRTR:
-    raise ValueError("QRTR checkpoint doesn't exist yet")
-  checkpoint_path = checkpoint_paths[vmode]
-  global _last_checkpoint_path
+  global _last_checkpoint_path, _last_checkpoint_alias
   _last_checkpoint_path = checkpoint_path
+  _last_checkpoint_alias = ckpt_key
   checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
   model_dict = checkpoint['state_dict']
   adjust_factors = checkpoint['adjust_factors']
