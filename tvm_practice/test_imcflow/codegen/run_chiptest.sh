@@ -175,6 +175,10 @@ else
     echo ""
 fi
 
+# Acquire chip lock before any remote transfer/execution
+chip_lock_acquire "run_chiptest.sh"
+trap 'chip_lock_release' EXIT
+
 # Step 2: Transfer test folder to remote
 if [[ "$SKIP_STEP2" == true ]]; then
     echo "Step 2: Skipped."
@@ -193,6 +197,7 @@ fi
 # Steps 3-5: Scan programming (shared with run_dataset_eval.sh)
 scan_transfer_reg_files 3 "$SKIP_STEP3"
 scan_transfer_executable 4 "$SKIP_STEP4"
+
 scan_program_registers 5 "$SKIP_STEP5"
 
 # Step 6: Execute on remote chip

@@ -234,6 +234,10 @@ else
     echo ""
 fi
 
+# Acquire chip lock before any remote transfer/execution
+chip_lock_acquire "run_dataset_eval.sh"
+trap 'chip_lock_release' EXIT
+
 # Step 2: Transfer host_binary_make.dataset + dataset to remote
 if [[ "$SKIP_STEP2" == true ]]; then
     echo "Step 2: Skipped."
