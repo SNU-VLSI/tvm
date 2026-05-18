@@ -8,7 +8,7 @@ adc codes — and compute predicted E[noise] / Var[noise]. Compare observed to
 predicted in aggregate.
 
 Inputs come from:
-  - chip dumps under codegen/debuggig/fpga/sample_<N>/
+  - chip dumps under codegen/debugging/fpga/sample_<N>/
   - psum_imcu_column_map.npz under eval_dir/<model>_evl.linux/
   - concat_per_core.json + noise CSV under /root/project/CIM/noise/noise_df/B2_out/N32/
   - imcflow checkpoint pointed to by resnet8_subset_models.py:317
@@ -17,6 +17,7 @@ Usage:
     python scripts/diagnose_noise_per_qconv.py --n-samples 10
     python scripts/diagnose_noise_per_qconv.py --n-samples 200 --output-dir runs/full
     python scripts/diagnose_noise_per_qconv.py --n-samples 5 --layers weight4_2
+    python scripts/diagnose_noise_per_qconv.py --noise-csv B2_noise_matrix_per_ch_concat.csv
 """
 import argparse
 import json
@@ -33,11 +34,11 @@ import torch.nn.functional as F
 
 
 CODEGEN = '/root/project/tvm/tvm_practice/test_imcflow/codegen'
-FPGA_DIR = os.path.join(CODEGEN, 'debuggig/fpga')
+FPGA_DIR = os.path.join(CODEGEN, 'debugging/fpga')
 PYSIM_DIR = os.path.join(CODEGEN, 'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/test_outputs/py_runner')
 NPZ_PATH = os.path.join(CODEGEN, 'eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz')
 NOISE_DIR = '/root/project/CIM/noise/noise_df/B2_out/N32'
-CSV_PATH = os.path.join(NOISE_DIR, 'B2_noise_matrix_per_ch_concat.csv')
+DEFAULT_CSV_NAME = 'B2_noise_matrix_per_ch_concat.csv'
 LAYOUT_JSON = os.path.join(NOISE_DIR, 'concat_per_core.json')
 CKPT_PATH = ('/root/project/CIM/trained_models/image_classification/'
              'NAT_PER_CH/prange_half_psum_duplication_1/B2/'
@@ -49,6 +50,7 @@ PRANGE = 2
 PBITS = 6
 WBITS = 4
 ABITS = 4
+NO_SKIP_ACC_MASK = (1 << ABITS) - 1
 PBOUND = ARRAY_SIZE / 2 / PRANGE       # 64
 PSTEP = 2 * PBOUND / (2 ** PBITS)      # 2.0
 NUM_LEVELS = 2 ** PBITS                # 64
@@ -87,10 +89,24 @@ def parse_args():
                          'dumps under eval_dir/.../py_runner/sample_<N>/. With pysim greedy mode, '
                          'observed should exactly equal predicted_mode_sum (sanity check on the '
                          'CSV-lookup pipeline). Default: chip')
+    ap.add_argument('--noise-csv', type=str, default=DEFAULT_CSV_NAME,
+                    help='Noise CSV filename under NOISE_DIR, or an absolute/relative CSV path '
+                         f'(default: {DEFAULT_CSV_NAME})')
     ap.add_argument('--acc-mask', type=int, default=0,
                     help='acc_mask config (default 0 = all abits popcount<8 eligible to skip ADC+noise). '
                          'Must match the config used to compile/run the dump source.')
+    ap.add_argument('--skip-diagnose', action='store_true',
+                    help='Also compare the current skip-aware range against a no-skip hypothesis. '
+                         'The no-skip range is shifted by clean_no_skip - clean_skip, so this is '
+                         'diagnostic only and does not imply the chip was run with acc_mask=15.')
     return ap.parse_args()
+
+
+def resolve_noise_csv_path(noise_csv):
+    """Resolve --noise-csv as a filename under NOISE_DIR unless a path is given."""
+    if os.path.isabs(noise_csv) or os.path.dirname(noise_csv):
+        return noise_csv
+    return os.path.join(NOISE_DIR, noise_csv)
 
 
 def load_atomic_info(npz_path):
@@ -383,6 +399,12 @@ def compute_predicted_stats(adc_codes_all, skip_mask_all, pseudo_chs, csv_data):
     return E_total, Var_total, range_min, range_max, mode_total
 
 
+def expand_skip_affected(skip_mask_all, oc_size):
+    """Return output-element mask where any activation bit-plane used acc-mode skip."""
+    skip_2d = skip_mask_all.any(axis=0)  # (OH, OW)
+    return np.broadcast_to(skip_2d[None, :, :], (oc_size, skip_2d.shape[0], skip_2d.shape[1]))
+
+
 # ----------------------------------------------------------- per-source --
 
 def process_dump_source(label, dump_dir, atomics, weights, csv_data, sample_range,
@@ -393,6 +415,11 @@ def process_dump_source(label, dump_dir, atomics, weights, csv_data, sample_rang
         'obs': [], 'pred_E': [], 'pred_Var': [], 'pred_mode': [],
         'pred_range_min': [], 'pred_range_max': [],
         'in_range': [], 'skip_mask': [],
+        'clean_delta_no_skip_minus_skip': [],
+        'pred_range_min_no_skip_shifted': [],
+        'pred_range_max_no_skip_shifted': [],
+        'in_range_no_skip_shifted': [],
+        'skip_affected': [],
     })
     n_atomics_per_sample = sum(1 for a in atomics
                                 if not layers_filter or a['orig_conv'] in layers_filter)
@@ -458,23 +485,54 @@ def process_dump_source(label, dump_dir, atomics, weights, csv_data, sample_rang
             st_d['in_range'].append(in_range)
             st_d['skip_mask'].append(skip_mask)
 
+            if args.skip_diagnose:
+                clean_no_skip, adc_codes_no_skip, skip_mask_no_skip = noise_free_qconv(
+                    input_slice, w_tile, kernel_h=kh, stride=st, padding=pd,
+                    acc_mask=NO_SKIP_ACC_MASK, device=args.device,
+                )
+                clean_delta = clean_no_skip.squeeze(0) - clean_sq
+                _, _, range_min_no_skip, range_max_no_skip, _ = compute_predicted_stats(
+                    adc_codes_no_skip, skip_mask_no_skip, a['pseudo_chs'], csv_data,
+                )
+                range_min_no_skip_shifted = clean_delta + range_min_no_skip
+                range_max_no_skip_shifted = clean_delta + range_max_no_skip
+                in_range_no_skip_shifted = (
+                    (observed >= range_min_no_skip_shifted)
+                    & (observed <= range_max_no_skip_shifted)
+                )
+                skip_affected = expand_skip_affected(skip_mask, a['oc_size'])
+
+                st_d['clean_delta_no_skip_minus_skip'].append(clean_delta)
+                st_d['pred_range_min_no_skip_shifted'].append(range_min_no_skip_shifted)
+                st_d['pred_range_max_no_skip_shifted'].append(range_max_no_skip_shifted)
+                st_d['in_range_no_skip_shifted'].append(in_range_no_skip_shifted)
+                st_d['skip_affected'].append(skip_affected)
+
             n_done += 1
             if args.verbose:
                 z = (observed - E_pred) / np.sqrt(np.maximum(Var_pred, 1.0))
                 mode_match = (observed == np.round(mode_pred).astype(np.int32)).mean() * 100
-                print(f'  [{label}] s{s_idx:3d} {a["func"]:35s} core({a["imce_h"]},{a["imce_w_1based"]}) '
-                      f'oc{a["oc_id"]}({a["oc_size"]:>2d})/ic{a["ic_id"]}({a["ic_size"]:>2d}) '
-                      f'obs[mean={observed.mean():>7.1f} std={observed.std():>6.1f}] '
-                      f'pred[E={E_pred.mean():>7.1f} sd={np.sqrt(Var_pred).mean():>5.1f}] '
-                      f'mode%={mode_match:>5.1f} inrange%={in_range.mean()*100:>5.1f} |z|>3%={(np.abs(z)>3).mean()*100:>5.1f}')
+                msg = (f'  [{label}] s{s_idx:3d} {a["func"]:35s} core({a["imce_h"]},{a["imce_w_1based"]}) '
+                       f'oc{a["oc_id"]}({a["oc_size"]:>2d})/ic{a["ic_id"]}({a["ic_size"]:>2d}) '
+                       f'obs[mean={observed.mean():>7.1f} std={observed.std():>6.1f}] '
+                       f'pred[E={E_pred.mean():>7.1f} sd={np.sqrt(Var_pred).mean():>5.1f}] '
+                       f'mode%={mode_match:>5.1f} inrange%={in_range.mean()*100:>5.1f} '
+                       f'|z|>3%={(np.abs(z)>3).mean()*100:>5.1f}')
+                if args.skip_diagnose:
+                    msg += (f' skip_aff%={skip_affected.mean()*100:>5.1f} '
+                            f'noskip%={in_range_no_skip_shifted.mean()*100:>5.1f}')
+                print(msg)
 
     print(f'  [{label}] processed {n_done}/{n_atomics_per_sample * len(list(sample_range))} (sample, atomic) pairs')
     return stats
 
 
-def print_summaries(label, per_atomic_stats, atomics, layers_filter):
+def print_summaries(label, per_atomic_stats, atomics, layers_filter, skip_diagnose=False):
     """Print per-atomic and per-orig_conv summary tables for one dump source."""
     VAR_FLOOR = 1.0
+
+    def pct(mask):
+        return float(mask.mean() * 100) if mask.size else float('nan')
 
     print('\n' + '=' * 100)
     print(f'  [{label}] Per-atomic summary')
@@ -489,6 +547,11 @@ def print_summaries(label, per_atomic_stats, atomics, layers_filter):
                                       'obs_minus_pred_total': 0.0,
                                       'exact_match_total': 0,
                                       'skip_total': 0})
+    diag_rows = []
+    diag_agg = defaultdict(lambda: {'n_total': 0, 'skip_total': 0,
+                                     'strict_total': 0, 'noskip_total': 0,
+                                     'both_total': 0, 'neither_total': 0,
+                                     'delta': []})
     for a in atomics:
         if layers_filter and a['orig_conv'] not in layers_filter:
             continue
@@ -523,6 +586,23 @@ def print_summaries(label, per_atomic_stats, atomics, layers_filter):
         layer_agg[L]['exact_match_total'] += exact_match
         layer_agg[L]['skip_total'] += int(sk.sum())
 
+        if skip_diagnose and sd['in_range_no_skip_shifted']:
+            ir_no = np.concatenate([r.ravel() for r in sd['in_range_no_skip_shifted']])
+            skip_aff = np.concatenate([r.ravel() for r in sd['skip_affected']])
+            delta = np.concatenate([d.ravel() for d in sd['clean_delta_no_skip_minus_skip']])
+            both = ir & ir_no
+            neither = ~(ir | ir_no)
+            diag_rows.append((a, obs.size, skip_aff, ir, ir_no, both, neither, delta))
+
+            da = diag_agg[L]
+            da['n_total'] += obs.size
+            da['skip_total'] += int(skip_aff.sum())
+            da['strict_total'] += int(ir.sum())
+            da['noskip_total'] += int(ir_no.sum())
+            da['both_total'] += int(both.sum())
+            da['neither_total'] += int(neither.sum())
+            da['delta'].append(delta)
+
     print('\n' + '=' * 100)
     print(f'  [{label}] Per-orig-conv summary')
     print('=' * 100)
@@ -539,12 +619,44 @@ def print_summaries(label, per_atomic_stats, atomics, layers_filter):
               f'{a["in_range_total"]/a["n_total"]*100:>6.2f}% '
               f'{a["zlarge_total"]/a["n_total"]*100:>6.2f}% {chi2:>9.2f}')
 
+    if skip_diagnose and diag_rows:
+        print('\n' + '=' * 100)
+        print(f'  [{label}] Skip/no-skip diagnostic per-atomic')
+        print('=' * 100)
+        print(f'{"func":35s} {"orig":11s} {"n_elem":>9s} {"skip_aff%":>9s} '
+              f'{"strict%":>8s} {"noskip%":>8s} {"both%":>7s} {"neither%":>9s} '
+              f'{"delta_mu":>9s} {"delta_sd":>9s}')
+        for a, n_elem, skip_aff, ir, ir_no, both, neither, delta in diag_rows:
+            print(f'{a["func"]:35s} {a["orig_conv"]:11s} {n_elem:>9d} '
+                  f'{pct(skip_aff):>8.2f}% {pct(ir):>7.2f}% {pct(ir_no):>7.2f}% '
+                  f'{pct(both):>6.2f}% {pct(neither):>8.2f}% '
+                  f'{delta.mean():>9.2f} {delta.std():>9.2f}')
+
+        print('\n' + '=' * 100)
+        print(f'  [{label}] Skip/no-skip diagnostic per-orig-conv')
+        print('=' * 100)
+        print(f'{"orig_conv":12s} {"n_elem":>10s} {"skip_aff%":>9s} '
+              f'{"strict%":>8s} {"noskip%":>8s} {"both%":>7s} {"neither%":>9s} '
+              f'{"delta_mu":>9s} {"delta_sd":>9s}')
+        for L in sorted(diag_agg.keys()):
+            a = diag_agg[L]
+            n = max(a['n_total'], 1)
+            delta_all = np.concatenate(a['delta']) if a['delta'] else np.array([], dtype=np.float64)
+            print(f'{L:12s} {a["n_total"]:>10d} '
+                  f'{a["skip_total"]/n*100:>8.2f}% '
+                  f'{a["strict_total"]/n*100:>7.2f}% '
+                  f'{a["noskip_total"]/n*100:>7.2f}% '
+                  f'{a["both_total"]/n*100:>6.2f}% '
+                  f'{a["neither_total"]/n*100:>8.2f}% '
+                  f'{delta_all.mean():>9.2f} {delta_all.std():>9.2f}')
+
 
 # ----------------------------------------------------------- main loop ---
 
 def main():
     args = parse_args()
     layers_filter = set(args.layers.split(',')) if args.layers else None
+    csv_path = resolve_noise_csv_path(args.noise_csv)
 
     print('=' * 100)
     print('  diagnose_noise_per_qconv')
@@ -554,11 +666,13 @@ def main():
     print(f'  device        : {args.device}')
     print(f'  compare       : {args.compare}')
     print(f'  acc_mask      : {args.acc_mask}  (0 = all abits popcount<8 eligible)')
+    print(f'  noise csv     : {csv_path}')
+    print(f'  skip diagnose : {args.skip_diagnose}')
 
     print('\nLoading atomic info, layout, noise CSV, checkpoint...')
     atomics = load_atomic_info(NPZ_PATH)
     pseudo_map, n_per_core, n_pseudo = load_pseudo_ch_map(LAYOUT_JSON)
-    csv_data = load_noise_csv(CSV_PATH)
+    csv_data = load_noise_csv(csv_path)
     print(f'  atomics       : {len(atomics)}')
     print(f'  pseudo chs    : {n_pseudo} ({n_per_core}/core × 16 cores)')
     print(f'  csv shape     : probs {csv_data["probs"].shape}, refs={csv_data["n_refs"]}, wpatterns={csv_data["n_wpatterns"]}')
@@ -596,7 +710,7 @@ def main():
 
     for label, _ in sources:
         if label in all_stats:
-            print_summaries(label, all_stats[label], atomics, layers_filter)
+            print_summaries(label, all_stats[label], atomics, layers_filter, args.skip_diagnose)
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -608,22 +722,32 @@ def main():
                 if sd is None or not sd['obs']:
                     continue
                 out_path = os.path.join(args.output_dir, f'{label}__{a["func"]}.npz')
-                np.savez_compressed(
-                    out_path,
-                    observed=np.stack(sd['obs']),
-                    pred_E=np.stack(sd['pred_E']),
-                    pred_Var=np.stack(sd['pred_Var']),
-                    pred_mode=np.stack(sd['pred_mode']),
-                    pred_range_min=np.stack(sd['pred_range_min']),
-                    pred_range_max=np.stack(sd['pred_range_max']),
-                    in_range=np.stack(sd['in_range']),
-                    skip_mask=np.stack(sd['skip_mask']),
-                    pseudo_chs=a['pseudo_chs'],
-                    valid_cols=a['valid_cols'],
-                    imce_h=a['imce_h'], imce_w_1based=a['imce_w_1based'],
-                    orig_conv=a['orig_conv'],
-                    sample_start=args.sample_start, n_samples=args.n_samples,
-                )
+                out = {
+                    'observed': np.stack(sd['obs']),
+                    'pred_E': np.stack(sd['pred_E']),
+                    'pred_Var': np.stack(sd['pred_Var']),
+                    'pred_mode': np.stack(sd['pred_mode']),
+                    'pred_range_min': np.stack(sd['pred_range_min']),
+                    'pred_range_max': np.stack(sd['pred_range_max']),
+                    'in_range': np.stack(sd['in_range']),
+                    'skip_mask': np.stack(sd['skip_mask']),
+                    'pseudo_chs': a['pseudo_chs'],
+                    'valid_cols': a['valid_cols'],
+                    'imce_h': a['imce_h'],
+                    'imce_w_1based': a['imce_w_1based'],
+                    'orig_conv': a['orig_conv'],
+                    'sample_start': args.sample_start,
+                    'n_samples': args.n_samples,
+                }
+                if args.skip_diagnose and sd['in_range_no_skip_shifted']:
+                    out.update({
+                        'clean_delta_no_skip_minus_skip': np.stack(sd['clean_delta_no_skip_minus_skip']),
+                        'pred_range_min_no_skip_shifted': np.stack(sd['pred_range_min_no_skip_shifted']),
+                        'pred_range_max_no_skip_shifted': np.stack(sd['pred_range_max_no_skip_shifted']),
+                        'in_range_no_skip_shifted': np.stack(sd['in_range_no_skip_shifted']),
+                        'skip_affected': np.stack(sd['skip_affected']),
+                    })
+                np.savez_compressed(out_path, **out)
         print(f'\nRaw arrays saved under {args.output_dir}/')
 
     print('\nDone.')
