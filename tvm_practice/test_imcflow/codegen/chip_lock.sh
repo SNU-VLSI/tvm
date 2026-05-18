@@ -60,25 +60,22 @@ chip_lock_acquire() {
     existing_lock=$(_chip_lock_ssh "cat $CHIP_LOCKFILE 2>/dev/null")
 
     if [[ -n "$existing_lock" ]]; then
-        # Lock exists - check if stale
+        # Lock exists - always abort (never auto-remove)
+        echo ""
+        echo -e "${_RED}=========================================${_NC}"
+        echo -e "${_RED}  CHIP LOCKED - ABORTING${_NC}"
+        echo -e "${_RED}=========================================${_NC}"
+        echo -e "${_RED}  Lock info:${_NC}"
+        echo "$existing_lock" | while IFS= read -r line; do
+            echo -e "${_RED}    $line${_NC}"
+        done
         if _chip_lock_is_stale; then
-            echo -e "${_YELLOW}[CHIP LOCK] Stale lock detected (no chip process running). Removing stale lock.${_NC}"
-            echo -e "${_YELLOW}[CHIP LOCK] Previous lock info: ${existing_lock}${_NC}"
-            _chip_lock_ssh "rm -f $CHIP_LOCKFILE"
-        else
-            # Active lock - abort
-            echo ""
-            echo -e "${_RED}=========================================${_NC}"
-            echo -e "${_RED}  CHIP LOCKED - ABORTING${_NC}"
-            echo -e "${_RED}=========================================${_NC}"
-            echo -e "${_RED}  Lock info:${_NC}"
-            echo "$existing_lock" | while IFS= read -r line; do
-                echo -e "${_RED}    $line${_NC}"
-            done
-            echo -e "${_RED}=========================================${_NC}"
-            echo ""
-            exit 1
+            echo -e "${_YELLOW}  (no chip process detected - may be stale)${_NC}"
+            echo -e "${_YELLOW}  To remove: ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST 'rm $CHIP_LOCKFILE'${_NC}"
         fi
+        echo -e "${_RED}=========================================${_NC}"
+        echo ""
+        exit 1
     fi
 
     # Acquire lock
