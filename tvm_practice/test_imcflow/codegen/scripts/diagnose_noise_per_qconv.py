@@ -106,6 +106,9 @@ def parse_args():
                     help='Board registry name used with --ckpt-alias (default: B2).')
     ap.add_argument('--ckpt-vmode', type=str, default='half',
                     help='VMode registry name used with --ckpt-alias (default: half).')
+    ap.add_argument('--dump-dir', type=str, default=None,
+                    help='Override chip dump directory (default: debugging/fpga/<ckpt-alias> if '
+                         '--ckpt-alias is set, otherwise debugging/fpga).')
     ap.add_argument('--acc-mask', type=int, default=0,
                     help='acc_mask config (default 0 = all abits popcount<8 eligible to skip ADC+noise). '
                          'Must match the config used to compile/run the dump source.')
@@ -732,9 +735,18 @@ def main():
             dtype=np.int64,
         )
 
+    # Resolve chip dump directory
+    ckpt_alias = args.ckpt_alias or os.environ.get('CKPT', '')
+    if args.dump_dir:
+        fpga_dir = args.dump_dir
+    elif ckpt_alias:
+        fpga_dir = os.path.join(FPGA_DIR, ckpt_alias)
+    else:
+        fpga_dir = FPGA_DIR
+
     sources = []
     if args.compare in ('chip', 'both'):
-        sources.append(('chip', FPGA_DIR))
+        sources.append(('chip', fpga_dir))
     if args.compare in ('pysim', 'both'):
         sources.append(('pysim', PYSIM_DIR))
 

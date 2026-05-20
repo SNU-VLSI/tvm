@@ -9,12 +9,13 @@ Usage:
     python scripts/compare_chip_vs_deploy_single_atomic.py
 """
 
+import argparse
 import os
 import pickle
 import numpy as np
 
 CODEGEN_DIR = '/root/project/tvm/tvm_practice/test_imcflow/codegen'
-CHIP_DUMP_DIR = os.path.join(CODEGEN_DIR, 'debugging/fpga/sample_0')
+DEFAULT_FPGA_DIR = os.path.join(CODEGEN_DIR, 'debugging/fpga')
 PSUM_NPZ_PATH = os.path.join(
     CODEGEN_DIR, 'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/psum_imcu_column_map.npz')
 
@@ -61,7 +62,25 @@ def summarize_diff(label, chip, deploy):
             print(f'      diff at {i}: chip={chip[i]} deploy={deploy[i]} diff={diff[i]}')
 
 
+def parse_args():
+    ap = argparse.ArgumentParser(description='Compare chip dump vs deploy debug pkl')
+    ap.add_argument('--dump-dir', type=str, default=None,
+                    help='Chip dump directory containing sample_0/ (default: debugging/fpga)')
+    ap.add_argument('--ckpt-alias', type=str, default=None,
+                    help='Checkpoint alias; resolves to debugging/fpga/<alias>')
+    return ap.parse_args()
+
+
 def main():
+    args = parse_args()
+    ckpt_alias = args.ckpt_alias or os.environ.get('CKPT', '')
+    if args.dump_dir:
+        chip_dump_dir = os.path.join(args.dump_dir, 'sample_0')
+    elif ckpt_alias:
+        chip_dump_dir = os.path.join(DEFAULT_FPGA_DIR, ckpt_alias, 'sample_0')
+    else:
+        chip_dump_dir = os.path.join(DEFAULT_FPGA_DIR, 'sample_0')
+
     psum = np.load(PSUM_NPZ_PATH, allow_pickle=True)
     with open(DEPLOY_NO_NOISE, 'rb') as f:
         deploy_no = pickle.load(f)
@@ -69,14 +88,14 @@ def main():
         deploy_yes = pickle.load(f)
 
     print('=' * 90)
-    print(f'  CHIP DUMP  : {CHIP_DUMP_DIR}')
+    print(f'  CHIP DUMP  : {chip_dump_dir}')
     print(f'  DEPLOY no  : {DEPLOY_NO_NOISE}')
     print(f'  DEPLOY yes : {DEPLOY_WITH_NOISE}')
     print(f'  PSUM npz   : {PSUM_NPZ_PATH}')
     print('=' * 90)
 
     for deploy_name, chip_file, imcflow_func in SINGLE_ATOMIC:
-        chip_raw = np.load(os.path.join(CHIP_DUMP_DIR, chip_file))
+        chip_raw = np.load(os.path.join(chip_dump_dir, chip_file))
         valid_cols = psum[f'valid_cols/{imcflow_func}']
         # Find this func's oc_size from the flat records
         func_idx = list(psum['func_names']).index(imcflow_func)

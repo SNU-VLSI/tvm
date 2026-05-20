@@ -65,6 +65,10 @@ show_help() {
     echo "  $0 -l INFO 100               # Progress bar only (less verbose)"
     echo "  CONSOLE_LOG_LEVEL=INFO $0 100 # Same via env var"
     echo ""
+    echo "Environment variables:"
+    echo "  CKPT           Checkpoint alias for debug dump subdir (debugging/fpga/<CKPT>)"
+    echo "  DEBUG_EXE=1    Enable debug node dump fetch from remote"
+    echo ""
     echo "Remote configuration is loaded from .env file."
     exit 0
 }
@@ -82,6 +86,7 @@ QUIET_MODE=false
 SAMPLE_INDICES=""
 CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-DEBUG}"
 MODEL_EVL_DIR="resnet8_subset31_pretrained_orig_evl.linux"
+CKPT="${CKPT:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -211,6 +216,7 @@ echo "Binary dir:       $BINARY_DIR"
 echo "Model (evl dir): $MODEL_EVL_DIR"
 echo "Samples: $SAMPLES_DISPLAY"
 echo "Remote host: $REMOTE_HOST"
+echo "Ckpt alias:       ${CKPT:-<none>}"
 echo "Log level: $CONSOLE_LOG_LEVEL"
 echo "Quiet mode: $QUIET_MODE"
 echo "Result file (remote): $REMOTE_RESULT_PATH"
@@ -315,11 +321,21 @@ fi
 # Step 6.5: Fetch debug_nodes from remote and cleanup (only when DEBUG_EXE=1)
 if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
     REMOTE_DEBUG_DIR="$REMOTE_BASE_PATH/debug_nodes"
-    LOCAL_DEBUG_DIR="debugging/fpga"
+    if [[ -n "$CKPT" ]]; then
+        LOCAL_DEBUG_DIR="debugging/fpga/$CKPT"
+    else
+        LOCAL_DEBUG_DIR="debugging/fpga"
+    fi
 
     echo ""
     echo "Step 6.5: Fetching debug_nodes from remote (DEBUG_EXE=1)..."
     echo ""
+
+    # Clean target directory to avoid stale files from previous runs
+    if [[ -d "$LOCAL_DEBUG_DIR" ]]; then
+        echo "Removing existing $LOCAL_DEBUG_DIR/ ..."
+        rm -rf "$LOCAL_DEBUG_DIR"
+    fi
     mkdir -p "$LOCAL_DEBUG_DIR"
 
     # scp -r all sample folders from FPGA to host
