@@ -35,7 +35,7 @@ _chip_lock_get_user_id() {
 }
 
 _chip_lock_ssh() {
-    sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$1"
+    sshpass -p "$REMOTE_PASSWORD" ssh -o ConnectTimeout=10 -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$1"
 }
 
 # Check if stale: lock exists but no chip-related process is running on remote
@@ -58,6 +58,22 @@ chip_lock_acquire() {
     # Check if lock exists on remote
     local existing_lock
     existing_lock=$(_chip_lock_ssh "cat $CHIP_LOCKFILE 2>/dev/null")
+    local ssh_status=$?
+
+    # Check for SSH connectivity failure (exit code 255 = connection error)
+    if [[ $ssh_status -eq 255 ]]; then
+        echo ""
+        echo -e "${_RED}=========================================${_NC}"
+        echo -e "${_RED}  CHIP UNREACHABLE - ABORTING${_NC}"
+        echo -e "${_RED}=========================================${_NC}"
+        echo -e "${_RED}  Cannot connect to ${REMOTE_HOST}:${REMOTE_PORT}${_NC}"
+        echo -e "${_RED}  SSH connection failed (timeout or refused).${_NC}"
+        echo -e "${_YELLOW}  Check that the FPGA board is powered on and${_NC}"
+        echo -e "${_YELLOW}  network-reachable, then retry.${_NC}"
+        echo -e "${_RED}=========================================${_NC}"
+        echo ""
+        exit 1
+    fi
 
     if [[ -n "$existing_lock" ]]; then
         # Lock exists - always abort (never auto-remove)
@@ -87,19 +103,41 @@ started: ${timestamp}"
 ${lock_content}
 LOCKEOF"
 
+    if [[ $? -eq 255 ]]; then
+        echo ""
+        echo -e "${_RED}=========================================${_NC}"
+        echo -e "${_RED}  CHIP UNREACHABLE - ABORTING${_NC}"
+        echo -e "${_RED}=========================================${_NC}"
+        echo -e "${_RED}  Connected for check but failed to write lock.${_NC}"
+        echo -e "${_RED}  SSH connection to ${REMOTE_HOST}:${REMOTE_PORT} lost.${_NC}"
+        echo -e "${_RED}=========================================${_NC}"
+        echo ""
+        exit 1
+    fi
+
     echo -e "${_GREEN}[CHIP LOCK] Acquired (user=${user_id}, script=${script_name})${_NC}"
 }
 
 chip_lock_release() {
     _chip_lock_ssh "rm -f $CHIP_LOCKFILE" 2>/dev/null
-    echo -e "${_GREEN}[CHIP LOCK] Released${_NC}"
+    if [[ $? -eq 255 ]]; then
+        echo -e "${_YELLOW}[CHIP LOCK] Warning: could not release lock (chip unreachable).${_NC}"
+        echo -e "${_YELLOW}  Lock file ${CHIP_LOCKFILE} may remain on remote.${_NC}"
+        echo -e "${_YELLOW}  Remove manually when chip is back: ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST 'rm $CHIP_LOCKFILE'${_NC}"
+    else
+        echo -e "${_GREEN}[CHIP LOCK] Released${_NC}"
+    fi
 }
 
 chip_lock_status() {
     local existing_lock
     existing_lock=$(_chip_lock_ssh "cat $CHIP_LOCKFILE 2>/dev/null")
+    local ssh_status=$?
 
-    if [[ -z "$existing_lock" ]]; then
+    if [[ $ssh_status -eq 255 ]]; then
+        echo -e "${_RED}[CHIP LOCK] Chip is UNREACHABLE (${REMOTE_HOST}:${REMOTE_PORT})${_NC}"
+        echo -e "${_RED}  Cannot determine lock status - SSH connection failed.${_NC}"
+    elif [[ -z "$existing_lock" ]]; then
         echo -e "${_GREEN}[CHIP LOCK] Chip is FREE${_NC}"
     else
         echo -e "${_YELLOW}[CHIP LOCK] Chip is BUSY:${_NC}"

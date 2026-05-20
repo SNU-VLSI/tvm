@@ -241,7 +241,7 @@ def getModel_(input_shape, until_relay: int = None):
     y = c.check(y + y_residual)
 
     # post process
-    y = c.check(relay.cast(y,dtype="float32") * relay.var("post_f_inv", shape=(1,), dtype="float32"))
+    y = c.check(relay.cast(y,dtype="float32") * relay.var("post_f_inv", shape=(64,1,1), dtype="float32"))
     y = c.check(relay.nn.relu(y))
     y = c.check(relay.nn.adaptive_avg_pool2d(y, output_size=(1,1)))
     y = c.check(relay.nn.batch_flatten(y))
@@ -394,8 +394,11 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
       return np.array([adjust_factors['x_f_1']], dtype=dtype)
 
     if name == 'post_f_inv':
-      # post_f_inv = 1.0 / bn2_f_3
-      return np.array([1.0 / adjust_factors['bn2_f_3']], dtype=dtype)
+      # post_f_inv = 1.0 / bn2_f_3  (per-channel [C] or scalar)
+      bn2_f_3 = np.asarray(adjust_factors['bn2_f_3'], dtype='float64').flatten()
+      inv = 1.0 / bn2_f_3
+      # Reshape: scalar -> (1,) then broadcast to (C,1,1); per-channel -> (C,) -> (C,1,1)
+      return np.broadcast_to(inv.reshape(-1, 1, 1), shape).astype(dtype).copy()
 
     # Handle layer-specific parameters using regex patterns
     # Pattern for weight{2,3,4}_{0,1,2}
@@ -497,13 +500,13 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
       bn2_f_key = f'bn2_f_{idx}'
 
       if x_f_key in adjust_factors and bn2_f_key in adjust_factors:
-        value = adjust_factors[bn2_f_key] / adjust_factors[x_f_key]
+        value = np.asarray(adjust_factors[bn2_f_key], dtype='float64').flatten() / np.asarray(adjust_factors[x_f_key], dtype='float64').flatten()
         if dtype.startswith('int'):
-          value = int(round(value))
-        if shape == (1,):
-          return np.array([value], dtype=dtype)
-        else:
-          return np.full(shape, fill_value=value, dtype=dtype)
+          value = np.round(value).astype(dtype)
+        # Reshape: scalar->(1,) or per-channel->(C,), then broadcast to (C,1,1) etc.
+        target_ndim = len(shape)
+        value = value.reshape((-1,) + (1,) * (target_ndim - 1))
+        return np.broadcast_to(value, shape).astype(dtype).copy()
       else:
         raise ValueError(f"Missing adjust_factors for computing {name}")
 
