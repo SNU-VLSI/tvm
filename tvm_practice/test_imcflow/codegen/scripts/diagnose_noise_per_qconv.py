@@ -10,14 +10,16 @@ predicted in aggregate.
 Inputs come from:
   - chip dumps under codegen/debugging/fpga/sample_<N>/
   - psum_imcu_column_map.npz under eval_dir/<model>_evl.linux/
-  - concat_per_core.json + noise CSV under /root/project/CIM/noise/noise_df/B2_out/N32/
-  - imcflow checkpoint pointed to by resnet8_subset_models.py:317
+  - concat_per_core.json + noise CSV under --noise-dir
+  - imcflow checkpoint from --ckpt-path / --ckpt-alias, or the built-in default
 
 Usage:
     python scripts/diagnose_noise_per_qconv.py --n-samples 10
     python scripts/diagnose_noise_per_qconv.py --n-samples 200 --output-dir runs/full
     python scripts/diagnose_noise_per_qconv.py --n-samples 5 --layers weight4_2
     python scripts/diagnose_noise_per_qconv.py --noise-csv B2_noise_matrix_per_ch_concat.csv
+    python scripts/diagnose_noise_per_qconv.py --noise-dir /root/project/CIM/noise/noise_df/B2_out_refine/N32
+    python scripts/diagnose_noise_per_qconv.py --ckpt-alias tmp01_refine_ndis32
 """
 import argparse
 import json
@@ -34,6 +36,7 @@ import torch.nn.functional as F
 
 
 CODEGEN = '/root/project/tvm/tvm_practice/test_imcflow/codegen'
+CIM_DIR = os.environ.get('CIM_DIR', '/root/project/CIM')
 FPGA_DIR = os.path.join(CODEGEN, 'debugging/fpga')
 PYSIM_DIR = os.path.join(CODEGEN, 'eval_dir/resnet8_subset31_pretrained_orig_evl.baremetal/test_outputs/py_runner')
 NPZ_PATH = os.path.join(CODEGEN, 'eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz')
@@ -90,8 +93,19 @@ def parse_args():
                          'observed should exactly equal predicted_mode_sum (sanity check on the '
                          'CSV-lookup pipeline). Default: chip')
     ap.add_argument('--noise-csv', type=str, default=DEFAULT_CSV_NAME,
-                    help='Noise CSV filename under NOISE_DIR, or an absolute/relative CSV path '
+                    help='Noise CSV filename under --noise-dir, or an absolute/relative CSV path '
                          f'(default: {DEFAULT_CSV_NAME})')
+    ap.add_argument('--noise-dir', type=str, default=NOISE_DIR,
+                    help='Directory containing the default noise CSV and concat_per_core.json '
+                         f'(default: {NOISE_DIR})')
+    ap.add_argument('--ckpt-path', type=str, default=None,
+                    help='Checkpoint path ending in checkpoint.pth.tar. Overrides --ckpt-alias.')
+    ap.add_argument('--ckpt-alias', type=str, default=None,
+                    help='Checkpoint alias from /root/project/CIM/checkpoints/<board>_<vmode>.json.')
+    ap.add_argument('--ckpt-board', type=str, default='B2',
+                    help='Board registry name used with --ckpt-alias (default: B2).')
+    ap.add_argument('--ckpt-vmode', type=str, default='half',
+                    help='VMode registry name used with --ckpt-alias (default: half).')
     ap.add_argument('--acc-mask', type=int, default=0,
                     help='acc_mask config (default 0 = all abits popcount<8 eligible to skip ADC+noise). '
                          'Must match the config used to compile/run the dump source.')
@@ -102,11 +116,28 @@ def parse_args():
     return ap.parse_args()
 
 
-def resolve_noise_csv_path(noise_csv):
-    """Resolve --noise-csv as a filename under NOISE_DIR unless a path is given."""
+def resolve_noise_csv_path(noise_csv, noise_dir=NOISE_DIR):
+    """Resolve --noise-csv as a filename under noise_dir unless a path is given."""
     if os.path.isabs(noise_csv) or os.path.dirname(noise_csv):
         return noise_csv
-    return os.path.join(NOISE_DIR, noise_csv)
+    return os.path.join(noise_dir, noise_csv)
+
+
+def resolve_ckpt_path(ckpt_path=None, ckpt_alias=None, board='B2', vmode='half'):
+    """Resolve checkpoint path while preserving the historical built-in default."""
+    if ckpt_path:
+        return ckpt_path, ckpt_alias or '<path>'
+    if ckpt_alias:
+        sys.path.insert(0, CIM_DIR)
+        from checkpoints import resolve
+        resolved_path, resolved_alias = resolve(board, vmode, ckpt_alias)
+        return resolved_path, resolved_alias
+    return CKPT_PATH, '<default>'
+
+
+def signed_int16(arr):
+    arr = np.asarray(arr, dtype=np.int64)
+    return (((arr + 32768) & 0xFFFF) - 32768).astype(np.int32)
 
 
 def load_atomic_info(npz_path):
@@ -468,7 +499,10 @@ def process_dump_source(label, dump_dir, atomics, weights, csv_data, sample_rang
 
             dump_sq = dump[0, 0]
             dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
-            observed = dump_sel - clean_sq
+            # Chip and clean outputs are int16-domain values.  Match the
+            # low-level synthetic checker: differences must wrap through int16,
+            # otherwise small wrapped noise can look like +/-65536 outliers.
+            observed = signed_int16(dump_sel - clean_sq)
 
             E_pred, Var_pred, range_min, range_max, mode_pred = compute_predicted_stats(
                 adc_codes, skip_mask, a['pseudo_chs'], csv_data,
@@ -656,7 +690,11 @@ def print_summaries(label, per_atomic_stats, atomics, layers_filter, skip_diagno
 def main():
     args = parse_args()
     layers_filter = set(args.layers.split(',')) if args.layers else None
-    csv_path = resolve_noise_csv_path(args.noise_csv)
+    noise_dir = os.path.abspath(args.noise_dir)
+    csv_path = resolve_noise_csv_path(args.noise_csv, noise_dir)
+    layout_json = os.path.join(noise_dir, 'concat_per_core.json')
+    ckpt_path, ckpt_label = resolve_ckpt_path(
+        args.ckpt_path, args.ckpt_alias, args.ckpt_board, args.ckpt_vmode)
 
     print('=' * 100)
     print('  diagnose_noise_per_qconv')
@@ -666,18 +704,21 @@ def main():
     print(f'  device        : {args.device}')
     print(f'  compare       : {args.compare}')
     print(f'  acc_mask      : {args.acc_mask}  (0 = all abits popcount<8 eligible)')
+    print(f'  noise dir     : {noise_dir}')
     print(f'  noise csv     : {csv_path}')
+    print(f'  layout json   : {layout_json}')
+    print(f'  checkpoint    : {ckpt_path} ({ckpt_label})')
     print(f'  skip diagnose : {args.skip_diagnose}')
 
     print('\nLoading atomic info, layout, noise CSV, checkpoint...')
     atomics = load_atomic_info(NPZ_PATH)
-    pseudo_map, n_per_core, n_pseudo = load_pseudo_ch_map(LAYOUT_JSON)
+    pseudo_map, n_per_core, n_pseudo = load_pseudo_ch_map(layout_json)
     csv_data = load_noise_csv(csv_path)
     print(f'  atomics       : {len(atomics)}')
     print(f'  pseudo chs    : {n_pseudo} ({n_per_core}/core × 16 cores)')
     print(f'  csv shape     : probs {csv_data["probs"].shape}, refs={csv_data["n_refs"]}, wpatterns={csv_data["n_wpatterns"]}')
 
-    ckpt = torch.load(CKPT_PATH, map_location='cpu', weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     sd_ckpt = ckpt['state_dict']
     weights = {}
     for orig, (kh, st, pd, key) in CONV_PARAMS.items():

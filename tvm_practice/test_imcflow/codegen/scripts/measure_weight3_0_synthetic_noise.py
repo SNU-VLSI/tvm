@@ -59,8 +59,19 @@ OW = 1
 
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--candidates", required=True,
+    ap.add_argument("--candidates", default=None,
                     help="Candidate JSON from analyze_weight3_0_ref_psum.py")
+    ap.add_argument("--noise-csv", default=None,
+                    help="Reference noise CSV used for csv_diff_* comparison. "
+                         "If omitted, use the CSV stats embedded in --candidates.")
+    ap.add_argument("--recompute-summary", action="store_true",
+                    help="Do not generate or measure cases. Reuse a raw measurement npz and "
+                         "recompute synthetic_vs_csv_summary.csv, optionally with --noise-csv.")
+    ap.add_argument("--raw-measurements", default=None,
+                    help="Raw npz to reuse with --recompute-summary. Default: "
+                         "<out-dir>/synthetic_measurements_raw.npz")
+    ap.add_argument("--summary-out", default=None,
+                    help="Output summary CSV path. Default: <out-dir>/synthetic_vs_csv_summary.csv")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--candidate-id", type=int, action="append", default=None,
@@ -74,13 +85,13 @@ def parse_args():
     ap.add_argument("-c", "--connection", default=None,
                     help="Board SSH connection: user@host:port. Required unless --generate-only.")
     ap.add_argument("-b", "--board", default="B2", choices=["B1", "B2", "1128"])
-    ap.add_argument("--scan-val", required=True,
+    ap.add_argument("--scan-val", default=None,
                     help="Scan value used for the CSV condition, e.g. 0x0a.")
     ap.add_argument("--skip-scan", action="store_true")
-    ap.add_argument("--dda", type=float, required=True)
-    ap.add_argument("--ddc", type=float, required=True)
-    ap.add_argument("--ddl", type=float, required=True)
-    ap.add_argument("--ddf", type=float, required=True)
+    ap.add_argument("--dda", type=float, default=None)
+    ap.add_argument("--ddc", type=float, default=None)
+    ap.add_argument("--ddl", type=float, default=None)
+    ap.add_argument("--ddf", type=float, default=None)
     ap.add_argument("--ps-remote", "--ps_remote", dest="ps_remote", default=None,
                     help="Remote power supply RPC server HOST:PORT. If omitted, local config/<board>.json is used.")
     ap.add_argument("--gpu-remote", "--gpu_remote", dest="gpu_remote", default=None,
@@ -101,6 +112,18 @@ def parse_args():
     ap.add_argument("--force-board-reset", action="store_true",
                     help="Run 'make clear_time' on the board before execution so the next make run performs reset/warmup.")
     return ap.parse_args()
+
+
+def validate_args(args):
+    if args.recompute_summary:
+        return
+    if args.candidates is None:
+        raise ValueError("--candidates is required unless --recompute-summary")
+    if args.scan_val is None:
+        raise ValueError("--scan-val is required unless --recompute-summary")
+    for name in ("dda", "ddc", "ddl", "ddf"):
+        if getattr(args, name) is None:
+            raise ValueError(f"--{name} is required unless --recompute-summary")
 
 
 def parse_connection(conn_str, keyfile):
@@ -127,6 +150,7 @@ def import_measurement_stack(args):
 
     from common import client
     from common.bulk_file_transfer import BulkFileTransfer
+    from common.chip_lock import ChipLock
     from common.logging_config import setup_logging
     from executor import tune_executor
     from imcflow_sim.utils.acim_enum import ADCMode, VMode, MultModeSet, AccMask
@@ -136,6 +160,7 @@ def import_measurement_stack(args):
     return {
         "client": client,
         "BulkFileTransfer": BulkFileTransfer,
+        "ChipLock": ChipLock,
         "setup_logging": setup_logging,
         "tune_executor": tune_executor,
         "ADCMode": ADCMode,
@@ -159,6 +184,46 @@ def load_candidates(path, limit, candidate_ids=None):
     if not candidates:
         raise ValueError("No candidates selected")
     return payload.get("metadata", {}), candidates
+
+
+def apply_reference_noise_csv(candidates, noise_csv):
+    if noise_csv is None:
+        return None
+
+    csv_path = diag.resolve_noise_csv_path(noise_csv)
+    csv_data = diag.load_noise_csv(csv_path)
+    for candidate in candidates:
+        pseudo_ch = int(candidate["pseudo_ch"])
+        wbit = int(candidate["wbit"])
+        abit = int(candidate["abit"])
+        adc_code = int(candidate["adc_code"])
+        csv_row = wbit * csv_data["n_refs"] + adc_code
+        if pseudo_ch >= csv_data["probs"].shape[0]:
+            raise ValueError(
+                f"pseudo_ch={pseudo_ch} is outside reference CSV channel count "
+                f"{csv_data['probs'].shape[0]} ({csv_path})")
+        if csv_row >= csv_data["probs"].shape[1]:
+            raise ValueError(
+                f"CSV row={csv_row} for wbit={wbit}, adc_code={adc_code} is outside "
+                f"reference CSV row count {csv_data['probs'].shape[1]} ({csv_path})")
+
+        scale = diag.PSTEP * diag.W_SCALE[wbit] * (1 << abit)
+        probs = csv_data["probs"][pseudo_ch, csv_row]
+        nonzero = probs > 1e-12
+        candidate["output_scale"] = float(scale)
+        candidate["csv_diff_mean"] = float(csv_data["E"][pseudo_ch, csv_row])
+        candidate["csv_diff_std"] = float(np.sqrt(csv_data["Var"][pseudo_ch, csv_row]))
+        candidate["csv_diff_min"] = float(csv_data["diff_min"][pseudo_ch, csv_row])
+        candidate["csv_diff_max"] = float(csv_data["diff_max"][pseudo_ch, csv_row])
+        candidate["csv_out_mean"] = float(candidate["csv_diff_mean"] * scale)
+        candidate["csv_out_std"] = float(candidate["csv_diff_std"] * abs(scale))
+        candidate["csv_support_n"] = int(nonzero.sum())
+        candidate["csv_prob_mass"] = float(probs.sum())
+        candidate["csv_mode_diff"] = (
+            float(csv_data["diff_bins"][np.argmax(probs)]) if probs.size else float("nan")
+        )
+        candidate["reference_noise_csv"] = csv_path
+    return csv_path
 
 
 def weight_value_for_wbit(wbit):
@@ -221,6 +286,10 @@ def make_synthetic_case(candidate, pair_id, rng, out_dir):
         "csv_diff_max": float(candidate["csv_diff_max"]),
         "csv_out_mean": float(candidate["csv_out_mean"]),
         "csv_out_std": float(candidate["csv_out_std"]),
+        "csv_support_n": int(candidate.get("csv_support_n", -1)),
+        "csv_prob_mass": float(candidate.get("csv_prob_mass", np.nan)),
+        "csv_mode_diff": float(candidate.get("csv_mode_diff", np.nan)),
+        "reference_noise_csv": candidate.get("reference_noise_csv"),
         "wpattern": candidate.get("wpattern", f"{1 << wbit:04b}"),
     }
 
@@ -379,10 +448,59 @@ def summarize_case(case, ref_stack, res_stack):
         "csv_diff_max": csv_max,
         "csv_out_mean": case["csv_out_mean"],
         "csv_out_std": case["csv_out_std"],
+        "csv_support_n": case.get("csv_support_n", -1),
+        "csv_prob_mass": case.get("csv_prob_mass", np.nan),
+        "csv_mode_diff": case.get("csv_mode_diff", np.nan),
+        "reference_noise_csv": case.get("reference_noise_csv"),
         "csv_range_hit_pct": float(((norm >= csv_min) & (norm <= csv_max)).mean() * 100.0),
         "mean_shift_diff_bin": float(np.nanmean(norm) - case["csv_diff_mean"]),
         "std_ratio_diff_bin": float(np.nanstd(norm) / max(case["csv_diff_std"], 1e-12)),
     }
+
+
+def build_summaries(cases, ref_stack, res_stack):
+    if ref_stack.shape[0] != len(cases) or res_stack.shape[0] != len(cases):
+        raise ValueError(
+            f"Raw measurement case count mismatch: {len(cases)} cases, "
+            f"ref shape={ref_stack.shape}, res shape={res_stack.shape}")
+    return [
+        summarize_case(case, ref_stack[case_idx], res_stack[case_idx])
+        for case_idx, case in enumerate(cases)
+    ]
+
+
+def write_summary_csv(args, summaries):
+    summary_df = pd.DataFrame(summaries)
+    summary_path = args.summary_out or os.path.join(args.out_dir, "synthetic_vs_csv_summary.csv")
+    os.makedirs(os.path.dirname(os.path.abspath(summary_path)), exist_ok=True)
+    summary_df.to_csv(summary_path, index=False)
+    return summary_df, summary_path
+
+
+def print_summary_table(summary_df):
+    print(summary_df[[
+        "case_id", "valid_col", "diff_bin_mean", "diff_bin_std", "csv_diff_mean",
+        "csv_diff_std", "csv_range_hit_pct", "mean_shift_diff_bin",
+    ]].to_string(index=False))
+
+
+def recompute_summary(args):
+    raw_path = args.raw_measurements or os.path.join(args.out_dir, "synthetic_measurements_raw.npz")
+    with np.load(raw_path, allow_pickle=False) as raw:
+        ref_stack = raw["ref"]
+        res_stack = raw["res"]
+        cases = json.loads(raw["cases_json"].item())
+
+    reference_noise_csv = apply_reference_noise_csv(cases, args.noise_csv)
+    summaries = build_summaries(cases, ref_stack, res_stack)
+    summary_df, summary_path = write_summary_csv(args, summaries)
+
+    print(f"Recomputed summary for {len(cases)} synthetic cases")
+    print(f"  raw    : {raw_path}")
+    print(f"  csv    : {reference_noise_csv or 'embedded case stats'}")
+    print(f"  summary: {summary_path}")
+    print_summary_table(summary_df)
+    return 0
 
 
 def execute_measurement(args, cases, test_args):
@@ -393,6 +511,7 @@ def execute_measurement(args, cases, test_args):
     tune_executor = stack["tune_executor"]
     instrument = stack["instrument"]
     transform_conv_output_to_3d = stack["transform_conv_output_to_3d"]
+    ChipLock = stack["ChipLock"]
     init_gpu_rpc_if_requested(args)
 
     os.makedirs(os.path.join(args.out_dir, "logs"), exist_ok=True)
@@ -403,6 +522,8 @@ def execute_measurement(args, cases, test_args):
     conn = parse_connection(args.connection, args.keyfile)
 
     old_cwd = os.getcwd()
+    chip_lock = None
+    ssh_client = None
     os.chdir(args.measurement_root)
     try:
         ssh_client = client.open_ssh(conn["host"], conn["user"], conn["port"], keyfile=conn["keyfile"])
@@ -413,6 +534,10 @@ def execute_measurement(args, cases, test_args):
             key_filename=conn["keyfile"],
             max_threads=1,
         )
+
+        if not args.dryrun and not args.transfer_only:
+            chip_lock = ChipLock(ssh_client, script_name="measure_weight3_0_synthetic_noise.py")
+            chip_lock.acquire()
 
         if args.force_board_reset and not args.dryrun:
             cmd = f"cd {REMOTE_TEST_ROOT} && make clear_time"
@@ -455,12 +580,10 @@ def execute_measurement(args, cases, test_args):
 
         executor.execute()
         if args.transfer_only or args.dryrun:
-            ssh_client.close()
             return None, None, []
 
         all_ref = []
         all_res = []
-        summaries = []
         for repeat_idx in range(args.repeats):
             if repeat_idx > 0:
                 executor.rerun()
@@ -479,17 +602,23 @@ def execute_measurement(args, cases, test_args):
 
         ref_stack = np.stack(all_ref, axis=1)  # (case, repeat, OC, OH, OW)
         res_stack = np.stack(all_res, axis=1)
-        for case_idx, case in enumerate(cases):
-            summaries.append(summarize_case(case, ref_stack[case_idx], res_stack[case_idx]))
+        summaries = build_summaries(cases, ref_stack, res_stack)
 
-        ssh_client.close()
         return ref_stack, res_stack, summaries
     finally:
+        if chip_lock is not None:
+            chip_lock.release()
+        if ssh_client is not None:
+            ssh_client.close()
         os.chdir(old_cwd)
 
 
 def main():
     args = parse_args()
+    validate_args(args)
+    if args.recompute_summary:
+        return recompute_summary(args)
+
     apply_rpc_env_fallback(args)
     resolve_scan_val_path(args)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -497,6 +626,7 @@ def main():
     os.makedirs(npz_dir, exist_ok=True)
 
     metadata, candidates = load_candidates(args.candidates, args.limit, args.candidate_id)
+    reference_noise_csv = apply_reference_noise_csv(candidates, args.noise_csv)
     rng = np.random.default_rng(args.seed)
 
     cases = []
@@ -522,6 +652,7 @@ def main():
             },
             "measurement": {
                 "scan_val": args.scan_val,
+                "reference_noise_csv": reference_noise_csv or metadata.get("noise_csv"),
                 "dda": args.dda,
                 "ddc": args.ddc,
                 "ddl": args.ddl,
@@ -570,17 +701,12 @@ def main():
         candidates_json=json.dumps(candidates, sort_keys=True),
     )
 
-    summary_df = pd.DataFrame(summaries)
-    summary_path = os.path.join(args.out_dir, "synthetic_vs_csv_summary.csv")
-    summary_df.to_csv(summary_path, index=False)
+    summary_df, summary_path = write_summary_csv(args, summaries)
 
     print(f"Measured {len(cases)} synthetic cases x {args.repeats} repeats")
     print(f"  raw    : {raw_path}")
     print(f"  summary: {summary_path}")
-    print(summary_df[[
-        "case_id", "diff_bin_mean", "diff_bin_std", "csv_diff_mean",
-        "csv_diff_std", "csv_range_hit_pct", "mean_shift_diff_bin",
-    ]].to_string(index=False))
+    print_summary_table(summary_df)
     return 0
 
 
