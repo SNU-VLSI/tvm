@@ -216,8 +216,11 @@ def main():
                         break
                 if out_npy is None:
                     continue
-                qin = np.load(os.path.join(sample_dir, input_fname))
-                dump = np.load(out_npy)
+                try:
+                    qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
+                    dump = np.load(out_npy, allow_pickle=True)
+                except Exception:
+                    continue
                 ic_lo = a['ic_id'] * a['ic_block']
                 ic_hi = ic_lo + a['ic_size']
                 w_full = weights[orig]
@@ -280,8 +283,12 @@ def main():
             if out_npy is None:
                 continue
 
-            qin = np.load(os.path.join(sample_dir, input_fname))
-            dump = np.load(out_npy)
+            try:
+                qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
+                dump = np.load(out_npy, allow_pickle=True)
+            except Exception as e:
+                print(f"  [skip] sample_{s_idx} {a['func']}: {e}")
+                continue
 
             ic_lo = a['ic_id'] * a['ic_block']
             ic_hi = ic_lo + a['ic_size']
