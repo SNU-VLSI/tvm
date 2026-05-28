@@ -331,12 +331,12 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
     echo "Step 6.5: Fetching debug_nodes from remote (DEBUG_EXE=1)..."
     echo ""
 
-    # Clean target directory to avoid stale files from previous runs
-    if [[ -d "$LOCAL_DEBUG_DIR" ]]; then
-        echo "Removing existing $LOCAL_DEBUG_DIR/ ..."
-        rm -rf "$LOCAL_DEBUG_DIR"
-    fi
+    # Clean only sample_* from target directory, preserving run_* from repeat_dataset_eval
     mkdir -p "$LOCAL_DEBUG_DIR"
+    if compgen -G "$LOCAL_DEBUG_DIR/sample_*" > /dev/null; then
+        echo "Removing stale sample_* in $LOCAL_DEBUG_DIR/ ..."
+        rm -rf "$LOCAL_DEBUG_DIR"/sample_*
+    fi
 
     # scp -r all sample folders from FPGA to host
     echo "[CMD] scp -r remote:$REMOTE_DEBUG_DIR/* -> $LOCAL_DEBUG_DIR/"
