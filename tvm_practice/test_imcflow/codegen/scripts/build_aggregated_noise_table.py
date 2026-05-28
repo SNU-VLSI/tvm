@@ -163,6 +163,12 @@ def main():
     parser.add_argument('--smoothing', type=float, default=0.0)
     parser.add_argument('--min-count', type=int, default=10)
     parser.add_argument('--device', default='cpu')
+    parser.add_argument('--remote-host', default='147.46.91.206',
+                        help='Remote host for scp of full table')
+    parser.add_argument('--remote-base', default='~/Project/CIM',
+                        help='Remote CIM repo base path')
+    parser.add_argument('--no-scp', action='store_true',
+                        help='Skip scp of full table to remote')
     args = parser.parse_args()
 
     dump_dir = (os.path.join(CODEGEN, args.dump_dir)
@@ -316,11 +322,59 @@ def main():
 
     results = acc.results(min_count=args.min_count, smoothing=args.smoothing)
 
-    # Save
+    # Save lightweight (E/Var/Std/count + bin edges, no probs) for git
     output_path = (os.path.join(dump_dir, args.output)
                    if not os.path.isabs(args.output) else args.output)
-    np.savez(output_path, **results)
-    print(f"\nAggregated noise table saved: {output_path}")
+    lightweight = {k: v for k, v in results.items() if k != 'probs'}
+    np.savez_compressed(output_path, **lightweight)
+    print(f"\nLightweight table saved: {output_path} "
+          f"({os.path.getsize(output_path)/1e6:.1f} MB)")
+
+    # Save full (with probs) locally
+    full_path = output_path.replace('.npz', '_full.npz')
+    np.savez_compressed(full_path, **results)
+    print(f"Full table saved: {full_path} "
+          f"({os.path.getsize(full_path)/1e6:.1f} MB)")
+
+    # scp full table to remote
+    if not args.no_scp:
+        env_file = os.path.expanduser('~/.imcflow.env')
+        user_id = None
+        if os.path.isfile(env_file):
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('USER_ID='):
+                        user_id = line.split('=', 1)[1]
+        if not user_id:
+            print("  WARNING: USER_ID not found in ~/.imcflow.env, skipping scp")
+        else:
+            # Compute relative path under CIM repo
+            cim_local = '/root/project/CIM'
+            if output_path.startswith(cim_local):
+                rel = os.path.relpath(full_path, cim_local)
+            else:
+                rel = os.path.join('noise/noise_df/B2_chip_inference',
+                                   os.path.basename(os.path.dirname(output_path)),
+                                   os.path.basename(full_path))
+            remote_path = f"{args.remote_base}/{rel}"
+            remote_dir = os.path.dirname(remote_path)
+            remote = f"{user_id}@{args.remote_host}"
+            print(f"\n  scp full table to {remote}:{remote_path}")
+            # Ensure remote directory exists
+            mkdir_cmd = f'ssh {remote} "mkdir -p {remote_dir}"'
+            print(f"  $ {mkdir_cmd}")
+            ret = os.system(mkdir_cmd)
+            if ret == 0:
+                scp_cmd = f'scp {full_path} {remote}:{remote_path}'
+                print(f"  $ {scp_cmd}")
+                ret = os.system(scp_cmd)
+                if ret == 0:
+                    print("  scp OK")
+                else:
+                    print(f"  scp failed (exit {ret})")
+            else:
+                print(f"  ssh mkdir failed (exit {ret})")
 
     # Summary
     print(f"\n{'='*70}")
