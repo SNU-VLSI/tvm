@@ -14,9 +14,15 @@ no reliance on the original CSV.
 
 Usage:
   python scripts/build_aggregated_noise_table.py \\
-      --dump-dir debugging/fpga/uqat_tmp02_refine_ndis32_0_78 \\
+      --dump-dir debugging/fpga/uqat_tmp02_refine_ndis32_0_78/run_00 \\
       --samples 0-199 \\
       --output aggregated_noise_table.npz
+
+  # Multiple runs (data from all runs is combined):
+  python scripts/build_aggregated_noise_table.py \\
+      --dump-dir debugging/fpga/uqat_tmp02_refine_ndis32_0_78/run_0{0..9} \\
+      --samples 0-99 \\
+      --output aggregated_noise_table_multi.npz
 """
 
 import os, sys, argparse
@@ -148,7 +154,7 @@ class AggregatedNoiseAccumulator:
 
 def main():
     parser = argparse.ArgumentParser(description='Build aggregated noise table')
-    parser.add_argument('--dump-dir', required=True)
+    parser.add_argument('--dump-dir', required=True, nargs='+')
     parser.add_argument('--samples', default='0-199')
     parser.add_argument('--output', default='aggregated_noise_table.npz')
     parser.add_argument('--checkpoint', default=None)
@@ -165,16 +171,22 @@ def main():
     parser.add_argument('--device', default='cpu')
     args = parser.parse_args()
 
-    dump_dir = (os.path.join(CODEGEN, args.dump_dir)
-                if not os.path.isabs(args.dump_dir) else args.dump_dir)
+    dump_dirs = [os.path.join(CODEGEN, d) if not os.path.isabs(d) else d
+                 for d in args.dump_dir]
     sample_range = parse_sample_range(args.samples)
-    print(f"Dump dir: {dump_dir}")
+    print(f"Dump dirs ({len(dump_dirs)}):")
+    for d in dump_dirs:
+        print(f"  {d}")
     print(f"Samples: {sample_range[0]}..{sample_range[-1]} ({len(sample_range)})")
 
     if args.checkpoint:
         ckpt_path = args.checkpoint
     else:
-        alias = os.path.basename(dump_dir.rstrip('/'))
+        # Walk up from first dump_dir to find ckpt alias (skip run_XX levels)
+        alias_dir = dump_dirs[0].rstrip('/')
+        while os.path.basename(alias_dir).startswith('run_'):
+            alias_dir = os.path.dirname(alias_dir)
+        alias = os.path.basename(alias_dir)
         from checkpoints import resolve as ckpt_resolve
         ckpt_path, _ = ckpt_resolve('B2', 'half', alias)
     print(f"Checkpoint: {ckpt_path}")
@@ -198,58 +210,59 @@ def main():
     if args.ref_range is None or args.noise_range is None:
         print("Scanning subset for range estimation...")
         ref_samples, noise_samples = [], []
-        for s_idx in sample_range[:20]:
-            sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
-            if not os.path.isdir(sample_dir):
-                continue
-            qconv_to_input = build_qconv_to_input_map(sample_dir)
-            for a in atomics[:6]:
-                orig = a['orig_conv']
-                kh, st, pad, _ = CONV_PARAMS[orig]
-                input_fname = qconv_to_input.get(a['func'])
-                if input_fname is None:
+        for dump_dir in dump_dirs:  # Sample from all dump_dirs for accurate range
+            for s_idx in sample_range[:5]:
+                sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
+                if not os.path.isdir(sample_dir):
                     continue
-                out_npy = None
-                for f in os.listdir(sample_dir):
-                    if f.endswith(f'_{a["func"]}.npy'):
-                        out_npy = os.path.join(sample_dir, f)
-                        break
-                if out_npy is None:
-                    continue
-                try:
-                    qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
-                    dump = np.load(out_npy, allow_pickle=True)
-                except Exception:
-                    continue
-                ic_lo = a['ic_id'] * a['ic_block']
-                ic_hi = ic_lo + a['ic_size']
-                w_full = weights[orig]
-                oc_lo = a['oc_id'] * a['oc_block']
-                oc_hi = oc_lo + a['oc_size']
-                w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
-                clean_out, _, _ = noise_free_qconv(
-                    qin[:, ic_lo:ic_hi, :, :], w_tile,
-                    kernel_h=kh, stride=st, padding=pad, device=args.device)
-                clean_sq = clean_out.squeeze(0)
-                dump_sq = dump[0, 0]
-                dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
-                obs = signed_int16(dump_sel - clean_sq)
-                ref_samples.append(clean_sq.ravel())
-                noise_samples.append(obs.ravel())
+                qconv_to_input = build_qconv_to_input_map(sample_dir)
+                for a in atomics:  # All atomics to catch worst-case channels
+                    orig = a['orig_conv']
+                    kh, st, pad, _ = CONV_PARAMS[orig]
+                    input_fname = qconv_to_input.get(a['func'])
+                    if input_fname is None:
+                        continue
+                    out_npy = None
+                    for f in os.listdir(sample_dir):
+                        if f.endswith(f'_{a["func"]}.npy'):
+                            out_npy = os.path.join(sample_dir, f)
+                            break
+                    if out_npy is None:
+                        continue
+                    try:
+                        qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
+                        dump = np.load(out_npy, allow_pickle=True)
+                    except Exception:
+                        continue
+                    ic_lo = a['ic_id'] * a['ic_block']
+                    ic_hi = ic_lo + a['ic_size']
+                    w_full = weights[orig]
+                    oc_lo = a['oc_id'] * a['oc_block']
+                    oc_hi = oc_lo + a['oc_size']
+                    w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
+                    clean_out, _, _ = noise_free_qconv(
+                        qin[:, ic_lo:ic_hi, :, :], w_tile,
+                        kernel_h=kh, stride=st, padding=pad, device=args.device)
+                    clean_sq = clean_out.squeeze(0)
+                    dump_sq = dump[0, 0]
+                    dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
+                    obs = signed_int16(dump_sel - clean_sq)
+                    ref_samples.append(clean_sq.ravel())
+                    noise_samples.append(obs.ravel())
 
         all_ref = np.concatenate(ref_samples)
         all_noise = np.concatenate(noise_samples)
 
     if args.ref_range is None:
-        r1, r99 = np.percentile(all_ref, [0.2, 99.8])
-        margin = (r99 - r1) * 0.05
-        ref_lo, ref_hi = r1 - margin, r99 + margin
+        ref_lo, ref_hi = float(all_ref.min()), float(all_ref.max())
+        margin = (ref_hi - ref_lo) * 0.02
+        ref_lo, ref_hi = ref_lo - margin, ref_hi + margin
     else:
         ref_lo, ref_hi = args.ref_range
 
     if args.noise_range is None:
-        n99 = np.percentile(np.abs(all_noise), 99.5)
-        noise_lo, noise_hi = -n99, n99
+        n_abs_max = float(np.abs(all_noise).max())
+        noise_lo, noise_hi = -n_abs_max * 1.02, n_abs_max * 1.02
     else:
         noise_lo, noise_hi = args.noise_range
 
@@ -261,9 +274,11 @@ def main():
     acc = AggregatedNoiseAccumulator(n_pseudo, ref_bin_edges, noise_bin_edges)
 
     # Main pass
-    print(f"\nProcessing {len(sample_range)} samples × {len(atomics)} atomics...")
+    print(f"\nProcessing {len(dump_dirs)} dirs × {len(sample_range)} samples × {len(atomics)} atomics...")
     n_done = 0
-    for s_idx in sample_range:
+    for dd_idx, dump_dir in enumerate(dump_dirs):
+      print(f"\n--- Dir {dd_idx+1}/{len(dump_dirs)}: {os.path.basename(dump_dir)} ---")
+      for s_idx in sample_range:
         sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
         if not os.path.isdir(sample_dir):
             continue
@@ -317,8 +332,14 @@ def main():
     results = acc.results(min_count=args.min_count, smoothing=args.smoothing)
 
     # Save full table (compressed, ~4MB for 200×200 bins)
-    output_path = (os.path.join(dump_dir, args.output)
-                   if not os.path.isabs(args.output) else args.output)
+    # For relative output, save to parent of first dump_dir (or dump_dir itself if single)
+    if not os.path.isabs(args.output):
+        base = dump_dirs[0].rstrip('/')
+        if len(dump_dirs) > 1 and os.path.basename(base).startswith('run_'):
+            base = os.path.dirname(base)
+        output_path = os.path.join(base, args.output)
+    else:
+        output_path = args.output
     np.savez_compressed(output_path, **results)
     print(f"\nTable saved: {output_path} "
           f"({os.path.getsize(output_path)/1e6:.1f} MB)")
