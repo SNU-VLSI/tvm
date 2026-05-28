@@ -11,12 +11,8 @@
 #   # Specific run and sample range
 #   CKPT=uqat_tmp02_refine_ndis32_0_78 ./scripts/B2/build_noise_table.sh run_00 0-199
 #
-#   # Skip scp to remote
-#   CKPT=uqat_tmp02_refine_ndis32_0_78 NO_SCP=1 ./scripts/B2/build_noise_table.sh
-#
 # Environment:
 #   CKPT          (required) checkpoint alias
-#   NO_SCP        set to 1 to skip scp of full table
 #   REF_BINS      number of ref bins (default: 200)
 #   NOISE_BINS    number of noise bins (default: 200)
 #   DEVICE        cpu or cuda (default: cpu)
@@ -70,11 +66,6 @@ echo "  Checkpoint: $CKPT_PATH"
 echo "  Output dir: $CIM_NOISE_DIR"
 echo "=========================================="
 
-SCP_FLAG=""
-if [[ "${NO_SCP:-0}" == "1" ]]; then
-    SCP_FLAG="--no-scp"
-fi
-
 python scripts/build_aggregated_noise_table.py \
     --dump-dir "$RUN_DIR" \
     --samples "$SAMPLES" \
@@ -82,8 +73,7 @@ python scripts/build_aggregated_noise_table.py \
     --output "$CIM_NOISE_DIR/aggregated_noise_table.npz" \
     --n-ref-bins "$REF_BINS" \
     --n-noise-bins "$NOISE_BINS" \
-    --device "$DEVICE" \
-    $SCP_FLAG
+    --device "$DEVICE"
 
 echo ""
 echo "Done. Files:"
