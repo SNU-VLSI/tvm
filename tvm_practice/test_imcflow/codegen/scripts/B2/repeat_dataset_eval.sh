@@ -25,7 +25,7 @@ for ((j=0; j<NUM_REPEATS; j++)); do
     RUN_TAG=$(printf "run_%02d" "$j")
     # Consider a run complete if its debug dir exists (with samples) or a result file exists
     if [[ -d "$BASE_DEBUG_DIR/$RUN_TAG" ]] || \
-       ls "$BASE_RESULT_DIR"/dataset_results_${RUN_TAG}_*.txt &>/dev/null; then
+       ls "$BASE_RESULT_DIR"/dataset_results_${CKPT}_${RUN_TAG}_*.txt &>/dev/null; then
         START_RUN=$((j + 1))
     else
         break
@@ -94,7 +94,7 @@ for ((i=START_RUN; i<NUM_REPEATS; i++)); do
         # Insert run tag: dataset_results_20260528_120000.txt -> dataset_results_run00_20260528_120000.txt
         DIRNAME=$(dirname "$LATEST_RESULT")
         BASENAME=$(basename "$LATEST_RESULT")
-        NEW_NAME="${BASENAME/dataset_results_/dataset_results_${RUN_TAG}_}"
+        NEW_NAME="${BASENAME/dataset_results_/dataset_results_${CKPT}_${RUN_TAG}_}"
         mv "$LATEST_RESULT" "$DIRNAME/$NEW_NAME"
         echo "  Result: $DIRNAME/$NEW_NAME"
     fi
@@ -105,5 +105,5 @@ done
 echo "=========================================="
 echo "All $NUM_REPEATS runs completed."
 echo "  Debug dumps: $BASE_DEBUG_DIR/run_00/ ... run_$(printf '%02d' $((NUM_REPEATS-1)))/"
-echo "  Results:     $BASE_RESULT_DIR/dataset_results_run*_*.txt"
+echo "  Results:     $BASE_RESULT_DIR/dataset_results_${CKPT}_run*_*.txt"
 echo "=========================================="
