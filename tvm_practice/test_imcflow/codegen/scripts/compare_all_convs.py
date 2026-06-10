@@ -22,6 +22,7 @@ If --ckpt is omitted, the alias is read from build_metadata.json
 import argparse
 import json
 import os, sys, pickle, glob
+import re
 from collections import defaultdict
 import numpy as np
 
@@ -113,6 +114,232 @@ def find_npy(dump_dir, func_name):
     if not matches:
         return None
     return matches[0]
+
+
+
+def build_qconv_to_input_map(dump_dir):
+    """Map each imcflow_main_X dump to the preceding logical qconv input dump.
+
+    The py_runner dump sequence is:
+      imcflow_min_max_quantize -> optional split/bitpack -> imcflow_main_X
+
+    For multi-atomic qconvs the per-atomic bitpack inputs may be channel-split,
+    but the deploy pkl stores the logical qconv input before splitting. Keeping
+    the most recent min_max_quantize dump gives that same logical tensor.
+    """
+    qconv_to_input = {}
+    last_quant = None
+    for fname in sorted(os.listdir(dump_dir)):
+        if not fname.endswith('.npy'):
+            continue
+        m = re.match(r'(\d+)_(.+)\.npy', fname)
+        if not m:
+            continue
+        name = m.group(2)
+        if 'imcflow_min_max_quantize' in name and 'imcflow_main' not in name:
+            last_quant = fname
+        elif name.startswith('tvmgen_default_imcflow_main_'):
+            qconv_to_input[name] = last_quant
+    return qconv_to_input
+
+
+def to_numpy(value):
+    """Convert torch tensors / numpy arrays from the deploy pkl to ndarray."""
+    if hasattr(value, 'detach'):
+        value = value.detach().cpu()
+    if hasattr(value, 'numpy'):
+        return value.numpy()
+    return np.asarray(value)
+
+
+def load_py_model_input(sample_idx, dump_dir):
+    """Load the model input used by py_runner.
+
+    New py_runner runs dump this as ``sample_<N>/model_input.npy``. For older
+    runs, fall back to the exact ``test_inputs`` file that py_runner consumes.
+    """
+    candidates = [
+        (os.path.join(dump_dir, 'model_input.npy'), 'py_runner dump'),
+        (os.path.join(EVAL_DIR, 'test_inputs', f'sample_{sample_idx}',
+                      'model_input.npy'), 'test_inputs/sample fallback'),
+        (os.path.join(EVAL_DIR, 'test_inputs', 'model_input.npy'),
+         'test_inputs legacy fallback'),
+    ]
+    for path, source in candidates:
+        if os.path.exists(path):
+            return np.load(path), path, source
+    return None, None, None
+
+
+def _candidate_model_input_keys(sample_idx):
+    return [
+        ('model_input', sample_idx),
+        ('input_tensor', sample_idx),
+        ('input', sample_idx),
+        ('model_input', sample_idx, 'input'),
+        ('FP', sample_idx, 'model_input'),
+        ('FP', sample_idx, 'model_input', 'input'),
+        ('Int16', sample_idx, 'model_input'),
+        ('Int16', sample_idx, 'model_input', 'input'),
+        ('model', sample_idx, 'input'),
+    ]
+
+
+def _slice_model_input_sample(arr, sample_idx):
+    """Normalize common stored model-input layouts to NCHW single-sample."""
+    if arr.ndim == 5 and arr.shape[0] > sample_idx and arr.shape[1:3] == (1, 3):
+        return arr[sample_idx]
+    if arr.ndim == 4 and arr.shape[0] > 1 and arr.shape[1] == 3:
+        return arr[sample_idx:sample_idx + 1]
+    if arr.ndim == 3 and arr.shape[0] == 3:
+        return arr[None, ...]
+    return arr
+
+
+def load_deploy_model_input(dep, sample_idx):
+    """Find the model input tensor in the deploy pkl, if present."""
+    for key in _candidate_model_input_keys(sample_idx):
+        if key in dep:
+            return _slice_model_input_sample(to_numpy(dep[key]), sample_idx), key
+
+    for key in ('model_input', 'input_tensor'):
+        if key not in dep:
+            continue
+        arr = _slice_model_input_sample(to_numpy(dep[key]), sample_idx)
+        return arr, key
+
+    meta = dep.get(('meta', sample_idx))
+    if isinstance(meta, dict):
+        for key in ('model_input', 'input_tensor', 'input'):
+            if key in meta:
+                return _slice_model_input_sample(to_numpy(meta[key]), sample_idx), ('meta', sample_idx, key)
+
+    shape_matches = []
+    for key, value in dep.items():
+        if not (isinstance(key, tuple) and len(key) >= 2 and key[1] == sample_idx):
+            continue
+        arr = _slice_model_input_sample(to_numpy(value), sample_idx)
+        if arr.shape == (1, 3, 32, 32):
+            shape_matches.append((key, arr))
+    if shape_matches:
+        def shape_rank(item):
+            key, _ = item
+            key_text = repr(key).lower()
+            named = int(any(name in key_text for name in ('model', 'input', 'data', 'image')))
+            return (-named, repr(key))
+        key, arr = sorted(shape_matches, key=shape_rank)[0]
+        return arr, key
+
+    matches = []
+    for key, value in dep.items():
+        if not (isinstance(key, tuple) and len(key) >= 2 and key[1] == sample_idx):
+            continue
+        key_text = repr(key).lower()
+        if 'model_input' not in key_text and not ('model' in key_text and 'input' in key_text):
+            continue
+        arr = to_numpy(value)
+        if arr.ndim >= 2:
+            matches.append((key, arr))
+
+    if not matches:
+        return None, None
+
+    def rank(item):
+        key, arr = item
+        nchw3 = int(arr.ndim == 4 and arr.shape[0] == 1 and arr.shape[1] == 3)
+        return (-nchw3, arr.size, repr(key))
+
+    key, arr = sorted(matches, key=rank)[0]
+    return arr, key
+
+
+def diff_numeric(label, a, b):
+    a64 = a.astype(np.float64)
+    b64 = b.astype(np.float64)
+    d = a64 - b64
+    ad = np.abs(d)
+    n = a64.size
+    eq = int((a64 == b64).sum())
+    tol = 0.0 if (np.issubdtype(a.dtype, np.integer) and
+                  np.issubdtype(b.dtype, np.integer)) else max(1e-6, np.finfo(np.float32).eps)
+    n_close = int((ad <= tol).sum())
+    rmse = float(np.sqrt((d ** 2).mean()))
+    a_f = a64.flatten()
+    b_f = b64.flatten()
+    cos = float((a_f @ b_f) /
+                (np.linalg.norm(a_f) * np.linalg.norm(b_f) + 1e-12))
+    print(f'  [{label}] max_abs={ad.max():.6g}  mean_abs={ad.mean():.6g}  '
+          f'rmse={rmse:.6g}  exact={eq}/{n} ({100*eq/n:.2f}%)  '
+          f'close(<={tol:.0e})={n_close}/{n}  cos={cos:.6f}')
+    mask = ad > tol if tol > 0 else ad > 0
+    if mask.any():
+        for idx in np.argwhere(mask)[:3]:
+            t = tuple(idx)
+            print(f'      diff at {t}: pyrun={a64[t]:.9g} deploy={b64[t]:.9g} '
+                  f'diff={d[t]:.9g}')
+
+
+def compare_model_input(dep, sample_idx, dump_dir):
+    print(f'\n--- model input ---')
+    py_in, py_path, py_source = load_py_model_input(sample_idx, dump_dir)
+    dep_in, dep_key = load_deploy_model_input(dep, sample_idx)
+
+    if py_in is None:
+        print('  py_runner model input missing: expected model_input.npy under '
+              f'{dump_dir} or {os.path.join(EVAL_DIR, "test_inputs")}')
+    else:
+        print(f'  pyrun     : {py_in.shape} {py_in.dtype}  '
+              f'min={py_in.min():.6g} max={py_in.max():.6g} '
+              f'mean={py_in.mean():.6g}')
+        print(f'              file={py_path} ({py_source})')
+        if py_source != 'py_runner dump':
+            print('  [warn] py_runner dump model_input.npy not found; using the '
+                  'test_inputs file consumed by the simulator')
+
+    if dep_in is None:
+        print('  deploy model input missing in pkl. Expected a key like '
+              "('model_input', sample_idx), ('FP', sample_idx, 'model_input'), "
+              'or meta["model_input"].')
+        return
+
+    print(f'  deploy    : {dep_in.shape} {dep_in.dtype}  '
+          f'min={dep_in.min():.6g} max={dep_in.max():.6g} '
+          f'mean={dep_in.mean():.6g}')
+    print(f'              key={dep_key}')
+    if py_in is None:
+        return
+    if py_in.shape != dep_in.shape:
+        print(f'  MODEL INPUT SHAPE MISMATCH: pyrun {py_in.shape} vs deploy {dep_in.shape}')
+        return
+    diff_numeric('model input', py_in, dep_in)
+
+
+def load_qconv_input(npz, orig_conv, dump_dir, qconv_to_input):
+    """Load py_runner's logical input tensor for ``orig_conv``.
+
+    Returns (array, fname, all_input_fnames). ``array`` is NCHW int32.
+    """
+    fn = list(npz['func_names'])
+    atomics = [i for i in range(len(fn)) if str(npz['orig_conv'][i]) == orig_conv]
+    if not atomics:
+        return None, None, []
+
+    atomics.sort(key=lambda i: (int(npz['oc_id'][i]), int(npz['ic_id'][i])))
+    input_fnames = []
+    for i in atomics:
+        func = str(npz['func_names'][i])
+        fname = qconv_to_input.get(func)
+        if fname is not None:
+            input_fnames.append(fname)
+
+    unique = sorted(set(input_fnames))
+    if not unique:
+        return None, None, []
+
+    path = os.path.join(dump_dir, unique[0])
+    if not os.path.exists(path):
+        return None, unique[0], unique
+    return np.load(path).astype(np.int32), unique[0], unique
 
 
 def aggregate(npz, orig_conv, dump_dir, saturated=False):
@@ -211,6 +438,7 @@ def main():
         )
 
     dump_dir = resolve_dump_dir(sample_idx)
+    qconv_to_input = build_qconv_to_input_map(dump_dir)
 
     print('=' * 90)
     print(f'  PY_RUNNER : {dump_dir}')
@@ -218,6 +446,8 @@ def main():
     print(f'  CKPT      : {ckpt_alias}')
     print(f'  SAMPLE    : {sample_idx} (of {len(avail_samples)} stored)')
     print('=' * 90)
+
+    compare_model_input(dep, sample_idx, dump_dir)
 
     n_atomics_total = defaultdict(int)
     for i in range(len(npz['func_names'])):
@@ -232,7 +462,7 @@ def main():
         if key not in dep:
             print(f'  pkl key missing: {key}')
             continue
-        dep_out = dep[key].numpy().astype(np.int32)
+        dep_out = to_numpy(dep[key]).astype(np.int32)
 
         # Try plain sum first
         agg = aggregate(npz, orig_conv, dump_dir, saturated=False)
@@ -243,9 +473,34 @@ def main():
             print(f'  SHAPE MISMATCH: pyrun {agg.shape} vs deploy {dep_out.shape}')
             continue
 
-        print(f'  pyrun agg : {agg.shape} min={agg.min()} max={agg.max()} '
+        input_key = ('Int16', sample_idx, dep_name, 'input')
+        if input_key not in dep:
+            print(f'  input pkl key missing: {input_key}')
+        else:
+            py_in, input_fname, all_input_fnames = load_qconv_input(
+                npz, orig_conv, dump_dir, qconv_to_input)
+            if py_in is None:
+                detail = f' (candidate: {input_fname})' if input_fname else ''
+                print(f'  input pyrun missing for {orig_conv}{detail}')
+            else:
+                if len(all_input_fnames) > 1:
+                    print(f'  [warn] multiple candidate input dumps for {orig_conv}: '
+                          f'{all_input_fnames}; using {input_fname}')
+                dep_in = to_numpy(dep[input_key]).astype(np.int32)
+                if py_in.shape != dep_in.shape:
+                    print(f'  INPUT SHAPE MISMATCH: pyrun {py_in.shape} '
+                          f'vs deploy {dep_in.shape}  ({input_fname})')
+                else:
+                    print(f'  input pyrun : {py_in.shape} min={py_in.min()} '
+                          f'max={py_in.max()} mean={py_in.mean():.4f}  '
+                          f'file={input_fname}')
+                    print(f'  input deploy: {dep_in.shape} min={dep_in.min()} '
+                          f'max={dep_in.max()} mean={dep_in.mean():.4f}')
+                    diff('input quantized ', py_in, dep_in)
+
+        print(f'  output pyrun: {agg.shape} min={agg.min()} max={agg.max()} '
               f'mean={agg.mean():.4f}')
-        print(f'  deploy    : {dep_out.shape} min={dep_out.min()} max={dep_out.max()} '
+        print(f'  output deploy: {dep_out.shape} min={dep_out.min()} max={dep_out.max()} '
               f'mean={dep_out.mean():.4f}')
 
         diff('plain int32 sum    ', agg, dep_out)

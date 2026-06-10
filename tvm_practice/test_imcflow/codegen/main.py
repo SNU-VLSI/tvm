@@ -53,6 +53,9 @@ Examples:
   python main.py --model resnet8_subset06_pretrained_orig --driver-v2 \\
       --column-disable-config column_disable_config.json --random-seed 42
 
+  # Run with v2 driver pinned to IMCE row 0, column 1
+  python main.py --model one_conv_big --driver-v2 --fixed-imce-core 0,1
+
   # List available models
   python main.py --list-models
     """
@@ -141,6 +144,13 @@ Examples:
   )
 
   parser.add_argument(
+    "--fixed-imce-core",
+    type=str,
+    default=None,
+    help="Pin all driver-v2 qconv functions to one IMCE as h,w; h is 0-based row, w is 1-based IMCE column (example: 0,1)"
+  )
+
+  parser.add_argument(
     "--retry-disable",
     action="store_true",
     help="Disable retry on IMCFlow timeout (compile with -DRETRY_DISABLE)"
@@ -182,12 +192,34 @@ Examples:
 
   parser.add_argument(
     "--noise-mode",
-    choices=["sample", "greedy"],
+    choices=["sample", "greedy", "alias"],
     default=None,
-    help="ADC noise sampling mode. 'sample' (default): empirical inverse-CDF "
-         "draw from the per-(channel, wpattern, ref) distribution. 'greedy': "
-         "deterministic argmax over diff_bin (highest-probability noise level). "
+    help="ADC noise sampling mode. 'sample'/'alias' (default): empirical draw "
+         "from the distribution. 'greedy': deterministic argmax over diff_bin. "
          "Exported as IMCFLOW_NOISE_MODE for IMCU. Ignored by rtl_runner."
+  )
+
+  parser.add_argument(
+    "--noise-table-format",
+    choices=["auto", "wpattern_ref", "ref"],
+    default=None,
+    help="Noise CSV table format. 'auto' detects legacy <wpattern>_<ref> "
+         "rows vs signed-ref numeric rows. Ignored by rtl_runner."
+  )
+
+  parser.add_argument(
+    "--noise-granularity",
+    choices=["auto", "weight_bitplane", "input_bitplane"],
+    default=None,
+    help="Noise sampling granularity. ref requires input_bitplane; "
+         "wpattern_ref requires weight_bitplane. Ignored by rtl_runner."
+  )
+
+  parser.add_argument(
+    "--noise-seed",
+    type=int,
+    default=None,
+    help="Optional seed for py simulator stochastic noise sampling. Ignored by rtl_runner."
   )
 
   parser.add_argument(
@@ -280,6 +312,7 @@ Examples:
       column_disable_config=args.column_disable_config,
       num_disable_columns=args.num_disable_columns,
       random_seed=args.random_seed,
+      fixed_imce_core=args.fixed_imce_core,
       input_pattern=args.pattern if args.pattern else "default",
       dataset=args.dataset,
       sample=args.sample,
@@ -289,6 +322,9 @@ Examples:
       noise_csv=os.path.abspath(args.noise_csv) if args.noise_csv else None,
       noise_layout_json=os.path.abspath(args.noise_layout_json) if args.noise_layout_json else None,
       noise_mode=args.noise_mode,
+      noise_table_format=args.noise_table_format,
+      noise_granularity=args.noise_granularity,
+      noise_seed=args.noise_seed,
     )
   except ValueError as e:
     parser.print_help()

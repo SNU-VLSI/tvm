@@ -63,6 +63,7 @@ class PipelineOptions:
     column_disable_config: Optional[str] = None
     num_disable_columns: int = 8
     random_seed: Optional[int] = None
+    fixed_imce_core: Optional[str] = None
     input_pattern: str = "default"
     dataset: Optional[str] = None
     sample: Optional[int] = None
@@ -72,6 +73,9 @@ class PipelineOptions:
     noise_csv: Optional[str] = None
     noise_layout_json: Optional[str] = None
     noise_mode: Optional[str] = None
+    noise_table_format: Optional[str] = None
+    noise_granularity: Optional[str] = None
+    noise_seed: Optional[int] = None
     run_mode: RunMode = field(init=False)
 
     def __post_init__(self):
@@ -122,6 +126,10 @@ class PipelineOptions:
             raise ValueError(
                 "--column-disable-config requires --driver-v2."
             )
+        if self.fixed_imce_core and not self.use_v2:
+            raise ValueError(
+                "--fixed-imce-core requires --driver-v2."
+            )
 
         # Can't skip transform if stopping at transform
         if self.stop_at == PipelineStage.TRANSFORM and self.should_skip_transform():
@@ -147,6 +155,33 @@ class PipelineOptions:
                 deduped.append(r)
                 seen.add(r)
         self.ref_models = deduped
+
+        valid_noise_modes = (None, "sample", "greedy", "alias")
+        if self.noise_mode not in valid_noise_modes:
+            raise ValueError(
+                f"--noise-mode must be one of sample, greedy, alias; got {self.noise_mode!r}"
+            )
+        valid_formats = (None, "auto", "wpattern_ref", "ref")
+        if self.noise_table_format not in valid_formats:
+            raise ValueError(
+                "--noise-table-format must be one of auto, wpattern_ref, ref; "
+                f"got {self.noise_table_format!r}"
+            )
+        valid_granularities = (None, "auto", "weight_bitplane", "input_bitplane")
+        if self.noise_granularity not in valid_granularities:
+            raise ValueError(
+                "--noise-granularity must be one of auto, weight_bitplane, "
+                f"input_bitplane; got {self.noise_granularity!r}"
+            )
+        if self.noise_table_format == "ref" and self.noise_granularity == "weight_bitplane":
+            raise ValueError(
+                "--noise-table-format=ref requires --noise-granularity=input_bitplane"
+            )
+        if self.noise_table_format == "wpattern_ref" and self.noise_granularity == "input_bitplane":
+            raise ValueError(
+                "--noise-table-format=wpattern_ref requires "
+                "--noise-granularity=weight_bitplane"
+            )
 
     def should_run(self, stage: PipelineStage) -> bool:
         """Check if a given stage should run.

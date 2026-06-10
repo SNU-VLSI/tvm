@@ -12,6 +12,7 @@ Usage:
 
 import hashlib
 import os
+import shutil
 import socket
 import subprocess
 import time
@@ -169,6 +170,9 @@ class ImcFlowRunner(ABC):
             noise_csv: Optional[str] = None,
             noise_layout_json: Optional[str] = None,
             noise_mode: Optional[str] = None,
+            noise_table_format: Optional[str] = None,
+            noise_granularity: Optional[str] = None,
+            noise_seed: Optional[int] = None,
             sample_idx: Optional[int] = None) -> None:
         """Run the simulation
 
@@ -184,10 +188,17 @@ class ImcFlowRunner(ABC):
             noise_layout_json: Optional path to imce_map noise layout JSON
                 (concat_per_core.json). Forwarded as the 7th positional arg;
                 run_imcflow.py exports IMCFLOW_NOISE_LAYOUT_JSON for IMCU.
-            noise_mode: Optional ADC noise sampling mode. 'sample' (default
-                empirical) or 'greedy' (argmax over diff_bin). Forwarded as
-                the 8th positional arg; run_imcflow.py exports
+            noise_mode: Optional ADC noise sampling mode. 'sample'/'alias'
+                (default empirical) or 'greedy' (argmax over diff_bin).
+                Forwarded as the 8th positional arg; run_imcflow.py exports
                 IMCFLOW_NOISE_MODE for IMCU.
+            noise_table_format: Optional table format ('auto', 'wpattern_ref',
+                'ref'), forwarded to IMCFLOW_NOISE_TABLE_FORMAT.
+            noise_granularity: Optional sampling granularity ('auto',
+                'weight_bitplane', 'input_bitplane'), forwarded to
+                IMCFLOW_NOISE_GRANULARITY.
+            noise_seed: Optional stochastic noise seed, forwarded to
+                IMCFLOW_NOISE_SEED.
             sample_idx: Optional dataset sample index, forwarded as the 9th
                 positional arg → gem5 --sample-idx → host binary argv[6].
                 When set, host binary writes inputs/outputs under
@@ -199,8 +210,10 @@ class ImcFlowRunner(ABC):
         print(f"\n--- Running {self.display_name} ---")
 
         # Create runner-specific output directory
-        output_dir = self.get_output_path(test_name=eval_dir)
+        output_dir = self.get_output_path(test_name=eval_dir, sample_idx=sample_idx)
         os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+        if self.name == "py_runner":
+            self._dump_model_input(eval_dir, output_dir, sample_idx)
 
         # Create runner-specific log directory in test's logs folder
         runner_log_dir = os.path.join(eval_dir, "logs", self.name)
@@ -222,13 +235,17 @@ class ImcFlowRunner(ABC):
         env = os.environ.copy()
         env["SRAM_BACKDOOR"] = sram_backdoor
 
-        # run.sh positional args: binary, gdb, test_name, log_dir, imc_size, noise_csv, noise_layout_json, noise_mode, sample_idx
-        # Empty string in slots 6/7/8/9 means "skip"; run.sh omits the corresponding --noise-*/--sample-idx flag.
+        # run.sh positional args: binary, gdb, test_name, log_dir, imc_size,
+        # noise_csv, noise_layout_json, noise_mode, sample_idx,
+        # noise_table_format, noise_granularity, noise_seed. Empty strings mean
+        # "skip"; run.sh omits the corresponding --noise-* flag.
         sample_idx_str = "" if sample_idx is None else str(int(sample_idx))
+        noise_seed_str = "" if noise_seed is None else str(int(noise_seed))
         sim_command = ["direnv", "exec", ".", "./run.sh",
                        binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size,
                        noise_csv or "", noise_layout_json or "", noise_mode or "",
-                       sample_idx_str]
+                       sample_idx_str, noise_table_format or "",
+                       noise_granularity or "", noise_seed_str]
 
         try:
             self._stream_command_output(
@@ -265,6 +282,33 @@ class ImcFlowRunner(ABC):
     def cleanup(self) -> None:
         """Perform any cleanup after running (optional, default is no-op)"""
         pass
+
+    def _dump_model_input(self, eval_dir: str, output_path: str,
+                          sample_idx: Optional[int]) -> None:
+        """Copy the model input consumed by py_runner into its dump directory."""
+        if os.path.isabs(eval_dir):
+            abs_eval_dir = eval_dir
+        else:
+            codegen_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
+            abs_eval_dir = os.path.abspath(os.path.join(codegen_dir, eval_dir))
+
+        test_inputs_dir = os.path.join(abs_eval_dir, "test_inputs")
+        candidates = []
+        if sample_idx is not None:
+            candidates.append(os.path.join(
+                test_inputs_dir, f"sample_{int(sample_idx)}", "model_input.npy"))
+        candidates.append(os.path.join(test_inputs_dir, "model_input.npy"))
+
+        src = next((path for path in candidates if os.path.exists(path)), None)
+        if src is None:
+            print("[warn] model_input.npy not found under test_inputs; "
+                  "py_runner input dump skipped")
+            return
+
+        dst = os.path.join(os.path.dirname(output_path), "model_input.npy")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"Model input dump saved to: {dst}")
 
     def _stream_command_output(self, command: list, cwd: str, log_path: str,
                                 timeout: Optional[int] = None, env: Optional[dict] = None) -> None:
@@ -411,6 +455,9 @@ class RTLRunner(ImcFlowRunner):
             noise_csv: Optional[str] = None,
             noise_layout_json: Optional[str] = None,
             noise_mode: Optional[str] = None,
+            noise_table_format: Optional[str] = None,
+            noise_granularity: Optional[str] = None,
+            noise_seed: Optional[int] = None,
             sample_idx: Optional[int] = None) -> None:
         """Run the RTL simulation with automatic port allocation.
 
@@ -434,6 +481,15 @@ class RTLRunner(ImcFlowRunner):
                   f"(RTL path does not exercise the Python IMCU noise model)")
         if noise_mode:
             print(f"[RTLRunner] Ignoring --noise-mode={noise_mode} (RTL path "
+                  f"does not exercise the Python IMCU noise model)")
+        if noise_table_format:
+            print(f"[RTLRunner] Ignoring --noise-table-format={noise_table_format} "
+                  f"(RTL path does not exercise the Python IMCU noise model)")
+        if noise_granularity:
+            print(f"[RTLRunner] Ignoring --noise-granularity={noise_granularity} "
+                  f"(RTL path does not exercise the Python IMCU noise model)")
+        if noise_seed is not None:
+            print(f"[RTLRunner] Ignoring --noise-seed={noise_seed} (RTL path "
                   f"does not exercise the Python IMCU noise model)")
         if sample_idx is not None:
             print(f"[RTLRunner] Ignoring sample_idx={sample_idx} (RTL path "

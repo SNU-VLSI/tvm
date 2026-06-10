@@ -82,16 +82,48 @@ def _print_model(result_dir, mod, param_dict, mod_name):
 
 
 # ========================================================================
-# Random IMCE assignment helpers
+# IMCE assignment helpers
 # ========================================================================
 
-def _build_random_func_to_imce(mod, seed=None):
-    """Assign each imcflow function a random IMCE.
+def _parse_fixed_imce_core(fixed_imce_core):
+    """Parse ``h,w`` into an IMCE linear id.
+
+    The CLI convention matches column-disable JSON: h is a 0-based IMCE row,
+    and w is a 1-based IMCE column. PnR still uses col 0 for INODE, so IMCE
+    columns are represented as 1..IMCE_W_NUM at the Coord layer.
+    """
+    if fixed_imce_core is None:
+        return None
+    try:
+        h_str, w_str = str(fixed_imce_core).split(",", 1)
+        row = int(h_str)
+        w_1based = int(w_str)
+    except Exception as exc:
+        raise ValueError(
+            f"--fixed-imce-core expects 'h,w' (example: '0,1'), got {fixed_imce_core!r}"
+        ) from exc
+
+    if not (0 <= row < DevConfig.IMCE_H_NUM):
+        raise ValueError(
+            f"--fixed-imce-core row {row} out of range [0, {DevConfig.IMCE_H_NUM})"
+        )
+    if not (1 <= w_1based <= DevConfig.IMCE_W_NUM):
+        raise ValueError(
+            f"--fixed-imce-core w {w_1based} out of range [1, {DevConfig.IMCE_W_NUM}]"
+        )
+    return row * DevConfig.IMCE_W_NUM + (w_1based - 1)
+
+
+def _build_func_to_imce(mod, seed=None, fixed_imce_core=None):
+    """Assign each imcflow function to an IMCE.
 
     The candidate IMCE pool is restricted to ``DevConfig().get_active_imce_ids()``,
     which honors the column-disable JSON: when the JSON only mentions a subset of
     cores, that subset becomes the active pool. Multiple functions may collide on
     the same IMCE; the per-function PnR runs serialize execution.
+
+    When ``fixed_imce_core`` is provided, every imcflow function is pinned to
+    that single IMCE instead of randomly sampling from the active pool.
 
     Returns:
         func_to_imce: dict  func_name (str) -> imce_linear_id (int)
@@ -99,11 +131,24 @@ def _build_random_func_to_imce(mod, seed=None):
     rng = random.Random(seed)
     active_ids = DevConfig().get_active_imce_ids()
     print(f"[v2] Active IMCE set: {active_ids}")
+    fixed_imce_linear = _parse_fixed_imce_core(fixed_imce_core)
+    if fixed_imce_linear is not None:
+        if fixed_imce_linear not in active_ids:
+            raise ValueError(
+                f"--fixed-imce-core {fixed_imce_core!r} maps to linear "
+                f"{fixed_imce_linear}, but active IMCE set is {active_ids}"
+            )
+        row = fixed_imce_linear // DevConfig.IMCE_W_NUM
+        col_in_imce = fixed_imce_linear % DevConfig.IMCE_W_NUM
+        print(f"[v2] Fixed IMCE assignment: IMCE({row},{col_in_imce}) "
+              f"linear={fixed_imce_linear}")
     func_to_imce = {}
     for gv in sorted(mod.functions.keys(), key=lambda g: g.name_hint):
         func = mod[gv]
         if isinstance(func, relay.Function) and isImcflowFunc(func, mod):
-            func_to_imce[gv.name_hint] = rng.choice(active_ids)
+            func_to_imce[gv.name_hint] = (
+                fixed_imce_linear if fixed_imce_linear is not None else rng.choice(active_ids)
+            )
     return func_to_imce
 
 
@@ -292,6 +337,7 @@ def compile_for_imcflow_v2(
     save_intermediate=True,
     random_seed=None,
     noise_layout_json_path=None,
+    fixed_imce_core=None,
 ):
     """Single-phase compilation for IMCFlow with column-disable support.
 
@@ -305,6 +351,9 @@ def compile_for_imcflow_v2(
         skip_codegen: if True, skip codegen + graph executor generation.
         save_intermediate: if True, dump intermediate relay at each step.
         random_seed: optional seed for reproducible IMCE assignment.
+        fixed_imce_core: optional ``"h,w"`` core spec. h is 0-based IMCE row
+            and w is 1-based IMCE column. If set, all imcflow functions are
+            pinned to that IMCE instead of using random assignment.
         noise_layout_json_path: optional path to imce_map noise layout JSON
             (concat_per_core.json). Used ONLY for fail-fast cross-validation
             against ``column_disable_config_path`` at compile start — the JSON
@@ -399,9 +448,13 @@ def compile_for_imcflow_v2(
     _save("07_after_annotate")
 
     # ------------------------------------------------------------------
-    # 8. Random IMCE assignment
+    # 8. IMCE assignment
     # ------------------------------------------------------------------
-    func_to_imce = _build_random_func_to_imce(mod, seed=random_seed)
+    func_to_imce = _build_func_to_imce(
+        mod,
+        seed=random_seed,
+        fixed_imce_core=fixed_imce_core,
+    )
     if save_intermediate:
         with open(f"{output_dir}/func_to_imce.txt", "w") as f:
             pprint.pprint(func_to_imce, stream=f)
