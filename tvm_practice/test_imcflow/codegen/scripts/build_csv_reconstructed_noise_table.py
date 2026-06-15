@@ -30,6 +30,7 @@ Usage:
 
 import os, sys, argparse
 import numpy as np
+import pandas as pd
 import torch
 
 CODEGEN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,13 +45,95 @@ from diagnose_noise_per_qconv import (
 )
 from build_aggregated_noise_table import (
     AggregatedNoiseAccumulator, load_weights, parse_sample_range,
+    iter_existing_sample_dirs,
 )
 
-NOISE_DIR = '/root/project/CIM/noise/noise_df/B2_out/N32'
-LAYOUT_JSON = os.path.join(NOISE_DIR, 'concat_per_core.json')
-NPZ_PATH = os.path.join(CODEGEN, 'eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz')
+DEFAULT_NOISE_DIR = '/root/project/CIM/noise/noise_df/B2_out/N32'
+DEFAULT_LAYOUT_JSON = os.path.join(DEFAULT_NOISE_DIR, 'concat_per_core.json')
+DEFAULT_NPZ_PATH = os.path.join(CODEGEN, 'eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz')
 DEFAULT_CSV = os.path.join(CIM_DIR,
     'noise/noise_df/B2_out_refine_fixed_full_v1_partial/N32/B2_noise_matrix_per_ch_concat.csv')
+
+
+def _detect_csv_format(csv_path):
+    first = str(pd.read_csv(csv_path, header=[0, 1], index_col=0, nrows=1).index[0])
+    if '_' in first:
+        return 'wpattern_ref'
+    try:
+        float(first)
+    except ValueError as exc:
+        raise ValueError(
+            f"Cannot detect noise CSV format from first row index {first!r}"
+        ) from exc
+    return 'ref'
+
+
+def _parse_noise_columns(raw, label):
+    diff_bins_lv = raw.columns.get_level_values(0).astype(float).to_numpy()
+    channels_lv = raw.columns.get_level_values(1).astype(int).to_numpy()
+    uniq_channels = sorted(set(channels_lv.tolist()))
+    if uniq_channels != list(range(len(uniq_channels))):
+        raise ValueError(f"{label} CSV channels must be contiguous 0..C-1; got {uniq_channels}")
+    mask0 = channels_lv == 0
+    diff_bins = diff_bins_lv[mask0]
+    for ch in uniq_channels[1:]:
+        m = channels_lv == ch
+        if not (diff_bins_lv[m] == diff_bins).all():
+            raise ValueError(f"{label} channel {ch} has different diff_bin order from channel 0")
+    return diff_bins, channels_lv, uniq_channels
+
+
+def load_ref_noise_csv(csv_path):
+    raw = pd.read_csv(csv_path, header=[0, 1], index_col=0)
+    refs = np.asarray([float(idx) for idx in raw.index], dtype=np.float64)
+    order = np.argsort(refs)
+    raw = raw.iloc[order]
+    refs = refs[order]
+
+    diff_bins, channels_lv, uniq_channels = _parse_noise_columns(raw, 'ref')
+    C = len(uniq_channels)
+    R = raw.shape[0]
+    K = len(diff_bins)
+    probs = np.zeros((C, R, K), dtype=np.float64)
+    raw_np = raw.to_numpy(dtype=np.float64)
+    for ch in uniq_channels:
+        probs[ch] = raw_np[:, channels_lv == ch]
+
+    row_sum = probs.sum(axis=-1, keepdims=True)
+    if np.any(row_sum <= 0):
+        bad = np.argwhere(row_sum.squeeze(-1) <= 0)[:10].tolist()
+        raise ValueError(f"ref CSV has zero-probability rows at {bad}")
+    probs = probs / row_sum
+
+    return {
+        'table_format': 'ref',
+        'probs': probs,
+        'diff_bins': diff_bins,
+        'refs': refs,
+        'n_refs': R,
+        'n_wpatterns': 1,
+    }
+
+
+def load_noise_csv_auto(csv_path, table_format='auto'):
+    detected = _detect_csv_format(csv_path)
+    if table_format == 'auto':
+        table_format = detected
+    if table_format != detected:
+        raise ValueError(
+            f"Requested --noise-table-format={table_format}, but CSV looks like {detected}"
+        )
+    if table_format == 'ref':
+        return load_ref_noise_csv(csv_path)
+    data = load_noise_csv(csv_path)
+    data['table_format'] = 'wpattern_ref'
+    return data
+
+
+def resolve_csv_path(csv_path, noise_dir):
+    if os.path.isabs(csv_path) or os.path.dirname(csv_path):
+        return csv_path
+    return os.path.join(noise_dir, csv_path)
 
 
 def _build_alias_tables(probs_csv, diff_bins):
@@ -134,6 +217,11 @@ def sample_csv_noise(adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
     Returns:
         recon_noise: (n_trials, OC, OH, OW) int32 — reconstructed noise at int16 output level
     """
+    if csv_data.get('table_format') == 'ref':
+        return sample_ref_csv_noise(
+            adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
+            n_trials=n_trials, alias_tables=alias_tables)
+
     A, W, OC, OH, OW = adc_codes_all.shape
     diff_bins = csv_data['diff_bins']  # (K,)
     n_refs = csv_data['n_refs']
@@ -192,6 +280,64 @@ def sample_csv_noise(adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
     return recon_noise.astype(np.int32)
 
 
+def _nearest_ref_indices(values, refs):
+    vals = np.asarray(values, dtype=np.float64)
+    hi = np.searchsorted(refs, vals, side='left')
+    hi = np.clip(hi, 0, refs.size - 1)
+    lo = np.clip(hi - 1, 0, refs.size - 1)
+    return np.where(np.abs(vals - refs[hi]) < np.abs(vals - refs[lo]), hi, lo).astype(np.int64)
+
+
+def sample_ref_csv_noise(adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
+                         n_trials=1, alias_tables=None):
+    """Sample reconstructed noise from signed-ref/input-bitplane CSV.
+
+    CSV rows are signed refs. For each activation bitplane:
+      signed_ref = sum_wbit(adc_code * PSTEP * W_SCALE[wbit])
+      noise      = sample P(noise | pseudo_ch, nearest signed_ref)
+      output_noise += noise * (1 << abit)
+    """
+    A, W, OC, OH, OW = adc_codes_all.shape
+    refs = csv_data['refs']
+    diff_bins = csv_data['diff_bins']
+    N = OH * OW
+
+    if alias_tables is None:
+        alias_tables = _build_alias_tables(csv_data['probs'], diff_bins)
+    alias_prob, alias_idx, alias_valid = alias_tables
+
+    adc_codes = adc_codes_all.astype(np.float64)
+    w_scale = np.asarray(W_SCALE, dtype=np.float64).reshape(1, W, 1, 1, 1)
+    signed_refs = (adc_codes * PSTEP * w_scale).sum(axis=1)  # (A, OC, OH, OW)
+
+    recon_noise = np.zeros((n_trials, OC, OH, OW), dtype=np.float64)
+    for abit in range(A):
+        abit_scale = 1 << abit
+        skip_2d = skip_mask_all[abit]
+        bit_noise_flat = np.zeros((n_trials, OC, N), dtype=np.float64)
+
+        for oc_i in range(OC):
+            pch = pseudo_chs[oc_i]
+            rows = _nearest_ref_indices(signed_refs[abit, oc_i].ravel(), refs)
+            unique_rows, inverse = np.unique(rows, return_inverse=True)
+            for ui, row in enumerate(unique_rows):
+                if not alias_valid[pch, row]:
+                    continue
+                elem_mask = inverse == ui
+                n_elem = int(elem_mask.sum())
+                total_samples = n_trials * n_elem
+                sampled = _alias_sample(
+                    alias_prob[pch, row], alias_idx[pch, row],
+                    diff_bins, rng, total_samples)
+                bit_noise_flat[:, oc_i, elem_mask] = sampled.reshape(n_trials, n_elem)
+
+        bit_noise = bit_noise_flat.reshape(n_trials, OC, OH, OW)
+        bit_noise[:, :, skip_2d] = 0.0
+        recon_noise += (bit_noise * abit_scale).astype(np.int64)
+
+    return recon_noise.astype(np.int32)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Build CSV-reconstructed noise table')
     parser.add_argument('--dump-dir', required=True, nargs='+')
@@ -199,6 +345,15 @@ def main():
     parser.add_argument('--output', default='csv_reconstructed_noise_table.npz')
     parser.add_argument('--checkpoint', default=None)
     parser.add_argument('--csv', default=DEFAULT_CSV, help='Per-channel noise CSV path')
+    parser.add_argument('--noise-table-format', default='auto',
+                        choices=['auto', 'wpattern_ref', 'ref'],
+                        help='CSV format. auto detects from row labels.')
+    parser.add_argument('--noise-dir', default=DEFAULT_NOISE_DIR,
+                        help='Directory containing concat_per_core.json')
+    parser.add_argument('--layout-json', default=None,
+                        help='Path to concat_per_core.json. Defaults to --noise-dir/concat_per_core.json')
+    parser.add_argument('--npz-path', default=DEFAULT_NPZ_PATH,
+                        help='Path to psum_imcu_column_map.npz')
     parser.add_argument('--n-mc-trials', type=int, default=50,
                         help='Number of MC noise samples per output element (default: 50)')
     parser.add_argument('--n-ref-bins', type=int, default=200)
@@ -215,6 +370,12 @@ def main():
 
     dump_dirs = [os.path.join(CODEGEN, d) if not os.path.isabs(d) else d
                  for d in args.dump_dir]
+    noise_dir = args.noise_dir if os.path.isabs(args.noise_dir) else os.path.join(CODEGEN, args.noise_dir)
+    layout_json = args.layout_json or os.path.join(noise_dir, 'concat_per_core.json')
+    if not os.path.isabs(layout_json):
+        layout_json = os.path.join(CODEGEN, layout_json)
+    npz_path = args.npz_path if os.path.isabs(args.npz_path) else os.path.join(CODEGEN, args.npz_path)
+    csv_path = resolve_csv_path(args.csv, noise_dir)
     sample_range = parse_sample_range(args.samples)
     rng = np.random.default_rng(args.seed)
 
@@ -223,7 +384,11 @@ def main():
         print(f"  {d}")
     print(f"Samples: {sample_range[0]}..{sample_range[-1]} ({len(sample_range)})")
     print(f"MC trials per element: {args.n_mc_trials}")
-    print(f"CSV: {args.csv}")
+    print(f"CSV: {csv_path}")
+    print(f"CSV format: {args.noise_table_format}")
+    print(f"Noise dir: {noise_dir}")
+    print(f"Layout JSON: {layout_json}")
+    print(f"NPZ path: {npz_path}")
 
     # Resolve checkpoint
     if args.checkpoint:
@@ -238,12 +403,13 @@ def main():
     print(f"Checkpoint: {ckpt_path}")
 
     print("Loading metadata...")
-    atomics = load_atomic_info(NPZ_PATH)
-    pseudo_map, n_per_core, n_pseudo = load_pseudo_ch_map(LAYOUT_JSON)
+    atomics = load_atomic_info(npz_path)
+    pseudo_map, n_per_core, n_pseudo = load_pseudo_ch_map(layout_json)
     weights = load_weights(ckpt_path)
-    csv_data = load_noise_csv(args.csv)
+    csv_data = load_noise_csv_auto(csv_path, args.noise_table_format)
 
     print(f"  CSV: probs shape {csv_data['probs'].shape}, "
+          f"format={csv_data['table_format']}, "
           f"diff_bins: [{csv_data['diff_bins'][0]:.0f}..{csv_data['diff_bins'][-1]:.0f}]")
 
     print("Building alias tables for fast sampling...")
@@ -277,45 +443,54 @@ def main():
         # Auto-detect from subset
         print("Scanning subset for range estimation...")
         ref_samples, noise_samples = [], []
-        for dump_dir in dump_dirs:
-            for s_idx in sample_range[:5]:
-                sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
-                if not os.path.isdir(sample_dir):
+        n_scanned_samples = 0
+        for dump_dir, s_idx, sample_dir in iter_existing_sample_dirs(dump_dirs, sample_range):
+            if n_scanned_samples >= 5:
+                break
+            n_scanned_samples += 1
+            qconv_to_input = build_qconv_to_input_map(sample_dir)
+            for a in atomics:
+                orig = a['orig_conv']
+                kh, st, pad, _ = CONV_PARAMS[orig]
+                input_fname = qconv_to_input.get(a['func'])
+                if input_fname is None:
                     continue
-                qconv_to_input = build_qconv_to_input_map(sample_dir)
-                for a in atomics:
-                    orig = a['orig_conv']
-                    kh, st, pad, _ = CONV_PARAMS[orig]
-                    input_fname = qconv_to_input.get(a['func'])
-                    if input_fname is None:
-                        continue
-                    out_npy = None
-                    for f in os.listdir(sample_dir):
-                        if f.endswith(f'_{a["func"]}.npy'):
-                            out_npy = os.path.join(sample_dir, f)
-                            break
-                    if out_npy is None:
-                        continue
-                    try:
-                        qin = np.load(os.path.join(sample_dir, input_fname))
-                        dump = np.load(out_npy)
-                    except Exception:
-                        continue
-                    ic_lo = a['ic_id'] * a['ic_block']
-                    ic_hi = ic_lo + a['ic_size']
-                    w_full = weights[orig]
-                    oc_lo = a['oc_id'] * a['oc_block']
-                    oc_hi = oc_lo + a['oc_size']
-                    w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
-                    clean_out, _, _ = noise_free_qconv(
-                        qin[:, ic_lo:ic_hi, :, :], w_tile,
-                        kernel_h=kh, stride=st, padding=pad, device=args.device)
-                    clean_sq = clean_out.squeeze(0)
-                    dump_sq = dump[0, 0]
-                    dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
-                    obs = signed_int16(dump_sel - clean_sq)
-                    ref_samples.append(clean_sq.ravel())
-                    noise_samples.append(obs.ravel())
+                out_npy = None
+                for f in os.listdir(sample_dir):
+                    if f.endswith(f'_{a["func"]}.npy'):
+                        out_npy = os.path.join(sample_dir, f)
+                        break
+                if out_npy is None:
+                    continue
+                try:
+                    qin = np.load(os.path.join(sample_dir, input_fname))
+                    dump = np.load(out_npy)
+                except Exception:
+                    continue
+                ic_lo = a['ic_id'] * a['ic_block']
+                ic_hi = ic_lo + a['ic_size']
+                w_full = weights[orig]
+                oc_lo = a['oc_id'] * a['oc_block']
+                oc_hi = oc_lo + a['oc_size']
+                w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
+                clean_out, _, _ = noise_free_qconv(
+                    qin[:, ic_lo:ic_hi, :, :], w_tile,
+                    kernel_h=kh, stride=st, padding=pad, device=args.device)
+                clean_sq = clean_out.squeeze(0)
+                dump_sq = dump[0, 0]
+                dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
+                obs = signed_int16(dump_sel - clean_sq)
+                ref_samples.append(clean_sq.ravel())
+                noise_samples.append(obs.ravel())
+        if not ref_samples:
+            checked = []
+            for dump_dir in dump_dirs:
+                checked.extend(os.path.join(dump_dir, f'sample_{s}') for s in sample_range[:5])
+            raise RuntimeError(
+                "No usable qconv dump pairs found while estimating ranges. "
+                "Check that --dump-dir points to the directory containing sample_<N> "
+                f"subdirectories. First checked paths: {checked[:5]}"
+            )
 
         all_ref = np.concatenate(ref_samples)
         all_noise = np.concatenate(noise_samples)
@@ -339,10 +514,9 @@ def main():
     n_done = 0
     for dd_idx, dump_dir in enumerate(dump_dirs):
         print(f"\n--- Dir {dd_idx+1}/{len(dump_dirs)}: {os.path.basename(dump_dir)} ---")
-        for s_idx in sample_range:
-            sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
-            if not os.path.isdir(sample_dir):
-                continue
+        sample_items = [(s_idx, sample_dir)
+                        for dd, s_idx, sample_dir in iter_existing_sample_dirs([dump_dir], sample_range)]
+        for s_idx, sample_dir in sample_items:
             qconv_to_input = build_qconv_to_input_map(sample_dir)
 
             for a in atomics:

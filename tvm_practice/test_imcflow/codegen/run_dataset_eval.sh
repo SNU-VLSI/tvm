@@ -68,6 +68,7 @@ show_help() {
     echo "Environment variables:"
     echo "  CKPT           Checkpoint alias for debug dump subdir (debugging/fpga/<CKPT>)"
     echo "  DEBUG_EXE=1    Enable debug node dump fetch from remote"
+    echo "  PRESERVE_DEBUG_DUMPS=1  Keep existing local sample_* and remote debug_nodes after fetch"
     echo ""
     echo "Remote configuration is loaded from .env file."
     exit 0
@@ -219,6 +220,7 @@ echo "Remote host: $REMOTE_HOST"
 echo "Ckpt alias:       ${CKPT:-<none>}"
 echo "Log level: $CONSOLE_LOG_LEVEL"
 echo "Quiet mode: $QUIET_MODE"
+echo "Preserve debug dumps: ${PRESERVE_DEBUG_DUMPS:-0}"
 echo "Result file (remote): $REMOTE_RESULT_PATH"
 echo "Result dir (local):   $LOCAL_RESULT_DIR/"
 echo "=========================================="
@@ -331,9 +333,11 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
     echo "Step 6.5: Fetching debug_nodes from remote (DEBUG_EXE=1)..."
     echo ""
 
-    # Clean only sample_* from target directory, preserving run_* from repeat_dataset_eval
+    # Clean only sample_* from target directory, preserving run_* from repeat_dataset_eval.
     mkdir -p "$LOCAL_DEBUG_DIR"
-    if compgen -G "$LOCAL_DEBUG_DIR/sample_*" > /dev/null; then
+    if [[ "${PRESERVE_DEBUG_DUMPS:-0}" == "1" ]]; then
+        echo "Preserving existing local sample_* in $LOCAL_DEBUG_DIR/ ..."
+    elif compgen -G "$LOCAL_DEBUG_DIR/sample_*" > /dev/null; then
         echo "Removing stale sample_* in $LOCAL_DEBUG_DIR/ ..."
         rm -rf "$LOCAL_DEBUG_DIR"/sample_*
     fi
@@ -346,11 +350,15 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
     if [ $? -eq 0 ]; then
         echo "✅ debug_nodes fetched to $LOCAL_DEBUG_DIR/"
 
-        # Cleanup on FPGA to prevent SD card wear
-        echo "Cleaning up debug_nodes on remote..."
-        sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-            "rm -rf $REMOTE_DEBUG_DIR/*"
-        echo "✅ Remote debug_nodes cleaned up"
+        if [[ "${PRESERVE_DEBUG_DUMPS:-0}" == "1" ]]; then
+            echo "Preserving remote debug_nodes."
+        else
+            # Cleanup on FPGA to prevent SD card wear
+            echo "Cleaning up debug_nodes on remote..."
+            sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
+                "rm -rf $REMOTE_DEBUG_DIR/*"
+            echo "✅ Remote debug_nodes cleaned up"
+        fi
     else
         echo "⚠️  Failed to fetch debug_nodes (remote may not have any)"
     fi

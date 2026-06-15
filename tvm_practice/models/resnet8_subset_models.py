@@ -305,10 +305,20 @@ def getModel_from_pretrained_weight(iH=32, iW=32, until_relay=None):
 
   out, var_dict = getModel_([1, 3, iH, iW], until_relay=until_relay)
 
+  direct_checkpoint_path = os.getenv("CKPT_PATH", "").strip()
+  direct_checkpoint_alias = os.getenv("CKPT", "").strip() or None
+
   # Select checkpoint based on vmode
   vmode = get_default_vmode()
   board = os.getenv("BOARD", "UNKNOWN_BOARD")
-  if board == "B1":
+  ckpt_key = None
+  if direct_checkpoint_path:
+    checkpoint_path = os.path.abspath(os.path.expanduser(direct_checkpoint_path))
+    if not os.path.isfile(checkpoint_path):
+      raise FileNotFoundError(f"CKPT_PATH does not exist or is not a file: {checkpoint_path}")
+    ckpt_key = direct_checkpoint_alias
+    print(f"[INFO] Loading checkpoint from CKPT_PATH={checkpoint_path}")
+  elif board == "B1":
     checkpoint_paths = {
       VMode.FULL: '/root/project/CIM/trained_models/image_classification/NAT/prange_full_psum_duplication_1/greedy_ch_split/2026-Feb-12-20-38-13/imcflow/2026-Feb-26-21-34-16/checkpoint.pth.tar',
       VMode.HALF: '/root/project/CIM/trained_models/image_classification/NAT/prange_half_psum_duplication_1/B1/col_disabled/imcflow/2026-Apr-21-11-45-31/checkpoint.pth.tar',
