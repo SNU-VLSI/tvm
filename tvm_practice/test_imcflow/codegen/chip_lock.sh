@@ -11,7 +11,8 @@
 #   ...  chip work ...
 #   chip_lock_release
 #
-# Requires: REMOTE_HOST, REMOTE_PORT, REMOTE_USER, REMOTE_PASSWORD (from .env)
+# Requires: REMOTE_HOST, REMOTE_PORT, REMOTE_USER (from .env or caller env).
+# REMOTE_AUTH_METHOD=key uses authorized_keys. REMOTE_AUTH_METHOD=password uses sshpass.
 
 CHIP_LOCKFILE="/tmp/imcflow_user.lock"
 
@@ -35,7 +36,11 @@ _chip_lock_get_user_id() {
 }
 
 _chip_lock_ssh() {
-    sshpass -p "$REMOTE_PASSWORD" ssh -o ConnectTimeout=10 -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$1"
+    if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
+        sshpass -p "$REMOTE_PASSWORD" ssh -o ConnectTimeout=10 -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$1"
+    else
+        ssh -o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$1"
+    fi
 }
 
 # Check if stale: lock exists but no chip-related process is running on remote

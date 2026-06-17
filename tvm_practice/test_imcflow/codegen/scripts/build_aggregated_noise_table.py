@@ -279,7 +279,8 @@ def write_ref_only_csv(acc, csv_path, layout_json, layout_output=None, metadata_
         "csv_path": csv_path,
         "layout_json": layout_output,
         "table_format": "ref",
-        "granularity": "input_bitplane",
+        "granularity": "output",
+        "noise_unit": "output",
         "source": "build_aggregated_noise_table.py chip debug dumps",
     })
     with open(metadata_output, "w") as f:

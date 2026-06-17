@@ -289,21 +289,18 @@ $LABELS_PATH \
 $SAMPLES_ARG \
 $REMOTE_RESULT_PATH; \
 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1"
-    echo "[CMD] sshpass -p \"$REMOTE_PASSWORD\" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \"$REMOTE_CMD\""
+    echo "[CMD] $(scan_ssh_display) \"$REMOTE_CMD\""
 
     if [[ "$QUIET_MODE" == true ]]; then
         echo "(Quiet mode: remote output suppressed, results saved to $REMOTE_RESULT_PATH)"
-        sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-            "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" > /dev/null 2>&1
+        scan_ssh "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" > /dev/null 2>&1
         EVAL_STATUS=$?
     elif [[ "$CONSOLE_LOG_LEVEL" == "INFO" ]]; then
         echo "(INFO mode: showing progress bar only)"
-        sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-            "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" 2>&1 | "$SCRIPT_DIR/scripts/filter_eval_output.sh"
+        scan_ssh "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status" 2>&1 | "$SCRIPT_DIR/scripts/filter_eval_output.sh"
         EVAL_STATUS=${PIPESTATUS[0]}
     else
-        sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-            "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status"
+        scan_ssh "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status"
         EVAL_STATUS=$?
     fi
     if [ $EVAL_STATUS -eq 0 ]; then
@@ -344,8 +341,7 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
 
     # scp -r all sample folders from FPGA to host
     echo "[CMD] scp -r remote:$REMOTE_DEBUG_DIR/* -> $LOCAL_DEBUG_DIR/"
-    sshpass -p "$REMOTE_PASSWORD" scp -r -P $REMOTE_PORT \
-        "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DEBUG_DIR/*" "$LOCAL_DEBUG_DIR/"
+    scan_scp -r "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DEBUG_DIR/*" "$LOCAL_DEBUG_DIR/"
 
     if [ $? -eq 0 ]; then
         echo "✅ debug_nodes fetched to $LOCAL_DEBUG_DIR/"
@@ -355,8 +351,7 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
         else
             # Cleanup on FPGA to prevent SD card wear
             echo "Cleaning up debug_nodes on remote..."
-            sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-                "rm -rf $REMOTE_DEBUG_DIR/*"
+            scan_ssh "rm -rf $REMOTE_DEBUG_DIR/*"
             echo "✅ Remote debug_nodes cleaned up"
         fi
     else
@@ -379,9 +374,8 @@ else
     else
         LOCAL_RESULT_FILE="$LOCAL_RESULT_DIR/dataset_results_$(date +%Y%m%d_%H%M%S).txt"
     fi
-    echo "[CMD] sshpass -p \"$REMOTE_PASSWORD\" scp -P $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST:$REMOTE_RESULT_PATH $LOCAL_RESULT_FILE"
-    sshpass -p "$REMOTE_PASSWORD" scp -P $REMOTE_PORT \
-        "$REMOTE_USER@$REMOTE_HOST:$REMOTE_RESULT_PATH" "$LOCAL_RESULT_FILE"
+    echo "[CMD] $(scan_scp_display) $REMOTE_USER@$REMOTE_HOST:$REMOTE_RESULT_PATH $LOCAL_RESULT_FILE"
+    scan_scp "$REMOTE_USER@$REMOTE_HOST:$REMOTE_RESULT_PATH" "$LOCAL_RESULT_FILE"
 
     if [ $? -eq 0 ]; then
         # Prepend build configuration metadata to result file

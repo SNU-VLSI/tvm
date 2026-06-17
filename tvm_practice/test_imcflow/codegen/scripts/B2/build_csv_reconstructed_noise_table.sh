@@ -8,10 +8,13 @@
 #   CKPT                 required checkpoint alias
 #   CSV                  noise CSV path or filename under NOISE_DIR
 #   NOISE_TABLE_FORMAT   auto, wpattern_ref, or ref (default: auto)
+#   REF_RECONSTRUCTION_GRANULARITY
+#                        input_bitplane or output for ref CSVs (default: input_bitplane)
 #   NOISE_DIR            directory containing concat_per_core.json
 #   LAYOUT_JSON          explicit concat_per_core.json path
 #   NPZ_PATH             psum_imcu_column_map.npz path
 #   OUTPUT_DIR           output directory
+#   OUTPUT_NPZ           explicit output NPZ path
 #   MATCH_NPZ            existing aggregated npz whose bins should be reused
 #   N_MC_TRIALS          MC trials per output element (default: 50)
 #   REF_BINS             number of ref bins if MATCH_NPZ is unset (default: 200)
@@ -44,12 +47,14 @@ LAYOUT_JSON="${LAYOUT_JSON:-${NOISE_DIR}/concat_per_core.json}"
 NPZ_PATH="${NPZ_PATH:-eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz}"
 CSV="${CSV:-B2_noise_matrix_per_ch_concat.csv}"
 NOISE_TABLE_FORMAT="${NOISE_TABLE_FORMAT:-auto}"
+REF_RECONSTRUCTION_GRANULARITY="${REF_RECONSTRUCTION_GRANULARITY:-input_bitplane}"
 N_MC_TRIALS="${N_MC_TRIALS:-50}"
 REF_BINS="${REF_BINS:-200}"
 NOISE_BINS="${NOISE_BINS:-200}"
 DEVICE="${DEVICE:-cpu}"
 SEED="${SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-/root/project/CIM/noise/noise_df/B2_chip_inference/N32/${CKPT}}"
+OUTPUT_NPZ="${OUTPUT_NPZ:-${OUTPUT_DIR}/csv_reconstructed_noise_table.npz}"
 
 CKPT_PATH="${CKPT_PATH:-}"
 if [[ -z "$CKPT_PATH" ]]; then
@@ -77,12 +82,14 @@ echo "  Dump dir:   $RUN_DIR"
 echo "  Samples:    $SAMPLES"
 echo "  CSV:        $CSV"
 echo "  Format:     $NOISE_TABLE_FORMAT"
+echo "  Ref recon:  $REF_RECONSTRUCTION_GRANULARITY"
 echo "  MC trials:  $N_MC_TRIALS"
 echo "  Checkpoint: $CKPT_PATH"
 echo "  Noise dir:  $NOISE_DIR"
 echo "  Layout:     $LAYOUT_JSON"
 echo "  NPZ path:   $NPZ_PATH"
 echo "  Output dir: $OUTPUT_DIR"
+echo "  Output NPZ: $OUTPUT_NPZ"
 if [[ -n "${MATCH_NPZ:-}" ]]; then
     echo "  Match NPZ:  $MATCH_NPZ"
 else
@@ -97,10 +104,11 @@ python3 scripts/build_csv_reconstructed_noise_table.py \
     --checkpoint "$CKPT_PATH" \
     --csv "$CSV" \
     --noise-table-format "$NOISE_TABLE_FORMAT" \
+    --ref-reconstruction-granularity "$REF_RECONSTRUCTION_GRANULARITY" \
     --noise-dir "$NOISE_DIR" \
     --layout-json "$LAYOUT_JSON" \
     --npz-path "$NPZ_PATH" \
-    --output "$OUTPUT_DIR/csv_reconstructed_noise_table.npz" \
+    --output "$OUTPUT_NPZ" \
     --n-mc-trials "$N_MC_TRIALS" \
     --n-ref-bins "$REF_BINS" \
     --n-noise-bins "$NOISE_BINS" \
@@ -110,4 +118,4 @@ python3 scripts/build_csv_reconstructed_noise_table.py \
 
 echo ""
 echo "Done. Files:"
-ls -lh "$OUTPUT_DIR"/csv_reconstructed_noise_table*.npz
+ls -lh "$OUTPUT_NPZ"

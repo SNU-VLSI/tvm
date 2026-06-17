@@ -38,7 +38,7 @@ load_env() {
         echo "REMOTE_HOST=147.46.117.99"
         echo "REMOTE_PORT=1326"
         echo "REMOTE_USER=root"
-        echo "REMOTE_PASSWORD=root"
+        echo "REMOTE_AUTH_METHOD=key"
         echo "REMOTE_BASE_PATH=/home/root/tvm/tvm_practice/test_imcflow/codegen"
         echo "EOF"
         exit 1
@@ -49,17 +49,61 @@ load_env() {
         key="${key// /}"
         value="${value// /}"
         [[ -z "$key" || "$key" == \#* ]] && continue
-        export "$key=$value"
+        if [[ -z "${!key:-}" ]]; then
+            export "$key=$value"
+        fi
     done < "$ENV_FILE"
 
+    export REMOTE_AUTH_METHOD="${REMOTE_AUTH_METHOD:-key}"
+    if [[ "$REMOTE_AUTH_METHOD" != "key" && "$REMOTE_AUTH_METHOD" != "password" ]]; then
+        echo "Error: REMOTE_AUTH_METHOD must be key or password"
+        exit 1
+    fi
+
     # Validate required variables
-    local REQUIRED=(REMOTE_HOST REMOTE_PORT REMOTE_USER REMOTE_PASSWORD REMOTE_BASE_PATH)
+    local REQUIRED=(REMOTE_HOST REMOTE_PORT REMOTE_USER REMOTE_BASE_PATH)
     for var in "${REQUIRED[@]}"; do
         if [[ -z "${!var}" ]]; then
             echo "Error: $var is not set in $ENV_FILE"
             exit 1
         fi
     done
+    if [[ "$REMOTE_AUTH_METHOD" == "password" && -z "${REMOTE_PASSWORD:-}" ]]; then
+        echo "Error: REMOTE_PASSWORD is required when REMOTE_AUTH_METHOD=password"
+        exit 1
+    fi
+}
+
+scan_ssh_display() {
+    if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
+        echo "sshpass -p <redacted> ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
+    else
+        echo "ssh -o BatchMode=yes -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
+    fi
+}
+
+scan_scp_display() {
+    if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
+        echo "sshpass -p <redacted> scp -P $REMOTE_PORT"
+    else
+        echo "scp -o BatchMode=yes -P $REMOTE_PORT"
+    fi
+}
+
+scan_ssh() {
+    if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
+        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
+    else
+        ssh -o BatchMode=yes -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
+    fi
+}
+
+scan_scp() {
+    if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
+        sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" "$@"
+    else
+        scp -o BatchMode=yes -P "$REMOTE_PORT" "$@"
+    fi
 }
 
 scan_transfer_reg_files() {
@@ -106,8 +150,7 @@ scan_program_registers() {
     fi
     echo "Step $STEP_NUM: Executing scan program on remote chip (timeout: 0.5s)..."
     echo ""
-    sshpass -p "$REMOTE_PASSWORD" ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST \
-               "source ~/.bashrc && source /home/root/.venv/bin/activate && \
+    scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
                 cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
                 $REMOTE_BASE_PATH/scan_gen/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \

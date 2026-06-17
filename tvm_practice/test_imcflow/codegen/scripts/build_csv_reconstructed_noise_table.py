@@ -4,9 +4,10 @@
 Uses the same dump-loading pipeline as build_aggregated_noise_table.py, but
 instead of using observed chip noise (chip_output - clean_ref), it:
   1. Runs noise_free_qconv to get per-bitplane ADC codes (adc_codes_all)
-  2. For each (abit, wbit, pseudo_ch, adc_code), samples noise from the CSV
-     distribution P(noise_adc | wpattern, ref_adc, pseudo_ch)
-  3. Accumulates sampled noise with bit significance → reconstructed noise
+  2. Samples noise from the CSV distribution. Legacy wpattern_ref CSVs are
+     sampled per (abit, wbit, pseudo_ch, adc_code). Ref-only CSVs can be
+     sampled either per input bitplane or once at the output clean_ref.
+  3. Accumulates sampled noise when using a bitplane mode.
   4. Bins (clean_ref, reconstructed_noise) into the same histogram format
 
 This allows direct comparison: does the per-bitplane CSV noise model reproduce
@@ -200,7 +201,8 @@ def _alias_sample(alias_prob, alias_idx, diff_bins, rng, size):
 
 
 def sample_csv_noise(adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
-                     n_trials=1, alias_tables=None):
+                     n_trials=1, alias_tables=None, clean_ref=None,
+                     ref_reconstruction_granularity='input_bitplane'):
     """Sample reconstructed noise from CSV distributions using actual per-bitplane ADC codes.
 
     All n_trials are batched together for vectorized sampling.
@@ -218,9 +220,20 @@ def sample_csv_noise(adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
         recon_noise: (n_trials, OC, OH, OW) int32 — reconstructed noise at int16 output level
     """
     if csv_data.get('table_format') == 'ref':
-        return sample_ref_csv_noise(
-            adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
-            n_trials=n_trials, alias_tables=alias_tables)
+        if ref_reconstruction_granularity == 'input_bitplane':
+            return sample_ref_csv_noise(
+                adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng,
+                n_trials=n_trials, alias_tables=alias_tables)
+        if ref_reconstruction_granularity == 'output':
+            if clean_ref is None:
+                raise ValueError(
+                    "clean_ref is required when "
+                    "ref_reconstruction_granularity='output'")
+            return sample_ref_csv_noise_output(
+                clean_ref, pseudo_chs, csv_data, rng,
+                n_trials=n_trials, alias_tables=alias_tables)
+        raise ValueError(
+            "ref_reconstruction_granularity must be 'input_bitplane' or 'output'")
 
     A, W, OC, OH, OW = adc_codes_all.shape
     diff_bins = csv_data['diff_bins']  # (K,)
@@ -338,6 +351,43 @@ def sample_ref_csv_noise(adc_codes_all, skip_mask_all, pseudo_chs, csv_data, rng
     return recon_noise.astype(np.int32)
 
 
+def sample_ref_csv_noise_output(clean_ref, pseudo_chs, csv_data, rng,
+                                n_trials=1, alias_tables=None):
+    """Sample reconstructed noise from an output-level signed-ref CSV.
+
+    CSV rows are final clean_ref values and diff_bins are already int16 output
+    noise values. This mode samples once per output element:
+      noise = sample P(noise | pseudo_ch, nearest clean_ref)
+    """
+    OC, OH, OW = clean_ref.shape
+    refs = csv_data['refs']
+    diff_bins = csv_data['diff_bins']
+    N = OH * OW
+
+    if alias_tables is None:
+        alias_tables = _build_alias_tables(csv_data['probs'], diff_bins)
+    alias_prob, alias_idx, alias_valid = alias_tables
+
+    recon_noise_flat = np.zeros((n_trials, OC, N), dtype=np.float64)
+    clean_ref = clean_ref.astype(np.float64)
+    for oc_i in range(OC):
+        pch = pseudo_chs[oc_i]
+        rows = _nearest_ref_indices(clean_ref[oc_i].ravel(), refs)
+        unique_rows, inverse = np.unique(rows, return_inverse=True)
+        for ui, row in enumerate(unique_rows):
+            if not alias_valid[pch, row]:
+                continue
+            elem_mask = inverse == ui
+            n_elem = int(elem_mask.sum())
+            total_samples = n_trials * n_elem
+            sampled = _alias_sample(
+                alias_prob[pch, row], alias_idx[pch, row],
+                diff_bins, rng, total_samples)
+            recon_noise_flat[:, oc_i, elem_mask] = sampled.reshape(n_trials, n_elem)
+
+    return recon_noise_flat.reshape(n_trials, OC, OH, OW).astype(np.int32)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Build CSV-reconstructed noise table')
     parser.add_argument('--dump-dir', required=True, nargs='+')
@@ -348,6 +398,11 @@ def main():
     parser.add_argument('--noise-table-format', default='auto',
                         choices=['auto', 'wpattern_ref', 'ref'],
                         help='CSV format. auto detects from row labels.')
+    parser.add_argument('--ref-reconstruction-granularity', default='input_bitplane',
+                        choices=['input_bitplane', 'output'],
+                        help='How to reconstruct ref-format CSVs. Use output for '
+                             'chip-derived CSVs where rows are final clean_ref and '
+                             'diff_bins are already output-level noise.')
     parser.add_argument('--noise-dir', default=DEFAULT_NOISE_DIR,
                         help='Directory containing concat_per_core.json')
     parser.add_argument('--layout-json', default=None,
@@ -386,6 +441,7 @@ def main():
     print(f"MC trials per element: {args.n_mc_trials}")
     print(f"CSV: {csv_path}")
     print(f"CSV format: {args.noise_table_format}")
+    print(f"Ref reconstruction granularity: {args.ref_reconstruction_granularity}")
     print(f"Noise dir: {noise_dir}")
     print(f"Layout JSON: {layout_json}")
     print(f"NPZ path: {npz_path}")
@@ -551,10 +607,12 @@ def main():
                     kernel_h=kh, stride=st, padding=pad, device=args.device)
                 clean_sq = clean_out.squeeze(0)  # (OC, OH, OW)
 
-                # Sample noise from CSV using actual per-bitplane ADC codes
+                # Sample noise from CSV using the requested table semantics.
                 recon_noise = sample_csv_noise(
                     adc_codes_all, skip_mask_all, a['pseudo_chs'],
-                    csv_data, rng, n_trials=n_trials, alias_tables=alias_tables)
+                    csv_data, rng, n_trials=n_trials, alias_tables=alias_tables,
+                    clean_ref=clean_sq,
+                    ref_reconstruction_granularity=args.ref_reconstruction_granularity)
 
                 # Add each trial as an observation
                 for trial in range(n_trials):

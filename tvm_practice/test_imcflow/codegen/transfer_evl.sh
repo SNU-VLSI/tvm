@@ -6,12 +6,29 @@
 
 # Default configuration
 REMOTE_HOST="${REMOTE_HOST:-147.46.117.99}"
-REMOTE_PORT="1326"
-REMOTE_BASE_PATH="/home/root/tvm/tvm_practice/test_imcflow/codegen"
+REMOTE_PORT="${REMOTE_PORT:-1326}"
+REMOTE_BASE_PATH="${REMOTE_BASE_PATH:-/home/root/tvm/tvm_practice/test_imcflow/codegen}"
 REMOTE_PATH="$REMOTE_BASE_PATH/eval_dir"
-REMOTE_PASSWORD="root"
+REMOTE_AUTH_METHOD="${REMOTE_AUTH_METHOD:-key}"
+REMOTE_PASSWORD="${REMOTE_PASSWORD:-}"
 LOCAL_CODEGEN_DIR="/root/project/tvm/tvm_practice/test_imcflow/codegen"
 TEST_OUTPUTS_DIR="$LOCAL_CODEGEN_DIR/eval_dir"
+
+remote_ssh() {
+    if [[ "$REMOTE_AUTH_METHOD" == "password" ]]; then
+        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "$@"
+    else
+        ssh -o BatchMode=yes -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "$@"
+    fi
+}
+
+remote_scp() {
+    if [[ "$REMOTE_AUTH_METHOD" == "password" ]]; then
+        sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" "$@"
+    else
+        scp -o BatchMode=yes -P "$REMOTE_PORT" "$@"
+    fi
+}
 
 # Function to display help message
 show_help() {
@@ -62,10 +79,19 @@ fi
 CUSTOM_PATH=""
 if [[ "$1" == "--path" ]] || [[ "$1" == "-p" ]]; then
     CUSTOM_PATH="$2"
-    USERNAME="${3:-root}"
+    USERNAME="${3:-${REMOTE_USER:-root}}"
 else
     PATTERN="$1"
-    USERNAME="${2:-root}"
+    USERNAME="${2:-${REMOTE_USER:-root}}"
+fi
+
+if [[ "$REMOTE_AUTH_METHOD" != "key" && "$REMOTE_AUTH_METHOD" != "password" ]]; then
+    echo "Error: REMOTE_AUTH_METHOD must be key or password"
+    exit 1
+fi
+if [[ "$REMOTE_AUTH_METHOD" == "password" && -z "$REMOTE_PASSWORD" ]]; then
+    echo "Error: REMOTE_PASSWORD is required when REMOTE_AUTH_METHOD=password"
+    exit 1
 fi
 
 # Handle custom path mode
@@ -150,17 +176,17 @@ for dir in "${MATCHING_DIRS[@]}"; do
 
         # Remove existing directory on remote to ensure clean overwrite
         echo "  - Cleaning old directory on remote..."
-        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "rm -rf $REMOTE_PATH/$dir_name"
+        remote_ssh "rm -rf $REMOTE_PATH/$dir_name"
 
         # Create the remote directory
-        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "mkdir -p $REMOTE_PATH/$dir_name"
+        remote_ssh "mkdir -p $REMOTE_PATH/$dir_name"
 
         SUBDIR_SUCCESS=true
         for subdir in "${SUBDIRS_TO_TRANSFER[@]}"; do
             subdir_path="$dir/$subdir"
             if [[ -e "$subdir_path" ]]; then
                 echo "  - Transferring $subdir..."
-                if ! sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$subdir_path" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH/$dir_name/"; then
+                if ! remote_scp -r "$subdir_path" "$USERNAME@$REMOTE_HOST:$REMOTE_PATH/$dir_name/"; then
                     echo "    ✗ Failed to transfer $subdir"
                     SUBDIR_SUCCESS=false
                 fi
@@ -181,9 +207,9 @@ for dir in "${MATCHING_DIRS[@]}"; do
         # Use CUSTOM_REMOTE_PATH if set, otherwise REMOTE_PATH
         TARGET_REMOTE_PATH="${CUSTOM_REMOTE_PATH:-$REMOTE_PATH}"
         echo "  - Cleaning old directory on remote ($TARGET_REMOTE_PATH/$dir_name)..."
-        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$USERNAME@$REMOTE_HOST" "rm -rf $TARGET_REMOTE_PATH/$dir_name"
+        remote_ssh "rm -rf $TARGET_REMOTE_PATH/$dir_name"
 
-        if sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -r "$dir" "$USERNAME@$REMOTE_HOST:$TARGET_REMOTE_PATH"; then
+        if remote_scp -r "$dir" "$USERNAME@$REMOTE_HOST:$TARGET_REMOTE_PATH"; then
             echo "  ✓ Successfully transferred $dir_name to $TARGET_REMOTE_PATH"
             ((TRANSFER_COUNT++))
         else
