@@ -25,6 +25,7 @@
 #   CSV_LAYOUT_OUTPUT explicit concat_per_core.json output path
 #   CSV_METADATA_OUTPUT explicit CSV metadata output path
 #   CSV_MIN_COUNT minimum observations for a CSV (pseudo_ch, ref) row
+#   ACC_MASK      4-bit acc mask used by the compiled chip model (default: 0)
 
 set -euo pipefail
 
@@ -51,6 +52,7 @@ SAMPLES="${2:-0-100}"
 REF_BINS="${REF_BINS:-200}"
 NOISE_BINS="${NOISE_BINS:-200}"
 DEVICE="${DEVICE:-cpu}"
+ACC_MASK="${ACC_MASK:-0}"
 NOISE_DIR="${NOISE_DIR:-/root/project/CIM/noise/noise_df/B2_out/N32}"
 LAYOUT_JSON="${LAYOUT_JSON:-${NOISE_DIR}/concat_per_core.json}"
 NPZ_PATH="${NPZ_PATH:-eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz}"
@@ -96,6 +98,7 @@ echo "  Dump dir:   $RUN_DIR"
 echo "  Samples:    $SAMPLES"
 echo "  Ref bins:   $REF_BINS"
 echo "  Noise bins: $NOISE_BINS"
+echo "  Acc mask:   $ACC_MASK"
 echo "  Checkpoint: $CKPT_PATH"
 echo "  Noise dir:  $NOISE_DIR"
 echo "  Layout:     $LAYOUT_JSON"
@@ -119,6 +122,7 @@ ARGS=(
     --npz-path "$NPZ_PATH" \
     --n-ref-bins "$REF_BINS" \
     --n-noise-bins "$NOISE_BINS" \
+    --acc-mask "$ACC_MASK" \
     --device "$DEVICE"
 )
 

@@ -103,6 +103,7 @@ class AccMask(Enum):
   BM_1110 = 14
   BM_1111 = 15
 
+
 def cast_str_to_enum(s: str, expected_enum_type=None):
     """
     Cast a string like "ADCMode.SIX" or "SIX" into an Enum member.
@@ -130,12 +131,45 @@ def cast_str_to_enum(s: str, expected_enum_type=None):
     except KeyError:
         raise ValueError(f"Enum '{enum_type.__name__}' has no member '{member}'")
 
+
+_default_acc_mask = AccMask.BM_0000
+
+
+def _coerce_acc_mask(acc_mask) -> AccMask:
+  if isinstance(acc_mask, AccMask):
+    return acc_mask
+  if isinstance(acc_mask, int):
+    return AccMask(acc_mask)
+  if isinstance(acc_mask, str):
+    text = acc_mask.strip()
+    if text.startswith("AccMask."):
+      text = text.split(".", 1)[1]
+    if text.startswith("BM_"):
+      return AccMask[text]
+    if len(text) == 4 and set(text) <= {"0", "1"}:
+      return AccMask(int(text, 2))
+    return AccMask(int(text, 0))
+  raise TypeError(f"Unsupported acc_mask type: {type(acc_mask)}")
+
+
+def set_default_acc_mask(acc_mask):
+  global _default_acc_mask
+  _default_acc_mask = _coerce_acc_mask(acc_mask)
+
+
+def get_default_acc_mask() -> AccMask:
+  return _default_acc_mask
+
+
 class ConfigData(dict):
   def __init__(self, data_shape, weight_shape, padding, stride,
                 adcmode=ADCMode.SIX, vmode=None, multmode_set=MultModeSet.S4,
-               acc_mask=AccMask.BM_0000, use_imcu=1):
+               acc_mask=None, use_imcu=1):
     if vmode is None:
       vmode = _default_vmode
+    if acc_mask is None:
+      acc_mask = _default_acc_mask
+    acc_mask = _coerce_acc_mask(acc_mask)
     
     # Helper function to convert TVM types to Python int
     def to_int(val):

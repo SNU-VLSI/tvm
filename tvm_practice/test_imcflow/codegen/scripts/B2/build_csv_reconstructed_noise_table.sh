@@ -21,6 +21,7 @@
 #   NOISE_BINS           number of noise bins if MATCH_NPZ is unset (default: 200)
 #   DEVICE               cpu or cuda (default: cpu)
 #   SEED                 RNG seed (default: 42)
+#   ACC_MASK             4-bit acc mask used by the compiled chip model (default: 0)
 
 set -euo pipefail
 
@@ -53,6 +54,7 @@ REF_BINS="${REF_BINS:-200}"
 NOISE_BINS="${NOISE_BINS:-200}"
 DEVICE="${DEVICE:-cpu}"
 SEED="${SEED:-42}"
+ACC_MASK="${ACC_MASK:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-/root/project/CIM/noise/noise_df/B2_chip_inference/N32/${CKPT}}"
 OUTPUT_NPZ="${OUTPUT_NPZ:-${OUTPUT_DIR}/csv_reconstructed_noise_table.npz}"
 
@@ -84,6 +86,7 @@ echo "  CSV:        $CSV"
 echo "  Format:     $NOISE_TABLE_FORMAT"
 echo "  Ref recon:  $REF_RECONSTRUCTION_GRANULARITY"
 echo "  MC trials:  $N_MC_TRIALS"
+echo "  Acc mask:   $ACC_MASK"
 echo "  Checkpoint: $CKPT_PATH"
 echo "  Noise dir:  $NOISE_DIR"
 echo "  Layout:     $LAYOUT_JSON"
@@ -114,6 +117,7 @@ python3 scripts/build_csv_reconstructed_noise_table.py \
     --n-noise-bins "$NOISE_BINS" \
     --device "$DEVICE" \
     --seed "$SEED" \
+    --acc-mask "$ACC_MASK" \
     "${EXTRA_ARGS[@]}"
 
 echo ""

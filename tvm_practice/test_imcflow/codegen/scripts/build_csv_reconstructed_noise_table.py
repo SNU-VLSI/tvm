@@ -56,6 +56,21 @@ DEFAULT_CSV = os.path.join(CIM_DIR,
     'noise/noise_df/B2_out_refine_fixed_full_v1_partial/N32/B2_noise_matrix_per_ch_concat.csv')
 
 
+def parse_acc_mask(value):
+    text = str(value).strip()
+    if text.startswith('AccMask.'):
+        text = text.split('.', 1)[1]
+    if text.startswith('BM_'):
+        text = text[3:]
+    try:
+        mask = int(text, 2) if len(text) == 4 and set(text) <= {'0', '1'} else int(text, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f'invalid acc mask: {value!r}') from exc
+    if not 0 <= mask < 16:
+        raise argparse.ArgumentTypeError(f'acc mask out of range [0, 16): {value!r}')
+    return mask
+
+
 def _detect_csv_format(csv_path):
     first = str(pd.read_csv(csv_path, header=[0, 1], index_col=0, nrows=1).index[0])
     if '_' in first:
@@ -421,6 +436,8 @@ def main():
     parser.add_argument('--min-count', type=int, default=10)
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--acc-mask', type=parse_acc_mask, default=0,
+                        help='4-bit acc mask used by the compiled chip model')
     args = parser.parse_args()
 
     dump_dirs = [os.path.join(CODEGEN, d) if not os.path.isabs(d) else d
@@ -531,7 +548,8 @@ def main():
                 w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
                 clean_out, _, _ = noise_free_qconv(
                     qin[:, ic_lo:ic_hi, :, :], w_tile,
-                    kernel_h=kh, stride=st, padding=pad, device=args.device)
+                    kernel_h=kh, stride=st, padding=pad,
+                    acc_mask=args.acc_mask, device=args.device)
                 clean_sq = clean_out.squeeze(0)
                 dump_sq = dump[0, 0]
                 dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
@@ -604,7 +622,8 @@ def main():
 
                 clean_out, adc_codes_all, skip_mask_all = noise_free_qconv(
                     qin[:, ic_lo:ic_hi, :, :], w_tile,
-                    kernel_h=kh, stride=st, padding=pad, device=args.device)
+                    kernel_h=kh, stride=st, padding=pad,
+                    acc_mask=args.acc_mask, device=args.device)
                 clean_sq = clean_out.squeeze(0)  # (OC, OH, OW)
 
                 # Sample noise from CSV using the requested table semantics.

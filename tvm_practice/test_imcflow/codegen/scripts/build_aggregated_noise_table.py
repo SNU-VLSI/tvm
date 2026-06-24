@@ -51,6 +51,21 @@ DEFAULT_NPZ_PATH = os.path.join(
     CODEGEN, 'eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz')
 
 
+def parse_acc_mask(value):
+    text = str(value).strip()
+    if text.startswith('AccMask.'):
+        text = text.split('.', 1)[1]
+    if text.startswith('BM_'):
+        text = text[3:]
+    try:
+        mask = int(text, 2) if len(text) == 4 and set(text) <= {'0', '1'} else int(text, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f'invalid acc mask: {value!r}') from exc
+    if not 0 <= mask < 16:
+        raise argparse.ArgumentTypeError(f'acc mask out of range [0, 16): {value!r}')
+    return mask
+
+
 def parse_sample_range(s):
     result = []
     for part in s.split(','):
@@ -314,6 +329,8 @@ def main():
     parser.add_argument('--csv-min-count', type=int, default=1,
                         help='Minimum observations for a (pseudo_ch, ref) CSV row before fallback')
     parser.add_argument('--device', default='cpu')
+    parser.add_argument('--acc-mask', type=parse_acc_mask, default=0,
+                        help='4-bit acc mask used by the compiled chip model')
     parser.add_argument('--noise-dir', default=DEFAULT_NOISE_DIR,
                         help='Directory containing concat_per_core.json '
                              f'(default: {DEFAULT_NOISE_DIR})')
@@ -405,7 +422,8 @@ def main():
                 w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
                 clean_out, _, _ = noise_free_qconv(
                     qin[:, ic_lo:ic_hi, :, :], w_tile,
-                    kernel_h=kh, stride=st, padding=pad, device=args.device)
+                    kernel_h=kh, stride=st, padding=pad,
+                    acc_mask=args.acc_mask, device=args.device)
                 clean_sq = clean_out.squeeze(0)
                 dump_sq = dump[0, 0]
                 dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
@@ -490,7 +508,8 @@ def main():
 
             clean_out, _, _ = noise_free_qconv(
                 qin[:, ic_lo:ic_hi, :, :], w_tile,
-                kernel_h=kh, stride=st, padding=pad, device=args.device)
+                kernel_h=kh, stride=st, padding=pad,
+                acc_mask=args.acc_mask, device=args.device)
             clean_sq = clean_out.squeeze(0)
 
             dump_sq = dump[0, 0]

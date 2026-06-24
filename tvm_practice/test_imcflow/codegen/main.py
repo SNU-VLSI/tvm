@@ -13,7 +13,9 @@ import subprocess
 import os
 from test import MODEL_REGISTRY, INPUT_PATTERNS, run_test_pipeline
 from runners.pipeline_options import PipelineOptions, PipelineStage, parse_stop_at, parse_start_at
-from tvm.relay.backend.contrib.imcflow.acim_util import VMode, set_default_vmode
+from tvm.relay.backend.contrib.imcflow.acim_util import (
+  VMode, set_default_acc_mask, set_default_vmode,
+)
 
 
 def main():
@@ -172,6 +174,13 @@ Examples:
   )
 
   parser.add_argument(
+    "--acc-mask",
+    "--acc_mask",
+    default=os.environ.get("ACC_MASK", "0"),
+    help="ACIM acc mask for generated ConfigData. Accepts 0..15, 0b1111, 1111, BM_1111, or AccMask.BM_1111."
+  )
+
+  parser.add_argument(
     "--noise-csv",
     type=str,
     default=None,
@@ -254,6 +263,10 @@ Examples:
 
   # Set vmode globally before any model construction
   set_default_vmode(VMode[args.vmode])
+  try:
+    set_default_acc_mask(args.acc_mask)
+  except (KeyError, TypeError, ValueError) as exc:
+    parser.error(f"invalid --acc-mask {args.acc_mask!r}: {exc}")
 
   # Require model if not listing
   if not args.model:
