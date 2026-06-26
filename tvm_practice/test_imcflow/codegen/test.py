@@ -52,6 +52,22 @@ np.random.seed(1234)
 DEBUG_EXECUTOR=1
 DEBUG_SUBSET=1
 
+
+def _checkpoint_module_for_test(test_name):
+  """Return the model module that owns the last-checkpoint accessors for a given
+  test_name, or None if the test does not load a pretrained checkpoint.
+
+  Used to record the correct checkpoint path/alias in build metadata. Each
+  model module (resnet8_subset_models, ds_cnn_subset_models) exposes
+  get_last_checkpoint_path()/get_last_checkpoint_alias() set during weight load.
+  """
+  name = test_name or ""
+  if name.startswith("ds_cnn"):
+    return ds_cnn_subset_models
+  if name.startswith("resnet8"):
+    return resnet8_subset_models
+  return None
+
 # Print environment configuration at startup
 print(f"Environment: IMCFLOW_RUNNER={os.getenv('IMCFLOW_RUNNER', 'py')}, IMCFLOW_DEBUG={os.getenv('IMCFLOW_DEBUG', '0')}")
 
@@ -207,34 +223,39 @@ MODEL_REGISTRY = {
     # ------------------------------------------------------------------------------------------
     "ds_cnn_imcflow_small": (lambda: ds_cnn_imcflow.getModel(True, replicate_factor=1), "ones"),
 
-    # DS-CNN subset models (pretrained, input 10x10)
-    "ds_cnn_subset04_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=4), "ones"),
-    "ds_cnn_subset05_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=5), "ones"),
-    "ds_cnn_subset06_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=6), "ones"),
-    "ds_cnn_subset07_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=7), "ones"),
-    "ds_cnn_subset08_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=8), "ones"),
-    "ds_cnn_subset09_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=9), "ones"),
-    "ds_cnn_subset10_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=10), "ones"),
-    "ds_cnn_subset11_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=11), "ones"),
-    "ds_cnn_subset12_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=12), "ones"),
-    "ds_cnn_subset13_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=13), "ones"),
-    "ds_cnn_subset14_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=14), "ones"),
-    "ds_cnn_subset15_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=15), "ones"),
-    "ds_cnn_subset16_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=16), "ones"),
-    "ds_cnn_subset17_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=17), "ones"),
-    "ds_cnn_subset18_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=18), "ones"),
-    "ds_cnn_subset19_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=19), "ones"),
-    "ds_cnn_subset20_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=20), "ones"),
-    "ds_cnn_subset21_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=21), "ones"),
-    "ds_cnn_subset22_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=22), "ones"),
-    "ds_cnn_subset23_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=23), "ones"),
-    "ds_cnn_subset24_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=24), "ones"),
-    "ds_cnn_subset25_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=25), "ones"),
-    "ds_cnn_subset26_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=26), "ones"),
-    "ds_cnn_subset27_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=27), "ones"),
-    "ds_cnn_subset28_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(until_relay=28), "ones"),
+    # DS-CNN subset models (pretrained, real KWS input 49x10 MFCC)
+    "ds_cnn_subset04_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=4), "ones"),
+    "ds_cnn_subset05_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=5), "ones"),
+    "ds_cnn_subset06_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=6), "ones"),
+    "ds_cnn_subset07_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=7), "ones"),
+    "ds_cnn_subset08_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=8), "ones"),
+    "ds_cnn_subset09_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=9), "ones"),
+    "ds_cnn_subset10_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=10), "ones"),
+    "ds_cnn_subset11_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=11), "ones"),
+    "ds_cnn_subset12_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=12), "ones"),
+    "ds_cnn_subset13_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=13), "ones"),
+    "ds_cnn_subset14_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=14), "ones"),
+    "ds_cnn_subset15_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=15), "ones"),
+    "ds_cnn_subset16_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=16), "ones"),
+    "ds_cnn_subset17_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=17), "ones"),
+    "ds_cnn_subset18_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=18), "ones"),
+    "ds_cnn_subset19_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=19), "ones"),
+    "ds_cnn_subset20_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=20), "ones"),
+    "ds_cnn_subset21_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=21), "ones"),
+    "ds_cnn_subset22_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=22), "ones"),
+    "ds_cnn_subset23_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=23), "ones"),
+    "ds_cnn_subset24_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=24), "ones"),
+    "ds_cnn_subset25_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=25), "ones"),
+    "ds_cnn_subset26_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=26), "ones"),
+    "ds_cnn_subset27_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=27), "ones"),
+    "ds_cnn_subset28_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=28), "ones"),
+    "ds_cnn_subset29_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=29), "ones"),
+    "ds_cnn_subset30_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=30), "ones"),
+    "ds_cnn_subset31_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=31), "ones"),
+    "ds_cnn_subset32_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=32), "ones"),
+    "ds_cnn_subset33_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10, until_relay=33), "ones"),
     # Full model (no until_relay)
-    "ds_cnn_full_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(), "ones"),
+    "ds_cnn_full_pretrained": (lambda: ds_cnn_subset_models.getModel_from_pretrained_weight(iH=49, iW=10), "ones"),
 
     # Legacy models (for backward compatibility)
     # "big": (real_model.getModel, "random"),
@@ -982,11 +1003,13 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
       if not skip_codegen:
         ckpt_path = None
         ckpt_alias = None
-        try:
-          ckpt_path = resnet8_subset_models.get_last_checkpoint_path()
-          ckpt_alias = resnet8_subset_models.get_last_checkpoint_alias()
-        except AttributeError:
-          pass
+        ckpt_module = _checkpoint_module_for_test(test_name)
+        if ckpt_module is not None:
+          try:
+            ckpt_path = ckpt_module.get_last_checkpoint_path()
+            ckpt_alias = ckpt_module.get_last_checkpoint_alias()
+          except AttributeError:
+            pass
         save_build_metadata(eval_dir, use_patched=False, test_name=test_name,
                             options=options, checkpoint_path=ckpt_path,
                             checkpoint_alias=ckpt_alias)
@@ -1060,10 +1083,12 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
 
       # Save build metadata (patched)
       ckpt_path = None
-      try:
-        ckpt_path = resnet8_subset_models.get_last_checkpoint_path()
-      except AttributeError:
-        pass
+      ckpt_module = _checkpoint_module_for_test(test_name)
+      if ckpt_module is not None:
+        try:
+          ckpt_path = ckpt_module.get_last_checkpoint_path()
+        except AttributeError:
+          pass
       save_build_metadata(eval_dir, use_patched=True, test_name=test_name,
                           options=options, checkpoint_path=ckpt_path)
 

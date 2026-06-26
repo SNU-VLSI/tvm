@@ -1450,6 +1450,12 @@ class ImcflowLayoutLegalizer:
     if rank == 0 or (rank == 1 and ttype.shape[0] == 1):
       return LayoutType.SCALAR
     if rank == 1:
+      # imcflow conv config tensor (ConfigData.get_as_const_tensor) is a (8,) uint32
+      # constant carried as the last arg of imcflow_qconv/qdwconv. On the host
+      # path its layout must classify as SCALAR to match the op layout rule
+      # (it is data, not a per-channel C vector). No real C-vector is uint32-len-8.
+      if int(ttype.shape[0]) == 8 and ttype.dtype == "uint32":
+        return LayoutType.SCALAR
       return LayoutType.C
     if rank == 2:
       return LayoutType.MK
