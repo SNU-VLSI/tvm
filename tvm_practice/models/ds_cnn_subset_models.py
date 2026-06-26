@@ -350,7 +350,10 @@ def getModel_(input_shape, until_relay: int = None, replicate_factor: int = 1):
         ))
 
         # ============== Post-process (FP32 - CPU) ==============
-        y = c.check(relay.cast(y, dtype="float32") * relay.var("post_f_inv", shape=(1,), dtype="float32"))
+        # post_f_inv is per-channel (C,1,1) so it broadcasts over NCHW. Some
+        # checkpoints store bn_pw_f_4 as a scalar, others as a per-channel list;
+        # the loader broadcasts either form to this shape.
+        y = c.check(relay.cast(y, dtype="float32") * relay.var("post_f_inv", shape=(filters, 1, 1), dtype="float32"))
         y = c.check(relay.nn.relu(y))
         y = c.check(relay.nn.adaptive_avg_pool2d(y, output_size=(1, 1)))
         y = c.check(relay.nn.batch_flatten(y))
@@ -485,8 +488,12 @@ def getModel_from_pretrained_weight(iH=10, iW=10, until_relay=None, replicate_fa
             return np.array([adjust_factors['x_f_1']], dtype=dtype)
 
         if name == 'post_f_inv':
-            # post_f_inv = 1.0 / bn_pw_f_4
-            return np.array([1.0 / adjust_factors['bn_pw_f_4']], dtype=dtype)
+            # post_f_inv = 1.0 / bn_pw_f_4 (per-channel [C] or scalar).
+            # Reshape/broadcast to the var shape (C,1,1) so it works for both
+            # scalar checkpoints and per-channel ones.
+            bn_pw_f_4 = np.asarray(adjust_factors['bn_pw_f_4'], dtype='float64').flatten()
+            inv = 1.0 / bn_pw_f_4
+            return np.broadcast_to(inv.reshape(-1, 1, 1), shape).astype(dtype).copy()
 
         # Handle block-specific parameters using regex patterns
 
