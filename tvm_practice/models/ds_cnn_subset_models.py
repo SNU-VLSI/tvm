@@ -7,6 +7,9 @@ This module provides:
 3. Subset functionality (early stopping at specific relay operation)
 """
 
+import json as _json
+import os
+
 import numpy as np
 
 import tvm
@@ -15,6 +18,39 @@ from tvm import relay
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d, imcflow_qdwconv2d
+
+_last_checkpoint_path = None
+_last_checkpoint_alias = None
+
+# KWS checkpoint registry: loaded from CIM/checkpoints/b2_half_kws.json (single
+# source of truth). Mirrors resnet8_subset_models' B2_HALF_CHECKPOINTS but for
+# keyword_spotting (DS-CNN) checkpoints. Falls back to CIM_DIR env var, then to
+# /root/project/CIM. BOARD/vmode do not affect KWS checkpoint selection.
+
+def _load_kws_checkpoints():
+    cim_dir = os.environ.get("CIM_DIR", "/root/project/CIM")
+    registry_path = os.path.join(cim_dir, "checkpoints", "b2_half_kws.json")
+    with open(registry_path) as f:
+        reg = _json.load(f)
+    base = os.path.join(cim_dir, reg["_base"])
+    checkpoints = {
+        k: os.path.normpath(os.path.join(base, v, "checkpoint.pth.tar"))
+        for k, v in reg["entries"].items()
+    }
+    return checkpoints, reg.get("default", "")
+
+
+KWS_CHECKPOINTS, KWS_DEFAULT_CKPT = _load_kws_checkpoints()
+
+
+def get_last_checkpoint_path():
+    """Return the checkpoint path used by the most recent getModel_from_pretrained_weight() call."""
+    return _last_checkpoint_path
+
+
+def get_last_checkpoint_alias():
+    """Return the checkpoint alias used by the most recent getModel_from_pretrained_weight() call."""
+    return _last_checkpoint_alias
 
 
 def get_height(H, KH, padding, stride):
@@ -314,7 +350,10 @@ def getModel_(input_shape, until_relay: int = None, replicate_factor: int = 1):
         ))
 
         # ============== Post-process (FP32 - CPU) ==============
-        y = c.check(relay.cast(y, dtype="float32") * relay.var("post_f_inv", shape=(1,), dtype="float32"))
+        # post_f_inv is per-channel (C,1,1) so it broadcasts over NCHW. Some
+        # checkpoints store bn_pw_f_4 as a scalar, others as a per-channel list;
+        # the loader broadcasts either form to this shape.
+        y = c.check(relay.cast(y, dtype="float32") * relay.var("post_f_inv", shape=(filters, 1, 1), dtype="float32"))
         y = c.check(relay.nn.relu(y))
         y = c.check(relay.nn.adaptive_avg_pool2d(y, output_size=(1, 1)))
         y = c.check(relay.nn.batch_flatten(y))
@@ -379,8 +418,31 @@ def getModel_from_pretrained_weight(iH=10, iW=10, until_relay=None, replicate_fa
 
     out, var_dict = getModel_([1, 1, iH, iW], until_relay=until_relay, replicate_factor=replicate_factor)
 
-    # Load checkpoint
-    checkpoint_path = '/root/project/CIM/trained_models/keyword_spotting/NAT/prange_full_psum_duplication_1/2025-Dec-06-16-45-17/imcflow/2026-Jan-30-19-49-06/checkpoint.pth.tar'
+    # Select checkpoint. BOARD/vmode are intentionally ignored for KWS (they have
+    # no effect on this model); selection is by CKPT_PATH > CKPT alias > default.
+    direct_checkpoint_path = os.getenv("CKPT_PATH", "").strip()
+    direct_checkpoint_alias = os.getenv("CKPT", "").strip() or None
+
+    ckpt_key = None
+    if direct_checkpoint_path:
+        checkpoint_path = os.path.abspath(os.path.expanduser(direct_checkpoint_path))
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"CKPT_PATH does not exist or is not a file: {checkpoint_path}")
+        ckpt_key = direct_checkpoint_alias
+        print(f"[INFO] Loading KWS checkpoint from CKPT_PATH={checkpoint_path}")
+    else:
+        ckpt_key = direct_checkpoint_alias
+        if not ckpt_key:
+            ckpt_key = KWS_DEFAULT_CKPT
+            print(f"\033[93m[WARNING] CKPT not set. Defaulting to '{ckpt_key}'. Set CKPT env var to choose. Available: {list(KWS_CHECKPOINTS.keys())}\033[0m")
+        if ckpt_key not in KWS_CHECKPOINTS:
+            raise ValueError(f"Unknown CKPT='{ckpt_key}'. Available KWS checkpoints: {list(KWS_CHECKPOINTS.keys())}")
+        checkpoint_path = KWS_CHECKPOINTS[ckpt_key]
+
+    global _last_checkpoint_path, _last_checkpoint_alias
+    _last_checkpoint_path = checkpoint_path
+    _last_checkpoint_alias = ckpt_key
+
     checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
     model_dict = checkpoint['state_dict']
     adjust_factors = checkpoint['adjust_factors']
@@ -426,8 +488,12 @@ def getModel_from_pretrained_weight(iH=10, iW=10, until_relay=None, replicate_fa
             return np.array([adjust_factors['x_f_1']], dtype=dtype)
 
         if name == 'post_f_inv':
-            # post_f_inv = 1.0 / bn_pw_f_4
-            return np.array([1.0 / adjust_factors['bn_pw_f_4']], dtype=dtype)
+            # post_f_inv = 1.0 / bn_pw_f_4 (per-channel [C] or scalar).
+            # Reshape/broadcast to the var shape (C,1,1) so it works for both
+            # scalar checkpoints and per-channel ones.
+            bn_pw_f_4 = np.asarray(adjust_factors['bn_pw_f_4'], dtype='float64').flatten()
+            inv = 1.0 / bn_pw_f_4
+            return np.broadcast_to(inv.reshape(-1, 1, 1), shape).astype(dtype).copy()
 
         # Handle block-specific parameters using regex patterns
 
