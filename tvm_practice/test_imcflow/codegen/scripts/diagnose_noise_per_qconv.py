@@ -71,11 +71,89 @@ CONV_PARAMS = {
     'weight4_0': (1, 2, 0, 'layer3.block_int16.downsample.1.weight'),
 }
 
+MODEL_PROFILE_DEFAULTS = {
+    'resnet8': {
+        'npz_path': NPZ_PATH,
+        'pysim_dir': PYSIM_DIR,
+        'ckpt_path': CKPT_PATH,
+        'conv_params': CONV_PARAMS,
+    },
+    'kws_dscnn': {
+        'npz_path': os.path.join(CODEGEN, 'eval_dir/ds_cnn_full_pretrained_evl.linux/psum_imcu_column_map.npz'),
+        'pysim_dir': os.path.join(CODEGEN, 'eval_dir/ds_cnn_full_pretrained_evl.baremetal/test_outputs/py_runner'),
+        'ckpt_path': (
+            '/root/project/CIM/trained_models/keyword_spotting_mlperf/NAT/'
+            'prange_half_psum_duplication_1/2026-Feb-04-13-24-21/'
+            'imcflow/2026-Jun-26-21-27-07/checkpoint.pth.tar'
+        ),
+        'conv_params': {
+            'weight_pw_1': (1, 1, 0, 'block1.block_int16.pw.weight'),
+            'weight_pw_2': (1, 1, 0, 'block2.block_int16.pw.weight'),
+            'weight_pw_3': (1, 1, 0, 'block3.block_int16.pw.weight'),
+            'weight_pw_4': (1, 1, 0, 'block4.block_int16.pw.weight'),
+        },
+    },
+}
+
+
+def resolve_model_profile(profile=None):
+    name = str(
+        profile
+        or os.environ.get('NOISE_MODEL_PROFILE')
+        or os.environ.get('MODEL_PROFILE')
+        or 'resnet8'
+    ).strip()
+    aliases = {
+        'resnet': 'resnet8',
+        'resnet8_cifar10': 'resnet8',
+        'kws': 'kws_dscnn',
+        'dscnn': 'kws_dscnn',
+        'ds_cnn': 'kws_dscnn',
+    }
+    name = aliases.get(name, name)
+    if name not in MODEL_PROFILE_DEFAULTS:
+        valid = ', '.join(sorted(MODEL_PROFILE_DEFAULTS))
+        raise ValueError(f"unknown model profile {name!r}; choose one of: {valid}")
+    return name
+
+
+def get_profile_defaults(profile=None):
+    return MODEL_PROFILE_DEFAULTS[resolve_model_profile(profile)]
+
+
+def get_conv_params(profile=None):
+    return get_profile_defaults(profile)['conv_params']
+
+
+def get_default_npz_path(profile=None):
+    return get_profile_defaults(profile)['npz_path']
+
+
+def get_default_pysim_dir(profile=None):
+    return get_profile_defaults(profile)['pysim_dir']
+
+
+def get_default_ckpt_path(profile=None):
+    return get_profile_defaults(profile)['ckpt_path']
+
+
+CONV_PARAMS = get_conv_params()
+NPZ_PATH = get_default_npz_path()
+PYSIM_DIR = get_default_pysim_dir()
+CKPT_PATH = get_default_ckpt_path()
+
 
 # ---------------------------------------------------------------- helpers --
 
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--model-profile', default=os.environ.get('NOISE_MODEL_PROFILE', None),
+                    help='Noise diagnostics profile: resnet8 or kws_dscnn '
+                         '(default: NOISE_MODEL_PROFILE or resnet8)')
+    ap.add_argument('--npz-path', default=None,
+                    help='Override psum_imcu_column_map.npz path for the selected profile.')
+    ap.add_argument('--pysim-dir', default=None,
+                    help='Override py_runner dump directory for --compare pysim/both.')
     ap.add_argument('--n-samples', type=int, default=10,
                     help='Number of samples to process starting from --sample-start (default: 10)')
     ap.add_argument('--sample-start', type=int, default=0,
@@ -126,7 +204,7 @@ def resolve_noise_csv_path(noise_csv, noise_dir=NOISE_DIR):
     return os.path.join(noise_dir, noise_csv)
 
 
-def resolve_ckpt_path(ckpt_path=None, ckpt_alias=None, board='B2', vmode='half'):
+def resolve_ckpt_path(ckpt_path=None, ckpt_alias=None, board='B2', vmode='half', profile=None):
     """Resolve checkpoint path while preserving the historical built-in default."""
     if ckpt_path:
         return ckpt_path, ckpt_alias or '<path>'
@@ -135,7 +213,7 @@ def resolve_ckpt_path(ckpt_path=None, ckpt_alias=None, board='B2', vmode='half')
         from checkpoints import resolve
         resolved_path, resolved_alias = resolve(board, vmode, ckpt_alias)
         return resolved_path, resolved_alias
-    return CKPT_PATH, '<default>'
+    return get_default_ckpt_path(profile), '<default>'
 
 
 def signed_int16(arr):
@@ -692,12 +770,17 @@ def print_summaries(label, per_atomic_stats, atomics, layers_filter, skip_diagno
 
 def main():
     args = parse_args()
+    profile = resolve_model_profile(args.model_profile)
+    global CONV_PARAMS, NPZ_PATH, PYSIM_DIR
+    CONV_PARAMS = get_conv_params(profile)
+    NPZ_PATH = os.path.abspath(args.npz_path) if args.npz_path else get_default_npz_path(profile)
+    PYSIM_DIR = os.path.abspath(args.pysim_dir) if args.pysim_dir else get_default_pysim_dir(profile)
     layers_filter = set(args.layers.split(',')) if args.layers else None
     noise_dir = os.path.abspath(args.noise_dir)
     csv_path = resolve_noise_csv_path(args.noise_csv, noise_dir)
     layout_json = os.path.join(noise_dir, 'concat_per_core.json')
     ckpt_path, ckpt_label = resolve_ckpt_path(
-        args.ckpt_path, args.ckpt_alias, args.ckpt_board, args.ckpt_vmode)
+        args.ckpt_path, args.ckpt_alias, args.ckpt_board, args.ckpt_vmode, profile)
 
     print('=' * 100)
     print('  diagnose_noise_per_qconv')
@@ -706,10 +789,12 @@ def main():
     print(f'  layers filter : {sorted(layers_filter) if layers_filter else "<all>"}')
     print(f'  device        : {args.device}')
     print(f'  compare       : {args.compare}')
+    print(f'  model profile : {profile}')
     print(f'  acc_mask      : {args.acc_mask}  (0 = all abits popcount<8 eligible)')
     print(f'  noise dir     : {noise_dir}')
     print(f'  noise csv     : {csv_path}')
     print(f'  layout json   : {layout_json}')
+    print(f'  psum map      : {NPZ_PATH}')
     print(f'  checkpoint    : {ckpt_path} ({ckpt_label})')
     print(f'  skip diagnose : {args.skip_diagnose}')
 

@@ -21,8 +21,9 @@ else
     DATASET_EXEC_NAME="execute_graph_for_dataset"
 fi
 DATASET_DIR="dataset"
-IMAGES_PATH="$DATASET_DIR/cifar10/images.npy"
-LABELS_PATH="$DATASET_DIR/cifar10/labels.npy"
+DATASET_NAME="${DATASET_NAME:-cifar10}"
+IMAGES_PATH="$DATASET_DIR/$DATASET_NAME/images.npy"
+LABELS_PATH="$DATASET_DIR/$DATASET_NAME/labels.npy"
 REMOTE_RESULT_PATH="/tmp/tvm_dataset_results.txt"
 LOCAL_RESULT_DIR="eval_results"
 
@@ -44,6 +45,7 @@ show_help() {
     echo "Options:"
     echo "  -b, --binary-dir DIR  Binary directory (default: host_binary_make.dataset)"
     echo "  -m, --model DIR       Evl dir name for build step (default: resnet8_subset31_pretrained_orig_evl.linux)"
+    echo "  -d, --dataset NAME    Dataset subdir under dataset/ (default: cifar10)"
     echo "  -s, --skip LIST       Comma-separated step numbers to skip (e.g., 1,2,7)"
     echo "  -i, --indices LIST    Comma-separated sample indices (e.g., 0,5,10,15). Overrides num_samples."
     echo "  -l, --log-level LVL   Console log level: DEBUG (verbose, default) or INFO (progress bar)"
@@ -108,6 +110,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             MODEL_EVL_DIR="$2"
+            shift 2
+            ;;
+        -d|--dataset)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            DATASET_NAME="$2"
+            IMAGES_PATH="$DATASET_DIR/$DATASET_NAME/images.npy"
+            LABELS_PATH="$DATASET_DIR/$DATASET_NAME/labels.npy"
             shift 2
             ;;
         -s|--skip)
@@ -215,6 +227,7 @@ echo "=========================================="
 echo "Running dataset evaluation on remote chip"
 echo "Binary dir:       $BINARY_DIR"
 echo "Model (evl dir): $MODEL_EVL_DIR"
+echo "Dataset:          $DATASET_NAME"
 echo "Samples: $SAMPLES_DISPLAY"
 echo "Remote host: $REMOTE_HOST"
 echo "Ckpt alias:       ${CKPT:-<none>}"

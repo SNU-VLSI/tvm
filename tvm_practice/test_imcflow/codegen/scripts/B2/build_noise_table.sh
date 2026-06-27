@@ -26,6 +26,7 @@
 #   CSV_METADATA_OUTPUT explicit CSV metadata output path
 #   CSV_MIN_COUNT minimum observations for a CSV (pseudo_ch, ref) row
 #   ACC_MASK      4-bit acc mask used by the compiled chip model (default: 0)
+#   NOISE_MODEL_PROFILE diagnostics profile: resnet8 or kws_dscnn (default: resnet8)
 
 set -euo pipefail
 
@@ -53,6 +54,7 @@ REF_BINS="${REF_BINS:-200}"
 NOISE_BINS="${NOISE_BINS:-200}"
 DEVICE="${DEVICE:-cpu}"
 ACC_MASK="${ACC_MASK:-0}"
+NOISE_MODEL_PROFILE="${NOISE_MODEL_PROFILE:-resnet8}"
 NOISE_DIR="${NOISE_DIR:-/root/project/CIM/noise/noise_df/B2_out/N32}"
 LAYOUT_JSON="${LAYOUT_JSON:-${NOISE_DIR}/concat_per_core.json}"
 NPZ_PATH="${NPZ_PATH:-eval_dir/resnet8_subset31_pretrained_orig_evl.linux/psum_imcu_column_map.npz}"
@@ -99,6 +101,7 @@ echo "  Samples:    $SAMPLES"
 echo "  Ref bins:   $REF_BINS"
 echo "  Noise bins: $NOISE_BINS"
 echo "  Acc mask:   $ACC_MASK"
+echo "  Profile:    $NOISE_MODEL_PROFILE"
 echo "  Checkpoint: $CKPT_PATH"
 echo "  Noise dir:  $NOISE_DIR"
 echo "  Layout:     $LAYOUT_JSON"
@@ -123,6 +126,7 @@ ARGS=(
     --n-ref-bins "$REF_BINS" \
     --n-noise-bins "$NOISE_BINS" \
     --acc-mask "$ACC_MASK" \
+    --model-profile "$NOISE_MODEL_PROFILE" \
     --device "$DEVICE"
 )
 

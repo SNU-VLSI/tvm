@@ -43,6 +43,7 @@ from diagnose_noise_per_qconv import (
     signed_int16, load_atomic_info, load_pseudo_ch_map,
     build_qconv_to_input_map, noise_free_qconv, load_noise_csv,
     PSTEP, NUM_LEVELS, WBITS, ABITS, W_SCALE, CONV_PARAMS,
+    resolve_model_profile, get_conv_params, get_default_npz_path,
 )
 from build_aggregated_noise_table import (
     AggregatedNoiseAccumulator, load_weights, parse_sample_range,
@@ -422,8 +423,11 @@ def main():
                         help='Directory containing concat_per_core.json')
     parser.add_argument('--layout-json', default=None,
                         help='Path to concat_per_core.json. Defaults to --noise-dir/concat_per_core.json')
-    parser.add_argument('--npz-path', default=DEFAULT_NPZ_PATH,
-                        help='Path to psum_imcu_column_map.npz')
+    parser.add_argument('--npz-path', default=None,
+                        help='Path to psum_imcu_column_map.npz. Defaults to selected model profile.')
+    parser.add_argument('--model-profile', default=os.environ.get('NOISE_MODEL_PROFILE', None),
+                        help='Noise diagnostics profile: resnet8 or kws_dscnn '
+                             '(default: NOISE_MODEL_PROFILE or resnet8)')
     parser.add_argument('--n-mc-trials', type=int, default=50,
                         help='Number of MC noise samples per output element (default: 50)')
     parser.add_argument('--n-ref-bins', type=int, default=200)
@@ -439,6 +443,8 @@ def main():
     parser.add_argument('--acc-mask', type=parse_acc_mask, default=0,
                         help='4-bit acc mask used by the compiled chip model')
     args = parser.parse_args()
+    model_profile = resolve_model_profile(args.model_profile)
+    conv_params = get_conv_params(model_profile)
 
     dump_dirs = [os.path.join(CODEGEN, d) if not os.path.isabs(d) else d
                  for d in args.dump_dir]
@@ -446,7 +452,8 @@ def main():
     layout_json = args.layout_json or os.path.join(noise_dir, 'concat_per_core.json')
     if not os.path.isabs(layout_json):
         layout_json = os.path.join(CODEGEN, layout_json)
-    npz_path = args.npz_path if os.path.isabs(args.npz_path) else os.path.join(CODEGEN, args.npz_path)
+    npz_path = args.npz_path if args.npz_path else get_default_npz_path(model_profile)
+    npz_path = npz_path if os.path.isabs(npz_path) else os.path.join(CODEGEN, npz_path)
     csv_path = resolve_csv_path(args.csv, noise_dir)
     sample_range = parse_sample_range(args.samples)
     rng = np.random.default_rng(args.seed)
@@ -462,6 +469,7 @@ def main():
     print(f"Noise dir: {noise_dir}")
     print(f"Layout JSON: {layout_json}")
     print(f"NPZ path: {npz_path}")
+    print(f"Model profile: {model_profile}")
 
     # Resolve checkpoint
     if args.checkpoint:
@@ -478,7 +486,7 @@ def main():
     print("Loading metadata...")
     atomics = load_atomic_info(npz_path)
     pseudo_map, n_per_core, n_pseudo = load_pseudo_ch_map(layout_json)
-    weights = load_weights(ckpt_path)
+    weights = load_weights(ckpt_path, conv_params)
     csv_data = load_noise_csv_auto(csv_path, args.noise_table_format)
 
     print(f"  CSV: probs shape {csv_data['probs'].shape}, "
@@ -524,7 +532,7 @@ def main():
             qconv_to_input = build_qconv_to_input_map(sample_dir)
             for a in atomics:
                 orig = a['orig_conv']
-                kh, st, pad, _ = CONV_PARAMS[orig]
+                kh, st, pad, _ = conv_params[orig]
                 input_fname = qconv_to_input.get(a['func'])
                 if input_fname is None:
                     continue
@@ -595,7 +603,7 @@ def main():
 
             for a in atomics:
                 orig = a['orig_conv']
-                kh, st, pad, _ = CONV_PARAMS[orig]
+                kh, st, pad, _ = conv_params[orig]
                 input_fname = qconv_to_input.get(a['func'])
                 if input_fname is None:
                     continue

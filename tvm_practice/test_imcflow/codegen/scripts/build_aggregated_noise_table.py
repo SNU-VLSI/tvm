@@ -44,6 +44,7 @@ from diagnose_noise_per_qconv import (
     signed_int16, load_atomic_info, load_pseudo_ch_map,
     build_qconv_to_input_map, noise_free_qconv,
     PSTEP, NUM_LEVELS, WBITS, ABITS, W_SCALE, CONV_PARAMS,
+    resolve_model_profile, get_conv_params, get_default_npz_path,
 )
 
 DEFAULT_NOISE_DIR = '/root/project/CIM/noise/noise_df/B2_out/N32'
@@ -85,11 +86,11 @@ def iter_existing_sample_dirs(dump_dirs, sample_range):
                 yield dump_dir, s_idx, sample_dir
 
 
-def load_weights(ckpt_path):
+def load_weights(ckpt_path, conv_params=CONV_PARAMS):
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     sd = ckpt['state_dict']
     weights = {}
-    for orig, (kh, st, pad, key) in CONV_PARAMS.items():
+    for orig, (kh, st, pad, key) in conv_params.items():
         w = sd[key].cpu().numpy().astype(np.int32)
         weights[orig] = w
     return weights
@@ -331,16 +332,21 @@ def main():
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--acc-mask', type=parse_acc_mask, default=0,
                         help='4-bit acc mask used by the compiled chip model')
+    parser.add_argument('--model-profile', default=os.environ.get('NOISE_MODEL_PROFILE', None),
+                        help='Noise diagnostics profile: resnet8 or kws_dscnn '
+                             '(default: NOISE_MODEL_PROFILE or resnet8)')
     parser.add_argument('--noise-dir', default=DEFAULT_NOISE_DIR,
                         help='Directory containing concat_per_core.json '
                              f'(default: {DEFAULT_NOISE_DIR})')
     parser.add_argument('--layout-json', default=None,
                         help='Path to concat_per_core.json. If omitted, uses '
                              '--noise-dir/concat_per_core.json')
-    parser.add_argument('--npz-path', default=DEFAULT_NPZ_PATH,
+    parser.add_argument('--npz-path', default=None,
                         help='Path to psum_imcu_column_map.npz '
-                             f'(default: {DEFAULT_NPZ_PATH})')
+                             '(default: selected model profile)')
     args = parser.parse_args()
+    model_profile = resolve_model_profile(args.model_profile)
+    conv_params = get_conv_params(model_profile)
 
     dump_dirs = [os.path.join(CODEGEN, d) if not os.path.isabs(d) else d
                  for d in args.dump_dir]
@@ -348,7 +354,8 @@ def main():
     layout_json = args.layout_json or os.path.join(noise_dir, 'concat_per_core.json')
     if not os.path.isabs(layout_json):
         layout_json = os.path.join(CODEGEN, layout_json)
-    npz_path = args.npz_path if os.path.isabs(args.npz_path) else os.path.join(CODEGEN, args.npz_path)
+    npz_path = args.npz_path if args.npz_path else get_default_npz_path(model_profile)
+    npz_path = npz_path if os.path.isabs(npz_path) else os.path.join(CODEGEN, npz_path)
 
     sample_range = parse_sample_range(args.samples)
     print(f"Dump dirs ({len(dump_dirs)}):")
@@ -358,6 +365,7 @@ def main():
     print(f"Noise dir: {noise_dir}")
     print(f"Layout JSON: {layout_json}")
     print(f"NPZ path: {npz_path}")
+    print(f"Model profile: {model_profile}")
 
     if args.checkpoint:
         ckpt_path = args.checkpoint
@@ -374,7 +382,7 @@ def main():
     print("Loading metadata...")
     atomics = load_atomic_info(npz_path)
     pseudo_map, n_per_core, n_pseudo = load_pseudo_ch_map(layout_json)
-    weights = load_weights(ckpt_path)
+    weights = load_weights(ckpt_path, conv_params)
 
     for a in atomics:
         h = a['imce_h']
@@ -398,7 +406,7 @@ def main():
             qconv_to_input = build_qconv_to_input_map(sample_dir)
             for a in atomics:  # All atomics to catch worst-case channels
                 orig = a['orig_conv']
-                kh, st, pad, _ = CONV_PARAMS[orig]
+                kh, st, pad, _ = conv_params[orig]
                 input_fname = qconv_to_input.get(a['func'])
                 if input_fname is None:
                     continue
@@ -480,7 +488,7 @@ def main():
 
         for a in atomics:
             orig = a['orig_conv']
-            kh, st, pad, _ = CONV_PARAMS[orig]
+            kh, st, pad, _ = conv_params[orig]
             input_fname = qconv_to_input.get(a['func'])
             if input_fname is None:
                 continue
