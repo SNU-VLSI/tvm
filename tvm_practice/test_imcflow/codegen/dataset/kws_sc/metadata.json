@@ -1,0 +1,33 @@
+{
+  "classes": [
+    "yes",
+    "no",
+    "up",
+    "down",
+    "left",
+    "right",
+    "on",
+    "off",
+    "stop",
+    "go",
+    "unknown",
+    "silence"
+  ],
+  "clip_duration_ms": 1000.0,
+  "created_at": "2026-06-28T23:29:42.024211",
+  "dataset": "kws_sc",
+  "dct_coefficient_count": 10,
+  "dtype": "float32",
+  "feature_type": "mfcc",
+  "image_shape": [
+    1,
+    49,
+    10
+  ],
+  "label_dtype": "int64",
+  "num_samples": 12105,
+  "sample_rate": 16000,
+  "split": "testing",
+  "window_size_ms": 30.0,
+  "window_stride_ms": 20.0
+}

@@ -1,1 +1,3 @@
 *.npy
+!kws_sc/images.npy
+!kws_sc/labels.npy

@@ -179,6 +179,7 @@ cscope*
 perf
 .bash_history
 *.json
+!tvm_practice/test_imcflow/codegen/dataset/kws_sc/metadata.json
 *.params
 *.ro
 *.onnx
