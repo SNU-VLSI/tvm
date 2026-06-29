@@ -23,11 +23,12 @@ off-array (use_imcu=0) and is excluded from the int16 contract.
 
 NOTE on OC-split: blocks with pointwise OC>64 (blocks 6..13) get the qconv
 OC-split into multiple atomic convs that are concatenated. The TVM tensor that
-matches PyTorch's full-OC blockN.pw output is therefore the post-concat int16
-(1, OC, H, W) tensor (i.e. the input to that block's pw batch_norm), NOT an
-individual atomic qconv. This script locates the comparison tensor by matching
-the PyTorch output's exact (1, OC, H, W) int16 shape against TVM nodes in
-topological order, which is robust to whether a block was OC-split.
+matches PyTorch's full-OC blockN.pw output is the post-concat int16 (1, OC, H, W)
+tensor — the data input to that block's pointwise batch_norm. This script locates
+it exactly by walking the GraphExecutor JSON: it finds the 26 imcflow batch_norm
+nodes (13 blocks x {bn_dw, bn_pw}) in dataflow order, takes every 2nd (bn_pw),
+and reads the unique graph-node feeding each via its inputs[0] edge. No shape/
+name heuristic — robust to OC-split (where several same-shape concatenates exist).
 
 Usage:
   cd /root/project/tvm/tvm_practice/test_imcflow/codegen
@@ -60,8 +61,10 @@ DEFAULT_EVAL_DIR = os.path.join(
 NUM_BLOCKS = 13
 
 # PyTorch (berlin1) hooked module names for the 13 pointwise PsumConv modules.
-# The pkl key is ('Int16', idx, <module>, 'output').
-PT_PW_MODULE = {n: f"block{n}.block_int16.pw" for n in range(1, NUM_BLOCKS + 1)}
+# The pkl key is ('Int16', idx, <module>, 'output'). The VWW deploy model names
+# blocks 0-based ('blocks.{i}.block_int16.pw'), so relay block n (1..13) maps to
+# PyTorch blocks.{n-1}.
+PT_PW_MODULE = {n: f"blocks.{n - 1}.block_int16.pw" for n in range(1, NUM_BLOCKS + 1)}
 
 
 # ---------------------------------------------------------------------------
@@ -100,130 +103,93 @@ def pt_sample_indices(store):
 
 
 # ---------------------------------------------------------------------------
-# TVM side: re-run CPU debug executor on a supplied input
+# TVM side: build the CPU graph, run the debug executor, and use the graph JSON
+# to address each block's pointwise output node exactly.
 # ---------------------------------------------------------------------------
-def regenerate_tvm_transformed_pkl(eval_dir, model_input_np):
-    """Run the TVM CPU debug executor on model_input_np, writing
-    debug_executor_output_tensors_transformed.pkl into eval_dir. Returns the
-    loaded dict."""
-    from test import load_transformed_model, _build_and_run_on_cpu
+def build_tvm_debug(eval_dir, model_input_np):
+    """Build the transformed CPU model, run the debug executor on model_input_np,
+    and return (graph_json_dict, debug_tensors) where debug_tensors maps
+    graph-node-name -> output ndarray (output 0).
 
-    cpu_mod, cpu_params = load_transformed_model(
-        eval_dir, pkl_name="transformed_cpu_model.pkl"
-    )
-    model_input_np = np.ascontiguousarray(model_input_np.astype("float32"))
-    _build_and_run_on_cpu(
-        cpu_mod, cpu_params, {"model_input": model_input_np}, eval_dir, "transformed"
-    )
-    pkl_path = os.path.join(eval_dir, "debug_executor_output_tensors_transformed.pkl")
-    with open(pkl_path, "rb") as f:
-        return pickle.load(f)
-
-
-def _parse_key(key):
-    """Return (name, topo_index, output_num) for a TVM debug pkl key."""
-    parts = key.split("____")
-    name = parts[0]
-    t_idx = int(parts[1].split(":")[1])
-    o_idx = int(parts[2].split(":")[1])
-    return name, t_idx, o_idx
-
-
-def get_tvm_tensor(tvm_data, topo_index, output_num=0):
-    for key, arr in tvm_data.items():
-        _, t_idx, o_idx = _parse_key(key)
-        if t_idx == topo_index and o_idx == output_num:
-            return np.asarray(arr)
-    return None
-
-
-def tvm_nodes_sorted(tvm_data):
-    """All (topo_index, name, ndarray) sorted by topo index."""
-    rows = []
-    for key, arr in tvm_data.items():
-        name, t_idx, o_idx = _parse_key(key)
-        rows.append((t_idx, o_idx, name, np.asarray(arr)))
-    rows.sort(key=lambda r: (r[0], r[1]))
-    return rows
-
-
-def _pw_output_node_types(eval_dir):
-    """Walk the transformed @main graph and return, in block order, the relay op
-    name of the data-input to each block's POINTWISE batch_norm (= the pw conv
-    result = PyTorch blockN.pw output).
-
-    The transformed graph has, per block, two imcflow.fused_batch_norm calls:
-    bn_dw then bn_pw. So the bn_pw of block b is the (2b)-th imcflow batch_norm.
-    Its data input is the pw output node, whose op differs per block depending on
-    whether the pointwise conv was OC-split:
-      - no split:  strided_slice / layout_transform (deblocked qconv output)
-      - OC-split:  concatenate
-    Returning the op-name SEQUENCE lets us match the right debug-executor node by
-    op type in topological order, which is robust where a fixed shape/name is not.
+    We build here (rather than calling test._build_and_run_on_cpu) so we also keep
+    the GraphExecutor JSON, which lets us map a relay node to its exact debug-pkl
+    graph-node name (the debug key 'name' is the deduplicated graph node name, not
+    the fused primfunc name).
     """
-    from test import load_transformed_model
-    from tvm import relay
+    import json
     import tvm
+    from tvm import relay
+    from tvm.relay.backend import Executor, Runtime
+    from tvm.contrib.debugger import debug_executor
+    from test import load_transformed_model
 
-    mod, _ = load_transformed_model(eval_dir, pkl_name="transformed_cpu_model.pkl")
+    cpu_mod, cpu_params = load_transformed_model(eval_dir, pkl_name="transformed_cpu_model.pkl")
+    model_input_np = np.ascontiguousarray(model_input_np.astype("float32"))
 
-    def opname(e):
-        if isinstance(e, relay.Call):
-            if isinstance(e.op, relay.GlobalVar):
-                return e.op.name_hint
-            if hasattr(e.op, "name"):
-                return e.op.name
-            return type(e.op).__name__
-        return type(e).__name__
+    executor_ = Executor("graph")
+    runtime_ = Runtime("crt", {"system-lib": True})
+    with tvm.transform.PassContext(opt_level=0, config={"tir.disable_vectorize": True}):
+        graph, lib, params = tvm.relay.build(
+            cpu_mod, target="llvm", params=cpu_params, executor=executor_, runtime=runtime_)
 
-    bn_inputs = []  # (bn_opname, input_opname) in topo order
+    ctx = tvm.cpu(0)
+    ex = debug_executor.create(graph, lib, device=ctx)
+    if params:
+        ex.load_params(tvm.runtime.save_param_dict(params))
+    ex.set_input("model_input", model_input_np)
+    ex.run()
 
-    class V(relay.ExprVisitor):
-        def visit_call(self, c):
-            super().visit_call(c)
-            nm = opname(c)
-            # imcflow.fused_batch_norm is an Op (name 'imcflow.fused_batch_norm'),
-            # not a GlobalVar. Exclude the FP stem 'nn.batch_norm'.
-            if "fused_batch_norm" in nm:
-                bn_inputs.append(opname(c.args[0]))
+    # debug tensors keyed by 'name____topo-index:N____output-num:M'; collapse to
+    # graph-node-name -> output-0 ndarray (these pw nodes are single-output).
+    debug = {}
+    for k, v in ex.debug_datum.get_output_tensors().items():
+        name = k.split("____")[0]
+        onum = int(k.split("____")[2].split(":")[1])
+        if onum == 0:
+            debug[name] = v.asnumpy()
 
-    V().visit(mod["main"])
-    # bn_inputs are the imcflow bn data-inputs in order: [bn_dw1, bn_pw1, bn_dw2, ...]
-    # The pointwise ones are the odd positions (0-based: 1,3,5,...).
-    pw_input_ops = [bn_inputs[2 * b + 1] for b in range(NUM_BLOCKS)]
-    return pw_input_ops
+    return json.loads(graph), debug
 
 
-def find_block_pw_tensors(tvm_data, pt_store, idx, eval_dir):
-    """Locate the TVM debug tensor matching each PyTorch blockN.pw output.
+def _graph_node_meta(graph_json):
+    """Return list of per-node dicts: {name, func_name, op, inputs:[node_idx,...]}."""
+    meta = []
+    for node in graph_json["nodes"]:
+        attrs = node.get("attrs", {}) or {}
+        meta.append({
+            "name": node["name"],
+            "func_name": attrs.get("func_name", ""),
+            "op": node.get("op", ""),
+            "inputs": [e[0] for e in node.get("inputs", [])],
+        })
+    return meta
 
-    Uses the transformed graph to learn, per block, the op type that produces the
-    pw output (bn_pw's data input), then matches debug-executor nodes of that op
-    type in topological order while ALSO requiring the PyTorch output's exact
-    (1, OC, H, W) int16 shape. The combination (correct op type + correct shape +
-    topo cursor) pins the right node even where blocks share a shape.
 
-    Returns dict block_idx -> (topo_index, name, tvm_ndarray) or None.
+def find_block_pw_tensors(graph_json, debug, pt_store, idx):
+    """Map each block's pointwise-conv output to its exact TVM debug tensor.
+
+    Walk the GraphExecutor JSON (same dataflow order as relay). The pw output of
+    block b is the data-input (inputs[0]) of that block's pointwise
+    imcflow.fused_batch_norm node. There are 26 batch_norm graph nodes (13 blocks
+    x {bn_dw, bn_pw}) in relay order; the pw ones are every 2nd (indices 1,3,5,...).
+    Each node has a unique graph-node name, so the debug tensor is addressed
+    exactly with no shape/cursor heuristic.
+
+    Returns dict block_idx -> (node_name, tvm_ndarray) or None.
     """
-    pw_ops = _pw_output_node_types(eval_dir)
-    rows = tvm_nodes_sorted(tvm_data)
+    meta = _graph_node_meta(graph_json)
+    bn_idxs = [i for i, m in enumerate(meta) if "imcflow_fused_batch_norm" in m["func_name"]]
+    pw_bn_idxs = bn_idxs[1::2]  # bn_pw per block, in block order
     result = {}
-    cursor = 0
     for n in range(1, NUM_BLOCKS + 1):
-        pt = _to_numpy(pt_get(pt_store, ("Int16", idx, PT_PW_MODULE[n], "output"),
-                              f"block{n}.pw output"))
-        want_shape = tuple(int(s) for s in pt.shape)
-        want_op = pw_ops[n - 1]  # relay op name, e.g. 'strided_slice'/'layout_transform'/'concatenate'
-        found = None
-        for j in range(cursor, len(rows)):
-            t_idx, o_idx, name, arr = rows[j]
-            # debug node 'name' is the fused TIR func name; map relay op -> its substring
-            if arr.dtype == np.int16 and tuple(arr.shape) == want_shape \
-               and want_op.split(".")[-1] in name:
-                found = (t_idx, name, arr)
-                cursor = j + 1
-                break
-        result[n] = found
+        if n - 1 >= len(pw_bn_idxs):
+            result[n] = None
+            continue
+        bn_i = pw_bn_idxs[n - 1]
+        pw_node_i = meta[bn_i]["inputs"][0]
+        node_name = meta[pw_node_i]["name"]
+        arr = debug.get(node_name)
+        result[n] = (node_name, np.asarray(arr)) if arr is not None else None
     return result
 
 
@@ -288,16 +254,16 @@ def main():
     print(f"\nSample {idx}: model_input shape={pt_input.shape} "
           f"range=[{pt_input.min():.4f}, {pt_input.max():.4f}]")
 
-    # 2. Re-run TVM CPU debug executor on that exact input.
-    print(f"\nRe-running TVM CPU debug executor on sample {idx}'s input...")
+    # 2. Build the TVM CPU graph + run debug executor on that exact input.
+    print(f"\nBuilding TVM CPU graph + debug executor on sample {idx}'s input...")
     print(f"  eval_dir: {args.eval_dir}")
-    tvm_data = regenerate_tvm_transformed_pkl(args.eval_dir, pt_input)
-    print(f"  TVM debug pkl entries: {len(tvm_data)}")
+    graph_json, debug = build_tvm_debug(args.eval_dir, pt_input)
+    print(f"  TVM debug graph nodes: {len(graph_json['nodes'])}, debug tensors: {len(debug)}")
 
-    # 2b. Input-consistency check.
-    tvm_input = get_tvm_tensor(tvm_data, 0)
+    # 2b. Input-consistency check: the input node 'model_input' tensor must equal PT.
+    tvm_input = debug.get("model_input")
     if tvm_input is None:
-        print("  WARNING: could not find TVM topo-0 input for consistency check.")
+        print("  WARNING: could not find TVM 'model_input' node for consistency check.")
     else:
         in_diff = np.abs(tvm_input.astype(np.float64) - pt_input.astype(np.float64)).max()
         ok = in_diff <= args.input_tol
@@ -310,18 +276,18 @@ def main():
     print("\n" + "=" * 80)
     print("Pointwise PsumConv outputs (the on-array MVM bit-exact targets)")
     print("=" * 80)
-    located = find_block_pw_tensors(tvm_data, store, idx, args.eval_dir)
+    located = find_block_pw_tensors(graph_json, debug, store, idx)
     results = []
     for n in range(1, NUM_BLOCKS + 1):
         loc = located.get(n)
         if loc is None:
-            print(f"  [!!] block{n}.pw: no matching TVM int16 NCHW tensor found")
+            print(f"  [!!] block{n}.pw: pw-output graph node not found")
             results.append({"name": f"block{n}.pw", "match": False,
-                            "error": "TVM tensor not located"})
+                            "error": "TVM node not located"})
             continue
-        topo, name, tvm_arr = loc
+        name, tvm_arr = loc
         pt_arr = pt_get(store, ("Int16", idx, PT_PW_MODULE[n], "output"), f"block{n}.pw output")
-        r = compare_bit_exact(tvm_arr, pt_arr, f"block{n}.pw (topo {topo} {name})")
+        r = compare_bit_exact(tvm_arr, pt_arr, f"block{n}.pw ({name})")
         print_result(r)
         results.append(r)
 
