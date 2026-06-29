@@ -555,8 +555,10 @@ def compile_for_imcflow_v2(
         with open(f"{output_dir}/policy_table.txt", "w") as f:
             f.write(config.format_policy_table())
 
-    # NoC visualizations
-    imcflow_transform.generateNoCVisualizations(mod, output_dir + "/noc_visualizations")
+    # NoC visualizations (debug-only PNG/PDF; matplotlib makes this slow, ~30%
+    # of compile time on deep models — gate it on save_intermediate).
+    if save_intermediate:
+        imcflow_transform.generateNoCVisualizations(mod, output_dir + "/noc_visualizations")
 
     # FIFO conflict monitoring
     fifo_monitor = imcflow_transform.FIFOConflictMonitor()
