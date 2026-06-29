@@ -28,7 +28,7 @@ Usage:
       --output aggregated_noise_table_multi.npz
 """
 
-import os, sys, argparse, json
+import os, sys, argparse, json, re
 from collections import Counter
 import numpy as np
 import pandas as pd
@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.join(CODEGEN, 'scripts'))
 
 from diagnose_noise_per_qconv import (
     signed_int16, load_atomic_info, load_pseudo_ch_map,
-    build_qconv_to_input_map, noise_free_qconv,
+    noise_free_qconv,
     PSTEP, NUM_LEVELS, WBITS, ABITS, W_SCALE, CONV_PARAMS,
     resolve_model_profile, get_conv_params, get_default_npz_path,
 )
@@ -94,6 +94,102 @@ def load_weights(ckpt_path, conv_params=CONV_PARAMS):
         w = sd[key].cpu().numpy().astype(np.int32)
         weights[orig] = w
     return weights
+
+
+def parse_node_file(fname):
+    m = re.match(r"(\d+)_(.+)\.npy$", fname)
+    if not m:
+        return None
+    return int(m.group(1)), m.group(2)
+
+
+def iter_func_dump_candidates(sample_dir, func, valid_cols):
+    candidates = []
+    notes = []
+    for fname in sorted(os.listdir(sample_dir)):
+        parsed = parse_node_file(fname)
+        if parsed is None:
+            continue
+        node_id, name = parsed
+        if name != func:
+            continue
+        path = os.path.join(sample_dir, fname)
+        try:
+            dump = np.load(path, allow_pickle=True)
+            dump_sq = dump[0, 0]
+            dump_sel = dump_sq[:, :, valid_cols].transpose(2, 0, 1).astype(np.int32)
+        except Exception as exc:
+            notes.append(f"{fname}: load/select failed: {exc}")
+            continue
+        notes.append(f"{fname}: dump={tuple(dump.shape)} selected={tuple(dump_sel.shape)}")
+        candidates.append((node_id, fname, dump_sel))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates, notes
+
+
+def iter_prior_quant_candidates(sample_dir, out_node_id):
+    candidates = []
+    for fname in sorted(os.listdir(sample_dir)):
+        parsed = parse_node_file(fname)
+        if parsed is None:
+            continue
+        node_id, name = parsed
+        if node_id >= out_node_id:
+            continue
+        if "imcflow_min_max_quantize" not in name or "imcflow_main" in name:
+            continue
+        candidates.append((node_id, fname))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates
+
+
+def load_matching_qconv_observation(sample_dir, atomic, weights, conv_params, acc_mask, device):
+    """Return clean and observed dump tensors for one atomic qconv.
+
+    Preserved debug directories can contain stale nodes from earlier compiles.
+    We therefore pair each output candidate with the nearest prior quantize
+    candidate that has compatible channel count and produces the same selected
+    spatial shape as the dump.
+    """
+    orig = atomic["orig_conv"]
+    kh, st, pad, _ = conv_params[orig]
+    ic_lo = atomic["ic_id"] * atomic["ic_block"]
+    ic_hi = ic_lo + atomic["ic_size"]
+    w_full = weights[orig]
+    oc_lo = atomic["oc_id"] * atomic["oc_block"]
+    oc_hi = oc_lo + atomic["oc_size"]
+    w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
+    notes = []
+
+    dump_candidates, dump_notes = iter_func_dump_candidates(
+        sample_dir, atomic["func"], atomic["valid_cols"])
+    notes.extend(dump_notes)
+    for out_node_id, out_fname, dump_sel in dump_candidates:
+        for _, input_fname in iter_prior_quant_candidates(sample_dir, out_node_id):
+            try:
+                qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
+            except Exception as exc:
+                notes.append(f"{input_fname}: input load failed: {exc}")
+                continue
+            if qin.ndim != 4 or qin.shape[1] < ic_hi:
+                notes.append(
+                    f"{input_fname}: input shape {tuple(qin.shape)} incompatible "
+                    f"with channels [{ic_lo}, {ic_hi})"
+                )
+                continue
+            clean_out, _, _ = noise_free_qconv(
+                qin[:, ic_lo:ic_hi, :, :], w_tile,
+                kernel_h=kh, stride=st, padding=pad,
+                acc_mask=acc_mask, device=device)
+            clean_sq = clean_out.squeeze(0)
+            if tuple(clean_sq.shape) == tuple(dump_sel.shape):
+                return clean_sq, dump_sel, input_fname, out_fname, notes
+            notes.append(
+                f"{input_fname} -> {out_fname}: clean={tuple(clean_sq.shape)} "
+                f"dump={tuple(dump_sel.shape)}"
+            )
+
+    return None, None, None, None, notes
 
 
 class AggregatedNoiseAccumulator:
@@ -182,10 +278,20 @@ class AggregatedNoiseAccumulator:
 
 
 class RefOnlyCsvAccumulator:
-    """Accumulate exact P(obs_noise | pseudo_ch, clean_ref) for CIM training CSVs."""
+    """Accumulate P(obs_noise | pseudo_ch, clean_ref) for CIM training CSVs."""
 
-    def __init__(self, n_pseudo):
+    def __init__(self, n_pseudo, ref_bin_edges=None, noise_bin_edges=None):
         self.n_pseudo = int(n_pseudo)
+        self.ref_bin_edges = None if ref_bin_edges is None else np.asarray(ref_bin_edges, dtype=np.float64)
+        self.noise_bin_edges = None if noise_bin_edges is None else np.asarray(noise_bin_edges, dtype=np.float64)
+        self.ref_bin_centers = (
+            None if self.ref_bin_edges is None
+            else (self.ref_bin_edges[:-1] + self.ref_bin_edges[1:]) / 2
+        )
+        self.noise_bin_centers = (
+            None if self.noise_bin_edges is None
+            else (self.noise_bin_edges[:-1] + self.noise_bin_edges[1:]) / 2
+        )
         self.per_ch = [Counter() for _ in range(self.n_pseudo)]
         self.aggregate = Counter()
         self.total = 0
@@ -200,9 +306,21 @@ class RefOnlyCsvAccumulator:
             values = rounded
         return values.astype(np.int64, copy=False)
 
+    @staticmethod
+    def _bin_to_centers(values, edges, centers):
+        idx = np.digitize(values.astype(np.float64, copy=False), edges) - 1
+        idx = np.clip(idx, 0, len(centers) - 1)
+        return centers[idx]
+
     def add_batch(self, pseudo_chs, clean_ref, obs_noise):
         clean_ref = self._canonical_int_array(clean_ref)
         obs_noise = self._canonical_int_array(obs_noise)
+        ref_binned = self.ref_bin_centers is not None
+        noise_binned = self.noise_bin_centers is not None
+        if ref_binned:
+            clean_ref = self._bin_to_centers(clean_ref, self.ref_bin_edges, self.ref_bin_centers)
+        if noise_binned:
+            obs_noise = self._bin_to_centers(obs_noise, self.noise_bin_edges, self.noise_bin_centers)
         for oc_i, pch in enumerate(pseudo_chs):
             pch = int(pch)
             refs = clean_ref[oc_i].reshape(-1)
@@ -210,7 +328,10 @@ class RefOnlyCsvAccumulator:
             pairs = np.stack([refs, diffs], axis=1)
             unique, counts = np.unique(pairs, axis=0, return_counts=True)
             for (ref, diff), count in zip(unique, counts):
-                key = (int(ref), int(diff))
+                key = (
+                    float(ref) if ref_binned else int(ref),
+                    float(diff) if noise_binned else int(diff),
+                )
                 count = int(count)
                 self.per_ch[pch][key] += count
                 self.aggregate[key] += count
@@ -222,8 +343,14 @@ class RefOnlyCsvAccumulator:
         if fallback not in ("aggregate", "zero"):
             raise ValueError(f"unknown fallback policy: {fallback}")
 
-        refs = sorted({ref for counter in self.per_ch for ref, _ in counter.keys()})
-        diffs = sorted({diff for counter in self.per_ch for _, diff in counter.keys()})
+        if self.ref_bin_centers is not None:
+            refs = list(map(float, self.ref_bin_centers))
+        else:
+            refs = sorted({ref for counter in self.per_ch for ref, _ in counter.keys()})
+        if self.noise_bin_centers is not None:
+            diffs = list(map(float, self.noise_bin_centers))
+        else:
+            diffs = sorted({diff for counter in self.per_ch for _, diff in counter.keys()})
         if 0 not in diffs:
             diffs.append(0)
             diffs = sorted(diffs)
@@ -232,7 +359,9 @@ class RefOnlyCsvAccumulator:
             [list(map(float, diffs)), list(range(self.n_pseudo))],
             names=["diff_bin", "channel"],
         )
-        out = pd.DataFrame(0.0, index=pd.Index(list(map(float, refs)), name="ref"), columns=columns)
+        ref_to_row = {ref: i for i, ref in enumerate(refs)}
+        diff_to_col_base = {diff: i * self.n_pseudo for i, diff in enumerate(diffs)}
+        values = np.zeros((len(refs), len(diffs) * self.n_pseudo), dtype=np.float32)
 
         by_ch_ref = []
         for counter in self.per_ch:
@@ -244,9 +373,9 @@ class RefOnlyCsvAccumulator:
         for (ref, diff), count in self.aggregate.items():
             aggregate_by_ref.setdefault(ref, {})[diff] = count
 
-        zero_idx = float(0)
         for pch, ref_map in enumerate(by_ch_ref):
             for ref in refs:
+                row = ref_to_row[ref]
                 ref_counts = ref_map.get(ref, {})
                 total = sum(ref_counts.values())
                 if total < min_count:
@@ -254,11 +383,15 @@ class RefOnlyCsvAccumulator:
                         ref_counts = aggregate_by_ref.get(ref, {})
                         total = sum(ref_counts.values())
                     if total <= 0:
-                        out.loc[float(ref), (zero_idx, pch)] = 1.0
+                        values[row, diff_to_col_base[0] + pch] = 1.0
                         continue
                 for diff, count in ref_counts.items():
-                    out.loc[float(ref), (float(diff), pch)] = float(count) / float(total)
-        return out
+                    values[row, diff_to_col_base[diff] + pch] = float(count) / float(total)
+        return pd.DataFrame(
+            values,
+            index=pd.Index(list(map(float, refs)), name="ref"),
+            columns=columns,
+        )
 
     def summary(self):
         nonempty = sum(1 for c in self.per_ch if c)
@@ -297,6 +430,8 @@ def write_ref_only_csv(acc, csv_path, layout_json, layout_output=None, metadata_
         "table_format": "ref",
         "granularity": "output",
         "noise_unit": "output",
+        "ref_axis": "binned" if acc.ref_bin_centers is not None else "exact",
+        "diff_axis": "binned" if acc.noise_bin_centers is not None else "exact",
         "source": "build_aggregated_noise_table.py chip debug dumps",
     })
     with open(metadata_output, "w") as f:
@@ -403,38 +538,11 @@ def main():
             if n_scanned_samples >= 5:
                 break
             n_scanned_samples += 1
-            qconv_to_input = build_qconv_to_input_map(sample_dir)
             for a in atomics:  # All atomics to catch worst-case channels
-                orig = a['orig_conv']
-                kh, st, pad, _ = conv_params[orig]
-                input_fname = qconv_to_input.get(a['func'])
-                if input_fname is None:
+                clean_sq, dump_sel, _, _, _ = load_matching_qconv_observation(
+                    sample_dir, a, weights, conv_params, args.acc_mask, args.device)
+                if dump_sel is None:
                     continue
-                out_npy = None
-                for f in os.listdir(sample_dir):
-                    if f.endswith(f'_{a["func"]}.npy'):
-                        out_npy = os.path.join(sample_dir, f)
-                        break
-                if out_npy is None:
-                    continue
-                try:
-                    qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
-                    dump = np.load(out_npy, allow_pickle=True)
-                except Exception:
-                    continue
-                ic_lo = a['ic_id'] * a['ic_block']
-                ic_hi = ic_lo + a['ic_size']
-                w_full = weights[orig]
-                oc_lo = a['oc_id'] * a['oc_block']
-                oc_hi = oc_lo + a['oc_size']
-                w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
-                clean_out, _, _ = noise_free_qconv(
-                    qin[:, ic_lo:ic_hi, :, :], w_tile,
-                    kernel_h=kh, stride=st, padding=pad,
-                    acc_mask=args.acc_mask, device=args.device)
-                clean_sq = clean_out.squeeze(0)
-                dump_sq = dump[0, 0]
-                dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
                 obs = signed_int16(dump_sel - clean_sq)
                 ref_samples.append(clean_sq.ravel())
                 noise_samples.append(obs.ravel())
@@ -473,7 +581,10 @@ def main():
     ref_bin_edges = np.linspace(ref_lo, ref_hi, args.n_ref_bins + 1)
     noise_bin_edges = np.linspace(noise_lo, noise_hi, args.n_noise_bins + 1)
     acc = AggregatedNoiseAccumulator(n_pseudo, ref_bin_edges, noise_bin_edges)
-    csv_acc = RefOnlyCsvAccumulator(n_pseudo) if args.csv_output else None
+    csv_acc = (
+        RefOnlyCsvAccumulator(n_pseudo, ref_bin_edges, noise_bin_edges)
+        if args.csv_output else None
+    )
 
     # Main pass
     print(f"\nProcessing {len(dump_dirs)} dirs × {len(sample_range)} samples × {len(atomics)} atomics...")
@@ -484,44 +595,17 @@ def main():
         sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
         if not os.path.isdir(sample_dir):
             continue
-        qconv_to_input = build_qconv_to_input_map(sample_dir)
 
         for a in atomics:
-            orig = a['orig_conv']
-            kh, st, pad, _ = conv_params[orig]
-            input_fname = qconv_to_input.get(a['func'])
-            if input_fname is None:
+            clean_sq, dump_sel, _, _, candidates = load_matching_qconv_observation(
+                sample_dir, a, weights, conv_params, args.acc_mask, args.device)
+            if dump_sel is None:
+                preview = "; ".join(candidates[:3]) if candidates else "no candidates"
+                print(
+                    f"  [skip] sample_{s_idx} {a['func']}: no compatible input/dump pair "
+                    f"({preview})"
+                )
                 continue
-            out_npy = None
-            for f in os.listdir(sample_dir):
-                if f.endswith(f'_{a["func"]}.npy'):
-                    out_npy = os.path.join(sample_dir, f)
-                    break
-            if out_npy is None:
-                continue
-
-            try:
-                qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
-                dump = np.load(out_npy, allow_pickle=True)
-            except Exception as e:
-                print(f"  [skip] sample_{s_idx} {a['func']}: {e}")
-                continue
-
-            ic_lo = a['ic_id'] * a['ic_block']
-            ic_hi = ic_lo + a['ic_size']
-            w_full = weights[orig]
-            oc_lo = a['oc_id'] * a['oc_block']
-            oc_hi = oc_lo + a['oc_size']
-            w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
-
-            clean_out, _, _ = noise_free_qconv(
-                qin[:, ic_lo:ic_hi, :, :], w_tile,
-                kernel_h=kh, stride=st, padding=pad,
-                acc_mask=args.acc_mask, device=args.device)
-            clean_sq = clean_out.squeeze(0)
-
-            dump_sq = dump[0, 0]
-            dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
             obs = signed_int16(dump_sel - clean_sq)
 
             acc.add_batch(a['pseudo_chs'], clean_sq, obs)
