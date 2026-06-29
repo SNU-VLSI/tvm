@@ -397,37 +397,37 @@ def getModel_from_pretrained_weight(iH=96, iW=96, until_relay=None, replicate_fa
         m = re.match(r'weight_dw_(\d+)', name)
         if m:
             b = int(m.group(1))
-            key = f"block{b}.block_int16.dw.weight"
+            key = f"blocks.{b-1}.block_int16.dw.weight"
             return _block_tensor(name, key, dtype, shape)
 
         m = re.match(r'weight_pw_(\d+)', name)
         if m:
             b = int(m.group(1))
-            key = f"block{b}.block_int16.pw.weight"
+            key = f"blocks.{b-1}.block_int16.pw.weight"
             return _block_tensor(name, key, dtype, shape)
 
         m = re.match(r'fused_(scale|bias)_dw_(\d+)', name)
         if m:
             ptype, b = m.group(1), int(m.group(2))
-            key = f"block{b}.block_int16.bn_dw.{ptype}"
+            key = f"blocks.{b-1}.block_int16.bn_dw.{ptype}"
             return _block_tensor(name, key, dtype, shape)
 
         m = re.match(r'fused_(scale|bias)_pw_(\d+)', name)
         if m:
             ptype, b = m.group(1), int(m.group(2))
-            key = f"block{b}.block_int16.bn_pw.{ptype}"
+            key = f"blocks.{b-1}.block_int16.bn_pw.{ptype}"
             return _block_tensor(name, key, dtype, shape)
 
         m = re.match(r'quant_dw_(min|max)_(\d+)', name)
         if m:
             ptype, b = m.group(1), int(m.group(2))
-            key = f"block{b}.block_int16.act_dw.{ptype}"
+            key = f"blocks.{b-1}.block_int16.act_dw.{ptype}"
             return _scalar_tensor(name, key, dtype, shape)
 
         m = re.match(r'quant_pw_(min|max)_(\d+)', name)
         if m:
             ptype, b = m.group(1), int(m.group(2))
-            key = f"block{b}.block_int16.act_pw.{ptype}"
+            key = f"blocks.{b-1}.block_int16.act_pw.{ptype}"
             return _scalar_tensor(name, key, dtype, shape)
 
         raise ValueError(f"No mapping found for parameter: {name} (dtype={dtype}, shape={shape})")
