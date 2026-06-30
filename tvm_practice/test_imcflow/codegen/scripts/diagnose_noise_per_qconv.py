@@ -93,6 +93,23 @@ MODEL_PROFILE_DEFAULTS = {
             'weight_pw_4': (1, 1, 0, 'block4.block_int16.pw.weight'),
         },
     },
+    'vww_mobilenet': {
+        # eval_dir name matches the CIM loop ModelProfile tvm_model
+        # 'mobilenet_v1_vww_full_pretrained' (see run_resnet8_chip_noise_loop.py).
+        'npz_path': os.path.join(CODEGEN, 'eval_dir/mobilenet_v1_vww_full_pretrained_evl.linux/psum_imcu_column_map.npz'),
+        'pysim_dir': os.path.join(CODEGEN, 'eval_dir/mobilenet_v1_vww_full_pretrained_evl.baremetal/test_outputs/py_runner'),
+        'ckpt_path': (
+            '/root/project/CIM/trained_models/visual_wake_words/NAT/'
+            'prange_half_psum_duplication_1/2025-Dec-23-14-11-16/'
+            'imcflow/2026-Jun-29-18-25-56/checkpoint.pth.tar'
+        ),
+        # 13 pointwise convs (the only on-array MVMs). All 1x1, stride 1, pad 0.
+        # Checkpoint keys are 0-based plural 'blocks.{i}.block_int16.pw.weight'.
+        'conv_params': {
+            f'weight_pw_{b}': (1, 1, 0, f'blocks.{b - 1}.block_int16.pw.weight')
+            for b in range(1, 14)
+        },
+    },
 }
 
 
@@ -109,6 +126,10 @@ def resolve_model_profile(profile=None):
         'kws': 'kws_dscnn',
         'dscnn': 'kws_dscnn',
         'ds_cnn': 'kws_dscnn',
+        'vww': 'vww_mobilenet',
+        'visual_wake_words': 'vww_mobilenet',
+        'mobilenet': 'vww_mobilenet',
+        'mobilenet_v1_vww_full_pretrained': 'vww_mobilenet',
     }
     name = aliases.get(name, name)
     if name not in MODEL_PROFILE_DEFAULTS:

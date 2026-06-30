@@ -281,6 +281,10 @@ for _vww_n in range(4, 88):
     MODEL_REGISTRY[f"vww_subset{_vww_n:02d}_pretrained"] = _make_vww_subset(_vww_n)
 MODEL_REGISTRY["vww_full_pretrained"] = (
     lambda: mobilenet_subset_models.getModel_from_pretrained_weight(iH=96, iW=96), "ones")
+# Alias matching the CIM chip-noise loop ModelProfile (run_resnet8_chip_noise_loop.py
+# visual_wake_words: tvm_model="mobilenet_v1_vww_full_pretrained"). Same model as
+# vww_full_pretrained; the loop's TVM step looks it up by this name.
+MODEL_REGISTRY["mobilenet_v1_vww_full_pretrained"] = MODEL_REGISTRY["vww_full_pretrained"]
 
 # Available input patterns for testing
 INPUT_PATTERNS = ["random", "ones", "zeros", "linear"]
