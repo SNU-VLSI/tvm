@@ -53,6 +53,8 @@ import numpy as np
 
 CODEGEN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, CODEGEN_DIR)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for ulp_tolerance
+import ulp_tolerance as ULP
 
 DEFAULT_EVAL_DIR = os.path.join(
     CODEGEN_DIR, "eval_dir", "vww_full_pretrained_evl.baremetal"
@@ -189,7 +191,19 @@ def find_block_pw_tensors(graph_json, debug, pt_store, idx):
         pw_node_i = meta[bn_i]["inputs"][0]
         node_name = meta[pw_node_i]["name"]
         arr = debug.get(node_name)
-        result[n] = (node_name, np.asarray(arr)) if arr is not None else None
+        if arr is None:
+            result[n] = None
+            continue
+        # Also grab the pw INPUT (the quantized-activation node feeding this 1x1
+        # conv) so the on-array MVM can be re-anchored from dumps alone.
+        in_arr = None
+        ins = meta[pw_node_i].get("inputs", [])
+        if ins:
+            in_name = meta[ins[0]]["name"]
+            in_dbg = debug.get(in_name)
+            if in_dbg is not None:
+                in_arr = np.asarray(in_dbg)
+        result[n] = (node_name, np.asarray(arr), in_arr)
     return result
 
 
@@ -234,6 +248,12 @@ def main():
     ap.add_argument("--input-tol", type=float, default=0.0,
                     help="Max allowed abs diff when checking the FP input matches "
                          "on both sides (default 0 = bit-exact float)")
+    ap.add_argument("--ulp-tolerant", action="store_true",
+                    help="Classify a pointwise-output mismatch as BENIGN when it is "
+                         "fully attributable to the off-chip FP stem (TVM-vs-host "
+                         "float conv accumulation producing a +/-1 near-integer cast), "
+                         "verified by re-anchoring the 1x1 MVM on the dumped pw inputs. "
+                         "A genuine integer-kernel mismatch still FAILS.")
     args = ap.parse_args()
 
     print("=" * 80)
@@ -282,13 +302,39 @@ def main():
         loc = located.get(n)
         if loc is None:
             print(f"  [!!] block{n}.pw: pw-output graph node not found")
-            results.append({"name": f"block{n}.pw", "match": False,
+            results.append({"name": f"block{n}.pw", "match": False, "benign": False,
                             "error": "TVM node not located"})
             continue
-        name, tvm_arr = loc
+        name, tvm_arr, tvm_in = loc
         pt_arr = pt_get(store, ("Int16", idx, PT_PW_MODULE[n], "output"), f"block{n}.pw output")
         r = compare_bit_exact(tvm_arr, pt_arr, f"block{n}.pw ({name})")
+        r["benign"] = False
         print_result(r)
+        # ULP-tolerant classification: an off-chip FP stem ULP (TVM vs host float
+        # conv accumulation) can flip a near-integer stem cast by +/-1; if that
+        # crosses a 4-bit act quant bin it is amplified by the 1x1 MVM. That is a
+        # benign FP-boundary artifact, not an MVM kernel bug. We re-anchor from
+        # dumps: a 1x1 pw output diff is benign iff every differing pixel also has
+        # a differing pw INPUT column at the same (h,w); an output diff at a pixel
+        # with an identical input column is a genuine kernel mismatch.
+        if (not r["match"]) and args.ulp_tolerant and not r.get("error"):
+            pt_in = None
+            try:
+                pt_in = ULP._np(pt_get(store, ("Int16", idx, PT_PW_MODULE[n], "input"),
+                                       f"block{n}.pw input"))
+            except Exception:
+                pt_in = None
+            if tvm_in is None or pt_in is None:
+                print("       [ulp] cannot classify: pw INPUT tensor unavailable "
+                      "(TVM node or PT 'input' hook missing) -> keeping as MISMATCH")
+            else:
+                v = ULP.pw1x1_divergence_input_induced(tvm_in, pt_in, tvm_arr, pt_arr,
+                                                       name=f"block{n}.pw")
+                if v.status == ULP.BENIGN_FP_BOUNDARY:
+                    r["benign"] = True
+                    print(f"       [ulp] BENIGN (off-chip FP-stem propagation): {v.detail}")
+                else:
+                    print(f"       [ulp] REAL mismatch: {v.detail}")
         results.append(r)
 
     # 4. Summary.
@@ -296,13 +342,22 @@ def main():
     print("SUMMARY")
     print("=" * 80)
     n_exact = sum(1 for r in results if r.get("match"))
-    print(f"  sample {idx}: {n_exact}/{len(results)} pointwise convs bit-exact")
-    first_bad = next((r for r in results if not r.get("match")), None)
-    if first_bad is None:
-        print("  ✅ All pointwise PsumConv outputs match PyTorch bit-for-bit.")
+    n_benign = sum(1 for r in results if (not r.get("match")) and r.get("benign"))
+    print(f"  sample {idx}: {n_exact}/{len(results)} pointwise convs bit-exact"
+          + (f", {n_benign} benign (off-chip FP-stem ULP)" if n_benign else ""))
+    # A block passes if bit-exact, or (in --ulp-tolerant mode) classified benign.
+    real_bad = [r for r in results if not (r.get("match") or r.get("benign"))]
+    if not real_bad:
+        if n_benign:
+            print(f"  ✅ All pointwise PsumConv outputs match, or differ only by benign "
+                  f"off-chip FP-stem ULP ({n_benign} block(s)); the on-array MVM is "
+                  f"consistent. PASS (ULP-tolerant).")
+        else:
+            print("  ✅ All pointwise PsumConv outputs match PyTorch bit-for-bit.")
         sys.exit(0)
     else:
-        print(f"  ❌ First divergence: {first_bad['name']} "
+        first_bad = real_bad[0]
+        print(f"  ❌ Real divergence: {first_bad['name']} "
               f"({first_bad.get('error', 'mismatch')})")
         sys.exit(1)
 
