@@ -167,6 +167,41 @@ def _graph_node_meta(graph_json):
     return meta
 
 
+def _pw_input_node(meta, pw_out_i, max_depth=8):
+    """Walk back from a block's pw-OUTPUT node to its pointwise qconv and return
+    the graph-node index of the qconv's DATA input (inputs[0]) -- the real
+    (1, IC, H, W) quantized activation fed to the 1x1 MVM.
+
+    The pw-output node is qconv post-processing (strided_slice / layout_transform
+    / concatenate for OC-split), NOT the qconv, and its inputs[0] is a blocked
+    NCHW<k>C layout_transform, not the pw input. We BFS back through those
+    post-ops to the nn_imcflow_qconv node(s). For OC/IC-split blocks there are
+    several qconv nodes, but every one of them shares the SAME data-input tensor
+    (the single quantized activation feeding all OC/IC slices), so the first
+    qconv's data input is the whole pw input and matches PyTorch's pw 'input'
+    hook exactly. Returns None if no qconv is reached.
+    """
+    seen = set()
+    frontier = [pw_out_i]
+    depth = 0
+    while frontier and depth < max_depth:
+        nxt = []
+        for i in frontier:
+            if i in seen:
+                continue
+            seen.add(i)
+            fn = meta[i]["func_name"]
+            if "nn_imcflow_qconv" in fn and "qdw" not in fn:
+                ins = meta[i]["inputs"]
+                if ins:
+                    return ins[0]
+                continue
+            nxt.extend(meta[i]["inputs"])
+        frontier = nxt
+        depth += 1
+    return None
+
+
 def find_block_pw_tensors(graph_json, debug, pt_store, idx):
     """Map each block's pointwise-conv output to its exact TVM debug tensor.
 
@@ -195,12 +230,14 @@ def find_block_pw_tensors(graph_json, debug, pt_store, idx):
             result[n] = None
             continue
         # Also grab the pw INPUT (the quantized-activation node feeding this 1x1
-        # conv) so the on-array MVM can be re-anchored from dumps alone.
+        # conv) so the on-array MVM can be re-anchored from dumps alone. The pw
+        # input is the qconv's data input, reached by walking back from the
+        # pw-output node through its post-ops to the qconv (NOT pw_node_i's own
+        # inputs[0], which is a blocked NCHW<k>C layout_transform).
         in_arr = None
-        ins = meta[pw_node_i].get("inputs", [])
-        if ins:
-            in_name = meta[ins[0]]["name"]
-            in_dbg = debug.get(in_name)
+        pw_in_i = _pw_input_node(meta, pw_node_i)
+        if pw_in_i is not None:
+            in_dbg = debug.get(meta[pw_in_i]["name"])
             if in_dbg is not None:
                 in_arr = np.asarray(in_dbg)
         result[n] = (node_name, np.asarray(arr), in_arr)
