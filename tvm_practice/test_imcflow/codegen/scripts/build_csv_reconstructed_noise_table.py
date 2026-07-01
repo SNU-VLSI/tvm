@@ -41,13 +41,14 @@ sys.path.insert(0, os.path.join(CODEGEN, 'scripts'))
 
 from diagnose_noise_per_qconv import (
     signed_int16, load_atomic_info, load_pseudo_ch_map,
-    build_qconv_to_input_map, noise_free_qconv, load_noise_csv,
+    noise_free_qconv, load_noise_csv,
     PSTEP, NUM_LEVELS, WBITS, ABITS, W_SCALE, CONV_PARAMS,
     resolve_model_profile, get_conv_params, get_default_npz_path,
 )
 from build_aggregated_noise_table import (
     AggregatedNoiseAccumulator, load_weights, parse_sample_range,
-    iter_existing_sample_dirs,
+    iter_existing_sample_dirs, iter_func_dump_candidates,
+    iter_prior_quant_candidates,
 )
 
 DEFAULT_NOISE_DIR = '/root/project/CIM/noise/noise_df/B2_out/N32'
@@ -70,6 +71,60 @@ def parse_acc_mask(value):
     if not 0 <= mask < 16:
         raise argparse.ArgumentTypeError(f'acc mask out of range [0, 16): {value!r}')
     return mask
+
+
+def load_matching_reconstruction_inputs(sample_dir, atomic, weights, conv_params, acc_mask, device):
+    """Return clean qconv output and ADC-code tensors for a compatible dump pair.
+
+    Preserved debug dump directories can contain stale nodes from previous
+    compiles.  Match each qconv output candidate with the nearest prior
+    min_max_quantize input candidate and only accept the pair when the input
+    channel range is compatible and the recomputed clean output shape matches
+    the selected dump shape.
+    """
+    orig = atomic["orig_conv"]
+    kh, st, pad, _ = conv_params[orig]
+    ic_lo = atomic["ic_id"] * atomic["ic_block"]
+    ic_hi = ic_lo + atomic["ic_size"]
+    w_full = weights[orig]
+    oc_lo = atomic["oc_id"] * atomic["oc_block"]
+    oc_hi = oc_lo + atomic["oc_size"]
+    w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
+    notes = []
+
+    dump_candidates, dump_notes = iter_func_dump_candidates(
+        sample_dir, atomic["func"], atomic["valid_cols"])
+    notes.extend(dump_notes)
+    for out_node_id, out_fname, dump_sel in dump_candidates:
+        for _, input_fname in iter_prior_quant_candidates(sample_dir, out_node_id):
+            try:
+                qin = np.load(os.path.join(sample_dir, input_fname), allow_pickle=True)
+            except Exception as exc:
+                notes.append(f"{input_fname}: input load failed: {exc}")
+                continue
+            if qin.ndim != 4 or qin.shape[1] < ic_hi:
+                notes.append(
+                    f"{input_fname}: input shape {tuple(qin.shape)} incompatible "
+                    f"with channels [{ic_lo}, {ic_hi})"
+                )
+                continue
+            try:
+                clean_out, adc_codes_all, skip_mask_all = noise_free_qconv(
+                    qin[:, ic_lo:ic_hi, :, :], w_tile,
+                    kernel_h=kh, stride=st, padding=pad,
+                    acc_mask=acc_mask, device=device)
+            except Exception as exc:
+                notes.append(f"{input_fname} -> {out_fname}: clean qconv failed: {exc}")
+                continue
+            clean_sq = clean_out.squeeze(0)
+            if tuple(clean_sq.shape) == tuple(dump_sel.shape):
+                return clean_sq, dump_sel, adc_codes_all, skip_mask_all, notes
+            notes.append(
+                f"{input_fname} -> {out_fname}: clean={tuple(clean_sq.shape)} "
+                f"dump={tuple(dump_sel.shape)}"
+            )
+
+    return None, None, None, None, notes
 
 
 def _detect_csv_format(csv_path):
@@ -529,38 +584,11 @@ def main():
             if n_scanned_samples >= 5:
                 break
             n_scanned_samples += 1
-            qconv_to_input = build_qconv_to_input_map(sample_dir)
             for a in atomics:
-                orig = a['orig_conv']
-                kh, st, pad, _ = conv_params[orig]
-                input_fname = qconv_to_input.get(a['func'])
-                if input_fname is None:
+                clean_sq, dump_sel, _, _, _ = load_matching_reconstruction_inputs(
+                    sample_dir, a, weights, conv_params, args.acc_mask, args.device)
+                if dump_sel is None:
                     continue
-                out_npy = None
-                for f in os.listdir(sample_dir):
-                    if f.endswith(f'_{a["func"]}.npy'):
-                        out_npy = os.path.join(sample_dir, f)
-                        break
-                if out_npy is None:
-                    continue
-                try:
-                    qin = np.load(os.path.join(sample_dir, input_fname))
-                    dump = np.load(out_npy)
-                except Exception:
-                    continue
-                ic_lo = a['ic_id'] * a['ic_block']
-                ic_hi = ic_lo + a['ic_size']
-                w_full = weights[orig]
-                oc_lo = a['oc_id'] * a['oc_block']
-                oc_hi = oc_lo + a['oc_size']
-                w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
-                clean_out, _, _ = noise_free_qconv(
-                    qin[:, ic_lo:ic_hi, :, :], w_tile,
-                    kernel_h=kh, stride=st, padding=pad,
-                    acc_mask=args.acc_mask, device=args.device)
-                clean_sq = clean_out.squeeze(0)
-                dump_sq = dump[0, 0]
-                dump_sel = dump_sq[:, :, a['valid_cols']].transpose(2, 0, 1).astype(np.int32)
                 obs = signed_int16(dump_sel - clean_sq)
                 ref_samples.append(clean_sq.ravel())
                 noise_samples.append(obs.ravel())
@@ -599,40 +627,18 @@ def main():
         sample_items = [(s_idx, sample_dir)
                         for dd, s_idx, sample_dir in iter_existing_sample_dirs([dump_dir], sample_range)]
         for s_idx, sample_dir in sample_items:
-            qconv_to_input = build_qconv_to_input_map(sample_dir)
-
             for a in atomics:
-                orig = a['orig_conv']
-                kh, st, pad, _ = conv_params[orig]
-                input_fname = qconv_to_input.get(a['func'])
-                if input_fname is None:
+                clean_sq, _, adc_codes_all, skip_mask_all, candidates = (
+                    load_matching_reconstruction_inputs(
+                        sample_dir, a, weights, conv_params, args.acc_mask, args.device)
+                )
+                if clean_sq is None:
+                    preview = "; ".join(candidates[:3]) if candidates else "no candidates"
+                    print(
+                        f"  [skip] sample_{s_idx} {a['func']}: no compatible input/dump pair "
+                        f"({preview})"
+                    )
                     continue
-                out_npy = None
-                for f in os.listdir(sample_dir):
-                    if f.endswith(f'_{a["func"]}.npy'):
-                        out_npy = os.path.join(sample_dir, f)
-                        break
-                if out_npy is None:
-                    continue
-
-                try:
-                    qin = np.load(os.path.join(sample_dir, input_fname))
-                except Exception as e:
-                    print(f"  [skip] sample_{s_idx} {a['func']}: {e}")
-                    continue
-
-                ic_lo = a['ic_id'] * a['ic_block']
-                ic_hi = ic_lo + a['ic_size']
-                w_full = weights[orig]
-                oc_lo = a['oc_id'] * a['oc_block']
-                oc_hi = oc_lo + a['oc_size']
-                w_tile = w_full[oc_lo:oc_hi, ic_lo:ic_hi, :, :]
-
-                clean_out, adc_codes_all, skip_mask_all = noise_free_qconv(
-                    qin[:, ic_lo:ic_hi, :, :], w_tile,
-                    kernel_h=kh, stride=st, padding=pad,
-                    acc_mask=args.acc_mask, device=args.device)
-                clean_sq = clean_out.squeeze(0)  # (OC, OH, OW)
 
                 # Sample noise from CSV using the requested table semantics.
                 recon_noise = sample_csv_noise(
