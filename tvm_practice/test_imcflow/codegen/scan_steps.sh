@@ -14,6 +14,10 @@
 #   scan_transfer_reg_files "$STEP_NUM" "$SKIP_FLAG"
 
 NPZ_FILE_PATH="${NPZ_FILE_PATH:-scan_reg_files}"
+SCAN_SSH_RETRIES="${SCAN_SSH_RETRIES:-${REMOTE_SSH_RETRIES:-${FPGA_SSH_RETRIES:-3}}}"
+SCAN_SSH_RETRY_DELAY_SECONDS="${SCAN_SSH_RETRY_DELAY_SECONDS:-${REMOTE_SSH_RETRY_DELAY_SECONDS:-${FPGA_SSH_RETRY_DELAY_SECONDS:-30}}}"
+[[ "$SCAN_SSH_RETRIES" =~ ^[0-9]+$ ]] || SCAN_SSH_RETRIES=3
+[[ "$SCAN_SSH_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || SCAN_SSH_RETRY_DELAY_SECONDS=30
 
 # ---------------------------------------------------------------------------
 # chip lock (remote FPGA lock management)
@@ -90,7 +94,29 @@ scan_scp_display() {
     fi
 }
 
-scan_ssh() {
+scan_retry() {
+    local label="$1"
+    shift
+    local max_attempts=$((SCAN_SSH_RETRIES + 1))
+    local attempt
+    local status
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        "$@"
+        status=$?
+        local retryable=false
+        if [[ $status -eq 255 || ( "$label" == "scp" && $status -eq 1 ) ]]; then
+            retryable=true
+        fi
+        if [[ $status -eq 0 || "$retryable" != true || $attempt -ge $max_attempts ]]; then
+            return $status
+        fi
+        echo "  - Retry $label after exit $status (attempt ${attempt}/${max_attempts}) in ${SCAN_SSH_RETRY_DELAY_SECONDS}s" >&2
+        sleep "$SCAN_SSH_RETRY_DELAY_SECONDS"
+    done
+    return $status
+}
+
+scan_ssh_once() {
     if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
         sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
     else
@@ -98,12 +124,20 @@ scan_ssh() {
     fi
 }
 
-scan_scp() {
+scan_scp_once() {
     if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
         sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" "$@"
     else
         scp -o BatchMode=yes -P "$REMOTE_PORT" "$@"
     fi
+}
+
+scan_ssh() {
+    scan_retry ssh scan_ssh_once "$@"
+}
+
+scan_scp() {
+    scan_retry scp scan_scp_once "$@"
 }
 
 scan_transfer_reg_files() {

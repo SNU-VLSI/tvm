@@ -22,6 +22,11 @@ _YELLOW='\033[1;33m'
 _GREEN='\033[1;32m'
 _NC='\033[0m' # No Color
 
+CHIP_LOCK_SSH_RETRIES="${CHIP_LOCK_SSH_RETRIES:-${REMOTE_SSH_RETRIES:-${FPGA_SSH_RETRIES:-3}}}"
+CHIP_LOCK_SSH_RETRY_DELAY_SECONDS="${CHIP_LOCK_SSH_RETRY_DELAY_SECONDS:-${REMOTE_SSH_RETRY_DELAY_SECONDS:-${FPGA_SSH_RETRY_DELAY_SECONDS:-30}}}"
+[[ "$CHIP_LOCK_SSH_RETRIES" =~ ^[0-9]+$ ]] || CHIP_LOCK_SSH_RETRIES=3
+[[ "$CHIP_LOCK_SSH_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || CHIP_LOCK_SSH_RETRY_DELAY_SECONDS=30
+
 _chip_lock_get_user_id() {
     local env_file="$HOME/.imcflow.env"
     if [[ -f "$env_file" ]]; then
@@ -35,12 +40,28 @@ _chip_lock_get_user_id() {
     echo "unknown"
 }
 
-_chip_lock_ssh() {
+_chip_lock_ssh_once() {
     if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
         sshpass -p "$REMOTE_PASSWORD" ssh -o ConnectTimeout=10 -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$1"
     else
         ssh -o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$1"
     fi
+}
+
+_chip_lock_ssh() {
+    local max_attempts=$((CHIP_LOCK_SSH_RETRIES + 1))
+    local attempt
+    local status
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        _chip_lock_ssh_once "$1"
+        status=$?
+        if [[ $status -eq 0 || $status -ne 255 || $attempt -ge $max_attempts ]]; then
+            return $status
+        fi
+        echo -e "${_YELLOW}[CHIP LOCK] SSH failed with 255; retry ${attempt}/${max_attempts} in ${CHIP_LOCK_SSH_RETRY_DELAY_SECONDS}s${_NC}" >&2
+        sleep "$CHIP_LOCK_SSH_RETRY_DELAY_SECONDS"
+    done
+    return $status
 }
 
 # Check if stale: lock exists but no chip-related process is running on remote
