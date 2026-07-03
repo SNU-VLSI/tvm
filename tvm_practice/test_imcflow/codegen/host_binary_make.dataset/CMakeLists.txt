@@ -38,9 +38,16 @@ set(CMAKE_CXX_STANDARD 17)
 # tvm_model, dataset exec) because the code model must be uniform across all
 # linked objects. Harmless for smaller models (KWS/ResNet8); no effect on the
 # x86 py_runner path. Pairs with the existing -fno-pie/-no-pie static link.
+#
+# GCC's AArch64 `large` code model is incompatible with PIC ("sorry,
+# unimplemented: code model 'large' with '-fPIC'"), and CMake compiles static
+# libraries as PIC by default — so we must also turn PIC OFF globally for this
+# static, non-PIC binary. Disable both the CMake PIC default and any inherited
+# -fPIC/-fpic on compile and link.
 if(ISA STREQUAL "ARM")
-  add_compile_options(-mcmodel=large)
-  add_link_options(-mcmodel=large)
+  set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
+  add_compile_options(-mcmodel=large -fno-pic -fno-PIC)
+  add_link_options(-mcmodel=large -no-pie)
 endif()
 
 # ============================================================================
