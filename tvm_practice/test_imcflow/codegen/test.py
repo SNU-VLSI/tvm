@@ -35,6 +35,7 @@ from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import resnet8_subset_models
 from models import ds_cnn_subset_models
+from models import mobilenet_subset_models
 from models import models_for_test
 
 # Import shared input generator
@@ -66,6 +67,8 @@ def _checkpoint_module_for_test(test_name):
     return ds_cnn_subset_models
   if name.startswith("resnet8"):
     return resnet8_subset_models
+  if name.startswith("vww") or name.startswith("mobilenet"):
+    return mobilenet_subset_models
   return None
 
 # Print environment configuration at startup
@@ -263,6 +266,25 @@ MODEL_REGISTRY = {
     # "model_v2": (real_model2.getModelV2, "random"),
     # "model_1": (test_models.get_model1, "random"),
 }
+
+# ------------------------------------------------------------------------------
+# VWW MobileNetV1 (Visual Wake Words) subset models (pretrained, input 96x96).
+# 13 depthwise-separable blocks; getModel_ has 88 c.check ops, so subset indices
+# 4..87 are valid early-stop points. Registered programmatically (one entry per
+# index) plus the full model. Same conv-by-conv split mechanism as DS-CNN.
+# ------------------------------------------------------------------------------
+def _make_vww_subset(n):
+    return (lambda: mobilenet_subset_models.getModel_from_pretrained_weight(
+        iH=96, iW=96, until_relay=n), "ones")
+
+for _vww_n in range(4, 88):
+    MODEL_REGISTRY[f"vww_subset{_vww_n:02d}_pretrained"] = _make_vww_subset(_vww_n)
+MODEL_REGISTRY["vww_full_pretrained"] = (
+    lambda: mobilenet_subset_models.getModel_from_pretrained_weight(iH=96, iW=96), "ones")
+# Alias matching the CIM chip-noise loop ModelProfile (run_resnet8_chip_noise_loop.py
+# visual_wake_words: tvm_model="mobilenet_v1_vww_full_pretrained"). Same model as
+# vww_full_pretrained; the loop's TVM step looks it up by this name.
+MODEL_REGISTRY["mobilenet_v1_vww_full_pretrained"] = MODEL_REGISTRY["vww_full_pretrained"]
 
 # Available input patterns for testing
 INPUT_PATTERNS = ["random", "ones", "zeros", "linear"]

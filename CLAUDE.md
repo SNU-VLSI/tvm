@@ -27,6 +27,26 @@ This agent has deep expertise in:
 - Build directory: `tvm/build/`
 - Logs generated in: `eval_dir/logs/` when invoked from codegen
 
+## Debugging vs. speed (driver-v2 `compile_for_imcflow_v2`)
+
+Two debug-only outputs dominate compile time on deep models (e.g. VWW MobileNet's
+13 blocks) and should be turned OFF for fast iteration / structure checks:
+
+- **`save_intermediate` (default True)**: dumps per-stage relay (`0N_after_*.txt/.pdf`)
+  AND the NoC visualizations (matplotlib PNG/PDF, ~30% of compile time). Keep it ON
+  only when you actually need to inspect a specific transform stage or the NoC
+  routing/placement (debugging layout, partitioning, or PnR). Pass
+  `save_intermediate=False` otherwise.
+- **`skip_codegen` (default False)**: set `skip_codegen=True` to stop after
+  transform+codegen and skip the slow CPU `relay.build` (the hw-accurate qconv
+  compute). Use for verifying that transform/layout legalization succeeds (e.g.
+  bringing up a new model) without paying for the full graph-executor build.
+
+For numerical/bit-exact checks you DO need the build (and `--ref-models`); for "does
+it compile / does layout legalize" checks, `skip_codegen=True, save_intermediate=False`
+is far faster. NoC visualization is only meaningful when debugging hardware
+placement/routing — leave it off otherwise.
+
 ## When to Use the Agent
 
 Use `imcflow-compiler-expert` for ANY task including:

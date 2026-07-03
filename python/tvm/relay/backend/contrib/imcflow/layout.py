@@ -4,8 +4,8 @@ from tvm import relay
 from tvm.relay import transform, op
 from tvm.relay.expr import (Call, GlobalVar, TupleGetItem, const, Let, Var, If, Tuple, Constant)
 from tvm.relay.backend.contrib.imcflow.transform_utils import (
-  debug_print, getNodeID, getNodeDebugID, UseDefChainParser, NodeCollector, get_type, get_shape, 
-  isImcflowFunc
+  debug_print, getNodeID, getNodeDebugID, UseDefChainParser, NodeCollector, get_type, get_shape,
+  isImcflowFunc, _is_debug_enabled
 )
 from tvm.contrib.imcflow import (
   ImcflowDeviceConfig
@@ -566,6 +566,16 @@ CPU_REQUIRED_OP_LAYOUTS = {
       ],
       LayoutType.NCHW
     )
+  ],
+  # nn.pad on the host graph (e.g. TF-'same' asymmetric padding before stem/
+  # depthwise convs in VWW MobileNet). arg0 = NCHW data, arg1 = scalar pad_value.
+  "nn.pad": [
+    (
+      [
+        [LayoutType.NCHW, LayoutType.SCALAR],
+      ],
+      LayoutType.NCHW,
+    ),
   ],
   # IMCFlow-specific ops that may end up on CPU in single-qconv mode
   "qnn.imcflow_min_max_quantize": [
@@ -1502,6 +1512,13 @@ class ImcflowLayoutLegalizer:
 
   def _dump_layout_results(self, func, layout_results, annotate=False):
     """Pretty-print layout results following graph structure via use-def."""
+    # Debug-only output. The recursive use-def walk + getNodeDebugID FFI calls
+    # are O(N) per node and re-visit shared DAG nodes (no memo), so on deep models
+    # this dominates layout legalization time even when IMCFLOW_DEBUG is off.
+    # Skip entirely unless debug is enabled. (debug_layout attr set by annotate is
+    # never read elsewhere.)
+    if not _is_debug_enabled():
+      return
     def _dump(parser_, node, indent, seen, annotate=False):
       indent_str = "  " * indent
       layout = layout_results.get(node, "unknown")
@@ -1921,6 +1938,26 @@ class ImcflowLayoutLegalizer:
         if isinstance(curr_layout, (tuple, list)) or isinstance(target_layout, (tuple, list)):
           if self._layout_equal(curr_layout, target_layout):
             return expr, target_layout
+          # Composite (tuple) source layout into a scalar target layout: this happens
+          # for an OC-split pointwise conv whose atomic qconv outputs (each NCHW64C)
+          # feed a Tuple -> concatenate directly, with no intervening CPU op to
+          # normalize them first (unlike resnet8/ds_cnn, which always have an
+          # add/take between qconv and the Tuple). Convert each field to the scalar
+          # target layout element-wise and rebuild the Tuple. Mirrors the per-field
+          # tuple handling in visit_function.
+          if (isinstance(curr_layout, (tuple, list))
+              and not isinstance(target_layout, (tuple, list))
+              and isinstance(expr, relay.Tuple)
+              and len(expr.fields) == len(curr_layout)):
+            new_fields = []
+            for field, field_layout in zip(expr.fields, curr_layout):
+              field_hint = self._channels_from_expr(field)
+              new_field, _ = self._convert_layout(field, field_layout, target_layout, field_hint)
+              new_fields.append(new_field)
+            new_tup = relay.Tuple(new_fields)
+            new_layout = tuple(target_layout for _ in new_fields)
+            self.layout_map[new_tup] = new_layout
+            return new_tup, new_layout
           raise ValueError("Tuple layout mismatch; cannot convert composite layout automatically.")
 
         block_layouts = (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C)
@@ -2064,9 +2101,19 @@ class ImcflowLayoutLegalizer:
               if len(option) == len(arg_layouts) and base_layout in option:
                 return option
 
-          # If base_layout is a blocked layout and no rule matched, try NCHW
+          # If base_layout is a blocked layout (or a tuple/list of blocked layouts,
+          # e.g. an OC-split pointwise conv whose atomic-qconv outputs feed a Tuple
+          # -> concatenate directly) and no rule matched, prefer the NCHW option.
+          # Without the tuple case the fallback would pick rules[0][0][0] (e.g.
+          # concatenate's [QCONV_INPUT]), which is the wrong, unconvertible target.
           blocked_layouts = (LayoutType.NCHW16C, LayoutType.NCHW64C, LayoutType.NHWC16C, LayoutType.NHWC64C)
-          if base_layout in blocked_layouts:
+          base_is_blocked = (
+            base_layout in blocked_layouts
+            or (isinstance(base_layout, (tuple, list))
+                and len(base_layout) > 0
+                and all(l in blocked_layouts for l in base_layout))
+          )
+          if base_is_blocked:
             for rule in rules:
               inputs_options, _ = rule
               for option in inputs_options:
@@ -2140,7 +2187,8 @@ class ImcflowLayoutLegalizer:
             target_arg_layouts[i] = new_layout
 
         new_call = relay.Call(call.op, transformed_args, call.attrs)
-        relay.transform.InferType()(tvm.IRModule.from_expr(new_call))
+        # (Removed a per-call full-module InferType here: O(N^2) blowup on deep
+        # models; get_type() below falls back to per-node InferTypeLocal.)
         if isinstance(call.op, relay.GlobalVar) and isImcflowFunc(self.module[call.op.name_hint], self.module):
           out_layout = self.imcflow_func_layout_map[call.op.name_hint][1]
         else:
