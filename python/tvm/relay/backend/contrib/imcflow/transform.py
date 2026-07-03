@@ -1114,7 +1114,7 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
             else:
                 data = weight_const  # ndarray-like
             key = _weight_bytes_hash(data)
-            ImcflowDeviceConfig().AtomicSplitInfo[key] = {
+            entry = {
                 "orig_conv_id": orig_conv_id,
                 "orig_conv_name": orig_conv_name,
                 "oc_id": oc_id,
@@ -1126,6 +1126,14 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
                 "kernel": tuple(kernel),
                 "is_depthwise": is_depthwise,
             }
+            # Bucket entries by weight-bytes hash. Distinct atomic OC/IC slices
+            # can have byte-identical weights (e.g. all-zero / pruned dead
+            # channels), which collide on the hash. Keeping a LIST per key (in
+            # split-emission order) preserves every atomic's (oc_id, ic_id) so
+            # remap_atomic_split_info_by_func can hand each colliding function a
+            # distinct entry instead of the last-writer-wins single dict that
+            # silently dropped all but one oc_id (leaving -1 rows in the npz).
+            ImcflowDeviceConfig().AtomicSplitInfo.setdefault(key, []).append(entry)
 
           def removeSplitedArg(self, node):
             if isinstance(node, relay.Var):
@@ -1521,6 +1529,16 @@ def remap_atomic_split_info_by_func(mod):
 
   config = ImcflowDeviceConfig()
   by_func = {}
+  # AtomicSplitInfo maps weight-bytes-hash -> LIST of atomic entries (in
+  # split-emission order). A single hash can back several functions when their
+  # weights are byte-identical (all-zero / pruned slices). Consume one entry per
+  # matching function so each colliding function gets a DISTINCT (oc_id, ic_id),
+  # instead of every function collapsing onto the same entry (which left the
+  # unclaimed oc_id's rows as -1 in the psum-map npz). All colliding entries are
+  # dead (all-zero) slices, so their hardware output is identical; the only thing
+  # that matters is that every oc_id/ic_id block is claimed and written.
+  consumed = {}
+  total_entries = sum(len(v) for v in config.AtomicSplitInfo.values())
   for gv in sorted(mod.functions.keys(), key=lambda g: g.name_hint):
     func = mod[gv]
     if not isinstance(func, relay.Function):
@@ -1534,12 +1552,20 @@ def remap_atomic_split_info_by_func(mod):
     wkey = _hash(finder.found.args[1])
     if wkey is None:
       continue
-    info = config.AtomicSplitInfo.get(wkey)
-    if info is not None:
-      by_func[gv.name_hint] = info
+    entries = config.AtomicSplitInfo.get(wkey)
+    if not entries:
+      continue
+    idx = consumed.get(wkey, 0)
+    if idx >= len(entries):
+      # More functions than recorded atomic entries for this hash: reuse the
+      # last (all such extras are byte-identical dead slices anyway).
+      idx = len(entries) - 1
+    else:
+      consumed[wkey] = idx + 1
+    by_func[gv.name_hint] = entries[idx]
   config.AtomicSplitInfoByFunc = by_func
   print(f"[remap_atomic_split_info_by_func] resolved "
-        f"{len(by_func)} / {len(config.AtomicSplitInfo)} atomic qconvs "
+        f"{len(by_func)} / {total_entries} atomic qconvs "
         f"to imcflow function names")
 
 def merge_composite_ops(mod):

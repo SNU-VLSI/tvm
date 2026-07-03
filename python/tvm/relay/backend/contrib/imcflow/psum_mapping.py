@@ -223,10 +223,17 @@ def _build_records(
         # Secondary: hash the (post-legalization) weight Constant. This only
         # matches if AtomicSplitInfo was recorded after layout legalization,
         # but is harmless to attempt and useful for tests / debugging.
+        # AtomicSplitInfo values are LISTs (one per byte-identical atomic slice);
+        # this by-hash fallback cannot disambiguate colliding slices, so take the
+        # first entry. The reliable by-func path above is what handles collisions.
         if split_meta is None and atomic_split_info:
             wkey = _weight_const_hash(qconv.args[1])
             if wkey is not None:
-                split_meta = atomic_split_info.get(wkey)
+                hit = atomic_split_info.get(wkey)
+                if isinstance(hit, list):
+                    split_meta = hit[0] if hit else None
+                else:
+                    split_meta = hit
 
         if split_meta is not None:
             orig_conv = split_meta["orig_conv_name"]
