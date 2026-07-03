@@ -126,10 +126,16 @@ static int save_tensor_to_npy(const char* path, const DLTensor* tensor) {
     shape_str,
     tensor->ndim == 1 ? "," : "");  // Add trailing comma for 1D arrays
 
-  // Pad header to 16-byte boundary (including 10-byte prefix)
-  // Prefix: 6 (magic) + 2 (version) + 2 (header_len) = 10 bytes
+  // Pad header to 16-byte boundary (including 10-byte prefix).
+  // Prefix: 6 (magic) + 2 (version) + 2 (header_len) = 10 bytes.
+  // The "+ 1" reserves room for the mandatory terminating '\n' BEFORE rounding
+  // up, guaranteeing padded_len > header_len. Without it, when header_len lands
+  // exactly on the 16-byte boundary (padded_len == header_len) the space-pad
+  // loop below runs zero times yet the '\n' is still written, emitting one byte
+  // too many; that stray 0x0A becomes data byte 0 and shifts the whole payload
+  // by 1 byte (corrupting e.g. (1,1,24,5,64) int16 dumps whose header is 70 B).
   int total_prefix = 10;
-  int padded_len = ((total_prefix + header_len + 15) / 16) * 16 - total_prefix;
+  int padded_len = ((total_prefix + header_len + 1 + 15) / 16) * 16 - total_prefix;
 
   // Write header length (little-endian uint16)
   uint16_t hlen = (uint16_t)padded_len;

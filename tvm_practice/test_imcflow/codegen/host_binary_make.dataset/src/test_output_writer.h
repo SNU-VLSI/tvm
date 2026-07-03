@@ -95,7 +95,7 @@ static int save_tensor_to_npy(const char* path, const DLTensor* tensor) {
   // Pad header to 16-byte boundary (including 10-byte prefix)
   // Prefix: 6 (magic) + 2 (version) + 2 (header_len) = 10 bytes
   int total_prefix = 10;
-  int padded_len = ((total_prefix + header_len + 15) / 16) * 16 - total_prefix;
+  int padded_len = ((total_prefix + header_len + 1 + 15) / 16) * 16 - total_prefix;
 
   // Write header length (little-endian uint16)
   uint16_t hlen = (uint16_t)padded_len;
