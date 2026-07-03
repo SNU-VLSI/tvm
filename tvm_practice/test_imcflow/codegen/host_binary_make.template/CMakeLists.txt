@@ -32,6 +32,20 @@ endif()
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Large AArch64 static binaries (deep models like VWW MobileNetV1's 13 blocks
+# emit hundreds of default_libN.cc translation units + a large tvm_model.a)
+# overflow the default `small` code model's 15-bit GOT-page addressing: the
+# static link fails with "R_AARCH64_LD64_GOTPAGE_LO15 ... too many GOT entries
+# for -fpic". Build the whole ARM cross target with the `large` code model so
+# GOT/relocation offsets are unbounded. Applied to EVERY target (CRT libs,
+# tvm_model, dataset exec) because the code model must be uniform across all
+# linked objects. Harmless for smaller models (KWS/ResNet8); no effect on the
+# x86 py_runner path. Pairs with the existing -fno-pie/-no-pie static link.
+if(ISA STREQUAL "ARM")
+  add_compile_options(-mcmodel=large)
+  add_link_options(-mcmodel=large)
+endif()
+
 # ============================================================================
 # Input Validation
 # ============================================================================
