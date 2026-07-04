@@ -294,7 +294,14 @@ if [[ "$SKIP_STEP6" == true ]]; then
 else
     echo "Step 6: Executing on remote chip..."
     echo ""
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    # Write per-node debug dumps + heartbeat to tmpfs (RAM), NOT the SD card.
+    # A deep model (VWW: ~900 tiny .npy per sample × 100 samples ≈ 90k files)
+    # of create/unlink churn on the SD ext4 was corrupting its directory htree
+    # ("Bad message"). tmpfs absorbs it with zero SD wear; fetched + freed below.
+    # Overridable via CHIP_DEBUG_DUMP_DIR / CHIP_HEARTBEAT_PATH.
+    CHIP_DEBUG_DUMP_DIR="${CHIP_DEBUG_DUMP_DIR:-/var/volatile/debug_nodes}"
+    CHIP_HEARTBEAT_PATH="${CHIP_HEARTBEAT_PATH:-/var/volatile/imcflow_chip_heartbeat.txt}"
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
@@ -332,7 +339,9 @@ fi
 
 # Step 6.5: Fetch debug_nodes from remote and cleanup (only when DEBUG_EXE=1)
 if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
-    REMOTE_DEBUG_DIR="$REMOTE_BASE_PATH/debug_nodes"
+    # Dumps now live in tmpfs on the chip (see Step 6). Fetch from there; the
+    # cleanup below then frees that RAM. Keep in sync with CHIP_DEBUG_DUMP_DIR.
+    REMOTE_DEBUG_DIR="${CHIP_DEBUG_DUMP_DIR:-/var/volatile/debug_nodes}"
     if [[ -n "$CKPT" ]]; then
         LOCAL_DEBUG_DIR="debugging/fpga/$CKPT"
     else
@@ -359,14 +368,13 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
     if [ $? -eq 0 ]; then
         echo "✅ debug_nodes fetched to $LOCAL_DEBUG_DIR/"
 
-        if [[ "${PRESERVE_DEBUG_DUMPS:-0}" == "1" ]]; then
-            echo "Preserving remote debug_nodes."
-        else
-            # Cleanup on FPGA to prevent SD card wear
-            echo "Cleaning up debug_nodes on remote..."
-            scan_ssh "rm -rf $REMOTE_DEBUG_DIR/*"
-            echo "✅ Remote debug_nodes cleaned up"
-        fi
+        # ALWAYS clean the remote dumps: they now live in tmpfs (RAM), so leaving
+        # them accumulates across runs and can exhaust chip memory. PRESERVE_DEBUG_DUMPS
+        # only governs the LOCAL copy (already fetched above); it must NOT keep the
+        # tmpfs copy alive.
+        echo "Freeing remote tmpfs debug_nodes..."
+        scan_ssh "rm -rf $REMOTE_DEBUG_DIR"
+        echo "✅ Remote tmpfs debug_nodes freed"
     else
         echo "⚠️  Failed to fetch debug_nodes (remote may not have any)"
     fi

@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 
 #include <tvm/runtime/c_runtime_api.h>
 #include <tvm/runtime/crt/platform.h>
@@ -571,10 +572,45 @@ int main(int argc, char** argv) {
     // Set input
     TVMGraphExecutor_SetInput(exec, input_name, &input_tensor);
 
+    // Per-sample heartbeat: flush progress + free memory to a tmpfs file (and
+    // stderr) BEFORE running the sample, so if the chip hangs/dies mid-sample we
+    // know exactly which sample and its pre-run state. Written to tmpfs (RAM) so
+    // it survives an SD stall and adds no SD wear. Overwritten each sample (tiny).
+    {
+      const char* hb_path = getenv("IMCFLOW_HEARTBEAT_PATH");
+      if (!hb_path || !hb_path[0]) hb_path = "/var/volatile/imcflow_chip_heartbeat.txt";
+      long mem_avail_kb = -1;
+      FILE* mi = fopen("/proc/meminfo", "r");
+      if (mi) {
+        char k[64]; long v; char u[16];
+        while (fscanf(mi, "%63s %ld %15s", k, &v, u) == 3) {
+          if (strcmp(k, "MemAvailable:") == 0) { mem_avail_kb = v; break; }
+        }
+        fclose(mi);
+      }
+      time_t now = time(NULL);
+      FILE* hb = fopen(hb_path, "w");
+      if (hb) {
+        fprintf(hb, "sample_iter=%zu/%zu sample_idx=%zu mem_avail_kb=%ld epoch=%ld\n",
+                iter + 1, num_samples, sample_idx, mem_avail_kb, (long)now);
+        fflush(hb); fclose(hb);
+      }
+      fprintf(stderr, "[HB] sample %zu/%zu (idx=%zu) mem_avail_kb=%ld\n",
+              iter + 1, num_samples, sample_idx, mem_avail_kb);
+      fflush(stderr);
+    }
+
     // Run inference (node-by-node debug mode)
-    // Create debug output directory for this sample
+    // Create debug output directory for this sample. Base dir is overridable via
+    // IMCFLOW_DEBUG_DUMP_DIR; on the chip it is pointed at tmpfs (/var/volatile)
+    // so the ~900 tiny per-node .npy files per sample (×100 samples ≈ 90k files)
+    // never touch the SD card's ext4 — that write/unlink churn was corrupting the
+    // SD directory htree ("Bad message"). Defaults to "debug_nodes" (unchanged
+    // behavior for the x86 py_runner / local paths).
+    const char* dump_base = getenv("IMCFLOW_DEBUG_DUMP_DIR");
+    if (!dump_base || !dump_base[0]) dump_base = "debug_nodes";
     char debug_dir[512];
-    snprintf(debug_dir, sizeof(debug_dir), "debug_nodes/sample_%zu", sample_idx);
+    snprintf(debug_dir, sizeof(debug_dir), "%s/sample_%zu", dump_base, sample_idx);
     {
       char mkdir_cmd[600];
       snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", debug_dir);
