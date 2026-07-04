@@ -56,12 +56,27 @@ remote_scp_once() {
     fi
 }
 
+remote_rsync_once() {
+    # rsync over ssh, honoring the same port/auth as remote_scp_once. Passed args
+    # are rsync options + src... dest. Build-intermediate files are excluded by
+    # the caller so only the chip-needed artifacts (exec + mlf/) are sent.
+    if [[ "$REMOTE_AUTH_METHOD" == "password" ]]; then
+        sshpass -p "$REMOTE_PASSWORD" rsync -e "ssh -p $REMOTE_PORT" "$@"
+    else
+        rsync -e "ssh -o BatchMode=yes -p $REMOTE_PORT" "$@"
+    fi
+}
+
 remote_ssh() {
     remote_retry ssh remote_ssh_once "$@"
 }
 
 remote_scp() {
     remote_retry scp remote_scp_once "$@"
+}
+
+remote_rsync() {
+    remote_retry scp remote_rsync_once "$@"
 }
 
 # Function to display help message
@@ -243,8 +258,22 @@ for dir in "${MATCHING_DIRS[@]}"; do
         echo "  - Cleaning old directory on remote ($TARGET_REMOTE_PATH/$dir_name)..."
         remote_ssh "rm -rf $TARGET_REMOTE_PATH/$dir_name"
 
-        if remote_scp -r "$dir" "$USERNAME@$REMOTE_HOST:$TARGET_REMOTE_PATH"; then
-            echo "  ✓ Successfully transferred $dir_name to $TARGET_REMOTE_PATH"
+        # rsync (not scp -r) so we can EXCLUDE CMake build intermediates. The chip
+        # only needs build/<exec> + build/mlf/{graph,params}; build/CMakeFiles alone
+        # is ~78 MB / 2000+ dirs of useless CMake state that (a) balloons transfer
+        # time and (b) was the source of an SD-card ext4 directory corruption when a
+        # transfer was interrupted mid-way. Excluding it also drops *.a static libs,
+        # Makefile, and CMakeCache (all baked into the exec, unused on-chip).
+        # No trailing slash on "$dir" → rsync creates $TARGET_REMOTE_PATH/$dir_name,
+        # matching the old `scp -r "$dir" dest` semantics.
+        if remote_rsync -a \
+            --exclude 'build/CMakeFiles' \
+            --exclude 'build/CMakeCache.txt' \
+            --exclude 'build/cmake_install.cmake' \
+            --exclude 'build/Makefile' \
+            --exclude 'build/*.a' \
+            "$dir" "$USERNAME@$REMOTE_HOST:$TARGET_REMOTE_PATH/"; then
+            echo "  ✓ Successfully transferred $dir_name to $TARGET_REMOTE_PATH (build intermediates excluded)"
             ((TRANSFER_COUNT++))
         else
             echo "  ✗ Failed to transfer $dir_name"
