@@ -775,17 +775,8 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
     code += self.generateDevicePointerSetup()
     code += self.emitReset()
-    # NOTE: per-kernel warmup removed. emitWarmup() forks `make clear_time && make
-    # warmup` (a full accelerator hard-reset + 16 warmup binaries) via system() on
-    # EVERY kernel call. warmup is a GLOBAL routine (identical `make warmup`, not
-    # per-kernel state), so it only needs to run ONCE before a run. Doing it per
-    # kernel means a deep model (VWW: 47 imcflow kernels) hard-resets the fabric
-    # ~47×/sample; each warmup child then blocks unbounded (no timeout) on the
-    # shared UIO interrupt, and the accumulated reset/IRQ churn wedged the whole
-    # chip (SSH-dead) around sample ~46 — with RAM/tmpfs still free. Shallow models
-    # (KWS: 4 kernels) stayed under the threshold, which is why only VWW hit it.
-    # The single pre-run warmup is now issued by run_dataset_eval.sh before the
-    # binary runs. (clear_time here also defeated make's once-per-boot warmup gate.)
+    if self.os == "linux":
+      code += self.emitWarmup()
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt

@@ -301,14 +301,7 @@ else
     # Overridable via CHIP_DEBUG_DUMP_DIR / CHIP_HEARTBEAT_PATH.
     CHIP_DEBUG_DUMP_DIR="${CHIP_DEBUG_DUMP_DIR:-/var/volatile/debug_nodes}"
     CHIP_HEARTBEAT_PATH="${CHIP_HEARTBEAT_PATH:-/var/volatile/imcflow_chip_heartbeat.txt}"
-    # Warm up the accelerator ONCE, BEFORE the run. The per-kernel warmup was
-    # removed from codegen (see ext_codegen.py): forking `make warmup` on every
-    # one of VWW's 47 kernels hard-reset the fabric ~47x/sample and wedged the
-    # chip (SSH-dead) around sample ~46. A single pre-run warmup is sufficient
-    # (`make warmup` self-gates to once per boot). The post-run warmup is kept so
-    # a following run can start warm.
-    REMOTE_CMD="cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1; \
-cd $REMOTE_BASE_PATH && IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
