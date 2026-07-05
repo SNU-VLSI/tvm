@@ -306,6 +306,16 @@ class KernelCodeGenerator:
     code += f"if (_wait_rc != 0) {{\n"
     code.nextIndent()
     code += f'fprintf(stderr, "[RETRY] Timeout at {location_label}, attempt %d/%d\\n", _retry_count+1, MAX_RETRY_COUNT);\n'
+    if self.os == "linux":
+      # Drain + ack any pending interrupt BEFORE tearing down / re-arming. On the
+      # timeout path the success-path acks (generate_ack + INTR_DONE) were skipped,
+      # so a genuinely-fired-but-late edge would otherwise leave the UIO count and
+      # the IP interrupt asserted; the next attempt's enable_imcflow_interrupt
+      # would then stack on stale pending state and desync across kernels. Clear
+      # the IP-level interrupt (int_ack_gen + INTR_DONE reg) while the mmaps are
+      # still valid, i.e. before generateDevicePointerCleanup() munmaps them.
+      code += "generate_ack(int_ack_gen_pointer);\n"
+      code += "npu_pointer[INTR_DONE_REG_IDX] = 1;\n"
     code += self.generateDevicePointerCleanup()
     code += f"_retry_count++;\n"
     code += f"continue;\n"
@@ -357,11 +367,21 @@ static inline void enable_imcflow_interrupt(int fd)
   }
 }
 
-static inline int wait_imcflow_interrupt(int fd)
+static inline int wait_imcflow_interrupt(int fd, volatile uint32_t* npu_pointer)
 {
   uint32_t info;
   fd_set readfds;
   struct timeval timeout;
+
+  // Defense against a lost/already-latched interrupt edge: the STATE register is
+  // the ground truth for completion, the UIO interrupt is only a wake hint. If
+  // the op already reached IDLE (edge fired before we armed/waited, or was never
+  // delivered), return immediately instead of blocking on an edge that will
+  // never come. This is the primary fix for the ~sample-46 chip wedge: a single
+  // missed UIO edge previously hung forever with no status cross-check.
+  if (npu_pointer[STATE_REG_IDX] == SET_IDLE_CODE) {
+    return 0;
+  }
 
   FD_ZERO(&readfds);
   FD_SET(fd, &readfds);
@@ -371,17 +391,22 @@ static inline int wait_imcflow_interrupt(int fd)
 
   int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
   if (ret == 0) {
-    fprintf(stderr, "ERROR: Interrupt timeout (1s) - IMCFlow not responding\\n");
-    return -1;
+    // Interrupt did not arrive within 1s. Do NOT declare failure yet — the edge
+    // may have been missed while the compute actually finished. Fall back to
+    // polling the STATE register (bounded, MAX_POLL_COUNT) so a lost edge cannot
+    // wedge the run. Only if the array is genuinely not IDLE do we return -1.
+    fprintf(stderr, "WARN: Interrupt timeout (1s) - falling back to STATE-register poll\\n");
+    return wait_for_idle(npu_pointer);
   } else if (ret < 0) {
     perror("select failed");
-    return -1;
+    // select error is not proof the op failed; cross-check the STATE register.
+    return wait_for_idle(npu_pointer);
   }
 
   ssize_t nb = read(fd, &info, sizeof(info));
   if (nb != (ssize_t)sizeof(info)) {
     perror("read interrupt failed");
-    return -1;
+    return wait_for_idle(npu_pointer);
   }
   return 0;
 }
@@ -541,7 +566,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       " npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
-      "int _wait_rc = wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("int _wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "int _wait_rc = 0;"),
+      "int _wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);" if self.os == "linux" else ("int _wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "int _wait_rc = 0;"),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
       "npu_pointer[INTR_DONE_REG_IDX] = 1;",
     ]
@@ -555,7 +580,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
-      "_wait_rc = wait_imcflow_interrupt(npu_fd);" if self.os == "linux" else ("_wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "_wait_rc = 0;"),
+      "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);" if self.os == "linux" else ("_wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "_wait_rc = 0;"),
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
         "npu_pointer[INTR_DONE_REG_IDX] = 1;"
     ]
@@ -751,9 +776,13 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.generateRetryMacros()
     code += self.generateExternLink()
     code += makeConstArrayDecl(self.func, self.func_name, self.target_func)
+    # Emit polling utilities (wait_for_idle) BEFORE interrupt utilities:
+    # wait_imcflow_interrupt now calls wait_for_idle as its STATE-register
+    # fallback, so the polling helper must be defined first. Emit it
+    # unconditionally (not gated on USE_POLLING) since the linux/chip interrupt
+    # path always needs it as the lost-edge safety net.
+    code += self.generatePollingUtilities()
     code += self.generateInterruptUtilities()
-    if USE_POLLING:
-      code += self.generatePollingUtilities()
 
     # Kernel function prototype and definition (C)
     code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
