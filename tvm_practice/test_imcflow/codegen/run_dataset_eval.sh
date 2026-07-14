@@ -301,7 +301,16 @@ else
     # Overridable via CHIP_DEBUG_DUMP_DIR / CHIP_HEARTBEAT_PATH.
     CHIP_DEBUG_DUMP_DIR="${CHIP_DEBUG_DUMP_DIR:-/var/volatile/debug_nodes}"
     CHIP_HEARTBEAT_PATH="${CHIP_HEARTBEAT_PATH:-/var/volatile/imcflow_chip_heartbeat.txt}"
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    # Pin the eval binary to a single, otherwise-idle CPU core (taskset). The ZynqMP
+    # A53 has 4 cores; CPU0 carries the eth0/mmc/i2c IRQ handlers. When the eval was
+    # left to migrate across cores, bouncing onto CPU0 mid-way through the tight
+    # per-kernel MMIO + UIO-interrupt handshake raced with those IRQ handlers and
+    # eventually WEDGED the whole SoC (SSH-dead, RAM/tmpfs free) around sample ~46 of
+    # a deep-model (VWW, 47 kernels) run. Pinning the eval to an idle core removes the
+    # migration + CPU0 contention: verified a full 100-sample run then completes with
+    # 0 failures where every un-pinned run died by ~46-52. Overridable via CHIP_EVAL_CPU.
+    CHIP_EVAL_CPU="${CHIP_EVAL_CPU:-3}"
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
