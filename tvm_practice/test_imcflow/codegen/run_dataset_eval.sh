@@ -223,6 +223,38 @@ else
     SAMPLES_DISPLAY="num_samples: $NUM_SAMPLES"
 fi
 
+# Stage only the samples this run evaluates, instead of shipping the whole
+# dataset dir to the chip. transfer_dataset.sh scp's -r the entire dataset/,
+# which for a deep model (VWW: 1.2GB / 10961 samples) sends the full array every
+# run even though the loop touches ~100 of them. We slice images.npy/labels.npy
+# down to the requested rows (num_samples -> first K; -i indices -> those rows),
+# 0-based remapped into dataset/<name>/_staged, and point the run at that subset.
+# sample_map.json there records staged->original rows. Set NO_STAGE=1 to keep the
+# old whole-dataset behavior (e.g. to evaluate the full set on-chip).
+STAGED_DIR="$DATASET_DIR/$DATASET_NAME/_staged"
+if [[ "${NO_STAGE:-0}" != "1" ]]; then
+    if [[ -n "$SAMPLE_INDICES" ]]; then
+        STAGE_SEL=(--indices "$SAMPLE_INDICES")
+    else
+        STAGE_SEL=(--num-samples "$NUM_SAMPLES")
+    fi
+    echo "Staging subset -> $STAGED_DIR ($SAMPLES_DISPLAY)"
+    STAGED_COUNT="$(python3 "$DATASET_DIR/stage_subset.py" \
+        --src-dir "$DATASET_DIR/$DATASET_NAME" \
+        --out-dir "$STAGED_DIR" \
+        "${STAGE_SEL[@]}")"
+    if [[ $? -ne 0 || -z "$STAGED_COUNT" ]]; then
+        echo "Error: failed to stage sample subset"
+        exit 1
+    fi
+    # Staged file holds the selected rows as 0..K-1, so the C binary runs in
+    # num_samples mode over the whole staged file (its absolute rows == 0..K-1).
+    IMAGES_PATH="$STAGED_DIR/images.npy"
+    LABELS_PATH="$STAGED_DIR/labels.npy"
+    SAMPLES_ARG="$STAGED_COUNT"
+    SAMPLES_DISPLAY="$SAMPLES_DISPLAY (staged $STAGED_COUNT rows)"
+fi
+
 echo "=========================================="
 echo "Running dataset evaluation on remote chip"
 echo "Binary dir:       $BINARY_DIR"
@@ -272,9 +304,17 @@ else
         exit 1
     fi
 
-    echo "Step 2: Transferring $DATASET_DIR to remote server..."
-    echo ""
-    ./dataset/transfer_dataset.sh "$REMOTE_HOST"
+    if [[ "${NO_STAGE:-0}" != "1" ]]; then
+        # Ship only the staged subset (dataset/<name>/_staged), not the whole
+        # dataset/ dir. Keeps a deep model's full 1.2GB array off the wire.
+        echo "Step 2: Transferring staged subset ($DATASET_NAME/_staged) to remote server..."
+        echo ""
+        ./dataset/transfer_dataset.sh "$REMOTE_HOST" "$DATASET_NAME/_staged"
+    else
+        echo "Step 2: Transferring $DATASET_DIR to remote server..."
+        echo ""
+        ./dataset/transfer_dataset.sh "$REMOTE_HOST"
+    fi
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer $DATASET_DIR"
         exit 1

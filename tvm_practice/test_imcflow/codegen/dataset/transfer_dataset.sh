@@ -73,6 +73,33 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR_NAME="$(basename "$SCRIPT_DIR")"
 
+# Optional 2nd arg: a subpath UNDER dataset/ (e.g. "vww/_staged") to transfer
+# INSTEAD of the whole dataset/ dir. run_dataset_eval.sh passes the staged subset
+# so a deep model's full 1.2GB array is never shipped. Without it, the whole
+# dataset/ dir is sent (old behavior, kept for callers that want the full set).
+SUBPATH="${2:-}"
+
+if [[ -n "$SUBPATH" ]]; then
+    LOCAL_SRC="$SCRIPT_DIR/$SUBPATH"
+    if [[ ! -e "$LOCAL_SRC" ]]; then
+        echo "  ✗ Subpath not found locally: $LOCAL_SRC"
+        exit 1
+    fi
+    REMOTE_DEST_DIR="$REMOTE_PATH/$DIR_NAME/$(dirname "$SUBPATH")"
+    echo "Transferring $DIR_NAME/$SUBPATH to $USERNAME@$REMOTE_HOST:$REMOTE_DEST_DIR..."
+    # Only clear the staged subdir on the remote, not the whole dataset/ (other
+    # datasets/subsets stay put). Then recreate its parent and copy the subset in.
+    echo "  - Cleaning old $DIR_NAME/$SUBPATH on remote..."
+    remote_ssh "rm -rf $REMOTE_PATH/$DIR_NAME/$SUBPATH && mkdir -p $REMOTE_DEST_DIR"
+    if remote_scp -r "$LOCAL_SRC" "$USERNAME@$REMOTE_HOST:$REMOTE_DEST_DIR"; then
+        echo "  ✓ Successfully transferred $DIR_NAME/$SUBPATH"
+    else
+        echo "  ✗ Failed to transfer $DIR_NAME/$SUBPATH"
+        exit 1
+    fi
+    exit 0
+fi
+
 echo "Transferring $DIR_NAME to $USERNAME@$REMOTE_HOST:$REMOTE_PATH..."
 
 # Clean old directory on remote

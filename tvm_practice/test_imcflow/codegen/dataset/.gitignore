@@ -4,3 +4,6 @@
 # VWW loop dataset (100-sample stratified subset); images.npy via git-lfs
 !vww/images.npy
 !vww/labels.npy
+
+# Per-run staged subsets written by stage_subset.py (never committed)
+*/_staged/
