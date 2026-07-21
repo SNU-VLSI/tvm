@@ -1,3 +1,6 @@
 *.npy
 !kws_sc/images.npy
 !kws_sc/labels.npy
+# VWW loop dataset (100-sample stratified subset); images.npy via git-lfs
+!vww/images.npy
+!vww/labels.npy
