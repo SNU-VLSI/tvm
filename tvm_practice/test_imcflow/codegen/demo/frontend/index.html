@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>IMCFlow chip demo</title>
+<style>
+  :root { --ok:#1db954; --bad:#e0455e; --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; justify-content:space-between; align-items:center;
+           padding:16px 28px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:22px; margin:0; font-weight:600; }
+  #acc-big { font-size:34px; font-weight:700; }
+  main { display:grid; grid-template-columns: 420px 1fr; gap:24px; padding:28px; }
+  .imgwrap { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+             display:flex; align-items:center; justify-content:center; aspect-ratio:1; }
+  #sample-img { width:100%; height:100%; image-rendering:pixelated; border-radius:11px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 26px; }
+  .sample-id { color:var(--dim); font-size:15px; margin-bottom:6px; }
+  .verdict { font-size:28px; font-weight:700; margin:4px 0 18px; }
+  .verdict.ok { color:var(--ok); } .verdict.bad { color:var(--bad); }
+  .row { display:flex; align-items:center; gap:12px; margin:9px 0; font-size:18px; }
+  .row .name { width:120px; } .row .pct { width:70px; text-align:right; font-variant-numeric:tabular-nums; }
+  .bar { flex:1; height:16px; background:#21262d; border-radius:8px; overflow:hidden; }
+  .bar > span { display:block; height:100%; background:#3b82f6; }
+  .row.truth .name { font-weight:700; }
+  .row.truth .bar > span { background:var(--ok); }
+  footer { display:flex; gap:40px; padding:14px 28px; border-top:1px solid var(--line);
+           color:var(--dim); font-size:16px; font-variant-numeric:tabular-nums; }
+  footer b { color:var(--fg); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">IMCFlow chip demo</h1>
+  <div id="acc-big">—</div>
+</header>
+<main>
+  <div class="imgwrap"><img id="sample-img" alt="sample" /></div>
+  <div class="panel">
+    <div class="sample-id" id="sample-id">waiting…</div>
+    <div class="verdict" id="verdict">&nbsp;</div>
+    <div id="top5"></div>
+  </div>
+</main>
+<footer>
+  <div>seen: <b id="seen">0</b> / <span id="total">0</span></div>
+  <div>correct: <b id="correct">0</b></div>
+  <div>running acc: <b id="acc-foot">0.0%</b></div>
+  <div>profile: <b id="profile">—</b></div>
+  <div>chip acc (xcheck): <b id="chipacc">—</b></div>
+</footer>
+
+<script>
+let CLASSES = [], seen = 0, correct = 0, total = 0;
+
+function softmax(logits) {
+  const m = Math.max(...logits);
+  const ex = logits.map(v => Math.exp(v - m));
+  const s = ex.reduce((a, b) => a + b, 0);
+  return ex.map(v => v / s);
+}
+
+function render(ev) {
+  const probs = softmax(ev.scores);
+  // top-5 (내림차순)
+  const order = probs.map((p, i) => [p, i]).sort((a, b) => b[0] - a[0]).slice(0, 5);
+
+  document.getElementById("sample-img").src = "/image/" + ev.idx + "?t=" + ev.idx;
+  document.getElementById("sample-id").textContent =
+    "Sample #" + ev.idx + " (orig idx " + ev.orig_idx + ")   truth: " + CLASSES[ev.label];
+
+  const v = document.getElementById("verdict");
+  v.textContent = ev.correct ? "✅ correct" : "❌ wrong";
+  v.className = "verdict " + (ev.correct ? "ok" : "bad");
+
+  const html = order.map(([p, ci]) => {
+    const isTruth = ci === ev.label;
+    return `<div class="row ${isTruth ? "truth" : ""}">
+      <span class="name">${CLASSES[ci]}</span>
+      <span class="bar"><span style="width:${(p * 100).toFixed(1)}%"></span></span>
+      <span class="pct">${(p * 100).toFixed(1)}%</span></div>`;
+  }).join("");
+  document.getElementById("top5").innerHTML = html;
+
+  // 뷰어 자체 집계 (메인)
+  seen += 1;
+  if (ev.correct) correct += 1;
+  const acc = seen ? (100 * correct / seen) : 0;
+  document.getElementById("acc-big").textContent = acc.toFixed(1) + "%";
+  document.getElementById("acc-foot").textContent = acc.toFixed(1) + "%";
+  document.getElementById("seen").textContent = seen;
+  document.getElementById("correct").textContent = correct;
+}
+
+async function boot() {
+  const cfg = await (await fetch("/config")).json();
+  CLASSES = cfg.classes;
+  total = cfg.num_samples;
+  document.getElementById("title").textContent = cfg.title;
+  document.getElementById("total").textContent = total;
+  document.getElementById("profile").textContent = cfg.profile;
+
+  const es = new EventSource("/stream");
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === "sample") render(ev);
+    else if (ev.type === "progress") document.getElementById("chipacc").textContent = ev.chip_accuracy.toFixed(1) + "%";
+    else if (ev.type === "done") es.close();
+  };
+}
+boot();
+</script>
+</body>
+</html>

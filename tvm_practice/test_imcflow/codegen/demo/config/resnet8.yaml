@@ -1,0 +1,60 @@
+# ResNet8 / CIFAR-10 chip inference-only demo config
+# 이 파일 하나가 데모의 모든 task-specific / 접속 파라미터를 담는다.
+# mock <-> chip 전환은 profile 값만 바꾸면 된다 (코드 수정 불필요).
+
+task:
+  name: resnet8
+  title: "ResNet8 on IMCFlow chip · CIFAR-10"
+  # metadata.json["classes"] 와 반드시 동일 순서 (logit index -> class name)
+  classes:
+    - airplane
+    - automobile
+    - bird
+    - cat
+    - deer
+    - dog
+    - frog
+    - horse
+    - ship
+    - truck
+  num_classes: 10
+
+# 실행 소스: "mock"(canned txt 재생) | "chip"(실제 SSH)
+# 이번 세션은 mock 으로만 검증. chip 은 배선만 되어 있고 값은 실제 데모 때 채운다.
+profile: mock
+
+mock:
+  # fixtures/ 에 박제된 canned 결과 (실제 best checkpoint iter_009 500샘플)
+  fixture: fixtures/resnet8_iter009_500.txt
+  # 샘플 간 재생 지연 (ms). 실제 데모(chip)에서는 무시된다.
+  delay_ms: 300
+
+chip:
+  # ── 배선만: 실제 데모 때 아래 값을 노트북/내부망 기준으로 채운다 ──
+  # ssh_config 의 Host 별칭. 노트북 ~/.ssh/config 의 petalinux2 를 내부IP로 바꾼 뒤 그대로 참조.
+  ssh_host: petalinux2
+  ssh_port: 1326          # scan_steps.sh 는 -p $REMOTE_PORT 로 config Port 를 덮으므로 여기 값이 최종 포트
+  ssh_user: root
+  auth_method: key        # key => BatchMode=yes (키 필수). 데모 전 known_hosts 등록 1회 필요
+  console_log_level: RAW  # INFO 가 아니어야 per-sample stdout 이 filter 에 안 걸린다
+
+  # 원격에서 돌릴 실행 커맨드 구성요소. run_dataset_eval.sh 스텝6 REMOTE_CMD 를 그대로 복제.
+  # (준비 스텝에서 아래 원격 경로에 자산이 이미 적재돼 있어야 함)
+  remote_base_path: /home/root/imcflow
+  binary_dir: host_binary_make.dataset
+  dataset_exec: execute_graph_for_dataset   # DEBUG_EXE=1 이면 debug_execute_graph_for_dataset
+  eval_cpu: 3                               # taskset 핀 (CPU0 IRQ 경합 회피)
+  debug_dump_dir: /var/volatile/debug_nodes
+  heartbeat_path: /var/volatile/imcflow_chip_heartbeat.txt
+  graph_path: host_binary_make.dataset/build/mlf/executor-config/graph/default.graph
+  params_path: host_binary_make.dataset/build/mlf/parameters/default.params
+  images_path: dataset/cifar10/_staged/images.npy
+  labels_path: dataset/cifar10/_staged/labels.npy
+  remote_result_path: /tmp/tvm_dataset_results.txt
+
+run:
+  num_samples: 500
+
+# 샘플 순번 -> 원본 CIFAR-10 인덱스 매핑 (노트북 로컬 원본 사진 조회용).
+# 순차 가정 금지: 반드시 이 맵으로만 조회한다.
+sample_map: fixtures/sample_map.json
