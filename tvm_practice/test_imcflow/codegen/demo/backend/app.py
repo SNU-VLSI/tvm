@@ -55,15 +55,29 @@ CFG = load_config()
 with open(os.path.join(DEMO_ROOT, CFG["sample_map"])) as f:
     _SAMPLE_MAP = json.load(f)["staged_to_original"]
 
-# staged 이미지 (칩 입력과 같은 소스). 서버 검증용 사진 복원에 사용.
-# 실제 데모(노트북)에서는 로컬 원본 CIFAR-10 을 쓰지만, 이 서버 검증에서는 staged images.npy 를 복원한다.
-# worktree 는 코드만 복사되고 대용량 데이터는 원본 checkout 에만 있으므로 두 경로를 순서대로 탐색한다.
-_IMAGE_CANDIDATES = [
-    os.path.join(CODEGEN_ROOT, "dataset", "cifar10", "_staged", "images.npy"),
-    "/root/project/tvm/tvm_practice/test_imcflow/codegen/dataset/cifar10/_staged/images.npy",
-]
-_STAGED_IMAGES_PATH = next((p for p in _IMAGE_CANDIDATES if os.path.exists(p)), None)
-_IMAGES = np.load(_STAGED_IMAGES_PATH) if _STAGED_IMAGES_PATH else None
+# ── 이미지 소스 (config.image_source, 환경변수 DEMO_IMAGE_SOURCE 로 오버라이드 가능) ──
+# "staged_npy"  : 서버 검증. dataset/cifar10/_staged/images.npy 역정규화 복원, staged 순번으로 조회.
+# "torchvision" : 노트북. torchvision CIFAR-10 test split, orig_idx(sample_map) 로 조회.
+# run_laptop.sh 는 DEMO_IMAGE_SOURCE=torchvision 을 넣어 config 수정 없이 노트북 모드로 띄운다.
+_IMAGE_SOURCE = os.environ.get("DEMO_IMAGE_SOURCE") or CFG.get("image_source", "staged_npy")
+_IMAGES = None          # staged_npy 모드: [N,3,32,32] normalized float
+_TV_IMAGES = None       # torchvision 모드: [10000,32,32,3] uint8 (원본 test split)
+
+if _IMAGE_SOURCE == "staged_npy":
+    # worktree 는 코드만 복사되므로 대용량 데이터는 원본 checkout 에서도 탐색.
+    _cands = [
+        os.path.join(CODEGEN_ROOT, "dataset", "cifar10", "_staged", "images.npy"),
+        "/root/project/tvm/tvm_practice/test_imcflow/codegen/dataset/cifar10/_staged/images.npy",
+    ]
+    _p = next((p for p in _cands if os.path.exists(p)), None)
+    _IMAGES = np.load(_p) if _p else None
+elif _IMAGE_SOURCE == "torchvision":
+    # 노트북 로컬 원본 CIFAR-10 test split (download=True 로 최초 1회 받음). orig_idx 로 조회.
+    from torchvision.datasets import CIFAR10
+
+    _tv_root = os.path.join(DEMO_ROOT, CFG.get("torchvision", {}).get("root", "./cifar_data"))
+    _ds = CIFAR10(root=_tv_root, train=False, download=True)
+    _TV_IMAGES = _ds.data  # numpy [10000,32,32,3] uint8, 표준 test split 순서
 
 app = FastAPI(title="IMCFlow chip demo")
 
@@ -90,16 +104,27 @@ def config():
 
 @app.get("/image/{staged_idx}")
 def image(staged_idx: int):
-    """staged 순번의 원본 사진(32x32 PNG). 역정규화해 8-bit 복원."""
-    if _IMAGES is None:
-        return Response(status_code=404, content=b"staged images.npy not found")
+    """staged 순번에 해당하는 원본 사진(32x32 PNG).
+
+    - torchvision 모드: sample_map 으로 orig_idx 변환 -> test split[orig_idx] (uint8 원본, 역정규화 불필요).
+    - staged_npy 모드  : _staged/images.npy[staged_idx] 역정규화 복원.
+    """
     from PIL import Image
 
-    arr = _IMAGES[staged_idx].astype(np.float32)  # [3,32,32] normalized
-    if arr.shape[0] == 3:
-        arr = arr * _STD + _MEAN  # 역정규화
-        arr = np.clip(arr, 0.0, 1.0)
-        arr = (arr * 255).astype(np.uint8).transpose(1, 2, 0)  # HWC
+    if _IMAGE_SOURCE == "torchvision":
+        if _TV_IMAGES is None:
+            return Response(status_code=404, content=b"torchvision CIFAR-10 not loaded")
+        orig = _SAMPLE_MAP[staged_idx] if staged_idx < len(_SAMPLE_MAP) else staged_idx
+        arr = _TV_IMAGES[orig]  # [32,32,3] uint8, 이미 원본 사진
+    else:
+        if _IMAGES is None:
+            return Response(status_code=404, content=b"staged images.npy not found")
+        arr = _IMAGES[staged_idx].astype(np.float32)  # [3,32,32] normalized
+        if arr.shape[0] == 3:
+            arr = arr * _STD + _MEAN  # 역정규화
+            arr = np.clip(arr, 0.0, 1.0)
+            arr = (arr * 255).astype(np.uint8).transpose(1, 2, 0)  # HWC
+
     img = Image.fromarray(arr)
     buf = io.BytesIO()
     img.save(buf, format="PNG")

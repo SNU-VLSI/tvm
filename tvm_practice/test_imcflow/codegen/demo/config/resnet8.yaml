@@ -55,6 +55,14 @@ chip:
 run:
   num_samples: 500
 
+# 화면에 띄울 사진의 소스.
+#   "staged_npy"  : 서버 검증용. dataset/cifar10/_staged/images.npy 를 역정규화해 복원 (staged 순번으로 조회).
+#   "torchvision" : 노트북용. torchvision CIFAR-10 test split(10000장)을 orig_idx 로 조회 (README 정석).
+image_source: staged_npy
+torchvision:
+  # torchvision.datasets.CIFAR10 이 데이터를 받는/찾는 루트. 노트북에서 최초 1회 download=True 로 받는다.
+  root: ./cifar_data
+
 # 샘플 순번 -> 원본 CIFAR-10 인덱스 매핑 (노트북 로컬 원본 사진 조회용).
 # 순차 가정 금지: 반드시 이 맵으로만 조회한다.
 sample_map: fixtures/sample_map.json

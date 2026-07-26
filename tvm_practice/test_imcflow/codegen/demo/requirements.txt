@@ -1,0 +1,8 @@
+# 노트북(WSL) mock 데모 실행에 필요한 패키지
+fastapi
+uvicorn
+pyyaml
+numpy
+pillow
+# 사진 소스 = torchvision CIFAR-10 원본 (image_source: torchvision 일 때)
+torchvision
