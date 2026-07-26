@@ -1,8 +1,7 @@
 # 노트북(WSL) mock 데모 실행에 필요한 패키지
+# 사진은 git-lfs 로 박제된 fixtures/cifar10_test_images.npy 를 쓰므로 torchvision 불필요.
 fastapi
 uvicorn
 pyyaml
 numpy
 pillow
-# 사진 소스 = torchvision CIFAR-10 원본 (image_source: torchvision 일 때)
-torchvision

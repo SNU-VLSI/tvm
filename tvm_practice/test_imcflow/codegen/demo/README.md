@@ -53,12 +53,14 @@ mock 은 `fixtures/resnet8_iter009_500.txt` 를 라인별로 재생하되 per-sa
 ## 노트북(WSL)에서 mock 육안 확인 — 칩 연결 불필요
 
 프론트 렌더링을 노트북 브라우저에서 실제로 눈으로 보는 절차. **칩을 LAN 으로 붙일 필요 없다**(mock).
-`demo/` 디렉토리만 노트북으로 옮기면 된다(코드+fixture, ~100KB. 대용량 데이터 불필요 —
-사진은 torchvision 이 CIFAR-10 을 자동 다운로드해서 쓴다).
+사진(CIFAR-10 10000장)은 **git-lfs 로 박제**돼 있어 다운로드 불필요 — `git pull` 만으로 사진까지 다 온다.
 
 ```bash
-# 1) demo/ 를 노트북으로 복사 (git pull 또는 scp)
-# 2) 실행 (최초 1회는 venv 생성 + 의존성 설치 + CIFAR-10 다운로드)
+# 1) demo/ 를 노트북으로 가져오기 (git clone/pull). git-lfs 로 npy 를 받는다:
+git lfs install
+git lfs pull                        # fixtures/cifar10_test_images.npy (122MB) 내려받음
+
+# 2) 실행 (최초 1회는 venv 생성 + 의존성 설치)
 cd demo
 ./run_laptop.sh
 #   => http://127.0.0.1:8079  를 브라우저(Windows 쪽)에서 연다.
@@ -68,15 +70,14 @@ cd demo
 ./run_laptop.sh --no-setup
 ```
 
-- **사진 소스**: `run_laptop.sh` 는 `DEMO_IMAGE_SOURCE=torchvision` 을 넣어 노트북 모드로 띄운다.
-  torchvision CIFAR-10 test split 을 `sample_map.json` 의 `orig_idx` 로 조회한다(순차 가정 없음).
-  최초 실행 시 `demo/cifar_data/` 로 test set(약 170MB)을 자동 다운로드.
+- **사진 소스**: 기본 `full_npy` 모드. `fixtures/cifar10_test_images.npy`(10000장 정규화 float32, git-lfs)를
+  `sample_map.json` 의 `orig_idx` 로 조회 + 역정규화(순차 가정 없음). torchvision/네트워크 다운로드 불필요.
 - **WSL 브라우저**: 서버는 `127.0.0.1:8079`. WSL2 라면 Windows 브라우저에서 `localhost:8079` 로 바로 열린다.
-- **이 서버 검증과의 차이**: 렌더링·SSE·집계 코드는 100% 동일하고 **사진 소스만** 다르다
-  (서버=staged npy 역정규화, 노트북=torchvision 원본). 매핑 로직은 양쪽 동일하게 검증됨.
+- **이 서버 검증과의 차이**: 렌더링·SSE·집계 코드는 100% 동일. 이 서버는 `staged_npy`(500장) 로도 검증했고,
+  `full_npy`(10000장, orig_idx) 와 **동일 사진 반환을 교차검증**함(byte-identical). 매핑 로직 양쪽 검증 완료.
 
-> torchvision 설치가 부담이거나 오프라인이면 `DEMO_IMAGE_SOURCE=staged_npy` 로 띄우고
-> `dataset/cifar10/_staged/images.npy` 를 노트북에 함께 두면 사진 없이/역정규화로도 볼 수 있다.
+> `staged_npy`(500장) 로 띄우려면 `DEMO_IMAGE_SOURCE=staged_npy ./run_laptop.sh --no-setup`.
+> 단 그 경우 `dataset/cifar10/_staged/images.npy` 가 있어야 한다(서버 검증용 경로).
 
 ---
 

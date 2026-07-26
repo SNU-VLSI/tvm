@@ -25,10 +25,13 @@ else
   source "$VENV/bin/activate"
 fi
 
-# 노트북 모드: 사진 소스를 torchvision 원본으로 (config 수정 없이 환경변수 오버라이드)
-export DEMO_IMAGE_SOURCE="${DEMO_IMAGE_SOURCE:-torchvision}"
+# 노트북 모드: 사진 소스 = git-lfs 로 박제된 full npy (다운로드 불필요)
+export DEMO_IMAGE_SOURCE="${DEMO_IMAGE_SOURCE:-full_npy}"
 echo "[run] image_source = ${DEMO_IMAGE_SOURCE}  (staged_npy 로 바꾸려면 DEMO_IMAGE_SOURCE=staged_npy)"
+if [[ ! -s fixtures/cifar10_test_images.npy ]]; then
+  echo "[warn] fixtures/cifar10_test_images.npy 가 비어있음 — git-lfs pull 이 필요할 수 있습니다:"
+  echo "       git lfs install && git lfs pull"
+fi
 echo "[run] 서버 기동: http://127.0.0.1:${PORT}  (Ctrl-C 로 종료)"
-echo "[run] 최초 실행 시 torchvision 이 CIFAR-10 test set 을 demo/cifar_data 로 자동 다운로드합니다."
 cd backend
 exec python3 -m uvicorn app:app --host 127.0.0.1 --port "$PORT"
