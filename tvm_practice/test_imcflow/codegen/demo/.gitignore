@@ -7,3 +7,6 @@ config/_tv_test.yaml
 # 루트 .gitignore 의 *.json 규칙이 fixtures 의 필수 json 을 무시하므로 예외 처리 (반드시 커밋돼야 함)
 !fixtures/sample_map.json
 !fixtures/cifar10_metadata.json
+
+# make_staged.py 출력 (런타임 생성, 커밋 X)
+dataset/

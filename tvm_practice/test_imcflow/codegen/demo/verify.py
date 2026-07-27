@@ -55,11 +55,15 @@ def main():
             progress.append(ev)
 
     fails = []
-    n_expected = cfg["run"]["num_samples"]
+    # mock 은 fixture txt 전체를 재생하므로 기대 개수는 fixture 의 [Sample N] 개수다.
+    # (config.run.num_samples 는 chip 실행용 값이라 mock 검증 기준으로 쓰면 안 된다.)
+    import re
+    fixture_path = os.path.join(DEMO_ROOT, cfg["mock"]["fixture"])
+    n_expected = len(re.findall(r"^\[Sample \d+\]", open(fixture_path).read(), re.M))
 
     # 1. 개수
     if len(samples) != n_expected:
-        fails.append(f"sample count {len(samples)} != expected {n_expected}")
+        fails.append(f"sample count {len(samples)} != fixture samples {n_expected}")
 
     # 2. 스키마 + 3. softmax argmax == 칩 predicted + 5. orig_idx 매핑
     seen = correct = 0

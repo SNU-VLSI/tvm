@@ -24,6 +24,32 @@
 
 ---
 
+## 샘플 수 확장 (100 → 500 → …10000) + 라벨 상한 해소
+
+**라벨 500 상한 해소됨**: 원본 10000 라벨을 `fixtures/cifar10_test_labels.npy` (git-lfs)로 박제했다.
+이제 `git pull` 만으로 전체 라벨을 확보하며, 501번째 이후도 라벨이 있다.
+
+**임의의 N-샘플 staged 생성** (노트북에서, `git lfs pull` 후):
+```bash
+cd demo
+python3 make_staged.py 500                 # demo/dataset/cifar10/_staged500/ 생성 (images+labels+sample_map)
+# 칩으로 전송:
+scp -P 1326 -r dataset/cifar10/_staged500 \
+  root@147.46.117.99:/home/root/tvm/tvm_practice/test_imcflow/codegen/dataset/cifar10/
+# config/resnet8.yaml 갱신:
+#   chip.images_path: dataset/cifar10/_staged500/images.npy
+#   chip.labels_path: dataset/cifar10/_staged500/labels.npy
+#   run.num_samples: 500
+```
+- `make_staged.py N` 은 `fixtures/*.npy[0:N]` 슬라이스 + 순차 sample_map 을 만든다.
+  생성물 배열이 서버 `_staged` 와 **픽셀 일치** 검증됨. N 최대 10000.
+
+**소요 시간 (실측 샘플당 ~4.0s)**: 100=6.7분 / 500=33분 / 1000=1.1h / 10000=11.2h(밤샘 배치).
+**정확도**: 표본이 클수록 컴파일 정확도(76.4%)로 수렴 — 20샘플 90% → 100샘플 80% → 500 더 낮아짐.
+데모 수치로 작은 표본의 90% 를 말하면 안 맞을 수 있음. **권장: 실연 100(6.7분), 정확도 강조 500(33분).**
+
+---
+
 ## 1. 노트북에서 최신 코드 받기
 
 ```bash

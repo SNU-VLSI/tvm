@@ -53,15 +53,18 @@ chip:
   graph_path: host_binary_make.dataset/build/mlf/executor-config/graph/default.graph
   params_path: host_binary_make.dataset/build/mlf/parameters/default.params
   # _staged   = 서버가 올린 20샘플 (그대로 보존)
-  # _staged100 = 노트북이 fixtures/cifar10_test_images.npy[0:100] + fixture 라벨로 만들어 올린 100샘플.
-  #              첫 20샘플 슬라이스의 md5 가 _staged 와 완전 일치함을 확인 후 전송했다(동일 소스 보장).
+  # _stagedN  = fixtures/cifar10_test_images.npy[0:N] + cifar10_test_labels.npy[0:N] 슬라이스.
+  #             `python3 make_staged.py N` 으로 생성(라벨 10000장 박제로 500 상한 없음, 최대 N=10000).
+  #             생성물의 배열 값이 서버 _staged 와 픽셀 일치함을 검증했다(동일 소스).
   images_path: dataset/cifar10/_staged100/images.npy
   labels_path: dataset/cifar10/_staged100/labels.npy
   remote_result_path: /tmp/tvm_dataset_results.txt
 
 run:
   # chip.images_path 가 가리키는 staged 파일의 샘플 수를 넘기지 말 것 (초과 시 배열 밖 read).
-  # 현재 _staged100 = 100샘플. 더 늘리려면 같은 방식으로 _stagedN 을 만들어 올린다.
+  # 현재 _staged100 = 100샘플. 더 늘리려면 make_staged.py N -> scp -> 이 두 값 갱신.
+  # 실측 소요: 샘플당 ~4.0s. 100=6.7분 / 500=33분 / 1000=1.1h / 10000=11.2h (전체는 밤샘 배치).
+  # 정확도는 표본↑ 일수록 컴파일 정확도(76.4%)로 수렴: 20샘플 90% → 100샘플 80% → 500↓.
   num_samples: 100
 
 # 화면에 띄울 사진의 소스.
