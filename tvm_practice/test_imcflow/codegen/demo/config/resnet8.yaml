@@ -20,8 +20,8 @@ task:
   num_classes: 10
 
 # 실행 소스: "mock"(canned txt 재생) | "chip"(실제 SSH)
-# 이번 세션은 mock 으로만 검증. chip 은 배선만 되어 있고 값은 실제 데모 때 채운다.
-profile: mock
+# chip 은 노트북에서 실연결 검증 완료 (2026-07-27, 100샘플 80%).
+profile: chip
 
 mock:
   # fixtures/ 에 박제된 canned 결과 (실제 best checkpoint iter_009 500샘플)
@@ -52,12 +52,17 @@ chip:
   warmup_dir: /home/root/imcflow/xilinx/petalinux-csrc   # make clear_time && make warmup (추론 전/후)
   graph_path: host_binary_make.dataset/build/mlf/executor-config/graph/default.graph
   params_path: host_binary_make.dataset/build/mlf/parameters/default.params
-  images_path: dataset/cifar10/_staged/images.npy
-  labels_path: dataset/cifar10/_staged/labels.npy
+  # _staged   = 서버가 올린 20샘플 (그대로 보존)
+  # _staged100 = 노트북이 fixtures/cifar10_test_images.npy[0:100] + fixture 라벨로 만들어 올린 100샘플.
+  #              첫 20샘플 슬라이스의 md5 가 _staged 와 완전 일치함을 확인 후 전송했다(동일 소스 보장).
+  images_path: dataset/cifar10/_staged100/images.npy
+  labels_path: dataset/cifar10/_staged100/labels.npy
   remote_result_path: /tmp/tvm_dataset_results.txt
 
 run:
-  num_samples: 500
+  # chip.images_path 가 가리키는 staged 파일의 샘플 수를 넘기지 말 것 (초과 시 배열 밖 read).
+  # 현재 _staged100 = 100샘플. 더 늘리려면 같은 방식으로 _stagedN 을 만들어 올린다.
+  num_samples: 100
 
 # 화면에 띄울 사진의 소스.
 #   "full_npy"    : 노트북 기본. fixtures/cifar10_test_images.npy (10000장 정규화 float32, git-lfs 박제)를

@@ -106,6 +106,8 @@ async function boot() {
     const ev = JSON.parse(e.data);
     if (ev.type === "sample") render(ev);
     else if (ev.type === "progress") document.getElementById("chipacc").textContent = ev.chip_accuracy.toFixed(1) + "%";
+    // 백엔드가 ssh 실패 등을 조용히 삼키지 않고 올려준다 — 화면에 그대로 표시.
+    else if (ev.type === "error") document.getElementById("profile").textContent = "ERROR: " + ev.message;
     else if (ev.type === "done") es.close();
   };
 }
