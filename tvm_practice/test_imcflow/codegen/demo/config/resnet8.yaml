@@ -30,8 +30,9 @@ mock:
   delay_ms: 300
 
 chip:
-  # ── 배선만: 실제 데모 때 아래 값을 노트북/내부망 기준으로 채운다 ──
-  # ssh_config 의 Host 별칭. 노트북 ~/.ssh/config 의 petalinux2 를 내부IP로 바꾼 뒤 그대로 참조.
+  # ── 서버에서 20샘플 90% 재현 검증됨 (2026-07-27). ──
+  # 공인IP(petalinux2:1326) 그대로 사용. 내부망 전환은 데모장 직전에 HostName/Port 만 변경.
+  # ssh_config 의 Host 별칭. 노트북 ~/.ssh/config 의 petalinux2 를 그대로 참조.
   ssh_host: petalinux2
   ssh_port: 1326          # scan_steps.sh 는 -p $REMOTE_PORT 로 config Port 를 덮으므로 여기 값이 최종 포트
   ssh_user: root
@@ -40,12 +41,15 @@ chip:
 
   # 원격에서 돌릴 실행 커맨드 구성요소. run_dataset_eval.sh 스텝6 REMOTE_CMD 를 그대로 복제.
   # (준비 스텝에서 아래 원격 경로에 자산이 이미 적재돼 있어야 함)
-  remote_base_path: /home/root/imcflow
+  # ⚠️ 76.4% fixture 실행이 쓴 실제 base = /home/root/tvm/tvm_practice/test_imcflow/codegen.
+  #    /home/root/imcflow 로 두면 scan register 경로 불일치로 칩 출력이 죽어 전부 class 0 예측(정확도 0%)이 난다.
+  remote_base_path: /home/root/tvm/tvm_practice/test_imcflow/codegen
   binary_dir: host_binary_make.dataset
   dataset_exec: execute_graph_for_dataset   # DEBUG_EXE=1 이면 debug_execute_graph_for_dataset
   eval_cpu: 3                               # taskset 핀 (CPU0 IRQ 경합 회피)
   debug_dump_dir: /var/volatile/debug_nodes
   heartbeat_path: /var/volatile/imcflow_chip_heartbeat.txt
+  warmup_dir: /home/root/imcflow/xilinx/petalinux-csrc   # make clear_time && make warmup (추론 전/후)
   graph_path: host_binary_make.dataset/build/mlf/executor-config/graph/default.graph
   params_path: host_binary_make.dataset/build/mlf/parameters/default.params
   images_path: dataset/cifar10/_staged/images.npy

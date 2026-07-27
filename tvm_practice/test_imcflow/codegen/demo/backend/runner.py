@@ -41,7 +41,14 @@ def _build_remote_cmd(cfg: dict) -> str:
     c = cfg["chip"]
     n = cfg["run"]["num_samples"]
     exec_path = f"{c['binary_dir']}/build/{c['dataset_exec']}"
+    warmup_dir = c.get("warmup_dir", "/home/root/imcflow/xilinx/petalinux-csrc")
+    # ⚠️ 추론 "전" warmup 필수: IMC 아날로그 코어는 warmup 으로 깨워야 정상 연산한다.
+    # 안 하면 (칩 리부트/미warm 상태에서) 에러 없이 전부 class 0 만 예측한다(조용한 실패).
+    # run_dataset_eval.sh 는 warmup 을 추론 "후"에만 돌려 *다음* 실행을 준비하므로,
+    # 여기서 추론 앞에 clear_time+warmup 을 한 번 더 넣어 노트북 단독 실행도 안전하게 만든다.
+    pre = f"cd {warmup_dir} && make clear_time && make warmup > /dev/null 2>&1"
     return (
+        f"{pre}; "
         f"cd {c['remote_base_path']} && "
         f"IMCFLOW_DEBUG_DUMP_DIR={c['debug_dump_dir']} "
         f"IMCFLOW_HEARTBEAT_PATH={c['heartbeat_path']} "
@@ -49,8 +56,7 @@ def _build_remote_cmd(cfg: dict) -> str:
         f"{c['graph_path']} {c['params_path']} "
         f"{c['images_path']} {c['labels_path']} "
         f"{n} {c['remote_result_path']}; "
-        f"cd /home/root/imcflow/xilinx/petalinux-csrc && "
-        f"make clear_time && make warmup > /dev/null 2>&1"
+        f"cd {warmup_dir} && make clear_time && make warmup > /dev/null 2>&1"
     )
 
 
