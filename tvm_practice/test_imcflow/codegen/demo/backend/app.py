@@ -99,8 +99,17 @@ _IMAGES = None
 _INDEX_BY = "staged"    # "orig" (full_npy: orig_idx 로 조회) | "staged" (staged 순번)
 
 def _find_staged_images(dataset_name):
-    """worktree 는 코드만 복사되므로 대용량 staged 데이터는 원본 checkout 에서도 탐색."""
-    cands = [
+    """staged 입력 배열 탐색. 우선순위:
+      1) config.staged_images_fixture (demo/fixtures 에 박제한 것) — 노트북 기본.
+         resnet8 이 cifar10_test_images.npy 를 git-lfs 로 박제하듯, kws/vww staged
+         입력도 fixtures 로 박제해 `git lfs pull` 만으로 노트북에서 확보되게 한다.
+      2) codegen/dataset/<name>/_staged/images.npy — 서버(원본 checkout) 폴백.
+    """
+    fx = CFG.get("staged_images_fixture")
+    cands = []
+    if fx:
+        cands.append(os.path.join(DEMO_ROOT, fx))
+    cands += [
         os.path.join(CODEGEN_ROOT, "dataset", dataset_name, "_staged", "images.npy"),
         f"/root/project/tvm/tvm_practice/test_imcflow/codegen/dataset/{dataset_name}/_staged/images.npy",
     ]

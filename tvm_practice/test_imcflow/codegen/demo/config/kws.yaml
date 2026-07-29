@@ -59,6 +59,10 @@ run:
 # Input display: 49x10 MFCC (single channel) rendered as a viridis heatmap from
 # the staged array directly (no sample_map — staged 순번 그대로).
 image_source: staged_npy
+# Baked staged inputs (git-lfs on laptop). Same 100 samples the chip runs, so the
+# displayed MFCC matches each result. Falls back to codegen/dataset/kws_sc/_staged
+# on the server if this fixture is absent.
+staged_images_fixture: fixtures/kws_staged_images.npy
 display:
   kind: mfcc_heatmap
   aspect: "10 / 49"     # width/height (MFCC is 49 tall x 10 wide)

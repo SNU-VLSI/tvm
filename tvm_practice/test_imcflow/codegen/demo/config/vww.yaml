@@ -47,6 +47,9 @@ run:
 
 # Input display: 96x96 RGB already in 0..1 -> photo (no denorm, no sample_map).
 image_source: staged_npy
+# Baked staged inputs (git-lfs on laptop; 11MB). Same 100 samples the chip runs.
+# Falls back to codegen/dataset/vww/_staged on the server if this fixture is absent.
+staged_images_fixture: fixtures/vww_staged_images.npy
 display:
   kind: raw01
   aspect: "1"
