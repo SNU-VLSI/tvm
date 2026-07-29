@@ -33,14 +33,20 @@ def softmax_argmax(logits):
 
 
 def main():
-    with open(os.path.join(DEMO_ROOT, "config", "resnet8.yaml")) as f:
+    # Workload select: DEMO_WORKLOAD=resnet8|kws|vww (or argv[1]). Default resnet8.
+    workload = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DEMO_WORKLOAD", "resnet8"))
+    with open(os.path.join(DEMO_ROOT, "config", f"{workload}.yaml")) as f:
         cfg = yaml.safe_load(f)
     cfg["_demo_root"] = DEMO_ROOT
     cfg["profile"] = "mock"
     cfg["mock"]["delay_ms"] = 0
 
-    with open(os.path.join(DEMO_ROOT, cfg["sample_map"])) as f:
-        sample_map = json.load(f)["staged_to_original"]
+    # sample_map is optional (resnet8 has one; kws/vww use identity staged order).
+    sample_map = None
+    sm = cfg.get("sample_map")
+    if sm and os.path.exists(os.path.join(DEMO_ROOT, sm)):
+        with open(os.path.join(DEMO_ROOT, sm)) as f:
+            sample_map = json.load(f)["staged_to_original"]
 
     parser = ChipStreamParser()
     samples, progress = [], []
@@ -49,7 +55,7 @@ def main():
         if ev is None:
             continue
         if ev["type"] == "sample":
-            ev["orig_idx"] = sample_map[ev["idx"]]
+            ev["orig_idx"] = sample_map[ev["idx"]] if sample_map else ev["idx"]
             samples.append(ev)
         elif ev["type"] == "progress":
             progress.append(ev)
@@ -77,7 +83,8 @@ def main():
             fails.append(f"sample order broken at {i}: idx={ev['idx']}")
         if softmax_argmax(ev["scores"]) != ev["predicted"]:
             fails.append(f"sample {i}: softmax argmax != chip predicted {ev['predicted']}")
-        if ev["orig_idx"] != sample_map[ev["idx"]]:
+        expect_orig = sample_map[ev["idx"]] if sample_map else ev["idx"]
+        if ev["orig_idx"] != expect_orig:
             fails.append(f"sample {i}: orig_idx mismatch")
         # 뷰어 집계
         seen += 1

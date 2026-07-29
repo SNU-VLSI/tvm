@@ -1,0 +1,354 @@
+========================================
+  BUILD CONFIGURATION
+========================================
+use_patched_cpp............... False
+build_timestamp............... 2026-07-29T16:25:28.081323
+model_name.................... mobilenet_v1_vww_full_pretrained
+checkpoint_path............... /root/project/CIM/runs/chip3/vww_run1/visual_wake_words_chip_noise_loop/iter_001/deploy/2026-Jul-25-17-25-23/checkpoint.pth.tar
+board......................... B2
+vmode......................... HALF
+driver_v2..................... True
+column_disable_config......... /root/project/CIM/noise/noise_df/B2_out_chip3_bitline/N32/disabled.json
+num_disable_columns........... 32
+random_seed................... 42
+single_qconv.................. False
+retry_disable................. False
+max_retry_count............... -
+with_patch.................... False
+command_line.................. main.py --model mobilenet_v1_vww_full_pretrained --acc-mask 1 --driver-v2 --ref-models transformed --fixed-imce-core 0,1 --num-disable-columns 32 --column-disable-config /root/project/CIM/noise/noise_df/B2_out_chip3_bitline/N32/disabled.json --random-seed 42 --stop-at compile
+scan_reg_files................ /root/project/tvm/tvm_practice/test_imcflow/codegen/scan_gen/const_scan_reg_files/0x00
+========================================
+
+========================================
+  TVM Dataset Evaluation Results
+========================================
+Graph:   host_binary_make.dataset.vww/build/mlf/executor-config/graph/default.graph
+Params:  host_binary_make.dataset.vww/build/mlf/parameters/default.params
+Images:  dataset/vww/_staged/images.npy
+Labels:  dataset/vww/_staged/labels.npy
+========================================
+
+Starting evaluation of 100 samples...
+
+[Sample 0] Scores: [-0.5180, 0.5025]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 1] Scores: [0.0041, -0.0196]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 2] Scores: [0.3448, -0.3602]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 3] Scores: [0.4715, -0.4869]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 4] Scores: [0.4489, -0.4644]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 5] Scores: [0.3167, -0.3321]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 6] Scores: [0.1951, -0.2106]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 7] Scores: [-0.0416, 0.0261]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 8] Scores: [0.1067, -0.1222]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 9] Scores: [-0.6274, 0.6119]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 10] Scores: [-0.4710, 0.4555]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 11] Scores: [-0.2810, 0.2655]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 12] Scores: [0.3847, -0.4002]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 13] Scores: [-0.4793, 0.4638]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 14] Scores: [-0.1880, 0.1725]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 15] Scores: [-0.0503, 0.0348]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 16] Scores: [0.2613, -0.2767]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 17] Scores: [0.1596, -0.1751]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 18] Scores: [-0.0655, 0.0500]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 19] Scores: [-0.2403, 0.2248]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 20] Scores: [0.1903, -0.2058]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 21] Scores: [-0.2129, 0.1974]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 22] Scores: [0.4927, -0.5082]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 23] Scores: [-0.4096, 0.3941]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 24] Scores: [-0.5676, 0.5521]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 25] Scores: [-0.0945, 0.0790]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 26] Scores: [-0.1529, 0.1374]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 27] Scores: [0.2648, -0.2802]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 28] Scores: [0.4117, -0.4272]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 29] Scores: [-0.5649, 0.5494]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 30] Scores: [0.1335, -0.1490]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 31] Scores: [0.0255, -0.0409]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 32] Scores: [-0.4748, 0.4593]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 33] Scores: [0.0862, -0.1017]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 34] Scores: [-0.4390, 0.4235]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 35] Scores: [0.0721, -0.0876]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 36] Scores: [0.1643, -0.1798]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 37] Scores: [-0.6341, 0.6186]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 38] Scores: [0.4665, -0.4820]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 39] Scores: [0.3330, -0.3485]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 40] Scores: [-0.2350, 0.2195]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 41] Scores: [-0.4524, 0.4369]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 42] Scores: [0.4146, -0.4301]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 43] Scores: [-0.3335, 0.3180]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 44] Scores: [0.0374, -0.0528]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 45] Scores: [0.3175, -0.3330]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 46] Scores: [0.3518, -0.3673]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 47] Scores: [-0.0504, 0.0349]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 48] Scores: [0.4150, -0.4305]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 49] Scores: [-0.6198, 0.6043]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 50] Scores: [-0.3282, 0.3127]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 51] Scores: [0.4225, -0.4380]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 52] Scores: [-0.2226, 0.2071]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 53] Scores: [0.2085, -0.2240]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 54] Scores: [0.4605, -0.4760]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 55] Scores: [0.4777, -0.4932]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 56] Scores: [0.3645, -0.3800]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 57] Scores: [-0.2913, 0.2758]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 58] Scores: [-0.2153, 0.1998]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 59] Scores: [0.4128, -0.4283]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 60] Scores: [0.1925, -0.2080]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 61] Scores: [-0.5631, 0.5476]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 62] Scores: [0.4046, -0.4201]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 63] Scores: [0.4455, -0.4610]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 64] Scores: [0.3438, -0.3593]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 65] Scores: [0.3941, -0.4096]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 66] Scores: [-0.5122, 0.4967]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 67] Scores: [-0.6448, 0.6293]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 68] Scores: [-0.4680, 0.4525]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 69] Scores: [0.1231, -0.1386]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 70] Scores: [-0.4853, 0.4698]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 71] Scores: [-0.5513, 0.5358]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 72] Scores: [-0.5740, 0.5585]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 73] Scores: [-0.4518, 0.4363]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 74] Scores: [0.4862, -0.5016]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 75] Scores: [-0.6186, 0.6031]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 76] Scores: [-0.1031, 0.0876]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 77] Scores: [0.4315, -0.4470]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 78] Scores: [0.0458, -0.0613]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 79] Scores: [-0.3763, 0.3608]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 80] Scores: [0.0569, -0.0723]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 81] Scores: [-0.6468, 0.6313]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 82] Scores: [-0.6271, 0.6116]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 83] Scores: [0.4324, -0.4479]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 84] Scores: [0.4198, -0.4352]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 85] Scores: [-0.6007, 0.5852]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 86] Scores: [0.2347, -0.2501]
+         Predicted: 0, Label: 1, Result: X
+
+[Sample 87] Scores: [0.0114, -0.0269]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 88] Scores: [0.4865, -0.5020]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 89] Scores: [-0.5145, 0.4990]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 90] Scores: [-0.6404, 0.6249]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 91] Scores: [0.2100, -0.2254]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 92] Scores: [-0.3508, 0.3353]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 93] Scores: [0.3856, -0.4011]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 94] Scores: [0.3596, -0.3751]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 95] Scores: [0.1955, -0.2109]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 96] Scores: [0.4168, -0.4323]
+         Predicted: 0, Label: 0, Result: O
+
+[Sample 97] Scores: [-0.3839, 0.3684]
+         Predicted: 1, Label: 1, Result: O
+
+[Sample 98] Scores: [-0.2486, 0.2331]
+         Predicted: 1, Label: 0, Result: X
+
+[Sample 99] Scores: [-0.4000, 0.3845]
+         Predicted: 1, Label: 1, Result: O
+Progress: 100/100, Correct: 77/100, Failed: 0, Accuracy: 77.00%
+
+========================================
+  FINAL RESULTS
+========================================
+Total Samples: 100
+Evaluated:     100
+Failed:        0
+Correct:       77
+Accuracy:      77.00% (77/100)
+========================================
+
+
+========================================
+  PER-SAMPLE TIMING BREAKDOWN (avg of 100 samples)
+========================================
+  total   :  454.693 ms/sample
+  hw (imcflow region calls):  154.925 ms/sample  (34.1%)
+  cpu (all other nodes)    :  299.380 ms/sample  (65.8%)
+  set_input                :    0.002 ms/sample  (0.0%)
+  other (get_sample/memcpy):    0.386 ms/sample  (0.1%)
+========================================
+

@@ -44,14 +44,18 @@ chip:
   # ⚠️ 76.4% fixture 실행이 쓴 실제 base = /home/root/tvm/tvm_practice/test_imcflow/codegen.
   #    /home/root/imcflow 로 두면 scan register 경로 불일치로 칩 출력이 죽어 전부 class 0 예측(정확도 0%)이 난다.
   remote_base_path: /home/root/tvm/tvm_practice/test_imcflow/codegen
-  binary_dir: host_binary_make.dataset
+  # warmup-off per-model binary: per-kernel `make warmup` removed at codegen via
+  # IMCFLOW_NO_PERKERNEL_WARMUP=1. Co-resident on chip with .kws/.vww so switching
+  # models needs no re-transfer. ~16x faster than the old shared warmup-on binary
+  # (resnet8: 4.0 s -> 0.27 s/sample, 100 samples) with no accuracy change (80%).
+  binary_dir: host_binary_make.dataset.resnet8
   dataset_exec: execute_graph_for_dataset   # DEBUG_EXE=1 이면 debug_execute_graph_for_dataset
   eval_cpu: 3                               # taskset 핀 (CPU0 IRQ 경합 회피)
   debug_dump_dir: /var/volatile/debug_nodes
   heartbeat_path: /var/volatile/imcflow_chip_heartbeat.txt
-  warmup_dir: /home/root/imcflow/xilinx/petalinux-csrc   # make clear_time && make warmup (추론 전/후)
-  graph_path: host_binary_make.dataset/build/mlf/executor-config/graph/default.graph
-  params_path: host_binary_make.dataset/build/mlf/parameters/default.params
+  warmup_dir: /home/root/imcflow/xilinx/petalinux-csrc   # make clear_time && make warmup (추론 전/후, per-RUN 1회)
+  graph_path: host_binary_make.dataset.resnet8/build/mlf/executor-config/graph/default.graph
+  params_path: host_binary_make.dataset.resnet8/build/mlf/parameters/default.params
   # _staged   = 서버가 올린 20샘플 (그대로 보존)
   # _stagedN  = fixtures/cifar10_test_images.npy[0:N] + cifar10_test_labels.npy[0:N] 슬라이스.
   #             `python3 make_staged.py N` 으로 생성(라벨 10000장 박제로 500 상한 없음, 최대 N=10000).
@@ -63,7 +67,8 @@ chip:
 run:
   # chip.images_path 가 가리키는 staged 파일의 샘플 수를 넘기지 말 것 (초과 시 배열 밖 read).
   # 현재 _staged100 = 100샘플. 더 늘리려면 make_staged.py N -> scp -> 이 두 값 갱신.
-  # 실측 소요: 샘플당 ~4.0s. 100=6.7분 / 500=33분 / 1000=1.1h / 10000=11.2h (전체는 밤샘 배치).
+  # 실측 소요(warmup-off 바이너리): 샘플당 ~0.27s. 100=27초 / 500=2.2분 / 10000=45분.
+  #   (옛 warmup-on 공유 바이너리는 ~4.0s/샘플 = 100샘플 6.7분이었음. per-kernel warmup 제거로 16x.)
   # 정확도는 표본↑ 일수록 컴파일 정확도(76.4%)로 수렴: 20샘플 90% → 100샘플 80% → 500↓.
   num_samples: 100
 

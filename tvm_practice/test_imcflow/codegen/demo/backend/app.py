@@ -37,11 +37,32 @@ from parser import ChipStreamParser
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 DEMO_ROOT = os.path.dirname(BACKEND_DIR)
 CODEGEN_ROOT = os.path.dirname(DEMO_ROOT)
-CONFIG_PATH = os.path.join(DEMO_ROOT, "config", "resnet8.yaml")
+# Workload selection: DEMO_WORKLOAD=resnet8|kws|vww picks config/<workload>.yaml.
+# Defaults to resnet8 (original behavior). Each config carries its own task meta,
+# chip binary_dir (.resnet8/.kws/.vww warmup-off dirs), and display block.
+_WORKLOAD = os.environ.get("DEMO_WORKLOAD", "resnet8")
+CONFIG_PATH = os.path.join(DEMO_ROOT, "config", f"{_WORKLOAD}.yaml")
 
 # CIFAR-10 정규화 파라미터 (metadata.json transform). 역정규화해 사진 복원용.
 _MEAN = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32).reshape(3, 1, 1)
 _STD = np.array([0.2023, 0.1994, 0.2010], dtype=np.float32).reshape(3, 1, 1)
+
+# Small viridis colour-map (8 anchor stops, linearly interpolated) for the KWS
+# MFCC heatmap — avoids a matplotlib dependency in the demo venv.
+_VIRIDIS_STOPS = np.array([
+    [ 68,   1,  84], [ 72,  40, 120], [ 62,  74, 137], [ 49, 104, 142],
+    [ 38, 130, 142], [ 31, 158, 137], [ 53, 183, 121], [109, 205,  89],
+    [180, 222,  44], [253, 231,  37],
+], dtype=np.float32)
+
+def _viridis(norm2d):
+    """norm2d: [H,W] in 0..1 -> [H,W,3] uint8 viridis."""
+    x = np.clip(norm2d, 0.0, 1.0) * (len(_VIRIDIS_STOPS) - 1)
+    lo = np.floor(x).astype(int)
+    hi = np.minimum(lo + 1, len(_VIRIDIS_STOPS) - 1)
+    frac = (x - lo)[..., None]
+    rgb = _VIRIDIS_STOPS[lo] * (1 - frac) + _VIRIDIS_STOPS[hi] * frac
+    return rgb.astype(np.uint8)
 
 
 def load_config() -> dict:
@@ -53,30 +74,45 @@ def load_config() -> dict:
 
 CFG = load_config()
 
-# sample_map: staged 순번 -> 원본 CIFAR-10 인덱스
-with open(os.path.join(DEMO_ROOT, CFG["sample_map"])) as f:
-    _SAMPLE_MAP = json.load(f)["staged_to_original"]
+# sample_map: staged 순번 -> 원본 데이터셋 인덱스. resnet8(full_npy) 에만 필수이고,
+# kws/vww 는 staged 배열을 순번대로 바로 쓰므로 없을 수 있다(없으면 항등 매핑).
+_SAMPLE_MAP = None
+_sm = CFG.get("sample_map")
+if _sm:
+    _sm_path = os.path.join(DEMO_ROOT, _sm)
+    if os.path.exists(_sm_path):
+        with open(_sm_path) as f:
+            _SAMPLE_MAP = json.load(f)["staged_to_original"]
 
 # ── 이미지 소스 (config.image_source, 환경변수 DEMO_IMAGE_SOURCE 로 오버라이드 가능) ──
-# "full_npy"   : 노트북 기본. fixtures/cifar10_test_images.npy (10000장 정규화 float32, git-lfs 박제)를
-#                orig_idx(sample_map) 로 조회 + 역정규화. torchvision 다운로드 불필요.
-# "staged_npy" : 서버 검증. dataset/cifar10/_staged/images.npy (500장, staged 순번) 역정규화.
+# "full_npy"   : resnet8 노트북 기본. fixtures/cifar10_test_images.npy (10000장) orig_idx 조회.
+# "staged_npy" : dataset/<name>/_staged/images.npy (staged 순번). resnet8/kws/vww 공용.
+#                config.chip.dataset_name 이 dataset 하위 디렉토리명을 준다(cifar10|kws_sc|vww).
+# ── 표시 방식 (config.display.kind) ── 워크로드마다 staged 배열의 물리 의미가 달라 렌더가 다르다:
+#   "cifar_denorm" : [3,32,32] CIFAR 정규화 -> mean/std 역정규화 -> RGB 사진.
+#   "raw01"        : [3,H,W] 이미 0..1 범위 -> ×255 RGB (vww COCO).
+#   "mfcc_heatmap" : [1,49,10] 원시 MFCC(dB) -> per-image min-max 정규화 -> viridis heatmap (kws).
 _IMAGE_SOURCE = os.environ.get("DEMO_IMAGE_SOURCE") or CFG.get("image_source", "full_npy")
-_IMAGES = None          # 정규화된 [N,3,32,32] float32 (full 또는 staged)
-_INDEX_BY = "staged"    # "orig" (full_npy: orig_idx 로 조회) | "staged" (staged_npy: staged 순번)
+_DISPLAY = (CFG.get("display") or {}).get("kind", "cifar_denorm")
+_DATASET_NAME = (CFG.get("chip") or {}).get("dataset_name") or CFG.get("dataset_name", "cifar10")
+_IMAGES = None
+_INDEX_BY = "staged"    # "orig" (full_npy: orig_idx 로 조회) | "staged" (staged 순번)
+
+def _find_staged_images(dataset_name):
+    """worktree 는 코드만 복사되므로 대용량 staged 데이터는 원본 checkout 에서도 탐색."""
+    cands = [
+        os.path.join(CODEGEN_ROOT, "dataset", dataset_name, "_staged", "images.npy"),
+        f"/root/project/tvm/tvm_practice/test_imcflow/codegen/dataset/{dataset_name}/_staged/images.npy",
+    ]
+    p = next((c for c in cands if os.path.exists(c)), None)
+    return np.load(p) if p else None
 
 if _IMAGE_SOURCE == "full_npy":
     _p = os.path.join(DEMO_ROOT, "fixtures", "cifar10_test_images.npy")
     _IMAGES = np.load(_p) if os.path.exists(_p) else None
     _INDEX_BY = "orig"
 elif _IMAGE_SOURCE == "staged_npy":
-    # worktree 는 코드만 복사되므로 대용량 데이터는 원본 checkout 에서도 탐색.
-    _cands = [
-        os.path.join(CODEGEN_ROOT, "dataset", "cifar10", "_staged", "images.npy"),
-        "/root/project/tvm/tvm_practice/test_imcflow/codegen/dataset/cifar10/_staged/images.npy",
-    ]
-    _p = next((p for p in _cands if os.path.exists(p)), None)
-    _IMAGES = np.load(_p) if _p else None
+    _IMAGES = _find_staged_images(_DATASET_NAME)
     _INDEX_BY = "staged"
 
 app = FastAPI(title="IMCFlow chip demo")
@@ -91,6 +127,7 @@ def index():
 @app.get("/config")
 def config():
     t = CFG["task"]
+    disp = CFG.get("display") or {}
     return JSONResponse(
         {
             "title": t["title"],
@@ -98,6 +135,13 @@ def config():
             "num_classes": t["num_classes"],
             "num_samples": CFG["run"]["num_samples"],
             "profile": CFG.get("profile", "mock"),
+            # display hints for the frontend (aspect ratio + pixelation) so the
+            # input panel fits MFCC (49x10), COCO (96x96), or CIFAR (32x32).
+            "display": {
+                "kind": disp.get("kind", "cifar_denorm"),
+                "aspect": disp.get("aspect", "1"),
+                "pixelated": disp.get("pixelated", True),
+            },
         }
     )
 
@@ -114,17 +158,29 @@ def image(staged_idx: int):
     if _IMAGES is None:
         return Response(status_code=404, content=b"image npy not found")
 
-    if _INDEX_BY == "orig":
+    if _INDEX_BY == "orig" and _SAMPLE_MAP is not None:
         idx = _SAMPLE_MAP[staged_idx] if staged_idx < len(_SAMPLE_MAP) else staged_idx
     else:
         idx = staged_idx
 
-    arr = _IMAGES[idx].astype(np.float32)  # [3,32,32] normalized
-    if arr.shape[0] == 3:
-        arr = arr * _STD + _MEAN  # 역정규화
-        arr = np.clip(arr, 0.0, 1.0)
-        arr = (arr * 255).astype(np.uint8).transpose(1, 2, 0)  # HWC
-    img = Image.fromarray(arr)
+    arr = _IMAGES[idx].astype(np.float32)
+
+    if _DISPLAY == "mfcc_heatmap":
+        # [1,49,10] (or [49,10]) raw MFCC -> per-image min-max -> viridis heatmap.
+        m = arr[0] if arr.ndim == 3 else arr           # [49,10]
+        lo, hi = float(m.min()), float(m.max())
+        norm = (m - lo) / (hi - lo) if hi > lo else np.zeros_like(m)
+        rgb = _viridis(norm)                            # [49,10,3] uint8
+        img = Image.fromarray(rgb)
+    elif _DISPLAY == "raw01":
+        # [3,H,W] already in 0..1 -> RGB photo (vww COCO).
+        a = np.clip(arr, 0.0, 1.0)
+        img = Image.fromarray((a * 255).astype(np.uint8).transpose(1, 2, 0))
+    else:  # "cifar_denorm"
+        a = arr * _STD + _MEAN
+        a = np.clip(a, 0.0, 1.0)
+        img = Image.fromarray((a * 255).astype(np.uint8).transpose(1, 2, 0))
+
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
@@ -205,8 +261,10 @@ def _run_worker(hub: _RunHub):
             if ev is None:
                 continue
             if ev["type"] == "sample":
-                orig = _SAMPLE_MAP[ev["idx"]] if ev["idx"] < len(_SAMPLE_MAP) else ev["idx"]
-                ev["orig_idx"] = orig
+                if _SAMPLE_MAP is not None and ev["idx"] < len(_SAMPLE_MAP):
+                    ev["orig_idx"] = _SAMPLE_MAP[ev["idx"]]
+                else:
+                    ev["orig_idx"] = ev["idx"]
             hub.publish(ev)
     except Exception as e:  # ssh 실패 등 — 조용히 죽지 않게 프론트로 올린다
         hub.publish({"type": "error", "message": f"{type(e).__name__}: {e}"})

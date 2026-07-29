@@ -101,6 +101,13 @@ async function boot() {
   document.getElementById("total").textContent = total;
   document.getElementById("profile").textContent = cfg.profile;
 
+  // Adapt the input panel to the workload: MFCC (49x10) / COCO (96x96) / CIFAR (32x32).
+  const d = cfg.display || {};
+  const wrap = document.querySelector(".imgwrap");
+  const img = document.getElementById("sample-img");
+  if (wrap && d.aspect) wrap.style.aspectRatio = d.aspect;
+  if (img) img.style.imageRendering = (d.pixelated === false) ? "auto" : "pixelated";
+
   const es = new EventSource("/stream");
   es.onmessage = (e) => {
     const ev = JSON.parse(e.data);
