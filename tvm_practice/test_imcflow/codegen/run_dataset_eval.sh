@@ -197,6 +197,13 @@ if [[ -n "$SKIP_LIST" ]]; then
     done
 fi
 
+# Recompute MLF paths against the (possibly -b overridden) BINARY_DIR. These were
+# initialised at load time from the default BINARY_DIR, before option parsing, so
+# without this a `-b host_binary_make.dataset.<model>` run would execute that dir's
+# binary against the DEFAULT dir's graph/params (wrong MLF -> wrong/garbage model).
+GRAPH_PATH="$BINARY_DIR/build/mlf/executor-config/graph/default.graph"
+PARAMS_PATH="$BINARY_DIR/build/mlf/parameters/default.params"
+
 # Positional arguments
 NUM_SAMPLES="${1:-20}"
 
