@@ -30,6 +30,7 @@ Usage:
 
 import os, sys, argparse, json, re
 from collections import Counter
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import torch
@@ -78,12 +79,40 @@ def parse_sample_range(s):
     return result
 
 
-def iter_existing_sample_dirs(dump_dirs, sample_range):
+@dataclass(frozen=True)
+class SampleDirEntry:
+    dump_dir: str
+    sample_id: int
+    sample_dir: str
+    mode: str
+    ordinal: int
+
+
+def resolve_sample_dirs(dump_dirs, sample_range):
+    """Resolve requested sample ids to actual dump directories.
+
+    The caller passes dataset sample ids in the order used for chip evaluation.
+    The dump directory postfix is that sample's ordinal position within the
+    chip run: sample_0, sample_1, ...
+    """
+    sample_range = list(sample_range)
     for dump_dir in dump_dirs:
-        for s_idx in sample_range:
-            sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
-            if os.path.isdir(sample_dir):
-                yield dump_dir, s_idx, sample_dir
+        for ordinal, s_idx in enumerate(sample_range):
+            sample_dir = os.path.join(dump_dir, f'sample_{ordinal}')
+            if not os.path.isdir(sample_dir):
+                break
+            yield SampleDirEntry(
+                dump_dir=dump_dir,
+                sample_id=s_idx,
+                sample_dir=sample_dir,
+                mode='ordinal',
+                ordinal=ordinal,
+            )
+
+
+def iter_existing_sample_dirs(dump_dirs, sample_range):
+    for entry in resolve_sample_dirs(dump_dirs, sample_range):
+        yield entry.dump_dir, entry.sample_id, entry.sample_dir
 
 
 def load_weights(ckpt_path, conv_params=CONV_PARAMS):
@@ -456,6 +485,9 @@ def main():
                         help='Obs noise range (default: auto)')
     parser.add_argument('--smoothing', type=float, default=0.0)
     parser.add_argument('--min-count', type=int, default=10)
+    parser.add_argument('--layer-specific', action='store_true',
+                        help='Also build orig-conv/layer-specific tables. Default '
+                             'builds only one pooled table per pseudo column.')
     parser.add_argument('--csv-output', default=None,
                         help='Optional CIM-compatible ref-only per-channel CSV output path')
     parser.add_argument('--csv-layout-output', default=None,
@@ -501,6 +533,7 @@ def main():
     print(f"Layout JSON: {layout_json}")
     print(f"NPZ path: {npz_path}")
     print(f"Model profile: {model_profile}")
+    print(f"Noise table scope: {'layer-specific + pooled' if args.layer_specific else 'pooled per-column'}")
 
     if args.checkpoint:
         ckpt_path = args.checkpoint
@@ -529,18 +562,29 @@ def main():
 
     print(f"  Atomics: {len(atomics)}, pseudo_chs: {n_pseudo}")
 
+    sample_entries = list(resolve_sample_dirs(dump_dirs, sample_range))
+    if sample_entries:
+        modes = {entry.mode for entry in sample_entries}
+        if 'ordinal' in modes:
+            print(
+                "Sample dump resolution: mapping requested sample ids to "
+                "dump dirs by request order (sample_0..sample_N)."
+            )
+    else:
+        print("Sample dump resolution: no requested sample dirs found.")
+
     # Auto-determine ranges from a subset
     if args.ref_range is None or args.noise_range is None:
         print("Scanning subset for range estimation...")
         ref_samples, noise_samples = [], []
         n_scanned_samples = 0
-        for dump_dir, s_idx, sample_dir in iter_existing_sample_dirs(dump_dirs, sample_range):
+        for entry in sample_entries:
             if n_scanned_samples >= 5:
                 break
             n_scanned_samples += 1
             for a in atomics:  # All atomics to catch worst-case channels
                 clean_sq, dump_sel, _, _, _ = load_matching_qconv_observation(
-                    sample_dir, a, weights, conv_params, args.acc_mask, args.device)
+                    entry.sample_dir, a, weights, conv_params, args.acc_mask, args.device)
                 if dump_sel is None:
                     continue
                 obs = signed_int16(dump_sel - clean_sq)
@@ -551,6 +595,12 @@ def main():
             for dump_dir in dump_dirs:
                 preview = [os.path.join(dump_dir, f'sample_{s}') for s in sample_range[:5]]
                 checked.extend(preview)
+                if sample_range[:5] != list(range(min(5, len(sample_range)))):
+                    ordinal_preview = [
+                        os.path.join(dump_dir, f'sample_{i}')
+                        for i in range(min(5, len(sample_range)))
+                    ]
+                    checked.extend(ordinal_preview)
             raise RuntimeError(
                 "No usable qconv dump pairs found while estimating ranges. "
                 "This is not caused by the noise CSV row format; "
@@ -581,34 +631,40 @@ def main():
     ref_bin_edges = np.linspace(ref_lo, ref_hi, args.n_ref_bins + 1)
     noise_bin_edges = np.linspace(noise_lo, noise_hi, args.n_noise_bins + 1)
     acc = AggregatedNoiseAccumulator(n_pseudo, ref_bin_edges, noise_bin_edges)
+    orig_conv_names = sorted({a['orig_conv'] for a in atomics}) if args.layer_specific else []
+    acc_by_orig_conv = {
+        name: AggregatedNoiseAccumulator(n_pseudo, ref_bin_edges, noise_bin_edges)
+        for name in orig_conv_names
+    }
     csv_acc = (
         RefOnlyCsvAccumulator(n_pseudo, ref_bin_edges, noise_bin_edges)
         if args.csv_output else None
     )
 
     # Main pass
-    print(f"\nProcessing {len(dump_dirs)} dirs × {len(sample_range)} samples × {len(atomics)} atomics...")
+    print(f"\nProcessing {len(sample_entries)} resolved samples × {len(atomics)} atomics...")
     n_done = 0
-    for dd_idx, dump_dir in enumerate(dump_dirs):
-      print(f"\n--- Dir {dd_idx+1}/{len(dump_dirs)}: {os.path.basename(dump_dir)} ---")
-      for s_idx in sample_range:
-        sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
-        if not os.path.isdir(sample_dir):
-            continue
-
+    current_dump_dir = None
+    for entry in sample_entries:
+        if entry.dump_dir != current_dump_dir:
+            current_dump_dir = entry.dump_dir
+            print(f"\n--- Dir: {os.path.basename(entry.dump_dir)} ---")
         for a in atomics:
             clean_sq, dump_sel, _, _, candidates = load_matching_qconv_observation(
-                sample_dir, a, weights, conv_params, args.acc_mask, args.device)
+                entry.sample_dir, a, weights, conv_params, args.acc_mask, args.device)
             if dump_sel is None:
                 preview = "; ".join(candidates[:3]) if candidates else "no candidates"
                 print(
-                    f"  [skip] sample_{s_idx} {a['func']}: no compatible input/dump pair "
+                    f"  [skip] sample_{entry.sample_id} {a['func']}: "
+                    f"no compatible input/dump pair "
                     f"({preview})"
                 )
                 continue
             obs = signed_int16(dump_sel - clean_sq)
 
             acc.add_batch(a['pseudo_chs'], clean_sq, obs)
+            if args.layer_specific:
+                acc_by_orig_conv[a['orig_conv']].add_batch(a['pseudo_chs'], clean_sq, obs)
             if csv_acc is not None:
                 csv_acc.add_batch(a['pseudo_chs'], clean_sq, obs)
 
@@ -619,6 +675,21 @@ def main():
     print(f"  Total: {n_done} pairs")
 
     results = acc.results(min_count=args.min_count, smoothing=args.smoothing)
+    if args.layer_specific:
+        layer_results = [
+            acc_by_orig_conv[name].results(
+                min_count=args.min_count, smoothing=args.smoothing
+            )
+            for name in orig_conv_names
+        ]
+        results.update({
+            'orig_conv_names': np.array(orig_conv_names, dtype=object),
+            'probs_by_orig_conv': np.stack([r['probs'] for r in layer_results], axis=0),
+            'E_by_orig_conv': np.stack([r['E'] for r in layer_results], axis=0),
+            'Var_by_orig_conv': np.stack([r['Var'] for r in layer_results], axis=0),
+            'Std_by_orig_conv': np.stack([r['Std'] for r in layer_results], axis=0),
+            'count_by_orig_conv': np.stack([r['count'] for r in layer_results], axis=0),
+        })
 
     # Save full table (compressed, ~4MB for 200×200 bins)
     # For relative output, save to parent of first dump_dir (or dump_dir itself if single)

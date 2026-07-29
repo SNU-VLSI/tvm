@@ -195,5 +195,6 @@
   "C_Cpp.workspaceSymbols": "Just My Code",
   "C_Cpp.intelliSenseEngine": "default",
   "python.analysis.indexing": true,
-  "files.maxMemoryForLargeFilesMB": 4096
+  "files.maxMemoryForLargeFilesMB": 4096,
+  "git.ignoreLimitWarning": true
 }
