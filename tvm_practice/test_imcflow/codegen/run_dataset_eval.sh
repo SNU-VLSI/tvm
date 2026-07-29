@@ -350,7 +350,14 @@ else
     # migration + CPU0 contention: verified a full 100-sample run then completes with
     # 0 failures where every un-pinned run died by ~46-52. Overridable via CHIP_EVAL_CPU.
     CHIP_EVAL_CPU="${CHIP_EVAL_CPU:-3}"
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    # Optional per-sample timing breakdown (hw vs cpu vs setin). Passed through to
+    # the eval binary which emits [TIMING] lines to stderr + a summary to the
+    # result file. Off unless IMCFLOW_TIMING is set in this driver's environment.
+    TIMING_ENV=""
+    if [ -n "${IMCFLOW_TIMING:-}" ]; then
+        TIMING_ENV="IMCFLOW_TIMING=$IMCFLOW_TIMING "
+    fi
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
