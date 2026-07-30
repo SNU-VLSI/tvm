@@ -47,6 +47,21 @@ run:
 
 # Input display: 96x96 RGB already in 0..1 -> photo (no denorm, no sample_map).
 image_source: staged_npy
+
+# ── on-chip execution speed 패널 ── 자세한 설명은 resnet8.yaml 참조.
+# 모자이크는 vw_coco2014_96 원본(109619장)에서 균등 추출한 서로 다른 1000장이다.
+#   전처리된 dataset/vww/images.npy 는 칩에서도 git-lfs 포인터(1.2GB, 미실체화)이고 우리
+#   repo 가 추적하지 않아 못 받는다. 대신 원본 이미지셋을 받아 폴더에서 직접 뽑았다:
+#     curl -L -o vw.tar.gz https://www.silabs.com/public/files/github/machine_learning/benchmarks/datasets/vw_coco2014_96.tar.gz
+#     tar -xzf vw.tar.gz && python3 make_mosaic.py vww --cols 50 --rows 20 --tile 16 --from-dir <풀린경로>/vw_coco2014_96
+#   화면용 그림일 뿐이라 전처리(normalize) 없이 JPEG 을 그대로 쓴다. 칩이 실제로 도는
+#   test split(10961장 = 전체의 10%)이 아니라 전체에서 뽑은 것이라 구성이 정확히 같지는 않다.
+pipelined:
+  ms_per_sample: 5.12
+  total_samples: 1000           # 1000 × 5.12ms = 5.12초
+  mosaic: fixtures/vww_mosaic.png
+  mosaic_cols: 50
+  mosaic_rows: 20
 # Baked staged inputs (git-lfs on laptop; 11MB). Same 100 samples the chip runs.
 # Falls back to codegen/dataset/vww/_staged on the server if this fixture is absent.
 staged_images_fixture: fixtures/vww_staged_images.npy

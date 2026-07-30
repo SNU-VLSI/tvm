@@ -86,11 +86,14 @@ image_source: full_npy
 # 재생 길이 = total_samples × ms_per_sample (여기선 10000 × 1.209ms = 12.1초).
 # 모자이크는 make_mosaic.py 가 입력 배열에서 균등 추출해 만든 완성본 PNG 1장이고,
 # 프론트가 타일을 순서대로 드러내며 재생한다.
+# 세 워크로드가 모두 1000샘플 기준이다(모자이크 타일 수 = progress bar 총량 = 1000).
+# 워크로드마다 전체 크기가 달라(10000/12105/10961) 전체를 쓰면 재생 길이가 12s/2.7s/56s 로
+# 제각각이었다. 1000 으로 통일하면 패널끼리 비교가 되고 vww 도 5초대로 들어온다.
 pipelined:
   ms_per_sample: 1.209
-  total_samples: 10000          # CIFAR-10 test set 전체
+  total_samples: 1000           # 1000 × 1.209ms = 1.21초
   mosaic: fixtures/resnet8_mosaic.png
-  mosaic_cols: 100
+  mosaic_cols: 50
   mosaic_rows: 20
 
 # 샘플 순번 -> 원본 CIFAR-10 인덱스 매핑 (노트북 로컬 원본 사진 조회용).

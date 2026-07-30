@@ -91,15 +91,29 @@ def main():
     ap.add_argument("--tile-w", type=int)
     ap.add_argument("--tile-h", type=int)
     ap.add_argument("--out", help="출력 PNG 경로 (기본 fixtures/<workload>_mosaic.png)")
+    ap.add_argument("--from-dir",
+                    help="npy 대신 이미지 폴더에서 타일을 뽑는다(재귀 탐색, 경로 정렬 후 균등 추출). "
+                         "vww 처럼 전체 npy 를 구할 수 없고 원본 이미지셋만 있는 경우에 쓴다.")
     args = ap.parse_args()
 
     spec = SOURCES[args.workload]
-    src = next((p for p in spec["paths"] if os.path.exists(p)), None)
-    if src is None:
-        raise SystemExit(f"입력 배열을 찾지 못했습니다: {spec['paths']}")
-
-    images = np.load(src, mmap_mode="r")
-    total = images.shape[0]
+    files = None
+    if args.from_dir:
+        exts = (".jpg", ".jpeg", ".png", ".bmp")
+        files = sorted(
+            os.path.join(r, f)
+            for r, _, fs in os.walk(args.from_dir)
+            for f in fs if f.lower().endswith(exts)
+        )
+        if not files:
+            raise SystemExit(f"이미지를 찾지 못했습니다: {args.from_dir}")
+        src, images, total = args.from_dir, None, len(files)
+    else:
+        src = next((p for p in spec["paths"] if os.path.exists(p)), None)
+        if src is None:
+            raise SystemExit(f"입력 배열을 찾지 못했습니다: {spec['paths']}")
+        images = np.load(src, mmap_mode="r")
+        total = images.shape[0]
     ntiles = args.cols * args.rows
     if ntiles > total:
         raise SystemExit(f"타일 {ntiles}개 > 샘플 {total}개 — cols/rows 를 줄이세요")
@@ -112,14 +126,18 @@ def main():
 
     sheet = Image.new("RGB", (args.cols * tw, args.rows * th), (13, 17, 23))  # --bg 와 동일
     for k, i in enumerate(idxs):
-        tile = render_tile(np.asarray(images[i]), spec["display"]).resize((tw, th), Image.NEAREST)
-        sheet.paste(tile, ((k % args.cols) * tw, (k // args.cols) * th))
+        if files is not None:
+            tile = Image.open(files[i]).convert("RGB")
+        else:
+            tile = render_tile(np.asarray(images[i]), spec["display"])
+        sheet.paste(tile.resize((tw, th), Image.NEAREST),
+                    ((k % args.cols) * tw, (k // args.cols) * th))
 
     out = args.out or os.path.join(FIX, f"{args.workload}_mosaic.png")
     sheet.save(out, format="PNG", optimize=True)
     kb = os.path.getsize(out) / 1024
     print(f"✅ {out}  ({sheet.width}x{sheet.height}px, {kb:.0f} KB)")
-    print(f"   소스 {os.path.relpath(src, DEMO_ROOT)}  샘플 {total}개 중 {ntiles}개 균등 추출")
+    print(f"   소스 {src}  샘플 {total}개 중 {ntiles}개 균등 추출")
     print(f"   config 에 넣을 값: mosaic_cols={args.cols}  mosaic_rows={args.rows}  total_samples={total}")
 
 
