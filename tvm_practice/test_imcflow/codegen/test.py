@@ -950,6 +950,15 @@ def compare_outputs(cpu_outputs, imcflow_output):
   print("COMPARING OUTPUTS")
   print("="*60)
 
+  if cpu_outputs is None:
+    # No CPU references at all (e.g. --start-at simulate skips CPU_VALIDATION).
+    # The IMCFLOW output is still valid; there is simply nothing to compare
+    # against, so report and return gracefully instead of crashing.
+    print(f"\nIMCFLOW output shape: {imcflow_output.shape}, dtype: {imcflow_output.dtype}")
+    print("⚠️  No CPU reference outputs available (CPU validation was skipped). "
+          "Reporting IMCFLOW output only; skipping comparison.")
+    return
+
   if not isinstance(cpu_outputs, dict):
     # Backward compat: single ndarray treated as the (transformed) reference.
     cpu_outputs = {"transformed": cpu_outputs}
@@ -958,7 +967,17 @@ def compare_outputs(cpu_outputs, imcflow_output):
   print(f"References: {list(cpu_outputs.keys())}")
 
   failures = []
+  compared = 0
   for ref_name, cpu_output in cpu_outputs.items():
+    if cpu_output is None:
+      # A named reference exists but its CPU output was never produced (e.g.
+      # CPU_VALIDATION was skipped for this stage selection). Skip it with a
+      # clear warning rather than crashing on cpu_output.shape.
+      print(f"\n--- {ref_name} reference vs IMCFLOW ---")
+      print(f"⚠️  Skipping '{ref_name}' reference: CPU output is unavailable "
+            f"(CPU validation was skipped).")
+      continue
+    compared += 1
     ok, reason = _compare_one_reference(ref_name, cpu_output, imcflow_output)
     if not ok:
       failures.append((ref_name, reason))
@@ -967,8 +986,11 @@ def compare_outputs(cpu_outputs, imcflow_output):
     sys.stdout.flush()
     msg = ", ".join(f"{n}({r})" for n, r in failures)
     pytest.fail(f"Output comparison failed for: {msg}")
+  elif compared == 0:
+    print("\n⚠️  No CPU reference outputs available to compare against "
+          "(all references were skipped). Reporting IMCFLOW output only.")
   else:
-    print(f"\n✅ All {len(cpu_outputs)} reference comparison(s) passed")
+    print(f"\n✅ All {compared} reference comparison(s) passed")
 
 def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, input_data_dict=None):
   """Generate IMCFLOW evaluation results with optional CPU validation
