@@ -28,12 +28,21 @@
   footer { display:flex; gap:40px; padding:14px 28px; border-top:1px solid var(--line);
            color:var(--dim); font-size:16px; font-variant-numeric:tabular-nums; }
   footer b { color:var(--fg); }
+  .hdr-right { display:flex; align-items:center; gap:14px; }
+  .btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px;
+         padding:8px 16px; font-size:15px; cursor:pointer; font-family:inherit; }
+  .btn:hover:not(:disabled) { border-color:var(--dim); }
+  .btn:disabled { opacity:.4; cursor:default; }
 </style>
 </head>
 <body>
 <header>
   <h1 id="title">IMCFlow chip demo</h1>
-  <div id="acc-big">—</div>
+  <div class="hdr-right">
+    <button id="btn-stop" class="btn">stop</button>
+    <button id="btn-restart" class="btn">restart</button>
+    <div id="acc-big">—</div>
+  </div>
 </header>
 <main>
   <div class="imgwrap"><img id="sample-img" alt="sample" /></div>
@@ -93,13 +102,44 @@ function render(ev) {
   document.getElementById("correct").textContent = correct;
 }
 
+let ES = null, PROFILE = "—";
+
+function setRunning(on) {
+  document.getElementById("btn-stop").disabled = !on;
+  document.getElementById("btn-restart").disabled = on;   // 정지 상태에서만 재시작
+}
+
+function connect() {
+  // 카운터 초기화 — 재시작은 샘플 0 부터 다시 시작한다.
+  seen = 0; correct = 0;
+  document.getElementById("seen").textContent = 0;
+  document.getElementById("correct").textContent = 0;
+  document.getElementById("acc-big").textContent = "—";
+  document.getElementById("acc-foot").textContent = "0.0%";
+  document.getElementById("chipacc").textContent = "—";
+  document.getElementById("sample-id").textContent = "waiting…";
+  document.getElementById("profile").textContent = PROFILE;
+
+  setRunning(true);
+  ES = new EventSource("/stream");
+  ES.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === "sample") render(ev);
+    else if (ev.type === "progress") document.getElementById("chipacc").textContent = ev.chip_accuracy.toFixed(1) + "%";
+    // 백엔드가 ssh 실패 등을 조용히 삼키지 않고 올려준다 — 화면에 그대로 표시.
+    else if (ev.type === "error") document.getElementById("profile").textContent = "ERROR: " + ev.message;
+    else if (ev.type === "stopped") document.getElementById("sample-id").textContent = "stopped (사용자 중단)";
+    else if (ev.type === "done") { ES.close(); ES = null; setRunning(false); }
+  };
+}
+
 async function boot() {
   const cfg = await (await fetch("/config")).json();
   CLASSES = cfg.classes;
   total = cfg.num_samples;
+  PROFILE = cfg.profile;
   document.getElementById("title").textContent = cfg.title;
   document.getElementById("total").textContent = total;
-  document.getElementById("profile").textContent = cfg.profile;
 
   // Adapt the input panel to the workload: MFCC (49x10) / COCO (96x96) / CIFAR (32x32).
   const d = cfg.display || {};
@@ -108,15 +148,20 @@ async function boot() {
   if (wrap && d.aspect) wrap.style.aspectRatio = d.aspect;
   if (img) img.style.imageRendering = (d.pixelated === false) ? "auto" : "pixelated";
 
-  const es = new EventSource("/stream");
-  es.onmessage = (e) => {
-    const ev = JSON.parse(e.data);
-    if (ev.type === "sample") render(ev);
-    else if (ev.type === "progress") document.getElementById("chipacc").textContent = ev.chip_accuracy.toFixed(1) + "%";
-    // 백엔드가 ssh 실패 등을 조용히 삼키지 않고 올려준다 — 화면에 그대로 표시.
-    else if (ev.type === "error") document.getElementById("profile").textContent = "ERROR: " + ev.message;
-    else if (ev.type === "done") es.close();
+  document.getElementById("btn-stop").onclick = async (e) => {
+    e.target.disabled = true;
+    // 서버가 워커 종료까지 기다렸다 응답한다. done 이벤트로 버튼 상태가 정리된다.
+    await fetch("/stop", {method: "POST"});
   };
+  document.getElementById("btn-restart").onclick = async (e) => {
+    e.target.disabled = true;
+    if (ES) { ES.close(); ES = null; }
+    const r = await fetch("/restart", {method: "POST"});
+    if (r.ok) connect();
+    else { setRunning(false); document.getElementById("sample-id").textContent = "restart 실패 — 이전 실행 정리 중"; }
+  };
+
+  connect();
 }
 boot();
 </script>

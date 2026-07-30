@@ -19,6 +19,7 @@ import io
 import json
 import os
 import threading
+import time
 
 import numpy as np
 import yaml
@@ -219,6 +220,8 @@ class _RunHub:
         self._subs: set = set()
         self.runs_started = 0   # 실제로 띄운 실행(=ssh) 횟수. 게이트가 도는지 확인용.
         self.loop = None
+        self._proc = None       # chip 실행의 ssh Popen (mock 은 None)
+        self._stop = False      # stop 요청 플래그. 워커가 라인마다 확인한다.
 
     def attach_or_start(self):
         """(내가 실행 소유자인가, 내 큐, 리플레이할 과거 이벤트) 반환."""
@@ -228,6 +231,8 @@ class _RunHub:
                 self._active = True
                 self._history = []
                 self.runs_started += 1
+                self._stop = False
+                self._proc = None
             q: asyncio.Queue = asyncio.Queue()
             self._subs.add(q)
             # history 복사와 구독 등록이 같은 락 안 → 이벤트 중복/유실 없음
@@ -241,9 +246,38 @@ class _RunHub:
         for q in subs:
             self.loop.call_soon_threadsafe(q.put_nowait, ev)
 
+    def set_proc(self, proc):
+        """runner 가 ssh Popen 을 만들면 콜백으로 받아 둔다 (stop 에서 terminate 하려고)."""
+        with self._lock:
+            self._proc = proc
+
+    @property
+    def stop_requested(self) -> bool:
+        with self._lock:
+            return self._stop
+
+    def request_stop(self) -> bool:
+        """실행 중이면 정지를 건다. 반환값 = 실제로 정지를 걸었는지.
+
+        로컬 ssh terminate 만으로는 원격 프로세스가 남을 수 있어, 호출자가 이어서
+        runner.kill_remote() 도 호출해야 한다 (chip 프로파일).
+        """
+        with self._lock:
+            if not self._active:
+                return False
+            self._stop = True
+            proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        return True
+
     def finish(self):
         with self._lock:
             self._active = False
+            self._proc = None
             subs = list(self._subs)
         for q in subs:
             self.loop.call_soon_threadsafe(q.put_nowait, None)  # 종료 sentinel
@@ -265,7 +299,9 @@ def _run_worker(hub: _RunHub):
     """실행 소유자 1명만 도는 워커. blocking 제너레이터라 별도 스레드."""
     try:
         parser = ChipStreamParser()
-        for line in runner.iter_lines(CFG):
+        for line in runner.iter_lines(CFG, on_proc=hub.set_proc):
+            if hub.stop_requested:   # mock/chip 공통 — 라인 경계에서 빠져나온다
+                break
             ev = parser.feed(line)
             if ev is None:
                 continue
@@ -276,8 +312,11 @@ def _run_worker(hub: _RunHub):
                     ev["orig_idx"] = ev["idx"]
             hub.publish(ev)
     except Exception as e:  # ssh 실패 등 — 조용히 죽지 않게 프론트로 올린다
-        hub.publish({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        if not hub.stop_requested:   # stop 으로 죽인 ssh 의 예외는 에러가 아니다
+            hub.publish({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
+        if hub.stop_requested:
+            hub.publish({"type": "stopped"})
         hub.publish({"type": "done"})
         hub.finish()
 
@@ -286,6 +325,47 @@ def _run_worker(hub: _RunHub):
 def status():
     """실행 중인지 확인용 (디버그/운영). 칩을 건드리지 않는다."""
     return JSONResponse({"running": _HUB.active, "runs_started": _HUB.runs_started})
+
+
+def _stop_and_wait(timeout: float = 40.0) -> dict:
+    """정지를 걸고 워커가 실제로 끝날 때까지 기다린다.
+
+    끝날 때까지 기다리는 게 핵심: _active 가 False 가 되기 전에 새 연결이 들어오면
+    죽어가는 실행에 붙어버린다(restart 가 조용히 실패). 원격 pkill 도 반드시 같이 —
+    로컬 ssh 만 죽이면 칩에서 추론이 계속 돌아 다음 실행과 경합한다.
+    """
+    was_running = _HUB.request_stop()
+    killed_remote = False
+    if was_running and CFG.get("profile") == "chip":
+        killed_remote = runner.kill_remote(CFG)
+    deadline = time.monotonic() + timeout
+    while _HUB.active and time.monotonic() < deadline:
+        time.sleep(0.2)
+    return {
+        "was_running": was_running,
+        "killed_remote": killed_remote,
+        "idle": not _HUB.active,
+    }
+
+
+@app.post("/stop")
+def stop_run():
+    """실행 중인 추론을 중단한다. 실행 중이 아니면 was_running=False 로 무해하게 끝난다."""
+    return JSONResponse(_stop_and_wait())
+
+
+@app.post("/restart")
+def restart_run():
+    """정지 후 새 실행을 띄운다. 프론트는 응답을 받고 EventSource 를 다시 연결한다.
+
+    여기서 실행을 직접 시작하진 않는다 — /stream 재연결이 소유자가 되어 시작하므로
+    (실행 소유 = 첫 연결) 게이트 규칙이 한 곳에만 남는다.
+    """
+    r = _stop_and_wait()
+    if not r["idle"]:
+        return JSONResponse({**r, "restarted": False,
+                             "message": "이전 실행이 아직 정리되지 않았습니다"}, status_code=409)
+    return JSONResponse({**r, "restarted": True})
 
 
 @app.get("/stream")
