@@ -6,33 +6,63 @@
 <style>
   :root { --ok:#1db954; --bad:#e0455e; --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e; }
   * { box-sizing: border-box; }
-  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+  /* 한 화면에 다 담는다: body 를 세로 flex 로 두고 main 이 남는 높이를 전부 먹는다.
+     그래야 좌측 입력 패널이 "배정된 블록"을 높이까지 꽉 채울 수 있다. */
+  html, body { height:100%; }
+  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg);
+         display:flex; flex-direction:column; overflow:hidden; }
   header { display:flex; justify-content:space-between; align-items:center;
-           padding:16px 28px; border-bottom:1px solid var(--line); }
-  header h1 { font-size:22px; margin:0; font-weight:600; }
-  #acc-big { font-size:34px; font-weight:700; }
-  main { display:grid; grid-template-columns: 420px 1fr; gap:24px; padding:28px; }
+           padding:10px 24px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:20px; margin:0; font-weight:600; }
+  #acc-big { font-size:30px; font-weight:700; }
+  main { flex:1; min-height:0; display:grid; grid-template-columns: 300px 1fr;
+         gap:20px; padding:18px 24px; align-items:stretch; }
+  /* 입력 패널은 배정된 블록(좌측 열 × main 높이)을 꽉 채운다.
+     예전엔 wrap 에 aspect-ratio 를 걸었는데, kws MFCC(10/49) 처럼 세로로 긴 입력에서는
+     열 폭에 비율이 곱해져 높이가 2000px 을 넘어 화면 밖으로 잘렸다. */
   .imgwrap { background:var(--panel); border:1px solid var(--line); border-radius:12px;
-             display:flex; align-items:center; justify-content:center; aspect-ratio:1; }
-  #sample-img { width:100%; height:100%; image-rendering:pixelated; border-radius:11px; }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 26px; }
-  .sample-id { color:var(--dim); font-size:15px; margin-bottom:6px; }
-  .verdict { font-size:28px; font-weight:700; margin:4px 0 18px; }
+             display:flex; align-items:center; justify-content:center; padding:10px; min-height:0; }
+  /* ⚠️ width/height 는 반드시 100%. auto 로 두면 PNG 고유 크기(kws 는 10x49px)로 렌더돼
+     손톱만 하게 나온다 — max-* 는 축소만 하고 확대는 하지 않는다.
+     비율은 object-fit:contain 이 지키므로 블록 안에서 최대 크기로 확대된다. */
+  #sample-img { width:100%; height:100%; object-fit:contain;
+                image-rendering:pixelated; border-radius:8px; }
+  .rightcol { display:flex; flex-direction:column; gap:20px; min-width:0; min-height:0; overflow-y:auto; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 22px; }
+  .sample-id { color:var(--dim); font-size:14px; margin-bottom:4px; }
+  .verdict { font-size:22px; font-weight:700; margin:2px 0 12px; }
   .verdict.ok { color:var(--ok); } .verdict.bad { color:var(--bad); }
-  .row { display:flex; align-items:center; gap:12px; margin:9px 0; font-size:18px; }
+  .row { display:flex; align-items:center; gap:12px; margin:6px 0; font-size:16px; }
   .row .name { width:120px; } .row .pct { width:70px; text-align:right; font-variant-numeric:tabular-nums; }
   .bar { flex:1; height:16px; background:#21262d; border-radius:8px; overflow:hidden; }
   .bar > span { display:block; height:100%; background:#3b82f6; }
   .row.truth .name { font-weight:700; }
   .row.truth .bar > span { background:var(--ok); }
-  footer { display:flex; gap:40px; padding:14px 28px; border-top:1px solid var(--line);
-           color:var(--dim); font-size:16px; font-variant-numeric:tabular-nums; }
+  footer { display:flex; gap:36px; padding:9px 24px; border-top:1px solid var(--line);
+           color:var(--dim); font-size:14px; font-variant-numeric:tabular-nums; }
   footer b { color:var(--fg); }
   .hdr-right { display:flex; align-items:center; gap:14px; }
   .btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px;
          padding:8px 16px; font-size:15px; cursor:pointer; font-family:inherit; }
   .btn:hover:not(:disabled) { border-color:var(--dim); }
   .btn:disabled { opacity:.4; cursor:default; }
+
+  /* confusion matrix — 클래스 수가 2(vww)/10(resnet8)/12(kws) 로 달라 폭을 고정하지 않는다.
+     위치는 예측 확률 패널 바로 아래(오른쪽 열). */
+  .cm-head { display:flex; align-items:baseline; gap:14px; margin-bottom:12px; }
+  .cm-title { font-size:18px; font-weight:600; }
+  .cm-sub { color:var(--dim); font-size:14px; }
+  .cm-scroll { overflow-x:auto; }          /* 12클래스에서 좁은 화면이면 가로 스크롤 */
+  #cm { border-collapse:collapse; font-variant-numeric:tabular-nums; font-size:13px; }
+  #cm th, #cm td { border:1px solid var(--line); padding:2px 6px; text-align:right; min-width:32px; }
+  #cm th.rowhead { text-align:right; color:var(--dim); font-weight:600; white-space:nowrap; }
+  #cm th.colhead { color:var(--dim); font-weight:600; height:70px; padding:2px; min-width:24px; }
+  /* 열 라벨은 12개까지 가므로 세로쓰기 — 가로로 두면 표가 화면을 넘는다 */
+  #cm th.colhead > span { writing-mode:vertical-rl; transform:rotate(180deg); white-space:nowrap; }
+  #cm td.zero { color:#484f58; }           /* 0 은 눌러서 패턴이 드러나게 */
+  #cm td.diag { font-weight:700; }
+  #cm th.corner { border:none; }
+  #cm td.recall { border-left:2px solid var(--line); color:var(--dim); }
 </style>
 </head>
 <body>
@@ -46,10 +76,19 @@
 </header>
 <main>
   <div class="imgwrap"><img id="sample-img" alt="sample" /></div>
-  <div class="panel">
-    <div class="sample-id" id="sample-id">waiting…</div>
-    <div class="verdict" id="verdict">&nbsp;</div>
-    <div id="top5"></div>
+  <div class="rightcol">
+    <div class="panel">
+      <div class="sample-id" id="sample-id">waiting…</div>
+      <div class="verdict" id="verdict">&nbsp;</div>
+      <div id="top5"></div>
+    </div>
+    <div class="panel cm-panel">
+      <div class="cm-head">
+        <span class="cm-title">confusion matrix</span>
+        <span class="cm-sub">행 = 정답 · 열 = 예측 · 대각선이 정답</span>
+      </div>
+      <div class="cm-scroll"><table id="cm"></table></div>
+    </div>
   </div>
 </main>
 <footer>
@@ -62,6 +101,59 @@
 
 <script>
 let CLASSES = [], seen = 0, correct = 0, total = 0;
+let CM = [];   // CM[정답][예측] 누적 카운트
+
+function cmReset() {
+  const n = CLASSES.length;
+  CM = Array.from({length: n}, () => new Array(n).fill(0));
+  cmRender();
+}
+
+function cmAdd(label, predicted) {
+  // 칩이 범위 밖 값을 내보내도 화면이 죽지 않게 방어 (예: 파싱 이상, 클래스 수 불일치)
+  if (!CM.length || label == null || predicted == null) return;
+  if (label < 0 || label >= CM.length || predicted < 0 || predicted >= CM.length) return;
+  CM[label][predicted] += 1;
+}
+
+// 리플레이(늦게 붙은 뷰어가 수천 샘플을 한 번에 받는 경우)에 표를 매 샘플 다시 그리면
+// 화면이 멈춘다. 카운트는 항상 올리고, 그리기는 프레임당 한 번으로 합친다.
+let _cmDirty = false;
+function cmScheduleRender() {
+  if (_cmDirty) return;
+  _cmDirty = true;
+  requestAnimationFrame(() => { _cmDirty = false; cmRender(); });
+}
+
+function cmRender() {
+  const n = CLASSES.length;
+  const t = document.getElementById("cm");
+  if (!t || !n) return;
+
+  // 헤더: 좌상단 빈칸 + 예측 클래스(세로쓰기) + recall 열
+  let html = '<tr><th class="corner"></th>';
+  for (let j = 0; j < n; j++) html += `<th class="colhead"><span>${CLASSES[j]}</span></th>`;
+  html += '<th class="colhead"><span>recall</span></th></tr>';
+
+  for (let i = 0; i < n; i++) {
+    const rowSum = CM[i].reduce((a, b) => a + b, 0);
+    html += `<tr><th class="rowhead">${CLASSES[i]}</th>`;
+    for (let j = 0; j < n; j++) {
+      const v = CM[i][j];
+      // 행 정규화로 칠한다. 클래스별 표본 수가 달라도(kws _unknown_ 이 특히 많다)
+      // 행마다 "이 정답이 어디로 갔나"가 같은 기준으로 읽힌다.
+      const frac = rowSum ? v / rowSum : 0;
+      const bg = v === 0 ? "transparent"
+               : (i === j ? `rgba(29,185,84,${0.12 + 0.68 * frac})`      // 대각선 = 초록
+                          : `rgba(224,69,94,${0.12 + 0.68 * frac})`);    // 오분류 = 빨강
+      const cls = (i === j ? "diag" : "") + (v === 0 ? " zero" : "");
+      html += `<td class="${cls}" style="background:${bg}" title="${CLASSES[i]} → ${CLASSES[j]}: ${v}">${v}</td>`;
+    }
+    const rec = rowSum ? (100 * CM[i][i] / rowSum) : 0;
+    html += `<td class="recall">${rowSum ? rec.toFixed(0) + "%" : "—"}</td></tr>`;
+  }
+  t.innerHTML = html;
+}
 
 function softmax(logits) {
   const m = Math.max(...logits);
@@ -100,6 +192,9 @@ function render(ev) {
   document.getElementById("acc-foot").textContent = acc.toFixed(1) + "%";
   document.getElementById("seen").textContent = seen;
   document.getElementById("correct").textContent = correct;
+
+  cmAdd(ev.label, ev.predicted);
+  cmScheduleRender();
 }
 
 let ES = null, PROFILE = "—";
@@ -119,6 +214,7 @@ function connect() {
   document.getElementById("chipacc").textContent = "—";
   document.getElementById("sample-id").textContent = "waiting…";
   document.getElementById("profile").textContent = PROFILE;
+  cmReset();   // 재시작은 행렬도 처음부터
 
   setRunning(true);
   ES = new EventSource("/stream");
@@ -142,10 +238,10 @@ async function boot() {
   document.getElementById("total").textContent = total;
 
   // Adapt the input panel to the workload: MFCC (49x10) / COCO (96x96) / CIFAR (32x32).
+  // 비율은 PNG 의 고유 크기 + object-fit:contain 이 알아서 지킨다. cfg.display.aspect 를
+  // wrap 에 걸면 세로로 긴 입력(kws 10/49)에서 박스가 화면 밖으로 자라므로 쓰지 않는다.
   const d = cfg.display || {};
-  const wrap = document.querySelector(".imgwrap");
   const img = document.getElementById("sample-img");
-  if (wrap && d.aspect) wrap.style.aspectRatio = d.aspect;
   if (img) img.style.imageRendering = (d.pixelated === false) ? "auto" : "pixelated";
 
   document.getElementById("btn-stop").onclick = async (e) => {
