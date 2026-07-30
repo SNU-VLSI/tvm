@@ -66,7 +66,6 @@ run:
 image_source: staged_npy
 
 # ── on-chip execution speed 패널 ── 자세한 설명은 resnet8.yaml 참조.
-# 12105 × 0.226ms = 2.7초.
 pipelined:
   ms_per_sample: 0.226
   total_samples: 1000           # 1000 × 0.226ms = 0.23초 (세 워크로드 중 가장 짧다)

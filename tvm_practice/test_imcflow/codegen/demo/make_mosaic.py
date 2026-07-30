@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""pipelined(시뮬레이션) 빠른 실행 패널이 쓸 모자이크 시트를 만든다.
+"""on-chip execution speed 패널이 쓸 모자이크 시트를 만든다.
 
-빠른 실행은 정확도를 보여주지 않는다 — 처리 "속도"만 보여주는 패널이라, 입력 데이터셋
-전체를 훑는 그림이면 충분하다. 그래서 per-sample 추론 결과(mock txt)가 아니라
-입력 배열만 있으면 된다.
+이 패널은 정확도를 보여주지 않는다 — 처리 "속도"만 보여주므로 입력 데이터를 훑는
+그림이면 충분하다. 그래서 per-sample 추론 결과(mock txt)가 아니라 입력만 있으면 된다.
 
 산출물은 **완성된 모자이크 PNG 한 장**이다. 재생은 프론트가 이 그림의 타일을 순서대로
 드러내는 방식이라, 프레임을 낱장으로 갖고 있을 필요가 없다(스프라이트 시트 불필요).
@@ -15,9 +14,10 @@
 타일 렌더는 backend/app.py 의 image() 와 같은 규칙을 쓴다(cifar_denorm / mfcc_heatmap /
 raw01). 화면의 입력 패널과 모자이크가 다르게 보이면 안 되므로 바꿀 때 양쪽을 같이 고칠 것.
 
-사용:
-    python3 make_mosaic.py resnet8 --cols 100 --rows 20 --tile 16
-    python3 make_mosaic.py kws     --cols 100 --rows 8  --tile-w 10 --tile-h 30
+사용 (현재 config 는 세 워크로드 모두 1000타일 기준):
+    python3 make_mosaic.py resnet8 --cols 50  --rows 20 --tile 16
+    python3 make_mosaic.py kws     --cols 100 --rows 10 --tile-w 10 --tile-h 30
+    python3 make_mosaic.py vww     --cols 50  --rows 20 --tile 16 --from-dir <경로>/vw_coco2014_96
 """
 
 import argparse
