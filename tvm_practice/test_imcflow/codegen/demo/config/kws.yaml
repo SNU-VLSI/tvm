@@ -64,6 +64,15 @@ run:
 # Input display: 49x10 MFCC (single channel) rendered as a viridis heatmap from
 # the staged array directly (no sample_map — staged 순번 그대로).
 image_source: staged_npy
+
+# ── on-chip execution speed 패널 ── 자세한 설명은 resnet8.yaml 참조.
+# 12105 × 0.226ms = 2.7초.
+pipelined:
+  ms_per_sample: 0.226
+  total_samples: 12105          # Speech Commands test set 전체
+  mosaic: fixtures/kws_mosaic.png
+  mosaic_cols: 100
+  mosaic_rows: 8
 # Baked staged inputs (git-lfs on laptop). Same 100 samples the chip runs, so the
 # displayed MFCC matches each result. Falls back to codegen/dataset/kws_sc/_staged
 # on the server if this fixture is absent.

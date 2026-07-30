@@ -10,3 +10,6 @@ config/_tv_test.yaml
 
 # make_staged.py 출력 (런타임 생성, 커밋 X)
 dataset/
+
+# make_mosaic.py 가 쓰는 대용량 입력 사본(칩에서 받아온 것). 산출물 PNG 만 커밋한다.
+dataset/

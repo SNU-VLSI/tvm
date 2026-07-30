@@ -78,6 +78,21 @@ run:
 #   "staged_npy"  : 서버 검증용. dataset/cifar10/_staged/images.npy (500장)를 staged 순번으로 조회 + 역정규화.
 image_source: full_npy
 
+# ── on-chip execution speed 패널 (화면 표기 기준. 내부 키는 pipelined) ──
+# 실시간 데모는 atomic 모드(convolution 을 하나씩 실행)라 느리다. 이 패널은 pipelined
+# 실행의 on-chip 처리 속도를 보여주기 위한 것으로, 정확도는 다루지 않는다.
+# ⚠️ 이 수치는 off-chip CPU<->NPU 전송 시간을 뺀 값이다(실제로는 숨길 수 있어서).
+#    화면에도 각주로 그렇게 밝혀 두었다 — 수치를 바꿀 땐 각주 전제도 같이 확인할 것.
+# 재생 길이 = total_samples × ms_per_sample (여기선 10000 × 1.209ms = 12.1초).
+# 모자이크는 make_mosaic.py 가 입력 배열에서 균등 추출해 만든 완성본 PNG 1장이고,
+# 프론트가 타일을 순서대로 드러내며 재생한다.
+pipelined:
+  ms_per_sample: 1.209
+  total_samples: 10000          # CIFAR-10 test set 전체
+  mosaic: fixtures/resnet8_mosaic.png
+  mosaic_cols: 100
+  mosaic_rows: 20
+
 # 샘플 순번 -> 원본 CIFAR-10 인덱스 매핑 (노트북 로컬 원본 사진 조회용).
 # 순차 가정 금지: 반드시 이 맵으로만 조회한다.
 sample_map: fixtures/sample_map.json

@@ -41,8 +41,22 @@ CODEGEN_ROOT = os.path.dirname(DEMO_ROOT)
 # Workload selection: DEMO_WORKLOAD=resnet8|kws|vww picks config/<workload>.yaml.
 # Defaults to resnet8 (original behavior). Each config carries its own task meta,
 # chip binary_dir (.resnet8/.kws/.vww warmup-off dirs), and display block.
+# 시작 워크로드. 실행 중에는 POST /workload/<name> 으로 바꾼다(set_workload 참조).
 _WORKLOAD = os.environ.get("DEMO_WORKLOAD", "resnet8")
-CONFIG_PATH = os.path.join(DEMO_ROOT, "config", f"{_WORKLOAD}.yaml")
+CONFIG_DIR = os.path.join(DEMO_ROOT, "config")
+CONFIG_PATH = os.path.join(CONFIG_DIR, f"{_WORKLOAD}.yaml")
+
+
+def available_workloads() -> list:
+    """config/<name>.yaml 목록. 파일이 곧 워크로드 정의이므로 디렉토리를 그대로 읽는다.
+    _tv_test.yaml 처럼 '_' 로 시작하는 건 작업용이라 뺀다."""
+    try:
+        names = [f[:-5] for f in os.listdir(CONFIG_DIR)
+                 if f.endswith(".yaml") and not f.startswith("_")]
+    except OSError:
+        return [_WORKLOAD]
+    # resnet8 을 앞에 두고 나머지는 이름순 — 버튼 순서가 매번 바뀌지 않게.
+    return sorted(names, key=lambda n: (n != "resnet8", n))
 
 # CIFAR-10 정규화 파라미터 (metadata.json transform). 역정규화해 사진 복원용.
 _MEAN = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32).reshape(3, 1, 1)
@@ -66,8 +80,8 @@ def _viridis(norm2d):
     return rgb.astype(np.uint8)
 
 
-def load_config() -> dict:
-    with open(CONFIG_PATH) as f:
+def load_config(path: str = None) -> dict:
+    with open(path or CONFIG_PATH) as f:
         cfg = yaml.safe_load(f)
     cfg["_demo_root"] = DEMO_ROOT
     return cfg
@@ -78,12 +92,20 @@ CFG = load_config()
 # sample_map: staged 순번 -> 원본 데이터셋 인덱스. resnet8(full_npy) 에만 필수이고,
 # kws/vww 는 staged 배열을 순번대로 바로 쓰므로 없을 수 있다(없으면 항등 매핑).
 _SAMPLE_MAP = None
-_sm = CFG.get("sample_map")
-if _sm:
-    _sm_path = os.path.join(DEMO_ROOT, _sm)
-    if os.path.exists(_sm_path):
-        with open(_sm_path) as f:
-            _SAMPLE_MAP = json.load(f)["staged_to_original"]
+
+
+def _load_sample_map(cfg):
+    sm = cfg.get("sample_map")
+    if not sm:
+        return None
+    p = os.path.join(DEMO_ROOT, sm)
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return json.load(f)["staged_to_original"]
+
+
+_SAMPLE_MAP = _load_sample_map(CFG)
 
 # ── 이미지 소스 (config.image_source, 환경변수 DEMO_IMAGE_SOURCE 로 오버라이드 가능) ──
 # "full_npy"   : resnet8 노트북 기본. fixtures/cifar10_test_images.npy (10000장) orig_idx 조회.
@@ -93,20 +115,17 @@ if _sm:
 #   "cifar_denorm" : [3,32,32] CIFAR 정규화 -> mean/std 역정규화 -> RGB 사진.
 #   "raw01"        : [3,H,W] 이미 0..1 범위 -> ×255 RGB (vww COCO).
 #   "mfcc_heatmap" : [1,49,10] 원시 MFCC(dB) -> per-image min-max 정규화 -> viridis heatmap (kws).
-_IMAGE_SOURCE = os.environ.get("DEMO_IMAGE_SOURCE") or CFG.get("image_source", "full_npy")
-_DISPLAY = (CFG.get("display") or {}).get("kind", "cifar_denorm")
-_DATASET_NAME = (CFG.get("chip") or {}).get("dataset_name") or CFG.get("dataset_name", "cifar10")
-_IMAGES = None
-_INDEX_BY = "staged"    # "orig" (full_npy: orig_idx 로 조회) | "staged" (staged 순번)
+# 아래 5개는 _load_images(CFG) 가 한 번에 세팅한다(워크로드 전환 때 같이 갈아끼우려고).
+#   _IMAGES / _INDEX_BY("orig"|"staged") / _IMAGE_SOURCE / _DISPLAY / _DATASET_NAME
 
-def _find_staged_images(dataset_name):
+def _find_staged_images(dataset_name, cfg=None):
     """staged 입력 배열 탐색. 우선순위:
       1) config.staged_images_fixture (demo/fixtures 에 박제한 것) — 노트북 기본.
          resnet8 이 cifar10_test_images.npy 를 git-lfs 로 박제하듯, kws/vww staged
          입력도 fixtures 로 박제해 `git lfs pull` 만으로 노트북에서 확보되게 한다.
       2) codegen/dataset/<name>/_staged/images.npy — 서버(원본 checkout) 폴백.
     """
-    fx = CFG.get("staged_images_fixture")
+    fx = (cfg or CFG).get("staged_images_fixture")
     cands = []
     if fx:
         cands.append(os.path.join(DEMO_ROOT, fx))
@@ -117,13 +136,20 @@ def _find_staged_images(dataset_name):
     p = next((c for c in cands if os.path.exists(c)), None)
     return np.load(p) if p else None
 
-if _IMAGE_SOURCE == "full_npy":
-    _p = os.path.join(DEMO_ROOT, "fixtures", "cifar10_test_images.npy")
-    _IMAGES = np.load(_p) if os.path.exists(_p) else None
-    _INDEX_BY = "orig"
-elif _IMAGE_SOURCE == "staged_npy":
-    _IMAGES = _find_staged_images(_DATASET_NAME)
-    _INDEX_BY = "staged"
+def _load_images(cfg):
+    """(images 배열, index_by, image_source, display_kind, dataset_name) 를 cfg 로부터 구성."""
+    src = os.environ.get("DEMO_IMAGE_SOURCE") or cfg.get("image_source", "full_npy")
+    kind = (cfg.get("display") or {}).get("kind", "cifar_denorm")
+    name = (cfg.get("chip") or {}).get("dataset_name") or cfg.get("dataset_name", "cifar10")
+    if src == "full_npy":
+        p = os.path.join(DEMO_ROOT, "fixtures", "cifar10_test_images.npy")
+        return (np.load(p) if os.path.exists(p) else None), "orig", src, kind, name
+    if src == "staged_npy":
+        return _find_staged_images(name, cfg), "staged", src, kind, name
+    return None, "staged", src, kind, name
+
+
+_IMAGES, _INDEX_BY, _IMAGE_SOURCE, _DISPLAY, _DATASET_NAME = _load_images(CFG)
 
 app = FastAPI(title="IMCFlow chip demo")
 
@@ -145,6 +171,11 @@ def config():
             "num_classes": t["num_classes"],
             "num_samples": CFG["run"]["num_samples"],
             "profile": CFG.get("profile", "mock"),
+            # 워크로드 전환 버튼용. 지금 무엇이 떠 있는지 + 고를 수 있는 목록.
+            "workload": _WORKLOAD,
+            "workloads": available_workloads(),
+            # pipelined 빠른 실행 패널 설정. 없는 워크로드(vww)는 null 이고 프론트가 패널을 숨긴다.
+            "pipelined": _pipelined_meta(),
             # display hints for the frontend (aspect ratio + pixelation) so the
             # input panel fits MFCC (49x10), COCO (96x96), or CIFAR (32x32).
             "display": {
@@ -154,6 +185,61 @@ def config():
             },
         }
     )
+
+
+def _pipelined_meta():
+    """config.pipelined 를 프론트가 쓸 형태로. 모자이크 PNG 가 실제로 있을 때만 노출한다
+    (파일이 없으면 패널이 빈 캔버스로 떠서 고장난 것처럼 보인다)."""
+    p = CFG.get("pipelined")
+    if not p:
+        return None
+    rel = p.get("mosaic")
+    if not rel or not os.path.exists(os.path.join(DEMO_ROOT, rel)):
+        return None
+    total = int(p["total_samples"])
+    ms = float(p["ms_per_sample"])
+    return {
+        "ms_per_sample": ms,
+        "total_samples": total,
+        "duration_s": round(total * ms / 1000.0, 2),   # 재생 길이 = 실제 예상 소요시간
+        "cols": int(p.get("mosaic_cols", 100)),
+        "rows": int(p.get("mosaic_rows", 20)),
+        "mosaic_url": "/mosaic",
+    }
+
+
+@app.get("/tuning")
+def tuning():
+    """전압 튜닝 스윕의 진행 상태 (dev 패널용).
+
+    ⚠️ 여기서 PS 를 직접 RPC 로 읽지 않는다. 스윕 스크립트가 GPIB 세션을 점유하고 있어
+    동시에 붙으면 측정에 간섭한다. 스윕이 원자적으로 갱신하는 상태 파일만 읽는다.
+    파일이 없거나 오래됐으면 null — 프론트가 패널을 숨긴다.
+    """
+    path = os.environ.get("DEMO_TUNING_STATUS", "/tmp/ps_tuning_status.json")
+    try:
+        with open(path) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return JSONResponse(None)
+    # 스윕이 죽어도 파일은 남는다. 오래된 상태를 "진행 중"으로 보여주면 안 된다.
+    st["age_s"] = round(time.time() - float(st.get("ts", 0)), 1)
+    st["stale"] = st["age_s"] > 120
+    return JSONResponse(st)
+
+
+@app.get("/mosaic")
+def mosaic():
+    """현재 워크로드의 모자이크 PNG. 워크로드 전환 때 URL 이 같으므로 캐시를 막는다."""
+    p = (CFG.get("pipelined") or {}).get("mosaic")
+    if not p:
+        return Response(status_code=404, content=b"no pipelined mosaic for this workload")
+    path = os.path.join(DEMO_ROOT, p)
+    if not os.path.exists(path):
+        return Response(status_code=404, content=b"mosaic file not found")
+    with open(path, "rb") as f:
+        return Response(content=f.read(), media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/image/{staged_idx}")
@@ -352,6 +438,45 @@ def _stop_and_wait(timeout: float = 40.0) -> dict:
 def stop_run():
     """실행 중인 추론을 중단한다. 실행 중이 아니면 was_running=False 로 무해하게 끝난다."""
     return JSONResponse(_stop_and_wait())
+
+
+@app.post("/workload/{name}")
+def set_workload(name: str):
+    """워크로드를 바꾸고 처음부터 다시 시작할 수 있는 상태로 만든다.
+
+    실행 중이면 먼저 정지시킨다 — 칩은 한 번에 하나만 돌릴 수 있고, 특히 워크로드마다
+    바이너리(.resnet8/.kws/.vww)가 달라 이전 실행이 살아있는 채로 다른 모델을 띄우면
+    칩에서 두 모델이 경합한다.
+
+    실행 시작은 여기서 하지 않는다. 프론트가 /config 를 다시 읽고 /stream 에 재연결하면
+    그 연결이 소유자가 되어 시작한다("첫 연결이 소유자" 규칙을 한 곳에만 둔다).
+    """
+    global CFG, CONFIG_PATH, _WORKLOAD, _SAMPLE_MAP
+    global _IMAGES, _INDEX_BY, _IMAGE_SOURCE, _DISPLAY, _DATASET_NAME
+
+    avail = available_workloads()
+    if name not in avail:
+        return JSONResponse({"error": f"unknown workload {name!r}", "available": avail},
+                            status_code=404)
+
+    r = _stop_and_wait()
+    if not r["idle"]:
+        return JSONResponse({**r, "switched": False,
+                             "message": "이전 실행이 아직 정리되지 않았습니다"}, status_code=409)
+
+    path = os.path.join(CONFIG_DIR, f"{name}.yaml")
+    try:
+        cfg = load_config(path)
+        images, index_by, src, kind, dsname = _load_images(cfg)
+    except Exception as e:   # config 오타/누락 npy 등 — 기존 워크로드를 유지한 채 실패를 알린다
+        return JSONResponse({"switched": False, "workload": _WORKLOAD,
+                             "error": f"{type(e).__name__}: {e}"}, status_code=400)
+
+    CFG, CONFIG_PATH, _WORKLOAD = cfg, path, name
+    _SAMPLE_MAP = _load_sample_map(cfg)
+    _IMAGES, _INDEX_BY, _IMAGE_SOURCE, _DISPLAY, _DATASET_NAME = images, index_by, src, kind, dsname
+    return JSONResponse({"switched": True, "workload": name,
+                         "images_loaded": images is not None, **r})
 
 
 @app.post("/restart")
