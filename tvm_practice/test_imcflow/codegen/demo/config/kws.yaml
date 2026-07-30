@@ -7,8 +7,10 @@ task:
   title: "DS-CNN on IMCFlow chip · Speech Commands (KWS)"
   # logit index -> class name. Order from CIM utils/data_loader.py kws12 mapping:
   #   0..9 keywords, 10 unknown, 11 silence.
+  # ⚠️ yes/no/on/off 는 YAML 1.1 에서 boolean 이다. 따옴표 없이 두면 "yes" -> True 로
+  #    파싱돼 화면에 클래스명이 `true` 로 뜬다. 전부 인용부호 필수.
   classes:
-    - yes
+    - "yes"
     - "no"
     - up
     - down
@@ -54,6 +56,9 @@ chip:
 
 run:
   # dataset/kws_sc/_staged = 100샘플. 실측 ~0.12 s/샘플 (warmup-off).
+  # test set 전체(12105)를 돌리려면 images_path/labels_path 를 dataset/kws_sc/{images,labels}.npy
+  # (칩에 이미 적재됨) 로 바꾸고 num_samples=12105. 단 뷰어용 staged_images_fixture 도
+  # 12105 배열로 바꿔야 idx>=100 사진이 나온다. 소요 약 24분.
   num_samples: 100
 
 # Input display: 49x10 MFCC (single channel) rendered as a viridis heatmap from
