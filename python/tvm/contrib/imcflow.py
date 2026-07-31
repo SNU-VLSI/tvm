@@ -33,6 +33,44 @@ SMALL_DEBUG = 0
 
 BIG_IMEM = os.getenv("IMCFLOW_BIG_IMEM", "0") == "1"
 
+
+# ---------------------------------------------------------------------------
+# Master BUGFIX knob (IMCFLOW_BUGFIX = on | off, default off)
+# ---------------------------------------------------------------------------
+# ONE knob that switches the whole imcflow codegen flow between two behaviors:
+#
+#   * knob=off (DEFAULT): current-HEAD behavior = the 934 + P0-P3 + P4 NoC-sync
+#     code path (deadlock-free codegen that passes the BUGFIX-off RTL). This is
+#     the chip_acc_measure behavior we ship today. The RTL runner defaults to
+#     the BUGFIX-off build (gem5_bugfixoff_wt).
+#
+#   * knob=on: fall back to the merge-base a8af0e4cf behavior (the "BUGFIX-on
+#     golden") -- the 934/P0-P4 rendezvous + barrier sync emission is turned OFF
+#     and codegen reproduces a8af byte-for-byte. The RTL runner defaults to the
+#     BUGFIX-on build (gem5).
+#
+# `bugfix_off_mode() == True`  => knob is OFF => emit the 934 + P4 NoC sync.
+# `bugfix_off_mode() == False` => knob is ON  => a8af fallback (no new sync).
+#
+# Mirror of the existing _is_multl_swfix_enabled() precedent in
+# relay/backend/contrib/imcflow/imce_codeblock.py. Import this helper at every
+# sync call site instead of scattering raw os.environ.get(...) reads.
+def bugfix_off_mode() -> bool:
+  """Return True when IMCFLOW_BUGFIX is off (default) -> emit 934+P4 NoC sync.
+
+  Return False when IMCFLOW_BUGFIX=on -> reproduce a8af (no new sync emission).
+  """
+  return os.environ.get("IMCFLOW_BUGFIX", "off").lower() != "on"
+
+
+def overflow_sw_default_on() -> bool:
+  """Default for the SEPARATE IMCFLOW_BUGFIX_OVERFLOW_SW knob, coupled to the
+  master knob: the BUGFIX-off RTL lacks the HW overflow fix, so codegen should
+  SW-compensate when the master knob is off. The explicit
+  IMCFLOW_BUGFIX_OVERFLOW_SW env var still overrides this default (see
+  _is_multl_swfix_enabled)."""
+  return bugfix_off_mode()
+
 class NodeID(Enum):
   inode_0_0 = 0
   imce_0_1 = 1

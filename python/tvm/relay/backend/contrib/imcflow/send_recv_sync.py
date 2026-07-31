@@ -11,6 +11,7 @@ from tvm import relay
 from typing import List, Dict, Set, Tuple
 from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
 import logging
@@ -125,8 +126,16 @@ class SendRecvPairManager:
       # rendezvous; this restores the pair set so the imce/inode codeblocks emit
       # them. (Contention-only may under-cover 1:1 pipeline SENDs; measure vs
       # handcraft's 22 SETFLAG / 16 STANDBY and widen if needed.)
-      self.pairs = filtered_pairs
-      self.edge_to_pair = filtered_edge_to_pair
+      #
+      # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af, whose
+      # filter_contention=True path emitted ZERO pairs (self.pairs={}) -> all
+      # SEND/RECV/LOAD_LB are BARE. knob=off keeps the 934 activated filter.
+      if bugfix_off_mode():
+        self.pairs = filtered_pairs
+        self.edge_to_pair = filtered_edge_to_pair
+      else:
+        self.pairs = {}
+        self.edge_to_pair = {}
 
 
     def _assign_uuids(self, edges: List[TensorEdge]):
