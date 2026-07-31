@@ -49,18 +49,26 @@ BIG_IMEM = os.getenv("IMCFLOW_BIG_IMEM", "0") == "1"
 #     and codegen reproduces a8af byte-for-byte. The RTL runner defaults to the
 #     BUGFIX-on build (gem5).
 #
-# `bugfix_off_mode() == True`  => knob is OFF => emit the 934 + P4 NoC sync.
+# `bugfix_off_mode() == True`  => knob is OFF => emit the 934 + P4 NoC sync
+#                                 (opt-in, for the BUGFIX-off RTL co-sim path).
 # `bugfix_off_mode() == False` => knob is ON  => a8af fallback (no new sync).
+#
+# DEFAULT is ON (a8af). This keeps IMCFLOW_BUGFIX-unset runs byte-identical to
+# pristine chip_acc_measure, so existing chip / driver-v2 / FPGA workflows (which
+# never set the knob) are unaffected by this branch. The deadlock-avoidance
+# 934+P4 sync is emitted ONLY when a run explicitly opts in with IMCFLOW_BUGFIX=off
+# (the BUGFIX-off RTL co-sim path). See DWCONV_SYNC_GRANULARITY_DESIGN.md.
 #
 # Mirror of the existing _is_multl_swfix_enabled() precedent in
 # relay/backend/contrib/imcflow/imce_codeblock.py. Import this helper at every
 # sync call site instead of scattering raw os.environ.get(...) reads.
 def bugfix_off_mode() -> bool:
-  """Return True when IMCFLOW_BUGFIX is off (default) -> emit 934+P4 NoC sync.
+  """Return True when IMCFLOW_BUGFIX=off -> emit 934+P4 NoC sync (opt-in).
 
-  Return False when IMCFLOW_BUGFIX=on -> reproduce a8af (no new sync emission).
+  Return False when IMCFLOW_BUGFIX is unset or =on (the DEFAULT) -> reproduce
+  a8af (no new sync emission), i.e. pristine chip_acc_measure behavior.
   """
-  return os.environ.get("IMCFLOW_BUGFIX", "off").lower() != "on"
+  return os.environ.get("IMCFLOW_BUGFIX", "on").lower() == "off"
 
 
 def overflow_sw_default_on() -> bool:

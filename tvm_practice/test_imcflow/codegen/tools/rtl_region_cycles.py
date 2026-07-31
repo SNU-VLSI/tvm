@@ -76,6 +76,14 @@ def _resolve_log_dir(eval_dir: Path) -> Path:
         f"vcs_sim.log not found under {eval_dir} (looked in {eval_dir} and {cand})")
 
 
+# Substrings that only appear once the host actually started driving the
+# accelerator (a real workload run). If vcs_sim.log stops right after this and
+# never reaches the region markers, the co-sim connected but the graph never
+# executed -- see _diagnose_no_markers().
+_TXN_START = 'Starting transaction processing'
+_TXN_TRACE = 'Processing '  # per-transaction REG/DMEM/IMEM prints
+
+
 def parse_regions(log_dir: Path):
     """Return (region_starts_ps, final_ts_ps) from vcs_sim.log markers."""
     starts, final = [], 0
@@ -89,6 +97,47 @@ def parse_regions(log_dir: Path):
                 starts.append(int(m.group(1)))
     starts.sort()
     return starts, final
+
+
+def _diagnose_no_markers(log_dir: Path) -> str:
+    """Explain *why* vcs_sim.log has no region markers.
+
+    The region markers are printed by simv into vcs_sim.log only while the host
+    is driving transactions. They are NOT mirrored to any other log (checked:
+    gem5_output.log / gem5_rtl.log never contain them), so there is no alternate
+    file to fall back to -- an absent marker means the accelerator produced no
+    work, and the fsdb busy signal (imcflow_state_o) will likewise be flat.
+
+    The dominant real-world cause is an input-load failure: the eval driver
+    launched gem5 before test_inputs/model_input.{bin,meta.txt} were written, so
+    the graph executor loads no input and exits without issuing any RTL
+    transaction ("No inputs loaded" in gem5_output.log). The run still reports
+    'SIMULATION COMPLETED SUCCESSFULLY' (the host binary exited cleanly), which
+    is misleading. The fix is to re-run once inputs are present -- there is
+    nothing to measure in the current artifacts.
+    """
+    hints = []
+    vcs = log_dir / 'vcs_sim.log'
+    txt = ''
+    try:
+        txt = vcs.read_text(errors='ignore')
+    except OSError:
+        pass
+    if _TXN_START in txt and _TXN_TRACE not in txt:
+        hints.append("vcs_sim.log stops right after 'Starting transaction "
+                     "processing' with no 'Processing ...' transactions -> the "
+                     "co-sim connected but the accelerator never ran.")
+    gem5 = log_dir / 'gem5_output.log'
+    if gem5.is_file():
+        g = gem5.read_text(errors='ignore')
+        if 'No inputs loaded' in g or 'Failed to open metadata file' in g:
+            hints.append("gem5_output.log shows an input-load failure "
+                         "('No inputs loaded' / 'Failed to open metadata "
+                         "file') -> test_inputs were missing/incomplete when "
+                         "gem5 started; the graph never executed.")
+    return (' '.join(hints) + ' Re-run the RTL co-sim with test_inputs present; '
+            'the current fsdb/vcs_sim.log contain no accelerator activity to '
+            'measure.') if hints else ''
 
 
 def region_names(log_dir: Path, n: int):
@@ -202,6 +251,9 @@ def main(argv=None):
     starts, final = parse_regions(log_dir)
     if not starts:
         print(f"error: no region markers in {log_dir}/vcs_sim.log", file=sys.stderr)
+        why = _diagnose_no_markers(log_dir)
+        if why:
+            print(f"  cause: {why}", file=sys.stderr)
         return 2
     names = region_names(log_dir, len(starts))
     ends = starts[1:] + [final]
