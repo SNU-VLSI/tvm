@@ -649,15 +649,35 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
     loop_cnt = N * H * W
 
+    # P3 (DESIGN §2.3): inode->imce data-input rendezvous window on the dwconv
+    # minmaxquant RECV. The inode SEND loop does one handshake per packet; each
+    # imce RECV consumes exactly one packet, so the matching receiver window
+    # (SETFLAG(1);STANDBY(inode,1);SETFLAG(0)) must wrap EACH RECV (contract
+    # consumer_recv_per_sync=1). Emitting it per-pixel instead of per-RECV
+    # desynchronizes the handshake (the input-starvation deadlock). The window
+    # comes from the edge's contract via get_recv_window_sync (same source a
+    # plain conv uses); bare if the edge is not an inode data input.
+    recv_per_sync = getattr(in_edge_info, "consumer_recv_per_sync", None) or 1
+    _pm = getattr(getattr(self.call, "builder", None), "pair_manager", None)
+    recv_pre, recv_post = (None, None)
+    if _pm is not None:
+      recv_pre, recv_post = _pm.get_recv_window_sync(in_edge)
+
+    recv_idx = 0  # counts RECVs to place a window every recv_per_sync RECVs
     for ch_group_idx in range(ch_group_nums):
       # recv
       for i in range(2): # 32 -> 16 x 2
+        if recv_pre and (recv_idx % recv_per_sync == 0):
+          code += "\n".join(recv_pre) + "\n"
         code += IMCERecvBlock(
           var_name=UniqueVar((in_edge, 2*ch_group_idx+i)),
           fifo_id=in_edge_info.fifo_id,
           owner_edge=in_edge,
           annotation=f"dwconv minmaxquant recv ch_group {ch_group_idx}, part {i}"
         )
+        if recv_post and (recv_idx % recv_per_sync == recv_per_sync - 1):
+          code += "\n".join(recv_post) + "\n"
+        recv_idx += 1
 
       # compute
       src_mask = 15

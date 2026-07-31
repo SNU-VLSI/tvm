@@ -505,6 +505,26 @@ class EdgeInfoGenerator:
                 if fifo_id_cnt[dest_node] >= 8:
                     raise ValueError("FIFO ID cannot be over 7!")
 
+            # P3 (DESIGN §2.2): fill the sync-granularity contract for a data
+            # edge feeding a conv/dwconv. channels_per_issue distinguishes the
+            # two array widths (conv=64 via post_imcu NumChannels, dwconv=16 via
+            # vpu NumBlocks). producer_send_per_sync / consumer_recv_per_sync
+            # default to 1 (per-packet handshake) -- codegen that reads these
+            # emits byte-identical output to the current per-packet behavior.
+            # needs_flag_rendezvous=True: an inode->imce data input is a
+            # cross-fifo compute-gating edge, so a same-fifo count-match does not
+            # by itself order it (§2.0). Non-conv consumers keep None (untouched).
+            if dst_node_name == "nn.imcflow_qconv":
+                edgeinfo.set_sync_contract(channels_per_issue=64,
+                                           producer_send_per_sync=1,
+                                           consumer_recv_per_sync=1,
+                                           needs_flag_rendezvous=True)
+            elif dst_node_name == "nn.imcflow_qdwconv":
+                edgeinfo.set_sync_contract(channels_per_issue=16,
+                                           producer_send_per_sync=1,
+                                           consumer_recv_per_sync=1,
+                                           needs_flag_rendezvous=True)
+
             ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
 
         elif edge.src_id.tensor_type in [

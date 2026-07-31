@@ -145,7 +145,6 @@ class CodegenSuite:
         output_lines.append(f"    Total - Send: {item['total_send']}, Recv: {item['total_recv']}")
         output_lines.append(f"    Mismatch: {item['total_send']} sends vs {item['total_recv']} recvs")
       output_lines.append("\n" + "="*40)
-      # raise AssertionError(f"Recv/Send consistency check failed for function {func_name}")
     else:
       output_lines.append(f"✓ All edges have consistent send/recv counts")
       output_lines.append("="*40)
@@ -163,6 +162,23 @@ class CodegenSuite:
     output_file = os.path.join(model_dir, "recv_send_consistency.txt")
     with open(output_file, "a") as f:
       f.write("\n".join(output_lines) + "\n")
+
+    # P2 (DESIGN §2.4): fail at COMPILE TIME on a fifo-count mismatch instead of
+    # letting it surface as a 20000-poll RTL deadlock (state 0x1). ΣSEND==ΣRECV
+    # per edge is a hardware invariant (fifo occupancy conservation): if a
+    # producer sends more than the consumer receives, the producer wedges on a
+    # full fifo forever; fewer, the consumer wedges on empty. ResNet8 is already
+    # fully consistent, so this never fires there. dwconv granularity mismatches
+    # (the P3/P4 work) now show up here as an assert with the exact offending
+    # edges, not as an opaque hang. Opt out with IMCFLOW_SKIP_SYNC_ASSERT=1.
+    if inconsistencies and os.environ.get("IMCFLOW_SKIP_SYNC_ASSERT", "0") != "1":
+      detail = "; ".join(
+        f"{it['edge']}: send {it['total_send']} vs recv {it['total_recv']}"
+        for it in inconsistencies)
+      raise AssertionError(
+        f"[recv/send fifo-count mismatch] function {func_name}: "
+        f"{len(inconsistencies)} edge(s) would deadlock in RTL. {detail}. "
+        f"(see {output_file}; set IMCFLOW_SKIP_SYNC_ASSERT=1 to bypass)")
     print(f"Recv/send consistency appended to: {output_file}")
 
   def transform_function(self, _, func):

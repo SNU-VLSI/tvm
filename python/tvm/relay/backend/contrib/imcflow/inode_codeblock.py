@@ -356,18 +356,33 @@ class SendBlock(InodeCodeBlock):
     var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
 
-    # handcraft: data-input SEND is preceded (per-packet) by a pre-send
-    # rendezvous with the receiving imce. weight/const SEND is bare.
-    # chip_acc_measure reconcile (DESIGN §3.5 order contract): the pre-send
-    # rendezvous goes BEFORE the SEND; the single_qconv nop_delay (v2/atomic
-    # conv timing) goes AFTER the SEND. When single_qconv is off (ResNet8 /
-    # v1 multi-core) nop_delay == "" -> byte-identical to the 934ec1001 output.
+    # data-input SEND is preceded by a pre-send rendezvous with the receiving
+    # imce (weight/const SEND is bare -> _get_presend_sync_code_str returns "").
+    # Sync-granularity contract (DESIGN §2.3): emit the rendezvous once per
+    # `producer_send_per_sync` packets. Default (None) == 1 == per-packet, i.e.
+    # byte-identical to the previous hardcoded behavior.
+    # NOTE: `iter` here is the C loop-variable NAME (a string like "i1") for
+    # count>1, or the int 0 for count==1 -- it is NOT a Python integer we can do
+    # arithmetic on. So for the default per-packet case we emit the handshake
+    # unconditionally (as before); only a contracted value >1 wraps it in a
+    # C-level `if (iter % N == 0)` guard.
+    # chip_acc_measure reconcile (DESIGN §3.5 order contract): pre-send
+    # rendezvous BEFORE the SEND; the single_qconv nop_delay (v2/atomic-conv
+    # timing) AFTER the SEND. single_qconv off (ResNet8 / v1 multi-core) ->
+    # nop_delay == "" -> byte-identical to the 934ec1001 output.
+    send_per_sync = getattr(self.edge_info, "producer_send_per_sync", None) or 1
     nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
-    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id, nop_delay=nop_delay):
+    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr,
+                            fifo_id=fifo_id, send_per_sync=send_per_sync, nop_delay=nop_delay):
       code = ""
       pre = self._get_presend_sync_code_str()
       if pre:
-        code += pre
+        if send_per_sync == 1:
+          code += pre                      # per-packet (default, unchanged)
+        else:
+          # group N packets under one handshake: guard at C level.
+          guarded = "".join(f"  {ln}\n" for ln in pre.splitlines() if ln.strip())
+          code += f"if (({iter}) % {send_per_sync} == 0) {{\n{guarded}}}\n"
       code += f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
       code += nop_delay
       return code
