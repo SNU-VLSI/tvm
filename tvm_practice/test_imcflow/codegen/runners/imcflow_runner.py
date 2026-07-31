@@ -437,7 +437,12 @@ class RTLRunner(ImcFlowRunner):
 
     @property
     def directory_path(self) -> str:
-        return "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner"
+        # BUGFIX-off codegen-sync work runs against the bugfix-off RTL build.
+        # Allow an env override so the same tree can target either runner.
+        return os.environ.get(
+            "IMCFLOW_RTL_RUNNER_DIR",
+            "/root/project/imcflow/pmap/ISA_sim/gem5_bugfixoff_wt/tests/imcflow/rtl_runner",
+        )
 
     @property
     def timeout(self) -> int:
