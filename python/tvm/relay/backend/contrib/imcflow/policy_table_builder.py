@@ -514,15 +514,28 @@ class EdgeInfoGenerator:
             # needs_flag_rendezvous=True: an inode->imce data input is a
             # cross-fifo compute-gating edge, so a same-fifo count-match does not
             # by itself order it (§2.0). Non-conv consumers keep None (untouched).
+            # fill_order records the axis order the linebuffer consumer fills
+            # (DESIGN §4.5): a hardware counter auto-increments (bitpos->col->row)
+            # so a LOAD_LB consumer expects [ch_pass, h, w, bitplane] with 4
+            # bitplanes/pixel. P4's dwconv-output SEND emits 4 parts per ch_group
+            # that map 1:1 onto those 4 bitplanes -- documenting the layout
+            # correspondence the producer barrier is paired with.
             if dst_node_name == "nn.imcflow_qconv":
                 edgeinfo.set_sync_contract(channels_per_issue=64,
+                                           fill_order=["ch_pass", "h", "w", "bitplane"],
                                            producer_send_per_sync=1,
                                            consumer_recv_per_sync=1,
                                            needs_flag_rendezvous=True)
             elif dst_node_name == "nn.imcflow_qdwconv":
+                # dwconv data-input edge: the minmaxquant producer (imce_0_1)
+                # MULTICASTS its split odata to this LOAD_LB consumer plus a
+                # sibling. The middle-stage rendezvous is a node-level flag-2
+                # barrier (Fix-B), so consumer_recv_per_sync counts the 4-bitplane
+                # burst per window; needs_flag_rendezvous stays True.
                 edgeinfo.set_sync_contract(channels_per_issue=16,
+                                           fill_order=["ch_pass", "h", "w", "bitplane"],
                                            producer_send_per_sync=1,
-                                           consumer_recv_per_sync=1,
+                                           consumer_recv_per_sync=4,
                                            needs_flag_rendezvous=True)
 
             ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)

@@ -32,6 +32,19 @@ ConstPat = is_constant()
 # for debugging
 send_num_map = {}
 recv_num_map = {}
+
+# P4 (DESIGN §2.4, invariant II): flag-rendezvous handshake counters. Keyed by
+# a flag-rendezvous pair uuid: {uuid: {"producer": n, "consumer": {node_value: n}}}.
+# The producer barrier (get_pre_send_sync) and each consumer window
+# (get_recv_window_sync) increment these at emission time, multiplied by the
+# enclosing SimpleFor loop trips (same mechanism add_to_map uses). validate then
+# asserts producer_handshakes == each consumer's window count, so a future
+# granularity/flag mismatch surfaces at COMPILE time instead of a 20000-poll RTL
+# hang. Only populated for edges the codeblocks explicitly contract (dwconv
+# output today); ResNet8 never calls add_flag_handshake -> map stays empty ->
+# no effect / byte-identical.
+handshake_num_map = {}
+
 @dataclass
 class RecvSendNum:
   dir       : str  = ""  # "recv" or "send"
@@ -214,6 +227,24 @@ class LoadLBBlock(ImceCodeBlock):
     else:
       pre_lines, post_lines = self._get_window_sync()
 
+    # invariant II bookkeeping (see handshake_num_map): count this LOAD_LB window
+    # ONLY when it is a flag-2 producer-gated rendezvous (the dwconv-output
+    # Fix-B barrier: pre-lines contain STANDBY(producer, 2)). ResNet8's conv
+    # pipeline windows are SETFLAG(1)...SETFLAG(0) with NO STANDBY -> excluded, so
+    # the handshake map stays empty for ResNet8 and the (II) assert never fires
+    # there. The matching producer barrier (build_mmquant_for_dwconv) is likewise
+    # gated on SETFLAG(2).
+    self._rz_uuid = None
+    self._rz_consumer = None
+    if pre_lines and any("STANDBY" in ln and ", 2)" in ln for ln in pre_lines):
+      pm = getattr(self.builder, "pair_manager", None) if self.builder is not None else None
+      pair = pm.get_pair(self.edge) if pm is not None else None
+      if pair is not None:
+        self._rz_uuid = pair.uuid
+        # the consumer is THIS node = the LOAD_LB receiver of self.edge
+        rn = pm._get_hw_node(self.edge.dst_id)
+        self._rz_consumer = rn[0].value if isinstance(rn, tuple) else rn.value
+
     def load_lb_line(iter, fid=load_fifo_id, annot=annotation):
       return f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
 
@@ -240,6 +271,13 @@ class LoadLBBlock(ImceCodeBlock):
 
   def _render(self) -> str:
     add_to_map(self.edge, RecvSendNum("recv", self.count * self.repeat), is_send=False)
+    # invariant II: one consumer window per outer load_block iteration
+    # (self.count), scaled by the enclosing DWConv row/col SimpleFor nest.
+    if self._rz_uuid is not None:
+      outer = 1 if len(SimpleFor.count_stack) == 0 else int(math.prod(SimpleFor.count_stack))
+      entry = handshake_num_map.setdefault(self._rz_uuid, {"producer": 0, "consumer": {}})
+      entry["consumer"][self._rz_consumer] = (
+          entry["consumer"].get(self._rz_consumer, 0) + self.count * outer)
     return self.body.render()
 
 
@@ -663,6 +701,25 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     if _pm is not None:
       recv_pre, recv_post = _pm.get_recv_window_sync(in_edge)
 
+    # P4 (DESIGN §5-P4): producer-side output rendezvous on the dwconv
+    # minmaxquant SEND. imce_0_1's split odata is MULTICAST to two imce receivers
+    # (imce_0_2 and the real DWCONV consumer imce_1_1). Both wrap their LOAD_LB in
+    # a flag-2 window (SETFLAG(2); STANDBY(imce_0_1,2); SETFLAG(0)) but the
+    # producer never raised flag 2 -> both STANDBYs wedge (the middle-stage
+    # deadlock). The matching producer barrier comes from the SAME pair via
+    # get_pre_send_sync (a 2-phase flag-2 rendezvous:
+    #   STANDBY(r,2)xN; SETFLAG(2); STANDBY(r,0)xN; SETFLAG(0)).
+    # It fires ONCE per pixel (== one window per pixel on each receiver) and MUST
+    # precede the SENDs: each receiver's window CLOSES (SETFLAG(0)) before its
+    # LOAD_LB, so the producer's phase-down completes without waiting on the data
+    # transfer, then the 8 SENDs flow under fifo backpressure (depth 2). Because
+    # both split edges share the pair, both give the same barrier -> emit it once.
+    # A single global flag slot per node makes this a node-level rendezvous, so
+    # both ch_groups' SENDs are covered by the one barrier.
+    send_barrier = None
+    if _pm is not None:
+      send_barrier = _pm.get_pre_send_sync(split_out_edges[0])
+
     recv_idx = 0  # counts RECVs to place a window every recv_per_sync RECVs
     for ch_group_idx in range(ch_group_nums):
       # recv
@@ -686,17 +743,31 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
         var_i = UniqueVar((in_edge, 2*ch_group_idx+i))
         var_o = UniqueVar((self, 2*ch_group_idx+i))
         code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_idx});"
-      
-      # get_qreg
+
+      # get_qreg -- into per-ch_group vars so the SENDs can be hoisted after the
+      # one-per-pixel output barrier without qreg aliasing across ch_groups.
       for i in range(4):
-        var_o = UniqueVar((self, i))
+        var_o = UniqueVar((self, ch_group_idx, i))
         code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
 
-      # send
+    # P4: one output rendezvous per pixel, then all SENDs (see comment above).
+    if send_barrier:
+      code += "\n".join(send_barrier) + "\n"
+      # invariant II: record loop_cnt producer handshakes for this pair (the
+      # barrier is emitted once here but runs once per pixel inside the
+      # dwconv_minmaxquant_loop, which is not yet on the count_stack). Gated on a
+      # real flag-rendezvous barrier (SETFLAG appears) so a bare [] send_barrier
+      # records nothing.
+      _pair0 = _pm.get_pair(split_out_edges[0]) if _pm is not None else None
+      if _pair0 is not None and any("SETFLAG(2)" in ln for ln in send_barrier):
+        handshake_num_map.setdefault(_pair0.uuid, {"producer": 0, "consumer": {}})
+        handshake_num_map[_pair0.uuid]["producer"] += loop_cnt
+
+    for ch_group_idx in range(ch_group_nums):
       for i in range(4):
         split_out_edge_info = split_out_edge_infos[ch_group_idx]
         code += IMCESendBlock(
-          var_name=UniqueVar((self, i)),
+          var_name=UniqueVar((self, ch_group_idx, i)),
           fifo_id=split_out_edge_info.fifo_id,
           policy_addr=split_out_edge_info.policy_info[0].address,
           owner_edges=split_out_edges[ch_group_idx],

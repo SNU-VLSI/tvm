@@ -181,6 +181,45 @@ class CodegenSuite:
         f"(see {output_file}; set IMCFLOW_SKIP_SYNC_ASSERT=1 to bypass)")
     print(f"Recv/send consistency appended to: {output_file}")
 
+    # P4 (DESIGN §2.4, invariant II): flag-rendezvous handshake balance. Unlike
+    # (I) fifo-count (a byte-conservation invariant), (II) checks that a
+    # producer's SETFLAG barrier count equals EACH consumer's window count for a
+    # flag-rendezvous edge. A mismatch means one side raises/waits the wrong
+    # number of times on the single per-node flag slot -> lost-wakeup / 20000-poll
+    # hang (exactly the dwconv middle-stage deadlock P4 fixes). Populated only for
+    # edges the codeblocks explicitly contract (dwconv output); the map is empty
+    # for ResNet8, so this never fires there.
+    from tvm.relay.backend.contrib.imcflow.imce_codeblock import handshake_num_map
+    if handshake_num_map:
+      print(f"[FLAG rendezvous] {func_name} handshake balance: {handshake_num_map}")
+    flag_mismatches = []
+    for uuid, hs in handshake_num_map.items():
+      prod = hs.get("producer", 0)
+      for cnode, cwin in hs.get("consumer", {}).items():
+        if prod != cwin:
+          flag_mismatches.append((uuid, cnode, prod, cwin))
+    if flag_mismatches:
+      print("="*40)
+      print(f"[FLAG rendezvous] function {func_name}: {len(flag_mismatches)} mismatch(es)")
+      for uuid, cnode, prod, cwin in flag_mismatches:
+        print(f"  pair uuid={uuid}: producer_handshakes={prod} vs consumer(node {cnode}) windows={cwin}")
+      with open(output_file, "a") as f:
+        f.write(f"\n[FLAG rendezvous] {len(flag_mismatches)} mismatch(es): "
+                + "; ".join(f"uuid={u} prod={p} vs node{c}={w}"
+                            for u, c, p, w in flag_mismatches) + "\n")
+    if flag_mismatches and os.environ.get("IMCFLOW_SKIP_SYNC_ASSERT", "0") != "1":
+      detail = "; ".join(
+        f"uuid={u}: producer {p} vs consumer(node {c}) {w}"
+        for u, c, p, w in flag_mismatches)
+      raise AssertionError(
+        f"[flag-rendezvous handshake mismatch] function {func_name}: "
+        f"{len(flag_mismatches)} edge(s) would lost-wakeup deadlock in RTL. {detail}. "
+        f"(set IMCFLOW_SKIP_SYNC_ASSERT=1 to bypass)")
+
+    # Reset the flag-handshake map for the next function (per-function scope, like
+    # the codegen context). fifo maps are handled by construct_recv_send_map.
+    handshake_num_map.clear()
+
   def transform_function(self, _, func):
     # Note: the function name strips off the "_impl" suffix to match the original funcion name
     # which is the parent func's global_symbol attribute (prior: func.attsr.global_symbol).
