@@ -186,31 +186,12 @@ class RecvBlock(InodeCodeBlock):
     # Sync is already added inside the loop (per-packet sync), no need to add again here
 
   def _get_recv_sync_code_str(self):
-    """Get sync code as a string (for inline insertion in loops) for recv"""
-    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
-      return ""  # No pair manager, no sync
+    """Get sync code as a string (for inline insertion in loops) for recv.
 
-    edge = self._get_edge()
-    if edge is None:
-      return ""
-
-    pair = self.builder.pair_manager.get_pair(edge)
-    if pair is None:
-      return ""  # No sync needed for this edge
-
-    # Get current node - receiver node
-    dst_hw_node = self._get_hw_node_from_edge(edge)
-    if dst_hw_node is None:
-      return ""
-
-    # Generate sync code inline - RECEIVER pattern
-    # Receiver only waits for sender (not other receivers in multicast)
-    sync_lines = []
-    sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
-    sync_lines.append(f"__builtin_INODE_STANDBY({pair.sender_node.value}, {pair.uuid});")
-    sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
-
-    return "\n".join(sync_lines) + "\n"
+    handcraft: imce->inode output RECV is BARE (no SETFLAG/STANDBY). The inode
+    just receives; the producing imce does the (bare) SEND. Return "".
+    """
+    return ""
 
   def _add_sync_after_recv(self):
     """Add synchronization block after recv operation"""
@@ -375,15 +356,20 @@ class SendBlock(InodeCodeBlock):
     var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
 
-    # Per-packet sync: Send one packet, then sync immediately
+    # handcraft: data-input SEND is preceded (per-packet) by a pre-send
+    # rendezvous with the receiving imce. weight/const SEND is bare.
+    # chip_acc_measure reconcile (DESIGN §3.5 order contract): the pre-send
+    # rendezvous goes BEFORE the SEND; the single_qconv nop_delay (v2/atomic
+    # conv timing) goes AFTER the SEND. When single_qconv is off (ResNet8 /
+    # v1 multi-core) nop_delay == "" -> byte-identical to the 934ec1001 output.
     nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
     def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id, nop_delay=nop_delay):
-      code = f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
+      code = ""
+      pre = self._get_presend_sync_code_str()
+      if pre:
+        code += pre
+      code += f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
       code += nop_delay
-      # Add sync after each send
-      sync_code = self._get_sync_code_str()
-      if sync_code:
-        code += sync_code
       return code
     self.body.add(SimpleFor(recv_count, send_body_with_sync))
 
@@ -411,84 +397,64 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
 
-    # Per-packet sync: Send one packet, then sync immediately
+    # handcraft: data-input SEND is preceded (per-packet) by a pre-send
+    # rendezvous with the receiving imce. weight/const SEND is bare.
+    # chip_acc_measure reconcile (DESIGN §3.5): pre-send rendezvous BEFORE the
+    # SEND, single_qconv nop_delay AFTER (== "" when single_qconv off).
     nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
     def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id, nop_delay=nop_delay):
-      code = f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
+      code = ""
+      pre = self._get_presend_sync_code_str()
+      if pre:
+        code += pre
+      code += f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
       code += nop_delay
-      # Add sync after each send
-      sync_code = self._get_sync_code_str()
-      if sync_code:
-        code += sync_code
       return code
     self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
 
-  def _get_sync_code_str(self):
-    """Get sync code as a string (for inline insertion in loops) - SENDER pattern"""
+  def _get_presend_sync_code_str(self):
+    """Get PRE-send rendezvous code (handcraft, SENDER side for data input).
+
+    handcraft inode_0_0 data-input SEND (per-packet):
+        STANDBY(imce, 1); SET_FLAG(1); STANDBY(imce, 0); SET_FLAG(0); SEND
+    Only emitted for inode -> imce *data input* edges whose receiver is the
+    main-pipeline imce (plain-int dst id, e.g. imce_0_2). weight/const SENDs and
+    the fused/composite receiver (imce_0_1) get NO pre-send (bare).
+    """
     if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
-      print(f"[DEBUG _get_sync_code_str] No pair_manager")
-      return ""  # No pair manager, no sync
+      return ""
 
     edge_or_edges = self._get_edge()
     if edge_or_edges is None:
-      print(f"[DEBUG _get_sync_code_str] Edge is None")
+      return ""
+    edges = edge_or_edges if isinstance(edge_or_edges, list) else [edge_or_edges]
+
+    pm = self.builder.pair_manager
+    # Rendezvous only with data-input receivers (plain-int dst) of this SEND.
+    # Each edge maps to exactly ONE receiver (its own dst hw node); do NOT pull
+    # in the other multicast receivers (e.g. the fused imce_0_1 whose dst is a
+    # tuple must stay bare).
+    target_imces = []
+    for e in edges:
+      if not pm.is_inode_data_input_recv(e):
+        continue
+      rnode = pm._get_hw_node(e.dst_id)
+      if isinstance(rnode, tuple):
+        rnode = rnode[0]
+      if rnode is not None and rnode.is_imce() and rnode not in target_imces:
+        target_imces.append(rnode)
+
+    if not target_imces:
       return ""
 
-    # Handle multicast (list of edges) vs single edge
-    if isinstance(edge_or_edges, list):
-      # Multicast case - find edge with split_idx to get correct pair
-      edge = None
-      for e in edge_or_edges:
-        if e.split_idx is not None:
-          edge = e
-          break
-      if edge is None:
-        edge = edge_or_edges[0] if edge_or_edges else None
-      print(f"[DEBUG _get_sync_code_str] Multicast: selected edge={edge} from {edge_or_edges}")
-    else:
-      edge = edge_or_edges
+    target_imces.sort(key=lambda x: x.value)
 
-    if edge is None:
-      print(f"[DEBUG _get_sync_code_str] Edge is None after multicast handling")
-      return ""
-
-    pair = self.builder.pair_manager.get_pair(edge)
-    if pair is None:
-      print(f"[DEBUG _get_sync_code_str] No pair for edge: {edge}")
-      return ""  # No sync needed for this edge
-
-    # Skip sync if sender == all receivers (same node, no real communication)
-    if len(pair.receiver_nodes) == 1 and pair.sender_node in pair.receiver_nodes:
-      print(f"[DEBUG _get_sync_code_str] Skipping sync: sender==receiver for edge={edge}")
-      return ""  # No sync needed for same-node communication
-
-    # Get current node from edge_info
-    current_node = self.edge_info.policy_info[0].router_id
-
-    # DEBUG: Print pair info
-    print(f"[DEBUG _get_sync_code_str] edge={edge}")
-    print(f"[DEBUG _get_sync_code_str] pair.uuid={pair.uuid}, pair.sender_node={pair.sender_node}, pair.receiver_nodes={pair.receiver_nodes}")
-    print(f"[DEBUG _get_sync_code_str] pair.all_nodes={pair.all_nodes}")
-    print(f"[DEBUG _get_sync_code_str] current_node={current_node} (type={type(current_node)})")
-
-    # Generate sync code inline - SENDER pattern
-    # SENDER: STANDBY(receiver, uuid) → SETFLAG(uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_lines = []
-    # First wait for receiver to be ready (receiver sets its flag first)
-    for node in pair.all_nodes:
-      print(f"[DEBUG _get_sync_code_str] Checking node={node}, node != current_node = {node != current_node}")
-      if node != current_node:
-        sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
-    # Then set sender flag to acknowledge
-    sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
-    # Wait for receiver to clear flag (receiver processed data)
-    for node in pair.all_nodes:
-      if node != current_node:
-        sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, 0);")
-    # Clear sender flag
-    sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
-
-    print(f"[DEBUG _get_sync_code_str] Generated sync_lines: {sync_lines}")
+    for rnode in target_imces:
+      sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, 1); // sync with {rnode.name} before SEND")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG(1);")
+      sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, 0);")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
     return "\n".join(sync_lines) + "\n"
 
   def _add_sync_after_send(self):

@@ -213,7 +213,7 @@ class CodegenSuite:
       print(f"  {edge}")
 
     # Create send-recv pair manager for synchronization
-    pair_manager = SendRecvPairManager(sorted_edges, exclude_const=True)
+    pair_manager = SendRecvPairManager(sorted_edges, exclude_const=True, filter_contention=False)  # keep ALL inter-node pairs (handcraft needs pipeline sync)
     print(f"SendRecvPairManager created: {len(pair_manager.pairs)} send-recv pairs")
 
     # get use def chain
