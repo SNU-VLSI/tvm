@@ -3501,16 +3501,25 @@ class AnnotGenerator:
               groups = conv_call.attrs.groups if hasattr(conv_call.attrs, 'groups') else 1
               is_depthwise = (groups == IC) if groups > 1 else False
 
-              # Calculate atom_IC
+              # Calculate cost = number of atomic IMCE cores this conv occupies
+              # in one region, mirroring split_conv_to_atomic's split policy.
               if is_depthwise:
-                atom_IC = 32
+                # Depthwise is channel-independent (no cross-channel reduction):
+                # it runs off-array on the vpu at 16ch/block and split_conv_to_atomic
+                # slices it ONLY along OC in blocks of 32 (ic_split forced to 1).
+                # So its per-region footprint is LINEAR in channels, not IC*OC.
+                # Using the 2-D conv formula (ceil(IC/32)*ceil(OC/32)) here wrongly
+                # squares the channel count (e.g. 256ch -> 8*8=64), overflowing
+                # IMCE_NUM even though the real cost is ceil(256/32)=8.
                 atom_OC = 32
+                cost = math.ceil(OC / atom_OC)
               else:
+                # Regular/pointwise conv: the IMC array reduces input channels
+                # (IC -> array rows) and emits 64 output channels/pass (OC -> cols),
+                # so the footprint is genuinely 2-D: ceil(IC/atom_IC)*ceil(OC/64).
                 atom_IC = math.floor(256 / (KH * KW)) if (KH * KW) > 0 else 32
                 atom_OC = 64
-
-              # Calculate cost
-              cost = math.ceil(IC / atom_IC) * math.ceil(OC / atom_OC)
+                cost = math.ceil(IC / atom_IC) * math.ceil(OC / atom_OC)
               return max(1, cost)
             except Exception as e:
               debug_print(f"[getCost] Error calculating conv cost: {e}")
@@ -4737,6 +4746,18 @@ def constructTensorEdgeList(mod):
         # we will collect Var Nodes usage and its properties
         def _processInputNode(SrcGraphNode, SrcTag, DstGraphNodeID, DstTag, SplitIdx):
           if not self.InSubFunction:
+            # A top-level op may consume a Tuple of producers (e.g. a bare
+            # `concatenate` emitted by split_conv_to_atomic's OC-concat for a
+            # depthwise conv whose atomic slices were NOT wrapped into a
+            # split_concat_imcflow super-node). getCustomID(Tuple) returns a
+            # LIST of ids, which appendToTensorEdgeList cannot represent as a
+            # single edge. Emit one edge per Tuple field, mirroring the
+            # InSubFunction Tuple handling below.
+            if isinstance(SrcGraphNode, Tuple):
+              for field in SrcGraphNode.fields:
+                _processInputNode(field, SrcTag, DstGraphNodeID, DstTag,
+                                  self.getInputGraphNodeSplitIndex(field))
+              return True
             InputGraphNodeID = self.getCustomID(SrcGraphNode)
             self.appendToTensorEdgeList(InputGraphNodeID, DstGraphNodeID, SrcTag, DstTag, SplitIdx)
             return True
