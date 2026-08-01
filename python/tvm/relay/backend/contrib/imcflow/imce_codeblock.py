@@ -265,9 +265,49 @@ class LoadLBBlock(ImceCodeBlock):
     def load_lb_line(iter, fid=load_fifo_id, annot=annotation):
       return f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
 
+    # Sync-granularity (DESIGN §2 invariant II): the inode data-input rendezvous
+    # window is `SETFLAG(1); STANDBY(inode, 1); SETFLAG(0)` (get_recv_window_sync
+    # inode branch -> the only window carrying a `STANDBY(..., 1)`). The inode
+    # SendBlock does ONE such flag-1 handshake PER SEND packet, and each packet
+    # (32B) is exactly one LOAD_LB. When `repeat > 1` (dwconv: `repeat` == bitplane
+    # count == LOAD_LBs per output-column window) the default "one window around
+    # the whole `repeat` burst" gives the imce ONE handshake per `repeat` packets
+    # while the inode issues `repeat` handshakes -> a `repeat`:1 rendezvous-freq
+    # mismatch that wedges the very first STANDBY (imce_1_1 STANDBY(0,1) hangs;
+    # inode never re-raises flag 1). MobileNetV1's first depthwise reads the model
+    # input straight from the inode, so this inode-fed dwconv (repeat=4) is the
+    # first path to hit it -- ResNet8 conv from the inode has repeat==1 (per-window
+    # == per-LOAD_LB, no change), and DS-CNN dwconv is fed by an upstream imce
+    # (flag-2 window, `STANDBY(..., 2)`, excluded below). Fix: for the inode flag-1
+    # window with repeat>1, emit the window PER LOAD_LB (matching the inode's
+    # per-packet handshake).
+    is_inode_input_flag1_window = bool(
+        pre_lines
+        and any("STANDBY" in ln and ", 1)" in ln for ln in pre_lines)
+    )
+    per_load_lb_window = (
+        bugfix_off_mode()
+        and self.repeat > 1
+        and is_inode_input_flag1_window
+    )
+
+    def windowed_load_lb_line(iter, fid=load_fifo_id, annot=annotation):
+      body = ""
+      if pre_lines:
+        body += "\n".join(pre_lines) + "\n"
+      body += f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
+      if post_lines:
+        body += "\n".join(post_lines) + "\n"
+      return body
+
     def burst_body(iter):
       # one window per outer-loop iteration wrapping the `repeat` LOAD_LBs
       body = ""
+      if per_load_lb_window:
+        # inode-fed dwconv: one flag-1 handshake PER LOAD_LB to match the inode
+        # SendBlock's per-packet rendezvous frequency.
+        body += SimpleFor(self.repeat, windowed_load_lb_line).render() + "\n"
+        return body
       if pre_lines:
         body += "\n".join(pre_lines) + "\n"
       if self.repeat > 1:
@@ -2036,6 +2076,23 @@ class DWConvBlock(ImceCallCodeBlock):
       # src_mask indicates which channels in the 16-channel group are valid
       channels_in_group = min(16, self.channels - bshr_sel * 16)
       src_mask = channels_in_group - 1  # 0-indexed mask (15 for full group)
+
+      # BUGFIX knob (bugfix_off_mode()): a DWCONV group with channels_in_group<16
+      # (e.g. MobileNetV1's 8-channel depthwise) drives only the valid lanes. The
+      # vpu masks the unused blocks (block_mask -> vpu_wmask, BWEN active-high =
+      # mask-out) so the destination GPR's UPPER lanes are NEVER written and stay
+      # X. When imce_1_1 SENDs that raw partial psum straight to the next imce
+      # (split standalone-DWCONV path), the NoC TX carries X on the undriven lanes;
+      # BUGFIX-off has no X-masking so the flow_if `word_test` (^data !== 'x)
+      # $fatals after 100 such words (imce_intf_tx[4] = imce_1_1 local TX). Widen
+      # src_mask to 15 so ALL 16 blocks are block_selected => wmask=0 => every lane
+      # is WRITTEN (upper lanes accumulate the zero-padded upper input channels ->
+      # defined). The downstream minmaxquant only reads the valid channels, so the
+      # extra (zero) upper lanes are numerically inert. ResNet8 has no DWCONV;
+      # DS-CNN dwconv groups are full 16-lane (channels_in_group==16) => predicate
+      # never fires => byte-identical.
+      if bugfix_off_mode() and channels_in_group < 16:
+        src_mask = 15
 
       # Iterate over weight bitplanes (8 bitplanes for int8 weights)
       for shift_amt in range(self.num_weight_bitplanes):
