@@ -9,7 +9,7 @@
 - mock: fixtures/ 의 canned txt 를 라인별로 읽되, per-sample 경계마다 delay_ms 만큼 sleep 해
         "실시간처럼" 재생. (실제 데모에서는 sleep 없음.)
 - chip: run_dataset_eval.sh 스텝6의 REMOTE_CMD 를 그대로 복제해 ssh 로 직접 실행하고,
-        그 stdout 을 line-buffered 로 흘린다. 이번 세션에서는 호출하지 않는다(배선만).
+        그 stdout 을 line-buffered 로 흘린다. 노트북에서 실연결 검증 완료(2026-07-27).
 """
 
 import os
@@ -31,6 +31,17 @@ def _mock_lines(cfg: dict) -> Iterator[str]:
             if "Predicted:" in line and "Result:" in line:
                 if delay > 0:
                     time.sleep(delay)
+
+
+def _pgrep_pat(cfg: dict) -> str:
+    """pgrep/pkill 용 패턴.
+
+    첫 글자를 [] 로 감싸는 고전적 트릭. 이걸 안 하면 패턴을 담은 원격 셸 자신의
+    커맨드라인이 -f 매칭에 걸려, pgrep 은 항상 자기를 세고 pkill 은 자기(=래퍼 셸)를
+    죽인다. 래퍼가 죽으면 커맨드 꼬리의 clear_time+warmup 이 실행되지 않는다.
+    """
+    exe = cfg["chip"]["dataset_exec"]
+    return f"[{exe[0]}]{exe[1:]}"
 
 
 def _build_remote_cmd(cfg: dict) -> str:
@@ -60,19 +71,40 @@ def _build_remote_cmd(cfg: dict) -> str:
     )
 
 
-def _chip_lines(cfg: dict) -> Iterator[str]:
-    """실제 칩 SSH 실행. ── 이번 세션에서는 호출되지 않는다(배선만). ──
-
-    scan_steps.sh 의 scan_ssh_once 조립을 그대로 미러:
-        ssh -o BatchMode=yes -p <port> <user>@<host> "<remote_cmd>"
-    노트북 ~/.ssh/config 의 host 별칭(내부IP) + 키교환이 전제. README 이식 가이드 참조.
-    """
+def _ssh_argv(cfg: dict) -> list:
+    """scan_steps.sh 의 scan_ssh_once 조립을 그대로 미러한 ssh 인자 앞부분."""
     c = cfg["chip"]
-    remote_cmd = _build_remote_cmd(cfg)
-    ssh_argv = ["ssh"]
+    argv = ["ssh"]
     if c.get("auth_method", "key") == "key":
-        ssh_argv += ["-o", "BatchMode=yes"]
-    ssh_argv += ["-p", str(c["ssh_port"]), f"{c['ssh_user']}@{c['ssh_host']}", remote_cmd]
+        argv += ["-o", "BatchMode=yes"]
+    return argv + ["-p", str(c["ssh_port"]), f"{c['ssh_user']}@{c['ssh_host']}"]
+
+
+def kill_remote(cfg: dict, timeout: float = 30.0) -> bool:
+    """원격에 남은 추론 프로세스를 정리한다.
+
+    로컬 ssh 클라이언트를 terminate 해도 원격 프로세스는 살아남을 수 있다(그대로 두면
+    다음 실행과 칩에서 경합 → SoC wedge). stop 경로에서 반드시 같이 호출할 것.
+    """
+    # [e]xecute... 패턴이 아니면 pkill 이 자기를 담은 래퍼 셸까지 죽여,
+    # 커맨드 꼬리의 clear_time+warmup 이 실행되지 않는다.
+    argv = _ssh_argv(cfg) + ["-o", "ConnectTimeout=10", f'pkill -f "{_pgrep_pat(cfg)}"']
+    try:
+        # pkill 은 죽일 게 없으면 exit 1 — 실패가 아니므로 returncode 는 보지 않는다.
+        subprocess.run(argv, timeout=timeout, capture_output=True)
+        return True
+    except Exception:
+        return False
+
+
+def _chip_lines(cfg: dict, on_proc=None) -> Iterator[str]:
+    """실제 칩 SSH 실행. stdout 을 line-buffered 로 흘린다.
+
+    on_proc: Popen 을 넘겨받을 콜백. 호출자(app._RunHub)가 이 핸들로 중간 정지를 건다.
+             핸들을 밖으로 안 빼면 제너레이터 안에 갇혀 stop 을 걸 수 없다.
+    """
+    remote_cmd = _build_remote_cmd(cfg)
+    ssh_argv = _ssh_argv(cfg) + [remote_cmd]
 
     proc = subprocess.Popen(
         ssh_argv,
@@ -81,6 +113,8 @@ def _chip_lines(cfg: dict) -> Iterator[str]:
         bufsize=1,  # line-buffered
         text=True,
     )
+    if on_proc is not None:
+        on_proc(proc)
     try:
         for line in proc.stdout:  # 도착하는 대로 (sleep 없음 — 칩 실제 추론 속도 그대로)
             yield line
@@ -89,12 +123,12 @@ def _chip_lines(cfg: dict) -> Iterator[str]:
         proc.wait()
 
 
-def iter_lines(cfg: dict) -> Iterator[str]:
+def iter_lines(cfg: dict, on_proc=None) -> Iterator[str]:
     profile = cfg.get("profile", "mock")
     if profile == "mock":
-        return _mock_lines(cfg)
+        return _mock_lines(cfg)     # mock 은 프로세스가 없어 on_proc 무의미 (루프에서 정지)
     elif profile == "chip":
-        return _chip_lines(cfg)
+        return _chip_lines(cfg, on_proc=on_proc)
     raise ValueError(f"unknown profile: {profile!r} (expected 'mock' or 'chip')")
 
 

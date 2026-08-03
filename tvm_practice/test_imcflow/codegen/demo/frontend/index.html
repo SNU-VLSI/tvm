@@ -6,41 +6,143 @@
 <style>
   :root { --ok:#1db954; --bad:#e0455e; --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e; }
   * { box-sizing: border-box; }
-  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+  /* 한 화면에 다 담는다: body 를 세로 flex 로 두고 main 이 남는 높이를 전부 먹는다.
+     그래야 좌측 입력 패널이 "배정된 블록"을 높이까지 꽉 채울 수 있다. */
+  html, body { height:100%; }
+  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg);
+         display:flex; flex-direction:column; overflow:hidden; }
   header { display:flex; justify-content:space-between; align-items:center;
-           padding:16px 28px; border-bottom:1px solid var(--line); }
-  header h1 { font-size:22px; margin:0; font-weight:600; }
-  #acc-big { font-size:34px; font-weight:700; }
-  main { display:grid; grid-template-columns: 420px 1fr; gap:24px; padding:28px; }
+           padding:10px 24px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:20px; margin:0; font-weight:600; }
+  #acc-big { font-size:30px; font-weight:700; }
+  main { flex:1; min-height:0; display:grid; grid-template-columns: 300px 1fr;
+         gap:20px; padding:18px 24px; align-items:stretch; }
+  /* 입력 패널은 배정된 블록(좌측 열 × main 높이)을 꽉 채운다.
+     예전엔 wrap 에 aspect-ratio 를 걸었는데, kws MFCC(10/49) 처럼 세로로 긴 입력에서는
+     열 폭에 비율이 곱해져 높이가 2000px 을 넘어 화면 밖으로 잘렸다. */
   .imgwrap { background:var(--panel); border:1px solid var(--line); border-radius:12px;
-             display:flex; align-items:center; justify-content:center; aspect-ratio:1; }
-  #sample-img { width:100%; height:100%; image-rendering:pixelated; border-radius:11px; }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 26px; }
-  .sample-id { color:var(--dim); font-size:15px; margin-bottom:6px; }
-  .verdict { font-size:28px; font-weight:700; margin:4px 0 18px; }
+             display:flex; align-items:center; justify-content:center; padding:10px; min-height:0; }
+  /* ⚠️ width/height 는 반드시 100%. auto 로 두면 PNG 고유 크기(kws 는 10x49px)로 렌더돼
+     손톱만 하게 나온다 — max-* 는 축소만 하고 확대는 하지 않는다.
+     비율은 object-fit:contain 이 지키므로 블록 안에서 최대 크기로 확대된다. */
+  #sample-img { width:100%; height:100%; object-fit:contain;
+                image-rendering:pixelated; border-radius:8px; }
+  .rightcol { display:flex; flex-direction:column; gap:20px; min-width:0; min-height:0; overflow-y:auto; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 22px; }
+  .sample-id { color:var(--dim); font-size:14px; margin-bottom:4px; }
+  .verdict { font-size:22px; font-weight:700; margin:2px 0 12px; }
   .verdict.ok { color:var(--ok); } .verdict.bad { color:var(--bad); }
-  .row { display:flex; align-items:center; gap:12px; margin:9px 0; font-size:18px; }
+  .row { display:flex; align-items:center; gap:12px; margin:6px 0; font-size:16px; }
   .row .name { width:120px; } .row .pct { width:70px; text-align:right; font-variant-numeric:tabular-nums; }
   .bar { flex:1; height:16px; background:#21262d; border-radius:8px; overflow:hidden; }
   .bar > span { display:block; height:100%; background:#3b82f6; }
   .row.truth .name { font-weight:700; }
   .row.truth .bar > span { background:var(--ok); }
-  footer { display:flex; gap:40px; padding:14px 28px; border-top:1px solid var(--line);
-           color:var(--dim); font-size:16px; font-variant-numeric:tabular-nums; }
+  footer { display:flex; gap:36px; padding:9px 24px; border-top:1px solid var(--line);
+           color:var(--dim); font-size:14px; font-variant-numeric:tabular-nums; }
   footer b { color:var(--fg); }
+  .hdr-right { display:flex; align-items:center; gap:14px; }
+  .btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px;
+         padding:8px 16px; font-size:15px; cursor:pointer; font-family:inherit; }
+  .btn:hover:not(:disabled) { border-color:var(--dim); }
+  .btn:disabled { opacity:.4; cursor:default; }
+  .wl-tabs { display:flex; gap:8px; }
+  .wl { background:transparent; color:var(--dim); border:1px solid var(--line); border-radius:8px;
+        padding:6px 14px; font-size:14px; cursor:pointer; font-family:inherit; }
+  .wl:hover:not(:disabled) { color:var(--fg); border-color:var(--dim); }
+  .wl.active { background:#1f6feb22; color:var(--fg); border-color:#1f6feb; font-weight:600; }
+  .wl:disabled { opacity:.5; cursor:default; }
+
+  /* confusion matrix — 클래스 수가 2(vww)/10(resnet8)/12(kws) 로 달라 폭을 고정하지 않는다.
+     위치는 예측 확률 패널 바로 아래(오른쪽 열). */
+  .cm-head { display:flex; align-items:baseline; gap:14px; margin-bottom:12px; }
+  .cm-title { font-size:18px; font-weight:600; }
+  .cm-scroll { overflow-x:auto; }          /* 12클래스에서 좁은 화면이면 가로 스크롤 */
+  #cm { border-collapse:collapse; font-variant-numeric:tabular-nums; font-size:13px; }
+  #cm th, #cm td { border:1px solid var(--line); padding:2px 6px; text-align:right; min-width:32px; }
+  #cm th.rowhead { text-align:right; color:var(--dim); font-weight:600; white-space:nowrap; }
+  #cm th.colhead { color:var(--dim); font-weight:600; height:70px; padding:2px; min-width:24px; }
+  /* 열 라벨은 12개까지 가므로 세로쓰기 — 가로로 두면 표가 화면을 넘는다 */
+  #cm th.colhead > span { writing-mode:vertical-rl; transform:rotate(180deg); white-space:nowrap; }
+  #cm td.zero { color:#484f58; }           /* 0 은 눌러서 패턴이 드러나게 */
+  #cm td.diag { font-weight:700; }
+  #cm th.corner { border:none; }
+  #cm td.recall { border-left:2px solid var(--line); color:var(--dim); }
+
+  /* confusion matrix(고유 폭) + pipelined(남는 폭) 을 나란히 */
+  .lowerrow { display:grid; grid-template-columns:auto 1fr; gap:20px; align-items:start; min-width:0; }
+  .cm-panel { min-width:0; }
+
+  /* pipelined 빠른 실행 패널 */
+  .pl-head { display:flex; align-items:center; gap:14px; margin-bottom:10px; flex-wrap:wrap; }
+  /* 문구는 한 바퀴를 다 채운 뒤에만 뜬다(=완주의 보상). 재생 시작 때 다시 숨긴다. */
+  .pl-tag { color:var(--ok); font-size:17px; font-weight:700; margin-top:10px; }
+  .pl-note { color:var(--dim); font-size:12px; line-height:1.4; margin-top:8px; }
+
+  /* dev: 전압 튜닝 패널. 데모 화면을 밀지 않도록 우하단에 떠 있는 오버레이로 둔다. */
+  .tune { position:fixed; right:16px; bottom:16px; width:320px; z-index:50;
+          background:var(--panel); border:1px solid var(--line); border-radius:12px;
+          padding:12px 14px; font-size:13px; box-shadow:0 8px 28px #0009; }
+  .tune-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+  .tune-title { font-weight:600; font-size:14px; }
+  .tune-dev { color:#d29922; border:1px solid #d29922; border-radius:5px;
+              padding:0 5px; font-size:10px; font-weight:700; vertical-align:middle; }
+  .tune-phase { margin-left:auto; color:var(--dim); font-size:12px; }
+  .tune-rails { display:grid; grid-template-columns:repeat(auto-fit,minmax(88px,1fr)); gap:4px 10px;
+                color:var(--dim); font-variant-numeric:tabular-nums; margin-bottom:8px; }
+  .tune-rails b { color:var(--fg); font-weight:600; }
+  .tune-rails .swept { color:var(--ok); }
+  .tune-now { font-variant-numeric:tabular-nums; margin-bottom:6px; }
+  .tune-bar { height:6px; background:#21262d; border-radius:3px; overflow:hidden; }
+  .tune-bar > span { display:block; height:100%; width:0; background:#d29922; }
+  .tune-plot { display:flex; align-items:flex-end; gap:2px; height:46px; margin-top:8px; }
+  .tune-plot i { flex:1; background:#30363d; border-radius:2px 2px 0 0; min-height:2px; }
+  .tune-plot i.best { background:var(--ok); }
+  .tune-plot i.base { outline:1px solid #1f6feb; }
+  .pl-canvas { width:100%; display:block; border-radius:8px; background:#0b0f14;
+               image-rendering:pixelated; }
+  .pl-bar { height:8px; background:#21262d; border-radius:4px; overflow:hidden; margin-top:10px; }
+  .pl-bar > span { display:block; height:100%; width:0; background:var(--ok); }
+  .pl-foot { display:flex; justify-content:space-between; color:var(--dim);
+             font-size:13px; font-variant-numeric:tabular-nums; margin-top:6px; }
 </style>
 </head>
 <body>
 <header>
   <h1 id="title">IMCFlow chip demo</h1>
-  <div id="acc-big">—</div>
+  <div id="wl-tabs" class="wl-tabs"></div>
+  <div class="hdr-right">
+    <button id="btn-stop" class="btn">stop</button>
+    <button id="btn-restart" class="btn">restart</button>
+    <div id="acc-big">—</div>
+  </div>
 </header>
 <main>
   <div class="imgwrap"><img id="sample-img" alt="sample" /></div>
-  <div class="panel">
-    <div class="sample-id" id="sample-id">waiting…</div>
-    <div class="verdict" id="verdict">&nbsp;</div>
-    <div id="top5"></div>
+  <div class="rightcol">
+    <div class="panel">
+      <div class="sample-id" id="sample-id">waiting…</div>
+      <div class="verdict" id="verdict">&nbsp;</div>
+      <div id="top5"></div>
+    </div>
+    <div class="lowerrow">
+      <div class="panel cm-panel">
+        <div class="cm-head">
+          <span class="cm-title">confusion matrix</span>
+        </div>
+        <div class="cm-scroll"><table id="cm"></table></div>
+      </div>
+      <div class="panel pl-panel" id="pl-panel" hidden>
+        <div class="pl-head">
+          <span class="cm-title">on-chip execution speed</span>
+        </div>
+        <canvas id="pl-canvas" class="pl-canvas"></canvas>
+        <div class="pl-bar"><span id="pl-fill"></span></div>
+        <div class="pl-foot"><span id="pl-count">—</span></div>
+        <div class="pl-tag" id="pl-tag" hidden></div>
+        <div class="pl-note">*off-chip CPU to NPU transfer time is excluded as it can be hidden in practice</div>
+      </div>
+    </div>
   </div>
 </main>
 <footer>
@@ -49,10 +151,76 @@
   <div>running acc: <b id="acc-foot">0.0%</b></div>
   <div>profile: <b id="profile">—</b></div>
   <div>chip acc (xcheck): <b id="chipacc">—</b></div>
+  <div id="tune-foot" hidden>PS: <b id="tune-foot-v">—</b></div>
 </footer>
+
+<!-- dev: 전압 튜닝 진행 상황. 스윕이 돌 때만(또는 ?dev=1) 뜬다. -->
+<div id="tune" class="tune" hidden>
+  <div class="tune-head">
+    <span class="tune-title">voltage tuning <span class="tune-dev">dev</span></span>
+    <span class="tune-phase" id="tune-phase">—</span>
+  </div>
+  <div class="tune-rails" id="tune-rails"></div>
+  <div class="tune-now" id="tune-now">—</div>
+  <div class="tune-bar"><span id="tune-fill"></span></div>
+  <div class="tune-plot" id="tune-plot"></div>
+</div>
 
 <script>
 let CLASSES = [], seen = 0, correct = 0, total = 0;
+let CM = [];   // CM[정답][예측] 누적 카운트
+
+function cmReset() {
+  const n = CLASSES.length;
+  CM = Array.from({length: n}, () => new Array(n).fill(0));
+  cmRender();
+}
+
+function cmAdd(label, predicted) {
+  // 칩이 범위 밖 값을 내보내도 화면이 죽지 않게 방어 (예: 파싱 이상, 클래스 수 불일치)
+  if (!CM.length || label == null || predicted == null) return;
+  if (label < 0 || label >= CM.length || predicted < 0 || predicted >= CM.length) return;
+  CM[label][predicted] += 1;
+}
+
+// 리플레이(늦게 붙은 뷰어가 수천 샘플을 한 번에 받는 경우)에 표를 매 샘플 다시 그리면
+// 화면이 멈춘다. 카운트는 항상 올리고, 그리기는 프레임당 한 번으로 합친다.
+let _cmDirty = false;
+function cmScheduleRender() {
+  if (_cmDirty) return;
+  _cmDirty = true;
+  requestAnimationFrame(() => { _cmDirty = false; cmRender(); });
+}
+
+function cmRender() {
+  const n = CLASSES.length;
+  const t = document.getElementById("cm");
+  if (!t || !n) return;
+
+  // 헤더: 좌상단 빈칸 + 예측 클래스(세로쓰기) + recall 열
+  let html = '<tr><th class="corner"></th>';
+  for (let j = 0; j < n; j++) html += `<th class="colhead"><span>${CLASSES[j]}</span></th>`;
+  html += '<th class="colhead"><span>recall</span></th></tr>';
+
+  for (let i = 0; i < n; i++) {
+    const rowSum = CM[i].reduce((a, b) => a + b, 0);
+    html += `<tr><th class="rowhead">${CLASSES[i]}</th>`;
+    for (let j = 0; j < n; j++) {
+      const v = CM[i][j];
+      // 행 정규화로 칠한다. 클래스별 표본 수가 달라도(kws _unknown_ 이 특히 많다)
+      // 행마다 "이 정답이 어디로 갔나"가 같은 기준으로 읽힌다.
+      const frac = rowSum ? v / rowSum : 0;
+      const bg = v === 0 ? "transparent"
+               : (i === j ? `rgba(29,185,84,${0.12 + 0.68 * frac})`      // 대각선 = 초록
+                          : `rgba(224,69,94,${0.12 + 0.68 * frac})`);    // 오분류 = 빨강
+      const cls = (i === j ? "diag" : "") + (v === 0 ? " zero" : "");
+      html += `<td class="${cls}" style="background:${bg}" title="${CLASSES[i]} → ${CLASSES[j]}: ${v}">${v}</td>`;
+    }
+    const rec = rowSum ? (100 * CM[i][i] / rowSum) : 0;
+    html += `<td class="recall">${rowSum ? rec.toFixed(0) + "%" : "—"}</td></tr>`;
+  }
+  t.innerHTML = html;
+}
 
 function softmax(logits) {
   const m = Math.max(...logits);
@@ -91,25 +259,292 @@ function render(ev) {
   document.getElementById("acc-foot").textContent = acc.toFixed(1) + "%";
   document.getElementById("seen").textContent = seen;
   document.getElementById("correct").textContent = correct;
+
+  cmAdd(ev.label, ev.predicted);
+  cmScheduleRender();
 }
 
-async function boot() {
-  const cfg = await (await fetch("/config")).json();
-  CLASSES = cfg.classes;
-  total = cfg.num_samples;
-  document.getElementById("title").textContent = cfg.title;
-  document.getElementById("total").textContent = total;
-  document.getElementById("profile").textContent = cfg.profile;
+let ES = null, PROFILE = "—", WORKLOAD = null, RUNNING = false;
+// 이번 실행에서 칩이 첫 샘플을 내놓았는가. on-chip execution speed 재생의 시작 신호다.
+let SAW_SAMPLE = false;
 
-  const es = new EventSource("/stream");
-  es.onmessage = (e) => {
+function setRunning(on) {
+  RUNNING = on;
+  document.getElementById("btn-stop").disabled = !on;
+  document.getElementById("btn-restart").disabled = on;   // 정지 상태에서만 재시작
+  // 멈추는 건 여기서(stop/끊김/완료). 시작은 여기가 아니라 "첫 샘플 도착" 시점이다 —
+  // 연결 직후에 시작하면 칩 warmup 동안 재생만 먼저 돌아 싱크가 깨진다.
+  if (!on) plStop();
+}
+
+function connect() {
+  // 카운터 초기화 — 재시작은 샘플 0 부터 다시 시작한다.
+  seen = 0; correct = 0; SAW_SAMPLE = false;
+  document.getElementById("seen").textContent = 0;
+  document.getElementById("correct").textContent = 0;
+  document.getElementById("acc-big").textContent = "—";
+  document.getElementById("acc-foot").textContent = "0.0%";
+  document.getElementById("chipacc").textContent = "—";
+  document.getElementById("sample-id").textContent = "waiting…";
+  document.getElementById("profile").textContent = PROFILE;
+  cmReset();   // 재시작은 행렬도 처음부터
+
+  setRunning(true);
+  setTabsDisabled(false);   // 전환이 끝나 다시 고를 수 있는 상태
+  ES = new EventSource("/stream");
+  ES.onmessage = (e) => {
     const ev = JSON.parse(e.data);
-    if (ev.type === "sample") render(ev);
+    if (ev.type === "sample") {
+      // 첫 샘플 = 칩이 warmup 을 끝내고 실제로 돌기 시작한 순간. 여기에 재생을 맞춘다.
+      if (!SAW_SAMPLE) { SAW_SAMPLE = true; plStart(); }
+      render(ev);
+    }
     else if (ev.type === "progress") document.getElementById("chipacc").textContent = ev.chip_accuracy.toFixed(1) + "%";
     // 백엔드가 ssh 실패 등을 조용히 삼키지 않고 올려준다 — 화면에 그대로 표시.
     else if (ev.type === "error") document.getElementById("profile").textContent = "ERROR: " + ev.message;
-    else if (ev.type === "done") es.close();
+    else if (ev.type === "stopped") document.getElementById("sample-id").textContent = "stopped (사용자 중단)";
+    else if (ev.type === "done") { ES.close(); ES = null; setRunning(false); }
   };
+}
+
+// ── pipelined(시뮬레이션) 빠른 실행 ──
+// 실시간 데모는 atomic 모드라 샘플당 수십~수백 ms 다. 이 패널은 pipelined 모드의
+// 시뮬레이션 속도(resnet8 1.209ms, kws 0.226ms)로 전체 데이터셋을 훑는 데 걸리는
+// 시간을 그대로 재현한다. 정확도는 다루지 않는다 — 속도만 보여주는 패널이다.
+// 칩이 붙어 실제로 도는 동안에만 재생한다. 한 바퀴가 끝나면 5초 쉬고 다시 처음부터.
+// stop 이나 스트림 종료(칩 끊김 포함)면 즉시 멈춘다 — 칩이 안 도는데 옆에서 계속
+// 빠른 재생만 흐르면 무엇을 보고 있는지 오해를 준다.
+const PL_LOOP_GAP_MS = 5000;
+let PL = null, PL_IMG = null, PL_RUNNING = false, PL_TIMER = null, PL_GEN = 0;
+
+function plSetup(meta) {
+  plStop();          // 워크로드가 바뀌면 이전 모자이크 재생을 반드시 끊는다
+  PL = meta;
+  const panel = document.getElementById("pl-panel");
+  if (!panel) return;
+  if (!meta) { panel.hidden = true; PL_IMG = null; return; }   // vww 처럼 수치가 없으면 숨김
+  panel.hidden = false;
+
+  const tag = document.getElementById("pl-tag");
+  tag.textContent = `finish in ~${meta.duration_s}s!  ·  ${meta.ms_per_sample} ms/sample`;
+  tag.hidden = true;
+  document.getElementById("pl-count").textContent =
+    `0 / ${meta.total_samples.toLocaleString()} samples`;
+  document.getElementById("pl-fill").style.width = "0";
+
+  // 모자이크는 워크로드마다 다른데 URL 이 /mosaic 로 같다. 캐시를 피하려고 쿼리를 붙인다.
+  const img = new Image();
+  img.onload = () => {
+    PL_IMG = img;
+    const c = document.getElementById("pl-canvas");
+    c.width = img.width; c.height = img.height;
+    plClear();
+    // 칩이 이미 샘플을 내놓고 있는 중에 로드가 끝났으면(워크로드 전환 직후 등) 바로 시작.
+    if (RUNNING && SAW_SAMPLE) plStart();
+  };
+  img.onerror = () => { PL_IMG = null; };
+  img.src = meta.mosaic_url + "?w=" + encodeURIComponent(WORKLOAD || "");
+}
+
+function plClear() {
+  const c = document.getElementById("pl-canvas");
+  if (!c || !c.getContext) return;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#0b0f14";
+  ctx.fillRect(0, 0, c.width, c.height);
+}
+
+function plStart() {
+  if (PL_RUNNING || !PL || !PL_IMG || !RUNNING) return;
+  plRun();
+}
+
+function plStop() {
+  // 세대 번호를 올려 진행 중이던 rAF 루프와 5초 대기 타이머를 모두 무효화한다.
+  PL_GEN += 1;
+  PL_RUNNING = false;
+  if (PL_TIMER) { clearTimeout(PL_TIMER); PL_TIMER = null; }
+}
+
+function plRun() {
+  if (PL_RUNNING || !PL || !PL_IMG) return;
+  PL_RUNNING = true;
+  const gen = ++PL_GEN;
+  document.getElementById("pl-tag").hidden = true;   // 완주해야 다시 뜬다
+  plClear();
+
+  const c = document.getElementById("pl-canvas");
+  const ctx = c.getContext("2d");
+  const cols = PL.cols, rows = PL.rows, ntiles = cols * rows;
+  const tw = PL_IMG.width / cols, th = PL_IMG.height / rows;
+  const durMs = PL.duration_s * 1000;
+  const t0 = performance.now();
+  let drawn = 0;
+
+  // 시간 기준으로 진행을 계산한다(프레임 기준이 아니라). 프레임이 밀려도 총 재생 시간이
+  // total_samples × ms_per_sample 와 정확히 같게 유지되어, 옆에 쓴 문구와 어긋나지 않는다.
+  function frame(now) {
+    if (gen !== PL_GEN) return;          // stop / 워크로드 전환으로 무효화된 루프
+    const p = Math.min(1, (now - t0) / durMs);
+    const target = Math.round(p * ntiles);
+    for (; drawn < target; drawn++) {
+      const cx = (drawn % cols) * tw, cy = Math.floor(drawn / cols) * th;
+      ctx.drawImage(PL_IMG, cx, cy, tw, th, cx, cy, tw, th);
+    }
+    const seen = Math.round(p * PL.total_samples);
+    document.getElementById("pl-fill").style.width = (p * 100).toFixed(1) + "%";
+    document.getElementById("pl-count").textContent =
+      `${seen.toLocaleString()} / ${PL.total_samples.toLocaleString()} samples`;
+
+    if (p < 1) { requestAnimationFrame(frame); return; }
+    document.getElementById("pl-tag").hidden = false;   // 완주 -> 문구 등장
+    PL_RUNNING = false;
+    PL_TIMER = setTimeout(() => {                       // 5초 쉬고 처음부터
+      PL_TIMER = null;
+      if (gen === PL_GEN && RUNNING) plRun();
+    }, PL_LOOP_GAP_MS);
+  }
+  requestAnimationFrame(frame);
+}
+
+// ── dev: 전압 튜닝 진행 표시 ──
+// 백엔드 /tuning 은 스윕 스크립트가 쓴 상태 파일을 읽어줄 뿐이다(PS 직접 접근 없음).
+// 스윕이 돌고 있을 때만 자동으로 뜨고, ?dev=1 이면 유휴 상태에서도 계속 보인다.
+const TUNE_FORCE = new URLSearchParams(location.search).get("dev") === "1";
+
+function tuneRender(st) {
+  const box = document.getElementById("tune");
+  const foot = document.getElementById("tune-foot");
+  const live = st && !st.stale && st.active;
+  if (!st || (!live && !TUNE_FORCE)) { box.hidden = true; foot.hidden = true; return; }
+  box.hidden = false;
+
+  document.getElementById("tune-phase").textContent =
+    (st.stale ? "stale" : st.phase || "—") + (st.error ? ` · ${st.error}` : "");
+
+  // 전 rail setpoint. 스윕 대상 rail 은 현재 인가값으로, 나머지는 baseline 으로 표시.
+  const p = st.point || {};
+  const rails = st.baseline || {};
+  const cur = (p.set_v != null) ? p.set_v : null;
+  document.getElementById("tune-rails").innerHTML = Object.keys(rails).map((r) => {
+    const v = (r === st.rail && cur != null) ? cur : rails[r];
+    const cls = (r === st.rail) ? "swept" : "";
+    return `<div class="${cls}">${r} <b>${Number(v).toFixed(4)}</b>V</div>`;
+  }).join("");
+
+  const footV = (st.rail && cur != null) ? `${st.rail} ${Number(cur).toFixed(4)}V` : "idle";
+  foot.hidden = false;
+  document.getElementById("tune-foot-v").textContent = footV;
+
+  const mv = (p.meas_v != null) ? ` meas ${Number(p.meas_v).toFixed(4)}V` : "";
+  const ac = (p.acc != null) ? ` → ${Number(p.acc).toFixed(1)}%` : "";
+  document.getElementById("tune-now").textContent =
+    p.i ? `${st.rail} ${Number(p.set_v).toFixed(4)}V${mv}${ac}  (${p.i}/${p.n})` : "—";
+  document.getElementById("tune-fill").style.width =
+    p.i ? (100 * p.i / p.n).toFixed(1) + "%" : "0";
+
+  // 지금까지 측정된 정확도 막대. 최고점은 초록, baseline 전압 지점은 파란 테두리.
+  const h = st.history || [];
+  if (h.length) {
+    const accs = h.map((x) => x.acc);
+    const lo = Math.min(...accs), hi = Math.max(...accs);
+    const baseV = (st.sweep || {}).base_v;
+    document.getElementById("tune-plot").innerHTML = h.map((x) => {
+      const frac = hi > lo ? (x.acc - lo) / (hi - lo) : 1;
+      const cls = (x.acc === hi ? "best " : "") + (Math.abs(x.set_v - baseV) < 1e-9 ? "base" : "");
+      return `<i class="${cls}" style="height:${(10 + 90 * frac).toFixed(0)}%" ` +
+             `title="${Number(x.set_v).toFixed(4)}V → ${Number(x.acc).toFixed(1)}%"></i>`;
+    }).join("");
+  } else {
+    document.getElementById("tune-plot").innerHTML = "";
+  }
+}
+
+async function tunePoll() {
+  try {
+    const r = await fetch("/tuning");
+    tuneRender(r.ok ? await r.json() : null);
+  } catch (e) { /* 서버가 잠깐 없어도 조용히 넘어간다 */ }
+  setTimeout(tunePoll, 2000);
+}
+
+// /config 를 읽어 화면 전체를 그 워크로드에 맞춘다. 최초 기동과 워크로드 전환이 같은 경로.
+async function applyConfig() {
+  const cfg = await (await fetch("/config")).json();
+  CLASSES = cfg.classes;
+  total = cfg.num_samples;
+  PROFILE = cfg.profile;
+  WORKLOAD = cfg.workload;
+  document.getElementById("title").textContent = cfg.title;
+  document.getElementById("total").textContent = total;
+
+  // Adapt the input panel to the workload: MFCC (49x10) / COCO (96x96) / CIFAR (32x32).
+  // 비율은 PNG 의 고유 크기 + object-fit:contain 이 알아서 지킨다. cfg.display.aspect 를
+  // wrap 에 걸면 세로로 긴 입력(kws 10/49)에서 박스가 화면 밖으로 자라므로 쓰지 않는다.
+  const d = cfg.display || {};
+  const img = document.getElementById("sample-img");
+  if (img) img.style.imageRendering = (d.pixelated === false) ? "auto" : "pixelated";
+
+  renderTabs(cfg.workloads || [cfg.workload], cfg.workload);
+  plSetup(cfg.pipelined || null);
+  return cfg;
+}
+
+function renderTabs(list, active) {
+  const box = document.getElementById("wl-tabs");
+  if (!box) return;
+  box.innerHTML = "";
+  list.forEach((name) => {
+    const b = document.createElement("button");
+    b.className = "wl" + (name === active ? " active" : "");
+    b.textContent = name;
+    b.onclick = () => switchWorkload(name);
+    box.appendChild(b);
+  });
+}
+
+function setTabsDisabled(on) {
+  document.querySelectorAll("#wl-tabs .wl").forEach((b) => { b.disabled = on; });
+}
+
+async function switchWorkload(name) {
+  if (name === WORKLOAD) return;   // 같은 워크로드 재시작은 restart 버튼 쪽
+  setTabsDisabled(true);
+  setRunning(false);
+  // 먼저 스트림을 끊는다. 서버도 /workload 안에서 정지시키지만, 끊지 않으면 죽어가는
+  // 실행의 잔여 이벤트가 새 워크로드 화면에 섞여 들어온다(클래스 수가 달라 행렬이 깨진다).
+  if (ES) { ES.close(); ES = null; }
+  document.getElementById("sample-id").textContent = `${name} 로 전환 중…`;
+  let r;
+  try { r = await fetch("/workload/" + name, {method: "POST"}); }
+  catch (e) { r = null; }
+  if (!r || !r.ok) {
+    document.getElementById("sample-id").textContent = `${name} 전환 실패`;
+    setTabsDisabled(false);
+    return;
+  }
+  await applyConfig();   // CLASSES 가 먼저 바뀌어야 connect() 의 cmReset 이 새 크기로 잡힌다
+  connect();             // 새 워크로드로 처음부터 시작
+}
+
+async function boot() {
+  await applyConfig();
+
+  document.getElementById("btn-stop").onclick = async (e) => {
+    e.target.disabled = true;
+    // 서버가 워커 종료까지 기다렸다 응답한다. done 이벤트로 버튼 상태가 정리된다.
+    await fetch("/stop", {method: "POST"});
+  };
+  document.getElementById("btn-restart").onclick = async (e) => {
+    e.target.disabled = true;
+    if (ES) { ES.close(); ES = null; }
+    const r = await fetch("/restart", {method: "POST"});
+    if (r.ok) connect();
+    else { setRunning(false); document.getElementById("sample-id").textContent = "restart 실패 — 이전 실행 정리 중"; }
+  };
+
+  connect();
+  tunePoll();
 }
 boot();
 </script>

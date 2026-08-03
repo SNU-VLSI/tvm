@@ -1,0 +1,83 @@
+# DS-CNN / Google Speech Commands (12-class KWS) chip inference-only demo config.
+# Select with DEMO_WORKLOAD=kws. Mirrors resnet8.yaml; task-specific fields differ.
+# Input sample = 49x10 log-Mel MFCC, shown as a viridis heatmap.
+
+task:
+  name: kws
+  title: "DS-CNN on IMCFlow chip · Speech Commands (KWS)"
+  # logit index -> class name. Order from CIM utils/data_loader.py kws12 mapping:
+  #   0..9 keywords, 10 unknown, 11 silence.
+  # ⚠️ yes/no/on/off 는 YAML 1.1 에서 boolean 이다. 따옴표 없이 두면 "yes" -> True 로
+  #    파싱돼 화면에 클래스명이 `true` 로 뜬다. 전부 인용부호 필수.
+  classes:
+    - "yes"
+    - "no"
+    - up
+    - down
+    - left
+    - right
+    - "on"
+    - "off"
+    - stop
+    - go
+    - _unknown_
+    - _silence_
+  num_classes: 12
+
+# 실행 소스: "mock"(canned txt 재생) | "chip"(실제 SSH).
+profile: chip
+
+mock:
+  # 아직 canned fixture 없음. mock 로 돌리려면 fixture 를 채우고 이 경로를 갱신.
+  fixture: fixtures/kws_iter008_100.txt
+  delay_ms: 300
+
+chip:
+  ssh_host: petalinux2
+  ssh_port: 1326
+  ssh_user: root
+  auth_method: key
+  console_log_level: RAW
+  remote_base_path: /home/root/tvm/tvm_practice/test_imcflow/codegen
+  # warmup-off per-model binary (IMCFLOW_NO_PERKERNEL_WARMUP=1 at codegen).
+  # Co-resident on chip with .resnet8/.vww. per-sample ~0.12 s (8 imcflow kernels).
+  binary_dir: host_binary_make.dataset.kws
+  dataset_exec: execute_graph_for_dataset
+  dataset_name: kws_sc            # dataset/<name>/_staged for staged_npy image source
+  eval_cpu: 3
+  debug_dump_dir: /var/volatile/debug_nodes
+  heartbeat_path: /var/volatile/imcflow_chip_heartbeat.txt
+  warmup_dir: /home/root/imcflow/xilinx/petalinux-csrc   # per-RUN warmup 1회 (추론 전/후)
+  graph_path: host_binary_make.dataset.kws/build/mlf/executor-config/graph/default.graph
+  params_path: host_binary_make.dataset.kws/build/mlf/parameters/default.params
+  images_path: dataset/kws_sc/_staged/images.npy
+  labels_path: dataset/kws_sc/_staged/labels.npy
+  remote_result_path: /tmp/tvm_dataset_results.txt
+
+run:
+  # dataset/kws_sc/_staged = 100샘플. 실측 ~0.12 s/샘플 (warmup-off).
+  # test set 전체(12105)를 돌리려면 images_path/labels_path 를 dataset/kws_sc/{images,labels}.npy
+  # (칩에 이미 적재됨) 로 바꾸고 num_samples=12105. 단 뷰어용 staged_images_fixture 도
+  # 12105 배열로 바꿔야 idx>=100 사진이 나온다. 소요 약 24분.
+  num_samples: 100
+
+# Input display: 49x10 MFCC (single channel) rendered as a viridis heatmap from
+# the staged array directly (no sample_map — staged 순번 그대로).
+image_source: staged_npy
+
+# ── on-chip execution speed 패널 ── 자세한 설명은 resnet8.yaml 참조.
+pipelined:
+  ms_per_sample: 0.226
+  total_samples: 1000           # 1000 × 0.226ms = 0.23초 (세 워크로드 중 가장 짧다)
+  mosaic: fixtures/kws_mosaic.png
+  mosaic_cols: 100
+  mosaic_rows: 10
+# Baked staged inputs (git-lfs on laptop). Same 100 samples the chip runs, so the
+# displayed MFCC matches each result. Falls back to codegen/dataset/kws_sc/_staged
+# on the server if this fixture is absent.
+staged_images_fixture: fixtures/kws_staged_images.npy
+display:
+  kind: mfcc_heatmap
+  aspect: "10 / 49"     # width/height (MFCC is 49 tall x 10 wide)
+  pixelated: true
+# sample_map 없음: staged 배열을 순번대로 사용 (항등 매핑).
