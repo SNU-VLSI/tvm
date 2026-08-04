@@ -13,6 +13,17 @@ cd "$(dirname "$0")"
 VENV=".venv"
 PORT="${PORT:-8079}"
 
+# 포트 선점 확인을 맨 앞에서 한다. 안 그러면 venv 설치를 다 마친 뒤에야 uvicorn 이
+# "address already in use" 를 뱉는데, 그 메시지가 "Application startup complete" 뒤에
+# 묻혀서 원인이 잘 안 보인다.
+if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q .; then
+  echo "[error] 포트 $PORT 를 이미 다른 프로세스가 쓰고 있습니다."
+  ss -ltnpH "sport = :$PORT" 2>/dev/null | sed 's/^/        /'
+  echo "        먼저 내리세요:  ./stop_demo.sh"
+  echo "        다른 포트로 띄우려면:  PORT=8080 $0 ${*:-}"
+  exit 1
+fi
+
 if [[ "${1:-}" != "--no-setup" ]]; then
   echo "[setup] creating venv + installing requirements (최초 1회, torchvision 다운로드로 수 분 걸릴 수 있음)..."
   python3 -m venv "$VENV"
@@ -37,6 +48,13 @@ fi
 if [[ "${DEMO_WORKLOAD:-resnet8}" == "resnet8" && ! -s fixtures/cifar10_test_images.npy ]]; then
   echo "[warn] fixtures/cifar10_test_images.npy 가 비어있음 — git-lfs pull 이 필요할 수 있습니다:"
   echo "       git lfs install && git lfs pull"
+fi
+# 칩 stdout 원본 로그. 웹앱 로그(uvicorn)에는 HTTP 접근 기록만 남고 칩 출력은 파서가
+# 소비해 버리므로, 원본이 필요하면 이걸 켠다. tail -f 로 실시간 확인 가능.
+if [[ -n "${DEMO_CHIP_RAW_LOG:-}" ]]; then
+  echo "[run] chip raw log = ${DEMO_CHIP_RAW_LOG}   (tail -f ${DEMO_CHIP_RAW_LOG})"
+else
+  echo "[run] chip raw log = off  (켜려면 DEMO_CHIP_RAW_LOG=/tmp/chip_raw.log $0 ...)"
 fi
 echo "[run] 서버 기동: http://127.0.0.1:${PORT}  (Ctrl-C 로 종료)"
 cd backend

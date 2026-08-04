@@ -170,12 +170,31 @@ def _chip_lines(cfg: dict, on_proc=None) -> Iterator[str]:
     )
     if on_proc is not None:
         on_proc(proc)
+
+    # 칩 stdout 원본 보관 (선택). 파서가 이벤트로 못 바꾸는 라인 — "calling: tvmgen_...",
+    # scan npz 에러, 실행 초반의 초기화 메시지 — 은 그냥 버려지므로, 문제가 생겼을 때
+    # 볼 게 없다. DEMO_CHIP_RAW_LOG 를 주면 받은 그대로 append 한다.
+    # ⚠️ 기본은 꺼둔다: DEBUG 빌드는 샘플당 수십 줄을 뱉어 10000샘플이면 100MB 를 넘는다.
+    raw_path = os.environ.get("DEMO_CHIP_RAW_LOG")
+    raw = None
+    if raw_path:
+        try:
+            raw = open(raw_path, "a", buffering=1)   # line-buffered: tail -f 로 바로 보인다
+            raw.write(f"\n===== run start {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                      f"exec={remote_exec_path(cfg)} n={cfg['run']['num_samples']} =====\n")
+        except OSError:
+            raw = None                                # 로그 실패가 실행을 막으면 안 된다
+
     try:
         for line in proc.stdout:  # 도착하는 대로 (sleep 없음 — 칩 실제 추론 속도 그대로)
+            if raw is not None:
+                raw.write(line)
             yield line
     finally:
         proc.stdout.close()
         proc.wait()
+        if raw is not None:
+            raw.close()
 
 
 def iter_lines(cfg: dict, on_proc=None) -> Iterator[str]:
