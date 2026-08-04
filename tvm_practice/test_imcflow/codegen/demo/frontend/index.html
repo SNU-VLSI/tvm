@@ -75,6 +75,7 @@
 
   /* pipelined 빠른 실행 패널 */
   .pl-head { display:flex; align-items:center; gap:14px; margin-bottom:10px; flex-wrap:wrap; }
+  .pl-sim { color:var(--dim); font-weight:400; font-size:14px; }
   /* 문구는 한 바퀴를 다 채운 뒤에만 뜬다(=완주의 보상). 재생 시작 때 다시 숨긴다. */
   .pl-tag { color:var(--ok); font-size:17px; font-weight:700; margin-top:10px; }
   .pl-note { color:var(--dim); font-size:12px; line-height:1.4; margin-top:8px; }
@@ -134,7 +135,7 @@
       </div>
       <div class="panel pl-panel" id="pl-panel" hidden>
         <div class="pl-head">
-          <span class="cm-title">on-chip execution speed</span>
+          <span class="cm-title">on-chip execution speed <span class="pl-sim">(simulated)</span></span>
         </div>
         <canvas id="pl-canvas" class="pl-canvas"></canvas>
         <div class="pl-bar"><span id="pl-fill"></span></div>

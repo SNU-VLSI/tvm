@@ -48,14 +48,15 @@ chip:
   # IMCFLOW_NO_PERKERNEL_WARMUP=1. Co-resident on chip with .kws/.vww so switching
   # models needs no re-transfer. ~16x faster than the old shared warmup-on binary
   # (resnet8: 4.0 s -> 0.27 s/sample, 100 samples) with no accuracy change (80%).
-  binary_dir: host_binary_make.dataset.resnet8
+  # 칩 리비전. 다음 칩으로 넘어갈 땐 이 값만 바꾼다(chip3 -> chip4).
+  # 세 워크로드를 한 번에 덮어쓰려면 DEMO_CHIP_REV=chip4 ./run_laptop.sh 로 실행.
+  chip_rev: chip3_v2
+  binary_dir: host_binary_make.dataset.resnet8_{chip_rev}
   dataset_exec: execute_graph_for_dataset   # DEBUG_EXE=1 이면 debug_execute_graph_for_dataset
   eval_cpu: 3                               # taskset 핀 (CPU0 IRQ 경합 회피)
   debug_dump_dir: /var/volatile/debug_nodes
   heartbeat_path: /var/volatile/imcflow_chip_heartbeat.txt
   warmup_dir: /home/root/imcflow/xilinx/petalinux-csrc   # make clear_time && make warmup (추론 전/후, per-RUN 1회)
-  graph_path: host_binary_make.dataset.resnet8/build/mlf/executor-config/graph/default.graph
-  params_path: host_binary_make.dataset.resnet8/build/mlf/parameters/default.params
   # _staged   = 서버가 올린 20샘플 (그대로 보존)
   # _stagedN  = fixtures/cifar10_test_images.npy[0:N] + cifar10_test_labels.npy[0:N] 슬라이스.
   #             `python3 make_staged.py N` 으로 생성(라벨 10000장 박제로 500 상한 없음, 최대 N=10000).

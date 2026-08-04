@@ -33,6 +33,61 @@ def _mock_lines(cfg: dict) -> Iterator[str]:
                     time.sleep(delay)
 
 
+def chip_cfg(cfg: dict) -> dict:
+    """chip 블록을 해석해 돌려준다. 원본은 건드리지 않는다.
+
+    1) `{chip_rev}` 자리표시자 치환. 칩 리비전이 바뀌면 config 의 chip_rev 한 줄만
+       고치면 되고, 환경변수 DEMO_CHIP_REV 로 세 워크로드를 한 번에 덮어쓸 수도 있다.
+         binary_dir: host_binary_make.dataset.resnet8_{chip_rev}   + chip_rev: chip3
+         => host_binary_make.dataset.resnet8_chip3
+    2) graph_path/params_path 가 없으면 binary_dir 에서 유도한다. 셋을 따로 적으면
+       리비전을 올릴 때 하나만 고치는 실수가 나기 쉬워서, 기본은 유도에 맡긴다.
+    """
+    c = dict(cfg.get("chip") or {})
+    rev = os.environ.get("DEMO_CHIP_REV") or c.get("chip_rev", "")
+    for k, v in list(c.items()):
+        if isinstance(v, str) and "{chip_rev}" in v:
+            c[k] = v.replace("{chip_rev}", rev)
+    bd = c.get("binary_dir", "")
+    c.setdefault("graph_path", f"{bd}/build/mlf/executor-config/graph/default.graph")
+    c.setdefault("params_path", f"{bd}/build/mlf/parameters/default.params")
+    return c
+
+
+def remote_exec_path(cfg: dict) -> str:
+    c = chip_cfg(cfg)
+    return f"{c['binary_dir']}/build/{c['dataset_exec']}"
+
+
+def check_remote_assets(cfg: dict, timeout: float = 30.0) -> dict:
+    """실행 전에 원격 자산이 실제로 있는지 본다.
+
+    없는 경로로 실행하면 칩은 그냥 조용히 실패하고(빈 stdout) 화면은 "waiting" 에서
+    멈춘다. 원인을 찾는 데 오래 걸리므로 미리 확인해 이름을 그대로 알려준다.
+    """
+    c = chip_cfg(cfg)
+    paths = {
+        "exec": remote_exec_path(cfg),
+        "graph": c["graph_path"],
+        "params": c["params_path"],
+        "images": c["images_path"],
+        "labels": c["labels_path"],
+    }
+    base = c["remote_base_path"]
+    probe = "; ".join(
+        f'[ -e "{base}/{p}" ] && echo "OK {k}" || echo "MISSING {k} {p}"'
+        for k, p in paths.items()
+    )
+    argv = _ssh_argv(cfg) + ["-o", "ConnectTimeout=10", probe]
+    try:
+        r = subprocess.run(argv, timeout=timeout, capture_output=True, text=True)
+    except Exception as e:
+        return {"reachable": False, "error": f"{type(e).__name__}: {e}", "missing": []}
+    missing = [l for l in r.stdout.splitlines() if l.startswith("MISSING")]
+    return {"reachable": bool(r.stdout), "missing": missing,
+            "paths": paths, "raw": r.stdout.strip()}
+
+
 def _pgrep_pat(cfg: dict) -> str:
     """pgrep/pkill 용 패턴.
 
@@ -40,7 +95,7 @@ def _pgrep_pat(cfg: dict) -> str:
     커맨드라인이 -f 매칭에 걸려, pgrep 은 항상 자기를 세고 pkill 은 자기(=래퍼 셸)를
     죽인다. 래퍼가 죽으면 커맨드 꼬리의 clear_time+warmup 이 실행되지 않는다.
     """
-    exe = cfg["chip"]["dataset_exec"]
+    exe = chip_cfg(cfg)["dataset_exec"]
     return f"[{exe[0]}]{exe[1:]}"
 
 
@@ -49,7 +104,7 @@ def _build_remote_cmd(cfg: dict) -> str:
 
     검증된 옵션 전부 보존: taskset CPU 핀, tmpfs 덤프/heartbeat 경로, 실행 후 clear_time+warmup.
     """
-    c = cfg["chip"]
+    c = chip_cfg(cfg)          # {chip_rev} 치환 + graph/params 유도
     n = cfg["run"]["num_samples"]
     exec_path = f"{c['binary_dir']}/build/{c['dataset_exec']}"
     warmup_dir = c.get("warmup_dir", "/home/root/imcflow/xilinx/petalinux-csrc")

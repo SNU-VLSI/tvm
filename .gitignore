@@ -281,3 +281,6 @@ gallery/how_to/work_with_microtvm/micro_tvmc.py
 # GDB history file
 .gdb_history
 .codegraph/
+
+# Claude Code 로컬 상태 (worktree, settings.local.json). 커밋 대상 아님.
+.claude/

@@ -3,3 +3,5 @@ core*
 big/
 *_evl/
 *_ref/
+# make_staged.py / 전송용으로 만든 스테이징 데이터 (런타임 생성, 대용량)
+dataset/

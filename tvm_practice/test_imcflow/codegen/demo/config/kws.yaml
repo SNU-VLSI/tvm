@@ -41,15 +41,16 @@ chip:
   remote_base_path: /home/root/tvm/tvm_practice/test_imcflow/codegen
   # warmup-off per-model binary (IMCFLOW_NO_PERKERNEL_WARMUP=1 at codegen).
   # Co-resident on chip with .resnet8/.vww. per-sample ~0.12 s (8 imcflow kernels).
-  binary_dir: host_binary_make.dataset.kws
+  # 칩 리비전. 다음 칩으로 넘어갈 땐 이 값만 바꾼다(chip3 -> chip4).
+  # DEMO_CHIP_REV=chip4 로 세 워크로드 일괄 오버라이드 가능.
+  chip_rev: chip3
+  binary_dir: host_binary_make.dataset.kws_{chip_rev}
   dataset_exec: execute_graph_for_dataset
   dataset_name: kws_sc            # dataset/<name>/_staged for staged_npy image source
   eval_cpu: 3
   debug_dump_dir: /var/volatile/debug_nodes
   heartbeat_path: /var/volatile/imcflow_chip_heartbeat.txt
   warmup_dir: /home/root/imcflow/xilinx/petalinux-csrc   # per-RUN warmup 1회 (추론 전/후)
-  graph_path: host_binary_make.dataset.kws/build/mlf/executor-config/graph/default.graph
-  params_path: host_binary_make.dataset.kws/build/mlf/parameters/default.params
   images_path: dataset/kws_sc/_staged/images.npy
   labels_path: dataset/kws_sc/_staged/labels.npy
   remote_result_path: /tmp/tvm_dataset_results.txt

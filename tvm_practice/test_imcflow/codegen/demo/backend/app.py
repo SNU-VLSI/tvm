@@ -208,6 +208,23 @@ def _pipelined_meta():
     }
 
 
+def _tuning_status():
+    path = os.environ.get("DEMO_TUNING_STATUS", "/tmp/ps_tuning_status.json")
+    try:
+        with open(path) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    st["age_s"] = round(time.time() - float(st.get("ts", 0)), 1)
+    st["stale"] = st["age_s"] > 120
+    return st
+
+
+def _tuning_active() -> bool:
+    st = _tuning_status()
+    return bool(st and st.get("active") and not st.get("stale"))
+
+
 @app.get("/tuning")
 def tuning():
     """전압 튜닝 스윕의 진행 상태 (dev 패널용).
@@ -216,16 +233,8 @@ def tuning():
     동시에 붙으면 측정에 간섭한다. 스윕이 원자적으로 갱신하는 상태 파일만 읽는다.
     파일이 없거나 오래됐으면 null — 프론트가 패널을 숨긴다.
     """
-    path = os.environ.get("DEMO_TUNING_STATUS", "/tmp/ps_tuning_status.json")
-    try:
-        with open(path) as f:
-            st = json.load(f)
-    except (OSError, ValueError):
-        return JSONResponse(None)
-    # 스윕이 죽어도 파일은 남는다. 오래된 상태를 "진행 중"으로 보여주면 안 된다.
-    st["age_s"] = round(time.time() - float(st.get("ts", 0)), 1)
-    st["stale"] = st["age_s"] > 120
-    return JSONResponse(st)
+    # 스윕이 죽어도 파일은 남는다. 오래된 상태를 "진행 중"으로 보여주면 안 된다(_tuning_status).
+    return JSONResponse(_tuning_status())
 
 
 @app.get("/mosaic")
@@ -496,6 +505,23 @@ def restart_run():
 @app.get("/stream")
 async def stream():
     """SSE. 실행 중이면 새 ssh 를 띄우지 않고 진행 중인 실행에 붙는다(_RunHub 참조)."""
+    # ── 전압 튜닝 인터록 ──
+    # 튜닝 스윕은 서버 밖(별도 프로세스)에서 칩 추론을 돌린다. _RunHub 락은 이 서버
+    # 프로세스 안에서만 유효하므로, 브라우저를 열어 여기서 또 실행을 띄우면 칩에서
+    # 두 추론이 경합한다(오전에 SoC wedge 로 보드 전원 재인가까지 갔던 그 상황).
+    # 스윕이 도는 동안에는 실행을 시작하지 않고 이유를 알려준다.
+    if _tuning_active():
+        st = _tuning_status() or {}
+        msg = (f"voltage tuning in progress ({st.get('rail')} "
+               f"{(st.get('point') or {}).get('i','?')}/{(st.get('point') or {}).get('n','?')}) "
+               f"— live run disabled to avoid competing with the sweep on the chip")
+
+        async def blocked():
+            yield f"data: {json.dumps({'type': 'error', 'message': msg})}\n\n"
+            yield 'data: {"type": "done"}\n\n'
+
+        return StreamingResponse(blocked(), media_type="text/event-stream")
+
     _HUB.loop = asyncio.get_running_loop()
     owner, q, replay = _HUB.attach_or_start()
     if owner:
