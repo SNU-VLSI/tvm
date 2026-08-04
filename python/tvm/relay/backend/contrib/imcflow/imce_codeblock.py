@@ -8,6 +8,7 @@ from tvm import relay
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
+from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -19,10 +20,19 @@ import logging
 import pdb
 from dataclasses import dataclass
 
-# Environment variable to enable MULTL overflow bug SW fix
-# Set IMCFLOW_BUGFIX_OVERFLOW_SW=1 to enable the fix
+# Environment variable to enable MULTL overflow bug SW fix.
+# Set IMCFLOW_BUGFIX_OVERFLOW_SW=1/0 to explicitly enable/disable the SW fix.
+# If UNSET, the default is coupled to the master IMCFLOW_BUGFIX knob: the
+# BUGFIX-off RTL lacks the HW overflow fix, so codegen SW-compensates by
+# default when the master knob is off (bugfix_off_mode()==True); when the
+# master knob is on (BUGFIX-on RTL) the default is off. An explicit
+# IMCFLOW_BUGFIX_OVERFLOW_SW always wins.
 def _is_multl_swfix_enabled():
-  return os.environ.get("IMCFLOW_BUGFIX_OVERFLOW_SW", "0") == "1"
+  val = os.environ.get("IMCFLOW_BUGFIX_OVERFLOW_SW")
+  if val is not None:
+    return val == "1"
+  from tvm.contrib.imcflow import overflow_sw_default_on
+  return overflow_sw_default_on()
 
 if TYPE_CHECKING:
   from .builder_context import BuilderContext
@@ -32,6 +42,19 @@ ConstPat = is_constant()
 # for debugging
 send_num_map = {}
 recv_num_map = {}
+
+# P4 (DESIGN §2.4, invariant II): flag-rendezvous handshake counters. Keyed by
+# a flag-rendezvous pair uuid: {uuid: {"producer": n, "consumer": {node_value: n}}}.
+# The producer barrier (get_pre_send_sync) and each consumer window
+# (get_recv_window_sync) increment these at emission time, multiplied by the
+# enclosing SimpleFor loop trips (same mechanism add_to_map uses). validate then
+# asserts producer_handshakes == each consumer's window count, so a future
+# granularity/flag mismatch surfaces at COMPILE time instead of a 20000-poll RTL
+# hang. Only populated for edges the codeblocks explicitly contract (dwconv
+# output today); ResNet8 never calls add_flag_handshake -> map stays empty ->
+# no effect / byte-identical.
+handshake_num_map = {}
+
 @dataclass
 class RecvSendNum:
   dir       : str  = ""  # "recv" or "send"
@@ -184,46 +207,151 @@ def get_total_bytes(ttype):
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
 
-  def __init__(self, count: int, repeat: int, edge: TensorEdge, edge_info: TensorEdgeInfo, builder=None, annotation: str = ""):
+  def __init__(self, count: int, repeat: int, edge: TensorEdge, edge_info: TensorEdgeInfo, builder=None, annotation: str = "", bare: bool = False):
     super().__init__(annotation)
     self.count = count
     self.repeat = repeat
     self.edge = edge
     self.edge_info = edge_info
     self.builder = builder
+    self.bare = bare
+    self._rz_uuid = None
+    self._rz_consumer = None
+
+    # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
+    # per-LOAD_LB SETFLAG/STANDBY(uuid) sync; knob=off keeps the 934 handcraft
+    # window sync below.
+    if not bugfix_off_mode():
+      self._build_a8af()
+      return
 
     load_fifo_id = self.edge_info.fifo_id
     annotation = f"{self.edge}, {self.edge_info.node_info_str}"
 
+    # handcraft window sync: wrap the whole LOAD_LB burst (the `repeat` inner
+    # loop) in a single SETFLAG(1)...SETFLAG(0) window, with NO per-LOAD_LB
+    # STANDBY. Non-cyclic (no pair) edges emit bare LOAD_LB.
+    # `bare=True` forces a bare burst even for paired edges -- used by Marker A
+    # (has_noc_rhs) nodes, whose data LOAD_LB carries NO window in handcraft (the
+    # SETFLAG window there wraps the fused add-rhs RECV instead).
+    if bare:
+      pre_lines, post_lines = (None, None)
+      # Marker B' override: a flag-3 data-multicast producer's data LOAD_LB must
+      # carry a SETFLAG(3) window even on a Marker-A (has_noc_rhs) node. The
+      # producer STANDBYs this receiver at flag 3, so a bare LOAD_LB here would
+      # never satisfy that barrier (region3 imce_1_2 data from imce_0_3).
+      forced = self._get_window_sync()
+      if forced != (None, None):
+        pre_lines, post_lines = forced
+    else:
+      pre_lines, post_lines = self._get_window_sync()
+
+    # invariant II bookkeeping (see handshake_num_map): count this LOAD_LB window
+    # ONLY when it is a flag-2 producer-gated rendezvous (the dwconv-output
+    # Fix-B barrier: pre-lines contain STANDBY(producer, 2)). ResNet8's conv
+    # pipeline windows are SETFLAG(1)...SETFLAG(0) with NO STANDBY -> excluded, so
+    # the handshake map stays empty for ResNet8 and the (II) assert never fires
+    # there. The matching producer barrier (build_mmquant_for_dwconv) is likewise
+    # gated on SETFLAG(2).
+    if pre_lines and any("STANDBY" in ln and ", 2)" in ln for ln in pre_lines):
+      pm = getattr(self.builder, "pair_manager", None) if self.builder is not None else None
+      pair = pm.get_pair(self.edge) if pm is not None else None
+      if pair is not None:
+        self._rz_uuid = pair.uuid
+        # the consumer is THIS node = the LOAD_LB receiver of self.edge
+        rn = pm._get_hw_node(self.edge.dst_id)
+        self._rz_consumer = rn[0].value if isinstance(rn, tuple) else rn.value
+
+    def load_lb_line(iter, fid=load_fifo_id, annot=annotation):
+      return f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
+
+    # Sync-granularity (DESIGN §2 invariant II): the inode data-input rendezvous
+    # window is `SETFLAG(1); STANDBY(inode, 1); SETFLAG(0)` (get_recv_window_sync
+    # inode branch -> the only window carrying a `STANDBY(..., 1)`). The inode
+    # SendBlock does ONE such flag-1 handshake PER SEND packet, and each packet
+    # (32B) is exactly one LOAD_LB. When `repeat > 1` (dwconv: `repeat` == bitplane
+    # count == LOAD_LBs per output-column window) the default "one window around
+    # the whole `repeat` burst" gives the imce ONE handshake per `repeat` packets
+    # while the inode issues `repeat` handshakes -> a `repeat`:1 rendezvous-freq
+    # mismatch that wedges the very first STANDBY (imce_1_1 STANDBY(0,1) hangs;
+    # inode never re-raises flag 1). MobileNetV1's first depthwise reads the model
+    # input straight from the inode, so this inode-fed dwconv (repeat=4) is the
+    # first path to hit it -- ResNet8 conv from the inode has repeat==1 (per-window
+    # == per-LOAD_LB, no change), and DS-CNN dwconv is fed by an upstream imce
+    # (flag-2 window, `STANDBY(..., 2)`, excluded below). Fix: for the inode flag-1
+    # window with repeat>1, emit the window PER LOAD_LB (matching the inode's
+    # per-packet handshake).
+    is_inode_input_flag1_window = bool(
+        pre_lines
+        and any("STANDBY" in ln and ", 1)" in ln for ln in pre_lines)
+    )
+    per_load_lb_window = (
+        bugfix_off_mode()
+        and self.repeat > 1
+        and is_inode_input_flag1_window
+    )
+
+    def windowed_load_lb_line(iter, fid=load_fifo_id, annot=annotation):
+      body = ""
+      if pre_lines:
+        body += "\n".join(pre_lines) + "\n"
+      body += f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
+      if post_lines:
+        body += "\n".join(post_lines) + "\n"
+      return body
+
+    def burst_body(iter):
+      # one window per outer-loop iteration wrapping the `repeat` LOAD_LBs
+      body = ""
+      if per_load_lb_window:
+        # inode-fed dwconv: one flag-1 handshake PER LOAD_LB to match the inode
+        # SendBlock's per-packet rendezvous frequency.
+        body += SimpleFor(self.repeat, windowed_load_lb_line).render() + "\n"
+        return body
+      if pre_lines:
+        body += "\n".join(pre_lines) + "\n"
+      if self.repeat > 1:
+        body += SimpleFor(self.repeat, load_lb_line).render() + "\n"
+      else:
+        body += load_lb_line(iter)
+      if post_lines:
+        body += "\n".join(post_lines) + "\n"
+      return body
+
+    self.body = SimpleFor(self.count, burst_body, "load_block")
+
+  def _get_window_sync(self):
+    """Return (pre_lines, post_lines) for the LOAD_LB burst window."""
+    if self.builder is None or not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return None, None
+    return self.builder.pair_manager.get_recv_window_sync(self.edge)
+
+  # ---- a8af (knob=on) fallback: per-LOAD_LB SETFLAG/STANDBY(uuid) sync ----
+  def _build_a8af(self):
+    load_fifo_id = self.edge_info.fifo_id
+    annotation = f"{self.edge}, {self.edge_info.node_info_str}"
+
     # Per-packet sync: Load one packet, then sync immediately
-    # Use nested loops: outer loop (count) and inner loop (repeat)
     def inner_body_with_sync(iter, fid=load_fifo_id, annot=annotation):
       code = f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
-      # Add sync after each load
-      sync_code = self._get_sync_code_str()
+      sync_code = self._get_sync_code_str_a8af()
       if sync_code:
         code += sync_code
       return code
 
     if self.repeat > 1:
-      # Inner loop: repeat times with sync after each LOAD_LB
       inner_loop = SimpleFor(self.repeat, inner_body_with_sync)
-      # Outer loop: count times
       self.body = SimpleFor(self.count, inner_loop, "load_block")
     else:
-      # No need for inner loop if repeat == 1
       self.body = SimpleFor(self.count, inner_body_with_sync, "load_block")
 
-  def _get_sync_code_str(self):
-    """Get sync code as a string (for inline insertion after LOAD_LB)"""
+  def _get_sync_code_str_a8af(self):
+    """a8af per-LOAD_LB RECEIVER-pattern sync (SETFLAG(uuid); STANDBY(sender,uuid); SETFLAG(0))."""
     if self.builder is None or not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
-      return ""  # No pair manager, no sync
-
+      return ""
     pair = self.builder.pair_manager.get_pair(self.edge)
     if pair is None:
-      return ""  # No sync needed for this edge
-
-    # Get current node
+      return ""
     try:
       dst_gid = self.edge.dst_id.graph_node_id
       if isinstance(dst_gid, tuple):
@@ -233,18 +361,22 @@ class LoadLBBlock(ImceCodeBlock):
         current_node = current_node[0]
     except Exception:
       return ""
-
-    # Generate sync code inline - RECEIVER pattern
-    # Receiver only waits for sender (not other receivers in multicast)
     sync_lines = []
     sync_lines.append(f"__builtin_IMCE_SETFLAG({pair.uuid});")
     sync_lines.append(f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {pair.uuid});")
     sync_lines.append(f"__builtin_IMCE_SETFLAG(0);")
-
     return "\n".join(sync_lines) + "\n"
 
   def _render(self) -> str:
     add_to_map(self.edge, RecvSendNum("recv", self.count * self.repeat), is_send=False)
+    # invariant II: one consumer window per outer load_block iteration
+    # (self.count), scaled by the enclosing DWConv row/col SimpleFor nest.
+    # knob=off only (handshake_num_map is part of the 934/P4 sync work).
+    if bugfix_off_mode() and self._rz_uuid is not None:
+      outer = 1 if len(SimpleFor.count_stack) == 0 else int(math.prod(SimpleFor.count_stack))
+      entry = handshake_num_map.setdefault(self._rz_uuid, {"producer": 0, "consumer": {}})
+      entry["consumer"][self._rz_consumer] = (
+          entry["consumer"].get(self._rz_consumer, 0) + self.count * outer)
     return self.body.render()
 
 
@@ -654,15 +786,90 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     out_edge_info = DevConfig().get_tensor_edge_info(out_edge)
     loop_cnt = N * H * W
 
+    # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's bare
+    # RECV/compute/SEND loop (no P3 input window, no P4 output barrier, global
+    # (self,i) qreg vars). knob=off keeps the 934/P3/P4 rendezvous below.
+    if not bugfix_off_mode():
+      for ch_group_idx in range(ch_group_nums):
+        # recv
+        for i in range(2): # 32 -> 16 x 2
+          code += IMCERecvBlock(
+            var_name=UniqueVar((in_edge, 2*ch_group_idx+i)),
+            fifo_id=in_edge_info.fifo_id,
+            owner_edge=in_edge,
+            annotation=f"dwconv minmaxquant recv ch_group {ch_group_idx}, part {i}"
+          )
+        # compute
+        src_mask = 15
+        for i in range(2):
+          qreg_idx = i
+          var_i = UniqueVar((in_edge, 2*ch_group_idx+i))
+          var_o = UniqueVar((self, 2*ch_group_idx+i))
+          code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_idx});"
+        # get_qreg
+        for i in range(4):
+          var_o = UniqueVar((self, i))
+          code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
+        # send
+        for i in range(4):
+          split_out_edge_info = split_out_edge_infos[ch_group_idx]
+          code += IMCESendBlock(
+            var_name=UniqueVar((self, i)),
+            fifo_id=split_out_edge_info.fifo_id,
+            policy_addr=split_out_edge_info.policy_info[0].address,
+            owner_edges=split_out_edges[ch_group_idx],
+            annotation=f"dwconv minmaxquant send ch_group {ch_group_idx}, part {i}"
+          )
+      return SimpleFor(loop_cnt, code, "dwconv_minmaxquant_loop")
+
+    # P3 (DESIGN §2.3): inode->imce data-input rendezvous window on the dwconv
+    # minmaxquant RECV. The inode SEND loop does one handshake per packet; each
+    # imce RECV consumes exactly one packet, so the matching receiver window
+    # (SETFLAG(1);STANDBY(inode,1);SETFLAG(0)) must wrap EACH RECV (contract
+    # consumer_recv_per_sync=1). Emitting it per-pixel instead of per-RECV
+    # desynchronizes the handshake (the input-starvation deadlock). The window
+    # comes from the edge's contract via get_recv_window_sync (same source a
+    # plain conv uses); bare if the edge is not an inode data input.
+    recv_per_sync = getattr(in_edge_info, "consumer_recv_per_sync", None) or 1
+    _pm = getattr(getattr(self.call, "builder", None), "pair_manager", None)
+    recv_pre, recv_post = (None, None)
+    if _pm is not None:
+      recv_pre, recv_post = _pm.get_recv_window_sync(in_edge)
+
+    # P4 (DESIGN §5-P4): producer-side output rendezvous on the dwconv
+    # minmaxquant SEND. imce_0_1's split odata is MULTICAST to two imce receivers
+    # (imce_0_2 and the real DWCONV consumer imce_1_1). Both wrap their LOAD_LB in
+    # a flag-2 window (SETFLAG(2); STANDBY(imce_0_1,2); SETFLAG(0)) but the
+    # producer never raised flag 2 -> both STANDBYs wedge (the middle-stage
+    # deadlock). The matching producer barrier comes from the SAME pair via
+    # get_pre_send_sync (a 2-phase flag-2 rendezvous:
+    #   STANDBY(r,2)xN; SETFLAG(2); STANDBY(r,0)xN; SETFLAG(0)).
+    # It fires ONCE per pixel (== one window per pixel on each receiver) and MUST
+    # precede the SENDs: each receiver's window CLOSES (SETFLAG(0)) before its
+    # LOAD_LB, so the producer's phase-down completes without waiting on the data
+    # transfer, then the 8 SENDs flow under fifo backpressure (depth 2). Because
+    # both split edges share the pair, both give the same barrier -> emit it once.
+    # A single global flag slot per node makes this a node-level rendezvous, so
+    # both ch_groups' SENDs are covered by the one barrier.
+    send_barrier = None
+    if _pm is not None:
+      send_barrier = _pm.get_pre_send_sync(split_out_edges[0])
+
+    recv_idx = 0  # counts RECVs to place a window every recv_per_sync RECVs
     for ch_group_idx in range(ch_group_nums):
       # recv
       for i in range(2): # 32 -> 16 x 2
+        if recv_pre and (recv_idx % recv_per_sync == 0):
+          code += "\n".join(recv_pre) + "\n"
         code += IMCERecvBlock(
           var_name=UniqueVar((in_edge, 2*ch_group_idx+i)),
           fifo_id=in_edge_info.fifo_id,
           owner_edge=in_edge,
           annotation=f"dwconv minmaxquant recv ch_group {ch_group_idx}, part {i}"
         )
+        if recv_post and (recv_idx % recv_per_sync == recv_per_sync - 1):
+          code += "\n".join(recv_post) + "\n"
+        recv_idx += 1
 
       # compute
       src_mask = 15
@@ -671,17 +878,31 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
         var_i = UniqueVar((in_edge, 2*ch_group_idx+i))
         var_o = UniqueVar((self, 2*ch_group_idx+i))
         code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_idx});"
-      
-      # get_qreg
+
+      # get_qreg -- into per-ch_group vars so the SENDs can be hoisted after the
+      # one-per-pixel output barrier without qreg aliasing across ch_groups.
       for i in range(4):
-        var_o = UniqueVar((self, i))
+        var_o = UniqueVar((self, ch_group_idx, i))
         code += f"{var_o} = __builtin_IMCE_GET_QREG({i});"
 
-      # send
+    # P4: one output rendezvous per pixel, then all SENDs (see comment above).
+    if send_barrier:
+      code += "\n".join(send_barrier) + "\n"
+      # invariant II: record loop_cnt producer handshakes for this pair (the
+      # barrier is emitted once here but runs once per pixel inside the
+      # dwconv_minmaxquant_loop, which is not yet on the count_stack). Gated on a
+      # real flag-rendezvous barrier (SETFLAG appears) so a bare [] send_barrier
+      # records nothing.
+      _pair0 = _pm.get_pair(split_out_edges[0]) if _pm is not None else None
+      if _pair0 is not None and any("SETFLAG(2)" in ln for ln in send_barrier):
+        handshake_num_map.setdefault(_pair0.uuid, {"producer": 0, "consumer": {}})
+        handshake_num_map[_pair0.uuid]["producer"] += loop_cnt
+
+    for ch_group_idx in range(ch_group_nums):
       for i in range(4):
         split_out_edge_info = split_out_edge_infos[ch_group_idx]
         code += IMCESendBlock(
-          var_name=UniqueVar((self, i)),
+          var_name=UniqueVar((self, ch_group_idx, i)),
           fifo_id=split_out_edge_info.fifo_id,
           policy_addr=split_out_edge_info.policy_info[0].address,
           owner_edges=split_out_edges[ch_group_idx],
@@ -904,7 +1125,98 @@ class ConvBlock(ImceCallCodeBlock):
       op.prev_op = prev
       prev = op
 
-    self.body = self._build_structure()
+    # Marker A (RTL-derived boundary-STEP reorder) discriminator.
+    # has_noc_rhs == True when a post_op (e.g. fused add) takes one operand over
+    # an INTER-NODE NoC edge from a DIFFERENT imce (the add-rhs of region2
+    # imce_3_2 arrives from imce_2_2). With BUGFIX-off imce_ctrl, a stall-capable
+    # NoC RECV sitting between the boundary col_group's last LOAD_LB and its STEP
+    # lets valid drop mid-stall and mis-consume hs_remaining -> stale STEP latch
+    # -> deadlock. handcraft avoids it by doing the boundary col_group's final
+    # LOAD_LB AFTER that RECV window (right before STEP). We reproduce that only
+    # when has_noc_rhs (so region1's local-vec post-ops -- Multl/BN/Minmax with no
+    # inter-node rhs -- are provably excluded and keep their default ordering).
+    #
+    # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af, which had
+    # no Marker A logic -> leave these inert (False/None) and dispatch
+    # _build_structure/_build_loop_body to the a8af path below.
+    if bugfix_off_mode():
+      self.has_noc_rhs = self._compute_has_noc_rhs()
+      # Marker A sibling case (imce_2_2): a PLAIN conv (no post_op) whose output
+      # is the inter-node NoC `rhs` of a downstream fused add.
+      self.noc_rhs_sender_receiver = self._compute_noc_rhs_sender_receiver()
+      self.body = self._build_structure()
+    else:
+      self.has_noc_rhs = False
+      self.noc_rhs_sender_receiver = None
+      self.body = self._build_structure_a8af()
+
+  def _compute_noc_rhs_sender_receiver(self):
+    """Return the receiver hw node value if this PLAIN conv feeds a fused add's
+    inter-node NoC `rhs`, else None. Used for the imce_2_2 boundary reorder."""
+    if self.post_ops:
+      return None  # only plain convs (imce_2_2), fused convs use has_noc_rhs
+    try:
+      my_hw = DevConfig().get_hw_node(self.get_graph_node_id())
+    except Exception:
+      my_hw = None
+    for edge in self.out_edges:
+      dst_gid = edge.dst_id.graph_node_id
+      if not isinstance(dst_gid, tuple):
+        continue  # plain consumer, not fused
+      if edge.dst_id.tensor_type != "rhs":
+        continue  # only the fused add rhs slot
+      te_info = DevConfig().TensorEdgetoInfo.get(edge, None)
+      if te_info is None or te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+        continue
+      try:
+        dst_hw = DevConfig().get_hw_node(dst_gid)
+      except Exception:
+        continue
+      if isinstance(dst_hw, tuple):
+        dst_hw = dst_hw[0]
+      if dst_hw is not None and dst_hw.is_imce() and dst_hw != my_hw:
+        print(f"[Marker A sibling] {self.annotation}: sends NoC rhs to fused "
+              f"consumer imce {dst_hw} via {edge}")
+        return dst_hw
+    return None
+
+  def _compute_has_noc_rhs(self) -> bool:
+    """True iff a post_op consumes an inter-node NoC operand from another imce."""
+    if not self.post_ops:
+      return False
+    # edges produced internally by conv or any post_op (conv->add etc.)
+    internal_edges = set()
+    for op in [self] + self.post_ops:
+      internal_edges.update(op.out_edges)
+    try:
+      my_hw = DevConfig().get_hw_node(self.get_graph_node_id())
+    except Exception:
+      my_hw = None
+    for op in self.post_ops:
+      for edge in op.in_edges:
+        if edge in internal_edges:
+          continue  # internal (conv->add) edge, not NoC
+        # constant operand -> local, not NoC
+        try:
+          if ConstPat.match(CustomIDToNode()[edge.src_id.graph_node_id]):
+            continue
+        except KeyError:
+          pass
+        te_info = DevConfig().TensorEdgetoInfo.get(edge, None)
+        if te_info is None or te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+          continue  # same-hw-node (local) operand, not inter-node NoC
+        try:
+          src_hw = DevConfig().get_hw_node(edge.src_id.graph_node_id)
+        except Exception:
+          continue
+        if isinstance(src_hw, tuple):
+          src_hw = src_hw[0]
+        # inter-node operand from a DIFFERENT imce -> fused NoC rhs
+        if src_hw is not None and src_hw.is_imce() and src_hw != my_hw:
+          print(f"[Marker A] {self.annotation}: has_noc_rhs via edge {edge} "
+                f"(src imce {src_hw})")
+          return True
+    return False
 
   @property
   def num_blocks(self) -> int:
@@ -916,7 +1228,8 @@ class ConvBlock(ImceCallCodeBlock):
     # return self.out_channels//16
     return 4
 
-  def _build_loop_body(self, recv_count: int) -> CodeBlock:
+  # -------- a8af (knob=on) fallback: no Marker A / padding-drain / window sync --
+  def _build_loop_body_a8af(self, recv_count: int) -> CodeBlock:
     load_info = []
     for edge in self.in_edges:
       te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
@@ -927,7 +1240,6 @@ class ConvBlock(ImceCallCodeBlock):
         if ConstPat.match(CustomIDToNode()[arg_id]):
           continue
       except KeyError:
-        # If the node is not found in CustomIDToNode, treat it as non-constant
         pass
       load_info.append({"edge": edge, "te_info": te_info})
 
@@ -947,17 +1259,14 @@ class ConvBlock(ImceCallCodeBlock):
     comp.add(creg_code)
 
     if self.post_ops:
-      # Calculate internal edges (outputs from one op that are inputs to another)
       all_in_edges = copy(self.in_edges)
       all_out_edges = copy(self.out_edges)
       for op in self.post_ops:
         all_in_edges += op.in_edges
         all_out_edges += op.out_edges
-      internal_edges = set(all_out_edges)  # edges produced by conv or post_ops
+      internal_edges = set(all_out_edges)
 
-      # For each post_op, generate its external RECVs right before the op
       for op in self.post_ops:
-        # Find external edges for this op (edges not produced internally)
         op_external_edges = [e for e in op.in_edges if e not in internal_edges and e != load_edge]
 
         for edge in op_external_edges:
@@ -967,28 +1276,25 @@ class ConvBlock(ImceCallCodeBlock):
             continue
 
           if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
-            continue  # local edge, no need to recv
+            continue
 
           try:
             arg_id = edge.src_id.graph_node_id
             if ConstPat.match(CustomIDToNode()[arg_id]):
-              continue  # constant edge
+              continue
           except KeyError:
             pass
 
           if te_info.fifo_id != 0:
-            # Generate RECV for each block
             for i in range(op.num_blocks):
               var_i = UniqueVar((edge, i))
               if var_i.static:
                 continue
               annotation = f"{edge}, {te_info.node_info_str}"
               owner_edge = te_info.owner
-              # Use IMCERecvBlock so add_to_map is called at render time with correct count_stack
               recv_code = IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation)
               comp.add(recv_code)
 
-              # Add sync after recv
               if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
                 pair = self.builder.pair_manager.get_pair(edge)
                 if pair:
@@ -1000,7 +1306,6 @@ class ConvBlock(ImceCallCodeBlock):
                   sync_code.add(f"__builtin_IMCE_SETFLAG(0);")
                   comp.add(sync_code)
 
-        # Add the post_op after its RECVs
         comp.add(op)
         print(f"[ConvBlock] post_op {type(op).__name__}: external_edges={op_external_edges}")
 
@@ -1012,7 +1317,6 @@ class ConvBlock(ImceCallCodeBlock):
       num_out_blocks = send_block.num_out_blocks
 
       print(f"[ConvBlock] with post ops : send_edges: {send_edges}, send_block: {type(send_block).__name__}")
-      # Pass empty recv_edges to RecvSendWrapper since we already handled post_op_recv_edges above
       return RecvSendWrapper(comp, self.num_blocks, num_out_blocks, send_block, [], send_edges, builder=self.builder)
     else:
       recv_edges = self.in_edges
@@ -1021,6 +1325,453 @@ class ConvBlock(ImceCallCodeBlock):
       num_blocks = self.num_blocks
       num_out_blocks = self.num_out_blocks
       return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges, builder=self.builder)
+
+  def _build_structure_a8af(self) -> CodeBlock:
+    row_pattern = self.conv.extract_2d_pattern()
+    pprint(f"[ConvBlock] row pattern for node {getNodeID(self.call.call)}:")
+    pprint(row_pattern)
+    root = SequentialBlock()
+    for idx, row_pat in enumerate(row_pattern):
+      outer_body = SequentialBlock()
+      tag = self.annotation + f"_row_group{idx}"
+      for inner_idx, pat in enumerate(row_pat["pattern"]):
+         inner_loop = SimpleFor(pat["count"],
+                                self._build_loop_body_a8af(pat["pattern"]),
+                                f"{tag}_col_group{inner_idx}")
+         outer_body.add(inner_loop)
+      outer_loop = SimpleFor(row_pat["count"], outer_body, f"{tag}_outer_loop(iterate row offset)")
+      root.add(outer_loop)
+
+    if self.remain > 0:
+      print(f"[ConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
+      tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")
+      tail_loop = SimpleFor(self.remain*4, tail_body, f"{self.annotation}_tail_loop")
+      add_to_map(self.load_edge_info.owner, RecvSendNum("recv", self.remain*4), is_send=False)
+      root.add(tail_loop)
+
+    return root
+
+  def _build_loop_body(self, recv_count: int, skip_presend: bool = False,
+                       reorder_final_load: bool = False,
+                       pad_drain: bool = False) -> CodeBlock:
+    load_info = []
+    for edge in self.in_edges:
+      te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
+      assert len(te_infos) == 1, "more than one te_info found!"
+      te_info = te_infos[0]
+      try:
+        arg_id = edge.src_id.graph_node_id
+        if ConstPat.match(CustomIDToNode()[arg_id]):
+          continue
+      except KeyError:
+        # If the node is not found in CustomIDToNode, treat it as non-constant
+        pass
+      load_info.append({"edge": edge, "te_info": te_info})
+
+    assert len(load_info) == 1, "there should be exactly one load edge"
+    load_edge = load_info[0]["edge"]
+    load_edge_info = load_info[0]["te_info"]
+    self.load_edge_info = load_edge_info
+    self.load_edge = load_edge  # saved for the tail_loop window sync
+
+    # Marker A reorder applies to (a) the fused NoC-rhs post_op path (imce_3_2)
+    # and (b) the plain conv that sends its odata as a fused add's NoC rhs
+    # (imce_2_2). Both peel the boundary col_group's final iteration.
+    is_boundary_colgroup = reorder_final_load  # preserved before the rebind below
+    reorder_fused = reorder_final_load and self.has_noc_rhs and bool(self.post_ops) and not skip_presend
+    reorder_plain_rhs = (reorder_final_load and not self.post_ops
+                         and self.noc_rhs_sender_receiver is not None and not skip_presend)
+    reorder_final_load = reorder_fused
+
+    comp = SequentialBlock()
+    # A pure-padding row-group feeding a fused consumer (skip_presend) produces
+    # NO real output: handcraft emits only dummy SEND(0)xN for this flush row,
+    # with no LOAD_LB / STEP / GET_CREG / pre-send STANDBY. Computing a real STEP
+    # here (as the default path does) makes imce_1_2 run one extra STEP-burst +
+    # STANDBY(6,1) that imce_1_1 does not consume -> back-pressure -> imce_1_2 rx
+    # X-fatal. So for skip_presend rows, skip the compute and let the SEND path
+    # emit dummies (RecvSendWrapper detects skip_presend). imce_2_1's flush row
+    # feeds a PLAIN consumer (imce_3_1) so skip_presend is False there -> keeps
+    # the real STEP, matching handcraft's asymmetry.
+    def _build_creg():
+      creg_code = TextBlock("")
+      for i in range(self.num_out_blocks):
+        var_o = UniqueVar((self, i))
+        creg_code += f"{var_o} = __builtin_IMCE_GET_CREG((short){i});"
+      return creg_code
+
+    if reorder_plain_rhs:
+      # Marker A (imce_2_2): boundary col_group with the pre-send STANDBY relocated
+      # INTO the LOAD window, between LOAD_LB x(n-1) and the final LOAD_LB. The data
+      # LOAD window (SETFLAG) still wraps all n loads; the SEND then carries no
+      # pre-send STANDBY (skip_presend=True on the wrapper).
+      # handcraft: SETFLAG(1); LOAD x(n-1); STANDBY(recv,1); LOAD x1; SETFLAG(0);
+      #            STEP; CREG; SEND (bare).
+      recv_hw = self.noc_rhs_sender_receiver
+      pre_lines, post_lines = (None, None)
+      if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+        pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(load_edge)
+      if pre_lines:
+        comp.add("\n".join(pre_lines))
+      comp.add(LoadLBBlock(recv_count, self.num_blocks - 1, load_edge, load_edge_info,
+                           builder=self.builder, bare=True))
+      comp.add(TextBlock(f"//! we wait IMCE node that requires receiving from this node to be ready\n"
+                         f"__builtin_IMCE_STANDBY({recv_hw.value}, 1);\n"))
+      comp.add(LoadLBBlock(recv_count, 1, load_edge, load_edge_info, builder=self.builder, bare=True))
+      if post_lines:
+        comp.add("\n".join(post_lines))
+      comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
+      comp.add(_build_creg())
+      # SEND real data, but pre-send STANDBY suppressed (relocated into the window).
+      return RecvSendWrapper(comp, self.num_blocks, self.num_out_blocks, self,
+                             [], self.out_edges, builder=self.builder,
+                             suppress_presend_only=True)
+
+    if reorder_final_load:
+      # Marker A boundary col_group: split the num_blocks bitplane LOAD_LBs into
+      # (n-1) BEFORE the fused-rhs RECV window and 1 AFTER it, immediately before
+      # STEP -- so STEP is issued only after the stall-capable NoC RECV has
+      # drained, keeping hs_remaining stable (RTL BUGFIX-off deadlock avoidance).
+      # handcraft: LOAD_LB x(n-1) [bare] ; RECV window ; LOAD_LB x1 ; STEP ; CREG.
+      comp.add(LoadLBBlock(recv_count, self.num_blocks - 1, load_edge, load_edge_info,
+                           builder=self.builder, bare=True))
+      # post_op fused-rhs RECV window is emitted here (see _emit_postop_recv below)
+      self._emit_postop_recv(comp, load_edge)
+      comp.add(TextBlock("//! this is last iteration before padding; final load after recv\n"))
+      # Fix G (region3 imce_3_2): boundary STEP rendezvous. When this node's data
+      # LOAD_LB producer MULTICASTS to a sibling S, and S also feeds this node's
+      # post-op lhs over NoC (cyclic coupling), the boundary STEP must wait for S
+      # to have finished sending its psum for this iteration -- otherwise STEP
+      # fires while the sibling's SEND handshake is mid-flight, mis-consuming
+      # hs_remaining -> stale STEP latch -> deadlock (fsim-confirmed: imce_3_2
+      # STEP stall). handcraft: STANDBY(imce_3_3, uuid) before the final LOAD_LB,
+      # paired with SETFLAG(uuid) after imce_3_3's SEND. region2 imce_3_2 (both
+      # edges single-target, self-fed add) and region1 (no sibling multicast) and
+      # imce_1_2 (no reorder_final_load) all fail the predicate -> no barrier.
+      bstep = self._get_boundary_step_barrier(load_edge)
+      if bstep:
+        comp.add(TextBlock(bstep))
+      comp.add(LoadLBBlock(recv_count, 1, load_edge, load_edge_info, builder=self.builder, bare=True))
+      comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
+      comp.add(_build_creg())
+      # compute the post_op(s) now that both operands are present
+      for op in self.post_ops:
+        comp.add(op)
+      # fall through to the SEND wrapper below (post_op RECV already emitted)
+      last_out_edges = self.post_ops[-1].out_edges
+      all_in_edges = copy(self.in_edges)
+      all_out_edges = copy(self.out_edges)
+      for op in self.post_ops:
+        all_in_edges += op.in_edges
+        all_out_edges += op.out_edges
+      send_edges = list(set(all_out_edges) - set(all_in_edges))
+      assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
+      send_block = self.post_ops[-1]
+      return RecvSendWrapper(comp, self.num_blocks, send_block.num_out_blocks, send_block,
+                             [], send_edges, builder=self.builder, skip_presend=skip_presend,
+                             post_send_setflag_uuid=self._get_boundary_step_notify_uuid(load_edge))
+
+    # Padding-row NoC-operand DRAIN (region3 imce_3_3 AND imce_3_2 bottom zero-pad
+    # row_group). A pure-padding row of a FUSED conv+add whose add operand arrives
+    # over the NoC (has_noc_rhs) MUST still RECV+drain that operand even on a zero
+    # output row and emit NO STEP/GET_CREG (there is no valid conv window; a STEP
+    # over an empty bottom_pad line buffer never retires -> hard hang). The
+    # producer keeps sending its full tail, so dropping the RECV overruns the
+    # input FIFO. Two entry conditions:
+    #   * skip_presend=True  -> node feeds a FUSED consumer (imce_3_3 -> imce_3_2)
+    #   * pad_drain=True     -> node feeds a PLAIN consumer (imce_3_2 -> imce_3_1),
+    #     which the skip_row_presend gate (feeds_fused_consumer) misses.
+    # handcraft zero-pad tail (both): SETFLAG(1); RECV x4; SETFLAG(0);
+    #   ADD(.,0) x4; [STANDBY(recv,1)]; SEND(result) x4  -- conv psum zeroed, NoC
+    # operand still consumed and forwarded. ADD is commutative so ADD(0,x) is used
+    # uniformly (functionally identical to handcraft's ADD(x,0) on imce_3_2).
+    if (skip_presend or pad_drain) and self.has_noc_rhs and self.post_ops:
+      # drain the fused post_op's NoC-rhs (emits its SETFLAG(1);RECV;SETFLAG(0)).
+      self._emit_postop_recv(comp, load_edge)
+      send_block = self.post_ops[-1]
+      # rhs edge = the post_op external in-edge that is NOT the conv load edge and
+      # not an internal/const edge (the imce_2_3 -> imce_3_3 rhs).
+      all_out_edges = copy(self.out_edges)
+      for op in self.post_ops:
+        all_out_edges += op.out_edges
+      internal_edges = set(all_out_edges)
+      rhs_edge = None
+      for e in send_block.in_edges:
+        if e in internal_edges or e == load_edge:
+          continue
+        te = DevConfig().TensorEdgetoInfo.get(e, None)
+        if te is None or te.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+          continue
+        try:
+          if ConstPat.match(CustomIDToNode()[e.src_id.graph_node_id]):
+            continue
+        except (KeyError, Exception):
+          pass
+        rhs_edge = e
+        break
+      # ADD(0, rhs) per output block, writing the send_block's output vars so the
+      # RecvSendWrapper below sends the real results (matching handcraft ADD(0,x)).
+      add_code = TextBlock("")
+      for i in range(send_block.num_out_blocks):
+        var_o = UniqueVar((send_block, i))
+        var_rhs = UniqueVar((rhs_edge, i)) if rhs_edge is not None else "0"
+        add_code += f"{var_o} = __builtin_IMCE_ADD(0, {var_rhs}, 15);"
+      comp.add(add_code)
+      last_out_edges = send_block.out_edges
+      send_edges = list(last_out_edges)
+      # Both cases send REAL ADD results (not dummy). Pre-send STANDBY differs by
+      # consumer type, matching handcraft's padding rows exactly:
+      #   * fused consumer (skip_presend, imce_3_3 -> imce_3_2): KEEP the pre-send
+      #     STANDBY(receiver,1) -> skip_presend=False on the wrapper.
+      #   * plain consumer (pad_drain-only, imce_3_2 -> imce_3_1): DROP the pre-send
+      #     STANDBY (handcraft padding SEND has none) -> suppress_presend_only=True
+      #     (real SEND, no STANDBY).
+      if skip_presend:
+        return RecvSendWrapper(comp, self.num_blocks, send_block.num_out_blocks, send_block,
+                               [], send_edges, builder=self.builder, skip_presend=False)
+      return RecvSendWrapper(comp, self.num_blocks, send_block.num_out_blocks, send_block,
+                             [], send_edges, builder=self.builder,
+                             suppress_presend_only=True)
+
+    if not skip_presend:
+      comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info,
+                           builder=self.builder, bare=self.has_noc_rhs))
+      comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
+      comp.add(_build_creg())
+
+    if self.post_ops and not skip_presend:
+      # (skip_presend flush row: no post_op RECV/compute either -- only dummy SEND)
+      # Calculate internal edges (outputs from one op that are inputs to another)
+      all_in_edges = copy(self.in_edges)
+      all_out_edges = copy(self.out_edges)
+      for op in self.post_ops:
+        all_in_edges += op.in_edges
+        all_out_edges += op.out_edges
+      internal_edges = set(all_out_edges)  # edges produced by conv or post_ops
+
+      # For each post_op, generate its external RECVs right before the op
+      for op in self.post_ops:
+        self._emit_postop_recv(comp, load_edge, only_op=op)
+        # Add the post_op after its RECVs
+        comp.add(op)
+
+    if self.post_ops:
+      last_out_edges = self.post_ops[-1].out_edges
+      if not skip_presend:
+        send_edges = list(set(all_out_edges) - set(all_in_edges))
+        assert (set(send_edges) == set(last_out_edges)), "currently doesn't support middle op SEND"
+      else:
+        # flush row: comp is empty (no compute); SEND target from post_op directly.
+        send_edges = list(last_out_edges)
+      send_block = self.post_ops[-1]
+      num_out_blocks = send_block.num_out_blocks
+
+      print(f"[ConvBlock] with post ops : send_edges: {send_edges}, send_block: {type(send_block).__name__}")
+      # Pass empty recv_edges to RecvSendWrapper since we already handled post_op_recv_edges above
+      # skip pre-send STANDBY for pure-padding col_groups (whole zero row_group).
+      # Fix G producer: imce_3_3 (fused conv+add sending its psum to a sibling that
+      # co-receives the same data multicast) reaches this non-reorder post_ops path
+      # for its SENDs. Emit SETFLAG(uuid) after each SEND so the sibling consumer's
+      # boundary STANDBY(this_node, uuid) can clear. Predicate returns None for all
+      # non-coupled nodes -> no notify -> region1/2 unaffected.
+      # ONLY on the boundary col_group (handcraft emits SETFLAG(5) exactly twice,
+      # at the boundary tiles, NOT every iteration). Emitting it every iteration
+      # (the earlier bug) floods the sibling's flag credit -> the barrier becomes
+      # trivially satisfied AND adds a per-iteration rendezvous that makes region3
+      # ~14x slower than handcraft (1388 vs >20000 polls) -> host poll timeout
+      # (throughput collapse, NOT a real deadlock).
+      _notify_uuid = (self._get_boundary_step_notify_uuid(load_edge)
+                      if (is_boundary_colgroup and not skip_presend) else None)
+      return RecvSendWrapper(comp, self.num_blocks, num_out_blocks, send_block, [], send_edges,
+                             builder=self.builder, skip_presend=skip_presend,
+                             post_send_setflag_uuid=_notify_uuid)
+    else:
+      recv_edges = self.in_edges
+      send_edges = self.out_edges
+      send_block = self
+      num_blocks = self.num_blocks
+      num_out_blocks = self.num_out_blocks
+      return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges,
+                             builder=self.builder, skip_presend=skip_presend)
+
+  def _get_boundary_step_barrier(self, load_edge):
+    """Fix G: return the one-way STANDBY line that gates the boundary STEP on the
+    sibling psum producer, or "" when the cyclic-coupling predicate is false.
+
+    Predicate (IR-decidable, verified byte-exact vs handcraft): the data LOAD_LB
+    producer of this node MULTICASTS (>=2 imce receivers) to a sibling S, AND S is
+    the NoC source of one of this node's post-op external (lhs) edges. Only then
+    does the boundary STEP need to wait for S's psum SEND (handcraft STANDBY(S,uuid)).
+    The uuid is the sibling-lhs edge's own SendRecvPair uuid (same object queried on
+    both sides -> matching value), NOT the hand-chosen literal 5.
+    """
+    if not (self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager):
+      return ""
+    pm = self.builder.pair_manager
+    # 1. data producer must multicast to >=2 imce (this node + a sibling)
+    data_pair = pm.get_pair(load_edge)
+    if data_pair is None:
+      return ""
+    imce_recvs = [r for r in data_pair.receiver_nodes if r.is_imce()]
+    if len(imce_recvs) < 2:
+      return ""
+    try:
+      my_hw = DevConfig().get_hw_node(self.get_graph_node_id())
+    except Exception:
+      return ""
+    sibling_nodes = set()
+    for r in imce_recvs:
+      if r != my_hw:
+        sibling_nodes.add(r)
+    if not sibling_nodes:
+      return ""
+    # 2. one of this node's post-op external (lhs) NoC edges must be sourced from
+    #    a sibling S that co-receives the data multicast.
+    all_out_edges = copy(self.out_edges)
+    for op in self.post_ops:
+      all_out_edges += op.out_edges
+    internal_edges = set(all_out_edges)
+    for op in self.post_ops:
+      for edge in op.in_edges:
+        if edge in internal_edges or edge == load_edge:
+          continue
+        # ONLY the lhs operand carries the sibling-psum rendezvous. In region2
+        # imce_3_2 the sibling (imce_2_2) feeds the RHS instead, and the data
+        # LOAD_LB comes from a DIFFERENT producer (imce_2_1) that only happens to
+        # multicast -> the predicate must reject rhs, else region2 gets a spurious
+        # STANDBY(12,7) and deadlocks. handcraft's barrier is lhs-only.
+        if getattr(edge.dst_id, "tensor_type", None) != "lhs":
+          continue
+        if edge not in DevConfig().TensorEdgetoInfo:
+          continue
+        te_info = DevConfig().TensorEdgetoInfo[edge]
+        if te_info is None or te_info.fifo_id in (0, TensorEdgeInfo.LOCAL_FIFO):
+          continue
+        try:
+          src_hw = DevConfig().get_hw_node(edge.src_id.graph_node_id)
+          if isinstance(src_hw, tuple):
+            src_hw = src_hw[0]
+        except Exception:
+          continue
+        if src_hw in sibling_nodes:
+          lhs_pair = pm.get_pair(edge)
+          if lhs_pair is None:
+            continue
+          # one-way rendezvous: wait for the sibling's SETFLAG(uuid) posted after
+          # its SEND of this lhs edge (handcraft STANDBY(18,5)).
+          return (f"//! wait sibling that sends psum into this node before STEP\n"
+                  f"__builtin_IMCE_STANDBY({lhs_pair.sender_node.value}, {lhs_pair.uuid});\n")
+    return ""
+
+  def _get_boundary_step_notify_uuid(self, load_edge):
+    """Fix G producer side: return the uuid this node must SETFLAG after its SEND
+    to release a sibling's boundary STEP, or None when the predicate is false.
+
+    Mirror of _get_boundary_step_barrier from the producer's view: this node
+    co-receives the data multicast (load_edge, >=2 imce receivers) AND sends one of
+    its outputs to a SIBLING co-receiver of that same multicast. The sibling is the
+    boundary-STEP consumer waiting on STANDBY(this_node, uuid); uuid is that out
+    edge's own SendRecvPair uuid (same object both sides -> matching value).
+    """
+    if not (self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager):
+      return None
+    pm = self.builder.pair_manager
+    data_pair = pm.get_pair(load_edge)
+    if data_pair is None:
+      return None
+    imce_recvs = [r for r in data_pair.receiver_nodes if r.is_imce()]
+    if len(imce_recvs) < 2:
+      return None
+    # this node is the LOAD_LB receiver of load_edge -> derive my_hw from the edge
+    # dst (get_hw_node on the conv graph id can be None; the edge dst is reliable).
+    try:
+      my_hw = DevConfig().get_hw_node(load_edge.dst_id.graph_node_id)
+      if isinstance(my_hw, tuple):
+        my_hw = my_hw[0]
+    except Exception:
+      my_hw = None
+    if my_hw is None or my_hw not in imce_recvs:
+      # fall back: any receiver we also send an output to counts as sibling below
+      my_hw = None
+    siblings = set(r for r in imce_recvs if r != my_hw)
+    # the real SEND edge to the sibling is the post_op's out_edge (fused add
+    # odata -> sibling lhs), not the conv's own out_edge -- include both.
+    candidate_out = list(self.out_edges)
+    for op in self.post_ops:
+      candidate_out += op.out_edges
+    for edge in candidate_out:
+      # only the sibling's LHS-fed rendezvous (region3). region2's imce_2_2 sends
+      # to a sibling's RHS slot -> reject so region2 gets no spurious SETFLAG.
+      if getattr(edge.dst_id, "tensor_type", None) != "lhs":
+        continue
+      if edge not in DevConfig().TensorEdgetoInfo:
+        continue
+      te_info = DevConfig().TensorEdgetoInfo[edge]
+      if te_info is None or te_info.fifo_id in (0, TensorEdgeInfo.LOCAL_FIFO):
+        continue
+      try:
+        dst_hw = DevConfig().get_hw_node(edge.dst_id.graph_node_id)
+        if isinstance(dst_hw, tuple):
+          dst_hw = dst_hw[0]
+      except Exception:
+        continue
+      if dst_hw in siblings:
+        out_pair = pm.get_pair(edge)
+        if out_pair is not None:
+          return out_pair.uuid
+    return None
+
+  def _emit_postop_recv(self, comp: SequentialBlock, load_edge, only_op=None):
+    """Emit the external (fused-rhs) RECV window+blocks for post_op(s).
+
+    Shared by the normal path (RECV emitted after STEP/CREG, before compute) and
+    the Marker A reorder path (RECV emitted before the final LOAD_LB+STEP). Emits
+    only RECVs, not the post_op compute. `only_op` restricts to a single post_op.
+    """
+    all_out_edges = copy(self.out_edges)
+    for op in self.post_ops:
+      all_out_edges += op.out_edges
+    internal_edges = set(all_out_edges)  # edges produced by conv or post_ops
+
+    ops = [only_op] if only_op is not None else list(self.post_ops)
+    for op in ops:
+      op_external_edges = [e for e in op.in_edges if e not in internal_edges and e != load_edge]
+      for edge in op_external_edges:
+        if edge in DevConfig().TensorEdgetoInfo:
+          te_info = DevConfig().TensorEdgetoInfo[edge]
+        else:
+          continue
+        if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+          continue  # local edge, no need to recv
+        try:
+          arg_id = edge.src_id.graph_node_id
+          if ConstPat.match(CustomIDToNode()[arg_id]):
+            continue  # constant edge
+        except KeyError:
+          pass
+        if te_info.fifo_id != 0:
+          # handcraft window sync: wrap ALL blocks' RECVs for this edge in one
+          # SETFLAG(1)...SETFLAG(0) window (no per-RECV STANDBY) for imce<->imce
+          # pipeline; STANDBY(inode,1) window for inode data input.
+          recv_blocks = []
+          for i in range(op.num_blocks):
+            var_i = UniqueVar((edge, i))
+            if var_i.static:
+              continue
+            annotation = f"{edge}, {te_info.node_info_str}"
+            owner_edge = te_info.owner
+            recv_blocks.append(IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation))
+          if not recv_blocks:
+            continue
+          pre_lines, post_lines = (None, None)
+          if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+            pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(edge)
+          if pre_lines:
+            comp.add("\n".join(pre_lines))
+          for rb in recv_blocks:
+            comp.add(rb)
+          if post_lines:
+            comp.add("\n".join(post_lines))
 
   def _build_structure(self) -> CodeBlock:
     """
@@ -1047,10 +1798,86 @@ class ConvBlock(ImceCallCodeBlock):
       
       outer_body = SequentialBlock()
       tag = self.annotation + f"_row_group{idx}"
-      
+
+      # A row_group whose every col_group has load pattern 0 is pure zero
+      # padding (trailing rows). handcraft emits its SEND without the pre-send
+      # STANDBY rendezvous ONLY when this conv feeds a fused/composite consumer
+      # (out edge dst graph_node_id is a tuple, e.g. imce_1_2 -> imce_1_1's fused
+      # conv sends literal 0). A conv feeding a plain consumer (imce_2_1 ->
+      # imce_3_1) still emits the rendezvous even for the padding row.
+      row_is_padding = all(pat["pattern"] == 0 for pat in row_pat["pattern"])
+      # Look at the EXTERNAL inter-node SEND edge (the post-op's output when this
+      # node is a fused conv+op), NOT the internal conv->add edge. A fused
+      # conv+add always has an internal conv->add edge with a tuple dst, which
+      # would make EVERY fused node look like it "feeds a fused consumer" and
+      # wrongly dummy-out its flush row -- dropping a NoC RECV the producer still
+      # feeds (region2 imce_3_2: add-rhs arrives from imce_2_2 -> undrained FIFO
+      # -> deadlock). The real discriminator is whether the node's SEND leaves to
+      # a fused consumer (dst is a tuple) vs a plain consumer (int dst).
+      external_out_edges = (self.post_ops[-1].out_edges
+                            if self.post_ops else self.out_edges)
+      feeds_fused_consumer = any(
+          isinstance(e.dst_id.graph_node_id, tuple) for e in external_out_edges)
+      skip_row_presend = row_is_padding and feeds_fused_consumer
+
+      # A pure-padding row of a FUSED conv+add whose operand arrives over the NoC
+      # must DRAIN-and-forward without computing (no STEP/GET_CREG): the producer
+      # keeps sending its tail, so the RECV must still fire or its input FIFO
+      # overruns -> hard hang (waveform: imce_3_2 STEP never retires in bottom_pad
+      # row -> imce_3_3 STANDBY(17,1) -> imce_2_3 SEND blocked -> imce_3_1 RECV).
+      # This holds REGARDLESS of whether the SEND target is fused (imce_3_3 ->
+      # imce_3_2) or plain (imce_3_2 -> imce_3_1); the earlier skip_row_presend
+      # gate wrongly required feeds_fused_consumer, so imce_3_2 (plain consumer)
+      # fell through to the compute path and emitted a spurious STEP over an empty
+      # (bottom_pad, S3_valid=0) line buffer. handcraft emits RECV+ADD(.,0)+SEND,
+      # no STEP. Decoupled from feeds_fused_consumer here.
+      pad_drain_row = row_is_padding and self.has_noc_rhs and bool(self.post_ops)
+
+      # Marker A: boundary col_group = the LAST non-zero-load col_group in this
+      # row_group (the one immediately before pure zero-padding). Its FINAL
+      # iteration is the "padding boundary" where the fused NoC-rhs RECV (has_noc_rhs,
+      # imce_3_2) or the relocated pre-send STANDBY (noc_rhs_sender, imce_2_2) must
+      # sit before the last LOAD_LB+STEP.
+      # The peel only makes sense at a REAL padding boundary: the last non-zero
+      # col_group must be FOLLOWED by a pure-zero-padding col_group (pattern==0)
+      # in this row. 3x3/pad-1 convs (imce_3_2, region2 imce_2_2/3_2) have that
+      # trailing zero-pad group -> peel (STEP hs_remaining guard / Fix G barrier).
+      # 1x1/pad-0 convs (region3 imce_1_2/1_3) have NO zero-pad col_group -> their
+      # last group is ordinary steady-state data; handcraft emits it as one
+      # monolithic loop with NO peel. Peeling them adds a spurious second RECV
+      # window + LOAD split on every outer row -> ~2x rendezvous on the hot path
+      # -> region3 throughput collapse (14x slower, host poll timeout). So gate
+      # boundary_idx on trailing-zero-pad existence (byte-exact vs handcraft).
+      boundary_idx = None
+      if self.has_noc_rhs or self.noc_rhs_sender_receiver is not None:
+        last_nonzero = None
+        has_trailing_pad = False
+        for j, pat in enumerate(row_pat["pattern"]):
+          if pat["pattern"] > 0:
+            last_nonzero = j
+          elif last_nonzero is not None:
+            has_trailing_pad = True  # a zero-load col_group AFTER the last real one
+        if has_trailing_pad:
+          boundary_idx = last_nonzero
+
       for inner_idx, pat in enumerate(row_pat["pattern"]):
-         inner_loop = SimpleFor(pat["count"], 
-                                self._build_loop_body(pat["pattern"]), 
+         if inner_idx == boundary_idx and pat["count"] >= 1:
+           # peel the final iteration and reorder its last LOAD_LB after the RECV
+           n_normal = pat["count"] - 1
+           if n_normal > 0:
+             outer_body.add(SimpleFor(
+                 n_normal,
+                 self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend),
+                 f"{tag}_col_group{inner_idx}"))
+           outer_body.add(SimpleFor(
+               1,
+               self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
+                                     reorder_final_load=True),
+               f"{tag}_col_group{inner_idx}_boundary"))
+           continue
+         inner_loop = SimpleFor(pat["count"],
+                                self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
+                                                      pad_drain=pad_drain_row),
                                 f"{tag}_col_group{inner_idx}")
          outer_body.add(inner_loop)
 
@@ -1060,8 +1887,30 @@ class ConvBlock(ImceCallCodeBlock):
     # read remaining pixels if any
     if self.remain > 0:
       print(f"[ConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
-      tail_body = TextBlock(f"__builtin_IMCE_RECV({self.load_edge_info.fifo_id});")
-      tail_loop = SimpleFor(self.remain*4, tail_body, f"{self.annotation}_tail_loop")
+      fid = self.load_edge_info.fifo_id
+      # If the load edge is cyclic (paired), the producer (e.g. imce_0_3) gates
+      # every one of its iterations on a matching SETFLAG(1) rendezvous. The main
+      # LOAD_LB loop wraps each 4-value block in a SETFLAG(1)...SETFLAG(0) window
+      # (LoadLBBlock), but the tail RECVs default to bare RECV with NO flag. Once
+      # the consumer enters this flag-less tail, the producer's per-iteration
+      # STANDBY blocks forever -> region2 TILE0 deadlock (fsim-confirmed root
+      # cause: imce_0_2 tail starves imce_0_3.STANDBY(2,1)). handcraft wraps the
+      # tail in the same window: remain x [SETFLAG(1); RECV x4; SETFLAG(0)].
+      pre_lines, post_lines = (None, None)
+      if (getattr(self, "load_edge", None) is not None and self.builder
+          and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager):
+        pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(self.load_edge)
+      if pre_lines:
+        # windowed tail: one SETFLAG(1)...SETFLAG(0) per 4-value block
+        def tail_window_body(iter, fid=fid, pre=pre_lines, post=post_lines):
+          body = "\n".join(pre) + "\n"
+          body += SimpleFor(4, TextBlock(f"__builtin_IMCE_RECV({fid});")).render() + "\n"
+          body += "\n".join(post) + "\n"
+          return body
+        tail_loop = SimpleFor(self.remain, tail_window_body, f"{self.annotation}_tail_loop")
+      else:
+        tail_body = TextBlock(f"__builtin_IMCE_RECV({fid});")
+        tail_loop = SimpleFor(self.remain*4, tail_body, f"{self.annotation}_tail_loop")
       add_to_map(self.load_edge_info.owner, RecvSendNum("recv", self.remain*4), is_send=False)
       root.add(tail_loop)
 
@@ -1228,6 +2077,23 @@ class DWConvBlock(ImceCallCodeBlock):
       channels_in_group = min(16, self.channels - bshr_sel * 16)
       src_mask = channels_in_group - 1  # 0-indexed mask (15 for full group)
 
+      # BUGFIX knob (bugfix_off_mode()): a DWCONV group with channels_in_group<16
+      # (e.g. MobileNetV1's 8-channel depthwise) drives only the valid lanes. The
+      # vpu masks the unused blocks (block_mask -> vpu_wmask, BWEN active-high =
+      # mask-out) so the destination GPR's UPPER lanes are NEVER written and stay
+      # X. When imce_1_1 SENDs that raw partial psum straight to the next imce
+      # (split standalone-DWCONV path), the NoC TX carries X on the undriven lanes;
+      # BUGFIX-off has no X-masking so the flow_if `word_test` (^data !== 'x)
+      # $fatals after 100 such words (imce_intf_tx[4] = imce_1_1 local TX). Widen
+      # src_mask to 15 so ALL 16 blocks are block_selected => wmask=0 => every lane
+      # is WRITTEN (upper lanes accumulate the zero-padded upper input channels ->
+      # defined). The downstream minmaxquant only reads the valid channels, so the
+      # extra (zero) upper lanes are numerically inert. ResNet8 has no DWCONV;
+      # DS-CNN dwconv groups are full 16-lane (channels_in_group==16) => predicate
+      # never fires => byte-identical.
+      if bugfix_off_mode() and channels_in_group < 16:
+        src_mask = 15
+
       # Iterate over weight bitplanes (8 bitplanes for int8 weights)
       for shift_amt in range(self.num_weight_bitplanes):
         weight_idx = bshr_sel * self.num_weight_bitplanes + shift_amt
@@ -1322,14 +2188,36 @@ class DWConvBlock(ImceCallCodeBlock):
           except KeyError:
             pass
           if te_info.fifo_id != 0:
+            # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
+            # bare RECVs (no window sync) for the dwconv post-op external inputs.
+            if not bugfix_off_mode():
+              for i in range(op.num_blocks):
+                var_i = UniqueVar((edge, i))
+                if var_i.static:
+                  continue
+                annotation = f"{edge}, {te_info.node_info_str}"
+                owner_edge = te_info.owner
+                comp.add(IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation))
+              continue
+            recv_blocks = []
             for i in range(op.num_blocks):
               var_i = UniqueVar((edge, i))
               if var_i.static:
                 continue
               annotation = f"{edge}, {te_info.node_info_str}"
               owner_edge = te_info.owner
-              recv_code = IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation)
-              comp.add(recv_code)
+              recv_blocks.append(IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation))
+            if not recv_blocks:
+              continue
+            pre_lines, post_lines = (None, None)
+            if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+              pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(edge)
+            if pre_lines:
+              comp.add("\n".join(pre_lines))
+            for rb in recv_blocks:
+              comp.add(rb)
+            if post_lines:
+              comp.add("\n".join(post_lines))
         comp.add(op)
 
     # Wrap with RECV/SEND
@@ -1535,26 +2423,52 @@ class VecOpBlock(ImceCallCodeBlock):
       pass
 
     if te_info.fifo_id != 0:
-      # Generate RECV for each block
+      # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
+      # per-RECV SETFLAG(uuid)/STANDBY(sender,uuid)/SETFLAG(0) sync.
+      if not bugfix_off_mode():
+        for i in range(op.num_blocks):
+          var_i = UniqueVar((edge, i))
+          if var_i.static:
+            continue
+          annotation = f"{edge}, {te_info.node_info_str}"
+          owner_edge = te_info.owner
+          recv_code = IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation)
+          comp.add(recv_code)
+          if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+            pair = self.builder.pair_manager.get_pair(edge)
+            if pair:
+              sync_code = SequentialBlock()
+              sync_code.add(f"// sync after IMCE recv: uuid={pair.uuid}")
+              sync_code.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
+              sync_code.add(f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {pair.uuid});")
+              sync_code.add(f"__builtin_IMCE_SETFLAG(0);")
+              comp.add(sync_code)
+        return
+
+      # handcraft window sync: wrap ALL blocks' RECVs for this edge in one
+      # window. imce<->imce = SETFLAG(1);RECV..;SETFLAG(0). inode data input =
+      # SETFLAG(1);STANDBY(inode,1);SETFLAG(0);RECV.. (window closes before RECV).
+      recv_blocks = []
       for i in range(op.num_blocks):
         var_i = UniqueVar((edge, i))
         if var_i.static:
           continue
         annotation = f"{edge}, {te_info.node_info_str}"
         owner_edge = te_info.owner
-        recv_code = IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation)
-        comp.add(recv_code)
+        recv_blocks.append(IMCERecvBlock(str(var_i), te_info.fifo_id, owner_edge, annotation))
+      if not recv_blocks:
+        return
 
-        # Add sync after recv if pair_manager exists
-        if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
-          pair = self.builder.pair_manager.get_pair(edge)
-          if pair:
-            sync_code = SequentialBlock()
-            sync_code.add(f"// sync after IMCE recv: uuid={pair.uuid}")
-            sync_code.add(f"__builtin_IMCE_SETFLAG({pair.uuid});")
-            sync_code.add(f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {pair.uuid});")
-            sync_code.add(f"__builtin_IMCE_SETFLAG(0);")
-            comp.add(sync_code)
+      pre_lines, post_lines = (None, None)
+      if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+        pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(edge)
+
+      if pre_lines:
+        comp.add("\n".join(pre_lines))
+      for rb in recv_blocks:
+        comp.add(rb)
+      if post_lines:
+        comp.add("\n".join(post_lines))
 
   def _render(self) -> str:
     return self.body.render()
@@ -1570,6 +2484,11 @@ class BatchNormBlock(ImceCallCodeBlock):
   def __init__(self, call: 'BuilderContext', annotation: str = ""):
     """ Code block for batch normalization """
     super().__init__(call, annotation)
+    # real_blocks = blocks carrying ACTUAL batch_norm data. When num_blocks is
+    # padded up to the producer's STEP-burst width (create_loop_from_call), only
+    # the first real_blocks have valid scale/bias; the rest are drain packets
+    # (their SENDs become dummy 0 in RecvSendWrapper). Defaults to num_blocks.
+    self.real_blocks = self.num_blocks
 
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND.
@@ -1595,8 +2514,11 @@ class BatchNormBlock(ImceCallCodeBlock):
     if data_edge is None and self.prev_op is not None:
       data_edge = self.prev_op
 
-    print("[BatchNormBlock] num blocks:", self.num_blocks)
-    for i in range(self.num_blocks):
+    # Compute only real_blocks; padded drain blocks (i >= real_blocks) have no
+    # valid scale/bias and must not be computed (their SEND is a dummy 0).
+    real_blocks = getattr(self, "real_blocks", self.num_blocks)
+    print("[BatchNormBlock] num blocks:", self.num_blocks, "real:", real_blocks)
+    for i in range(real_blocks):
       var_data = self._make_unique_input_var_for_post_op(data_edge, i)
       var_scale = UniqueVar((scale_edge, i)) if scale_edge else UniqueVar((self, i, "scale_placeholder"))
       var_bias = UniqueVar((bias_edge, i)) if bias_edge else UniqueVar((self, i, "bias_placeholder"))
@@ -1621,7 +2543,9 @@ class RecvSendWrapper(ImceCodeBlock):
   """
 
   def __init__(self, body: CodeBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
-               in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = "", builder=None):
+               in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = "", builder=None,
+               skip_presend: bool = False, suppress_presend_only: bool = False,
+               post_send_setflag_uuid: int = None):
     """Wrap a computation block with RECV/SEND operations.
 
     Args:
@@ -1630,6 +2554,12 @@ class RecvSendWrapper(ImceCodeBlock):
         out_edges:
         annotation: Optional annotation string
         builder: Optional builder reference for pair_manager access
+        skip_presend: If True, suppress the pre-send STANDBY rendezvous AND emit
+            dummy 0 SENDs. Used for zero-load (recv_count==0) col_groups whose SEND
+            is pure zero-padding (handcraft emits a bare SEND with no STANDBY there).
+        suppress_presend_only: If True, suppress ONLY the pre-send STANDBY but keep
+            REAL data SENDs. Used by the Marker A imce_2_2 boundary reorder, where
+            the pre-send STANDBY was already relocated into the LOAD window.
     """
     super().__init__(annotation)
     self.body = body
@@ -1641,6 +2571,12 @@ class RecvSendWrapper(ImceCodeBlock):
     self.send_map = {}
     self.recv_map = {}
     self.builder = builder
+    self.skip_presend = skip_presend
+    self.suppress_presend_only = suppress_presend_only
+    # Fix G producer side: SETFLAG(uuid) emitted AFTER the SEND loop, notifying the
+    # sibling consumer (imce_3_2) that this node's psum for the boundary iteration
+    # has been sent, so the consumer's boundary STEP may proceed. None -> no notify.
+    self.post_send_setflag_uuid = post_send_setflag_uuid
   
   @classmethod
   def from_codeblock(cls, codeblock: ImceCallCodeBlock, annotation: str="", builder=None):
@@ -1659,46 +2595,123 @@ class RecvSendWrapper(ImceCodeBlock):
 
   def _render(self) -> str:
     """Generate RECV -> body -> SEND."""
+    # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
+    # per-RECV/per-SEND uuid sync (no window sync, no pre-send STANDBY, no
+    # dummy-0 SEND / burst-pad).
+    if not bugfix_off_mode():
+      return self._render_a8af()
+
     code = TextBlock("")
 
     # --- 1. Generate RECVs ---
+    # handcraft window sync: wrap ALL blocks' RECVs for a given edge in ONE
+    # window (SETFLAG(1)...SETFLAG(0)) with no per-RECV STANDBY for imce<->imce
+    # pipeline, or a STANDBY(inode,1) window before the RECV for inode data
+    # input. So iterate edge-outer / block-inner.
+    # Fix D: if this receiver is fed by >=2 inode data-input edges (region2
+    # imce_1_3: add lhs from inode_0_0, rhs from inode_1_0), MERGE their
+    # per-edge SETFLAG(1);STANDBY(inode,1);SETFLAG(0) windows into ONE window
+    # that STANDBYs on every inode sender, closes once, then all the RECVs
+    # follow (handcraft). A single flag reg/node (imce_ctrl.sv) means two
+    # separate windows toggle 1->0->1->0 and desync from the flag=2 output
+    # barrier -> deadlock. region1 has at most one inode data input per
+    # receiver -> merge is None -> unchanged.
+    merged_input_pre = None
+    merged_input_edges = set()
+    if self.in_edges and self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+      pm = self.builder.pair_manager
+      merged_input_pre = pm.get_merged_inode_input_window(self.in_edges)
+      if merged_input_pre is not None:
+        merged_input_edges = set(pm.collect_inode_data_input_edges(self.in_edges))
+    merged_window_emitted = False
+
     if self.in_edges:
-      for i in range(self.num_blocks):
-        for edge in self.in_edges:
-          # te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
-          # assert len(te_infos) == 1, "more than one te_info found!"
-          # te_info = te_infos[0]
-          if edge in DevConfig().TensorEdgetoInfo:
-            te_info = DevConfig().TensorEdgetoInfo[edge]
-          else:
-            src_graph_id = edge.src_id.graph_node_id
-            dst_graph_id = edge.dst_id.graph_node_id
-            assert len(src_graph_id) == 2 and len(dst_graph_id) == 2, "Graph node ID should be tuple of (outer_id, inner_id)"
-            assert src_graph_id[0] == dst_graph_id[0], "If src and dst outer node id are different, this edge should be in DevConfig().TensorEdgetoInfo"
-            te_info = None
+      for edge in self.in_edges:
+        if edge in DevConfig().TensorEdgetoInfo:
+          te_info = DevConfig().TensorEdgetoInfo[edge]
+        else:
+          src_graph_id = edge.src_id.graph_node_id
+          dst_graph_id = edge.dst_id.graph_node_id
+          assert len(src_graph_id) == 2 and len(dst_graph_id) == 2, "Graph node ID should be tuple of (outer_id, inner_id)"
+          assert src_graph_id[0] == dst_graph_id[0], "If src and dst outer node id are different, this edge should be in DevConfig().TensorEdgetoInfo"
+          te_info = None
 
-          if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
-            continue # this edge's src and dst hw node is equal
+        if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+          continue # this edge's src and dst hw node is equal
 
-          try:
-            arg_id = edge.src_id.graph_node_id
-            if ConstPat.match(CustomIDToNode()[arg_id]):
-              continue
-          except KeyError:
-            pass
-          var_i = UniqueVar((edge, i))
-          if not te_info or var_i.static:
+        try:
+          arg_id = edge.src_id.graph_node_id
+          if ConstPat.match(CustomIDToNode()[arg_id]):
             continue
-          if te_info.fifo_id == 0:
+        except KeyError:
+          pass
+        if not te_info or te_info.fifo_id == 0:
+          continue
+
+        # Fix D merged path: this edge is one of >=2 inode data inputs -> emit
+        # the single merged window once (before the FIRST such edge's RECVs),
+        # then this edge's RECVs are bare (window already closed). Both edges'
+        # RECVs thus follow the one merged SETFLAG(1);STANDBY..;SETFLAG(0).
+        # Fix E (region3 imce_0_2): when num_blocks > 1 (>=2 words per producer
+        # SEND-pair), the producer inodes re-arm their pre-send rendezvous flag
+        # ONCE PER WORD (per SEND). A single window wrapping all num_blocks RECVs
+        # (edge-outer) only raises the consumer flag once, so the producer's 2nd
+        # SEND blocks forever on STANDBY(consumer,1) -> starve -> deadlock
+        # (fsim-confirmed root cause). handcraft interleaves block-outer and
+        # re-raises the window per block: for i: [window; RECV(lhs_i);
+        # RECV(rhs_i)]. num_blocks==1 (region2 imce_1_3) collapses to the old
+        # single-window behaviour, so region2 is unchanged.
+        if merged_input_pre is not None and edge in merged_input_edges:
+          if not merged_window_emitted:
+            # emit ALL merged edges here, block-outer, so the remaining merged
+            # edges skip their own emission below.
+            merged_edges_ordered = [e for e in self.in_edges if e in merged_input_edges]
+            for i in range(self.num_blocks):
+              any_recv = False
+              block_lines = []
+              for me in merged_edges_ordered:
+                me_info = DevConfig().TensorEdgetoInfo.get(me)
+                if me_info is None:
+                  continue
+                var_i = UniqueVar((me, i))
+                if var_i.static:
+                  continue
+                any_recv = True
+                block_lines.append(
+                    f"{var_i} = __builtin_IMCE_RECV({me_info.fifo_id}); "
+                    f"// {me}, {me_info.node_info_str}")
+                add_to_map(me_info.owner, RecvSendNum("recv", 1), is_send=False)
+              if not any_recv:
+                continue
+              code += "\n".join(merged_input_pre)
+              for line in block_lines:
+                code += line
+            merged_window_emitted = True
+          continue
+
+        # Collect the non-static RECV lines for all blocks of this edge
+        recv_lines = []
+        for i in range(self.num_blocks):
+          var_i = UniqueVar((edge, i))
+          if var_i.static:
             continue
           annotation = f"{edge}, {te_info.node_info_str}"
-          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
+          recv_lines.append(f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}")
           owner_edge = te_info.owner
           add_to_map(owner_edge, RecvSendNum("recv", 1), is_send=False)
+        if not recv_lines:
+          continue
 
-          # Add sync immediately after this recv
-          if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
-            code = self._add_sync_after_recv(code, edge)
+        pre_lines, post_lines = (None, None)
+        if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+          pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(edge)
+
+        if pre_lines:
+          code += "\n".join(pre_lines)
+        for line in recv_lines:
+          code += line
+        if post_lines:
+          code += "\n".join(post_lines)
 
     # --- 2. Generate Body ---
     # Here we call content() on the child block(s)
@@ -1761,25 +2774,43 @@ class RecvSendWrapper(ImceCodeBlock):
       if isinstance(self.send_block, VecOpBlock):
         actual_send_block = self.send_block.get_send_block()
 
-      # Per-packet sync: Send one packet, then sync immediately
+      # handcraft pre-send sync: emit ONE STANDBY(receiver, 1) BEFORE the SEND
+      # loop when the receiver is an imce (pipeline). Output to an inode is bare.
+      # Suppressed for zero-load col_groups (skip_presend) whose SEND is padding.
+      if (te_out_info.fifo_id != TensorEdgeInfo.LOCAL_FIFO and not self.skip_presend
+          and not self.suppress_presend_only):
+        if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager and output_edges:
+          pre_send = self.builder.pair_manager.get_pre_send_sync(output_edges[0])
+          if pre_send:
+            code += "\n".join(pre_send)
+
       for i in range(self.num_out_blocks):
         for te_out_info in [te_out_info]: #TODO: current version doesn't need it
           if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
             continue # this edge's src and dst hw node is equal
 
-          var_o = UniqueVar((actual_send_block, i))
+          # Burst-pad drains (i >= real_blocks) send a dummy 0, not an undefined
+          # compute var. Keeps SEND count == producer burst (4:1 lock-step) so
+          # imce_3_1 -> inode_3_0 matches handcraft (1 real + 3 dummy).
+          # skip_presend (pure-padding flush row feeding a fused consumer) emits
+          # ALL dummy SENDs (no compute happened) -- handcraft imce_1_2 last row.
+          _real = getattr(actual_send_block, "real_blocks", None)
+          if self.skip_presend or (_real is not None and i >= _real):
+            var_o = "0"
+          else:
+            var_o = UniqueVar((actual_send_block, i))
           if te_out_info:
             annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
             code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
             for out_edge in output_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
-            # Add sync AFTER each send (per-packet sync)
-            if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
-              if output_edges:
-                # Use first edge for UUID lookup (all edges in output_edges should have same UUID)
-                # IMPORTANT: += creates new object, so we must capture the return value
-                code = self._add_sync_after_send(code, output_edges[0])
+      # Fix G producer side: notify the sibling boundary-STEP consumer that this
+      # node's psum SEND for the iteration is complete (paired with the consumer's
+      # STANDBY(this_node, uuid) before its final boundary LOAD_LB).
+      if self.post_send_setflag_uuid is not None:
+        code += (f"//! notify psum send event to the sibling boundary consumer\n"
+                 f"__builtin_IMCE_SETFLAG({self.post_send_setflag_uuid});")
 
       # Producer IMCE signals end of output (flag 2)
       # TEMPORARILY DISABLED: Testing UUID-based sync instead
@@ -1788,6 +2819,109 @@ class RecvSendWrapper(ImceCodeBlock):
       # FIXME: the NOP count here is hardcoded
       # nops = " ".join([f"\"nop\\n\"" for _ in range(5)])
       # code += f"__asm__ volatile({nops});"
+
+    return code.render()
+
+  # ---- a8af (knob=on) fallback: per-RECV/per-SEND uuid sync, no windows ----
+  def _render_a8af(self) -> str:
+    """Generate RECV -> body -> SEND (a8af behavior)."""
+    code = TextBlock("")
+
+    # --- 1. Generate RECVs ---
+    if self.in_edges:
+      for i in range(self.num_blocks):
+        for edge in self.in_edges:
+          if edge in DevConfig().TensorEdgetoInfo:
+            te_info = DevConfig().TensorEdgetoInfo[edge]
+          else:
+            src_graph_id = edge.src_id.graph_node_id
+            dst_graph_id = edge.dst_id.graph_node_id
+            assert len(src_graph_id) == 2 and len(dst_graph_id) == 2, "Graph node ID should be tuple of (outer_id, inner_id)"
+            assert src_graph_id[0] == dst_graph_id[0], "If src and dst outer node id are different, this edge should be in DevConfig().TensorEdgetoInfo"
+            te_info = None
+
+          if te_info and te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+            continue # this edge's src and dst hw node is equal
+
+          try:
+            arg_id = edge.src_id.graph_node_id
+            if ConstPat.match(CustomIDToNode()[arg_id]):
+              continue
+          except KeyError:
+            pass
+          var_i = UniqueVar((edge, i))
+          if not te_info or var_i.static:
+            continue
+          if te_info.fifo_id == 0:
+            continue
+          annotation = f"{edge}, {te_info.node_info_str}"
+          code += f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); // {annotation}"
+          owner_edge = te_info.owner
+          add_to_map(owner_edge, RecvSendNum("recv", 1), is_send=False)
+
+          if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+            code = self._add_sync_after_recv(code, edge)
+
+    # --- 2. Generate Body ---
+    code += self.body
+
+    # --- 3. Generate SENDs ---
+    if self.out_edges:
+      out_edge_src_ids = {edge.src_id for edge in self.out_edges}
+      assert len(out_edge_src_ids) == 1, "out_edge_src_ids should have only one element"
+
+      src_id = out_edge_src_ids.pop()
+      te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(src_id, "out")
+
+      output_edges = self.out_edges
+      split_case = all(isinstance(dst_node, relay.Call) and dst_node.op == relay.op.get("split") for dst_node in [CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)] for edge in self.out_edges])
+      if split_case:
+        assert len(self.out_edges) == 1, "In split case, there should be only one out_edge from this block"
+        assert te_out_infos[0].fifo_id == TensorEdgeInfo.LOCAL_FIFO, "producer of split should have same HW node ID"
+        split_node_graph_id = self.out_edges[0].dst_id.graph_node_id
+        target_tensor_id = TensorID(split_node_graph_id, "odata")
+        te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(target_tensor_id, "out")
+        output_edges = [edge for edge in DevConfig().TensorEdgetoInfo.keys() if getInnerNodeID(edge.src_id.graph_node_id) == getInnerNodeID(target_tensor_id.graph_node_id)]
+        print(f"Info: got {len(te_out_infos)} tensor edge infos from split dst edge")
+
+      if not te_out_infos: raise RuntimeError(f"no tensor edge info found for src_id {src_id} even after checking split case")
+
+      if split_case:
+        assert len(te_out_infos) > 1, "In split case, there should be multiple tensor edge infos"
+        addresses = {info.policy_info[0].address for info in te_out_infos}
+        assert len(addresses) == 1, "In split case, all output addresses must be identical"
+        fifo_ids = {info.fifo_id for info in te_out_infos}
+        assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
+        te_out_info = te_out_infos[0]
+      else:
+        if len(te_out_infos) > 1:
+          addresses = {info.policy_info[0].address for info in te_out_infos}
+          assert len(addresses) == 1, "In split case, all output addresses must be identical"
+          fifo_ids = {info.fifo_id for info in te_out_infos}
+          assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
+          te_out_info = te_out_infos[0]
+        else:
+          te_out_info = te_out_infos[0]
+
+      actual_send_block = self.send_block
+      if isinstance(self.send_block, VecOpBlock):
+        actual_send_block = self.send_block.get_send_block()
+
+      for i in range(self.num_out_blocks):
+        for te_out_info in [te_out_info]:
+          if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+            continue
+
+          var_o = UniqueVar((actual_send_block, i))
+          if te_out_info:
+            annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
+            code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
+            for out_edge in output_edges:
+              add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
+
+            if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
+              if output_edges:
+                code = self._add_sync_after_send(code, output_edges[0])
 
     return code.render()
 
@@ -2011,6 +3145,24 @@ class RecvSendWrapper(ImceCodeBlock):
         count = count // ratio
         num_blocks = bn_num_blocks
         num_out_blocks = bn_num_blocks
+      # Burst-pad: the producer conv sends GRANULARITY (=4) values per STEP
+      # (GET_CREG 0..3 -> SEND x4). A standalone BN with num_blocks < GRANULARITY
+      # consumes fewer per window -> 1:GRANULARITY cadence mismatch vs producer
+      # -> FIFO back-pressure -> imce_2_1 tx X-fatal (router_flow_rx[11]/[16]).
+      # Pad num_blocks up to GRANULARITY, keep real_blocks = actual computed
+      # blocks; extra RECVs drain, extra SENDs are dummy 0. Reproduces handcraft
+      # imce_3_1 (loop/4, RECVx4, SENDx4 with 1 real + 3 dummy).
+      # BUGFIX knob: burst-pad is part of the 934 sync work; a8af (knob=on) had
+      # no burst-pad -> skip it.
+      GRANULARITY = 4
+      real_blocks = num_blocks
+      if bugfix_off_mode() and num_out_blocks == real_blocks and real_blocks < GRANULARITY and (GRANULARITY % real_blocks == 0):
+        ratio = GRANULARITY // real_blocks
+        count = count // ratio
+        num_blocks = GRANULARITY
+        num_out_blocks = GRANULARITY
+        actual_send_block.real_blocks = real_blocks
+        actual_send_block._num_blocks = num_blocks
     elif isinstance(actual_send_block, VecBlock):
       # For standalone VecBlock (Add, Mult, Div), use channel-based num_blocks
       # The num_blocks should be channels / 16, not byte-ratio based

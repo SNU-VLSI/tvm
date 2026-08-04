@@ -62,3 +62,79 @@ Use `imcflow-compiler-expert` for ANY task including:
 - invoke python at `/root/project/tvm/tvm_practice/test_imcflow/codegen`
 - source ~/.zshrc
 - use `.envrc` with `direnv`
+
+## IMCFLOW_BUGFIX master knob (BUGFIX-on vs BUGFIX-off RTL) — READ FIRST
+
+The RTL exists in two builds: **BUGFIX-on** (the original, chip/tapeout HW model)
+and **BUGFIX-off** (a co-sim build with BUGFIX_STEP/DWCONV/OVERFLOW/ROUTER macros
+commented out). BUGFIX-off deadlocks unless codegen emits extra NoC sync
+(rendezvous/barrier); BUGFIX-on works with the original a8af sync. ONE env var
+switches BOTH codegen and the RTL runner consistently:
+
+- **`IMCFLOW_BUGFIX` unset or `=on` (DEFAULT)** → codegen = a8af (no new sync,
+  byte-identical to pristine); RTL runner = `gem5/tests/imcflow/rtl_runner`
+  (BUGFIX-on simv); `IMCFLOW_BUGFIX_OVERFLOW_SW` default OFF. This is what all
+  existing chip / driver-v2 / FPGA workflows get — they never set the knob, so
+  they are unaffected.
+- **`IMCFLOW_BUGFIX=off`** (explicit opt-in) → codegen = 934+P0-P3+P4 sync;
+  RTL runner = `gem5_bugfixoff_wt/tests/imcflow/rtl_runner` (BUGFIX-off simv);
+  overflow-SW fix default ON; eval_dir gets a `.bugfixoff` suffix so its
+  artifacts (codegen/fsdb/output) never overwrite the default run's.
+
+Helper: `tvm.contrib.imcflow.bugfix_off_mode()` (default False = a8af). Gated at
+all sync call sites in send_recv_sync.py / imce_codeblock.py / inode_codeblock.py
+/ codegen.py, and at `runners/imcflow_runner.py` RTLRunner.directory_path.
+`IMCFLOW_RTL_RUNNER_DIR` still overrides the runner dir when set explicitly.
+Background & design: `DWCONV_SYNC_GRANULARITY_DESIGN.md`, `P4_HANDOFF.md`.
+
+## Running the BUGFIX-off RTL co-simulation (deadlock-check path)
+
+Not the chip path — this drives the VCS RTL runner (`--stop-at simulate`).
+Model names: `resnet8_subset31_pretrained_orig`, `ds_cnn_subset08_pretrained`
+(fast), `ds_cnn_full_pretrained`. Required env (from the codegen dir):
+
+```bash
+export IMCFLOW_BUGFIX=off            # <- the knob (BUGFIX-off codegen + runner)
+export IMCFLOW_RUNNER=rtl IMCFLOW_HOST_OS=baremetal IMCFLOW_HOST_ISA=x86
+export IMCFLOW_DIR=/root/project/imcflow_march_rtl
+export SNPSLMD_LICENSE_FILE=1727@147.46.168.128   # VCS/XProp license
+export CKPT=n32_signed_sample        # resnet8 (b2_half.json); ds_cnn -> kws_dscnn_base
+# PYTHONPATH/TVM_HOME must point at THIS checkout (worktree-aware)
+python -u main.py --model <model> --stop-at simulate
+```
+
+- **Pass = `POLLING ERROR 0` + `SIMULATION COMPLETED SUCCESSFULLY`.** A deadlock
+  shows as poll count climbing to 20000 then `POLLING ERROR` (host polls the
+  accelerator until it returns IDLE; 20000 = hang). Healthy runs finish in
+  hundreds–thousands of polls.
+- fsim per-node logs: `eval_dir/<model>_evl.baremetal[.bugfixoff]/logs/rtl_runner/fsim_logs/`.
+- GOTCHA: the shared BUGFIX-off runner `run.sh` hardcodes a `TVM_BUILD_DIR`; from
+  a different worktree set `IMCFLOW_TVM_CODEGEN_DIR=<this codegen dir>` (a
+  backward-compatible override was added). `direnv allow` the worktree + gem5
+  `.envrc` if the C build step reports `direnv blocked`.
+- ★GOTCHA (worktree + inputs): gem5's `run_imcflow_rtl.py` resolves the model
+  inputs against the **main** codegen tree (`/root/project/tvm/tvm_practice/test_imcflow/codegen/eval_dir/...`),
+  NOT the worktree. If that main-tree `eval_dir/<name>/test_inputs/` lacks
+  `model_input.{bin,meta.txt}`, gem5 logs `No inputs loaded!` and exits WITHOUT
+  running — yet the host binary still prints `POLLING ERROR 0` /
+  `SIMULATION COMPLETED SUCCESSFULLY` (misleading: it only means clean exit, not
+  that the accelerator computed). Verify real work ran: `imcflow_state_o` should
+  rise to 1 (fsdb has busy pulses), and vcs_sim.log should have
+  `Processing READ/WRITE` + `resuming normal operation` markers. A ~800 KB fsdb
+  (vs tens of MB) or a truncated vcs_sim.log ending at "gem5 connected..." means
+  the workload never ran. Fix: copy `model_input.*` into the MAIN-tree
+  `eval_dir/<name>/test_inputs/` before the run. (This surfaced when the
+  `.bugfixoff` eval_dir suffix created a new name with no matching main-tree
+  inputs; `rtl_region_cycles.py` now prints this specific diagnosis instead of a
+  bare "no region markers".)
+
+## Measuring accelerator busy cycles (imcflow_state_o)
+
+`tools/rtl_region_cycles.py <eval_dir> [--method fsdb|poll] [--json]` reports
+per-region cycles where the accelerator was actually computing (`imcflow_state_o=1`
+in the .fsdb; host poll/transfer overhead excluded), at 100 MHz. `--method fsdb`
+(default, accurate) needs Verdi on PATH (`/tool/Program/synopsys/verdi/V-2023.12-SP2-4/bin`);
+`--method poll` estimates from vcs_sim.log poll spans (within ~1% of fsdb).
+Use it to compare BUGFIX-on vs BUGFIX-off execute cycles for the same model — run
+each with its knob into its own eval_dir, then point the tool at each. See memory
+`[[rtl-region-busy-cycles]]`.

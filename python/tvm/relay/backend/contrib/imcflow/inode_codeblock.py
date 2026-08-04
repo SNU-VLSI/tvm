@@ -1,6 +1,7 @@
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.contrib.imcflow import bugfix_off_mode
 from textwrap import indent
 import math
 import pdb
@@ -186,30 +187,32 @@ class RecvBlock(InodeCodeBlock):
     # Sync is already added inside the loop (per-packet sync), no need to add again here
 
   def _get_recv_sync_code_str(self):
-    """Get sync code as a string (for inline insertion in loops) for recv"""
-    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
-      return ""  # No pair manager, no sync
+    """Get sync code as a string (for inline insertion in loops) for recv.
 
+    handcraft (knob=off): imce->inode output RECV is BARE (no SETFLAG/STANDBY).
+    The inode just receives; the producing imce does the (bare) SEND. Return "".
+
+    BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's per-RECV
+    RECEIVER-pattern sync (SETFLAG(uuid); STANDBY(sender,uuid); SETFLAG(0)).
+    """
+    if bugfix_off_mode():
+      return ""
+
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return ""
     edge = self._get_edge()
     if edge is None:
       return ""
-
     pair = self.builder.pair_manager.get_pair(edge)
     if pair is None:
-      return ""  # No sync needed for this edge
-
-    # Get current node - receiver node
+      return ""
     dst_hw_node = self._get_hw_node_from_edge(edge)
     if dst_hw_node is None:
       return ""
-
-    # Generate sync code inline - RECEIVER pattern
-    # Receiver only waits for sender (not other receivers in multicast)
     sync_lines = []
     sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
     sync_lines.append(f"__builtin_INODE_STANDBY({pair.sender_node.value}, {pair.uuid});")
     sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
-
     return "\n".join(sync_lines) + "\n"
 
   def _add_sync_after_recv(self):
@@ -375,15 +378,48 @@ class SendBlock(InodeCodeBlock):
     var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
 
-    # Per-packet sync: Send one packet, then sync immediately
+    # data-input SEND is preceded by a pre-send rendezvous with the receiving
+    # imce (weight/const SEND is bare -> _get_presend_sync_code_str returns "").
+    # Sync-granularity contract (DESIGN §2.3): emit the rendezvous once per
+    # `producer_send_per_sync` packets. Default (None) == 1 == per-packet, i.e.
+    # byte-identical to the previous hardcoded behavior.
+    # NOTE: `iter` here is the C loop-variable NAME (a string like "i1") for
+    # count>1, or the int 0 for count==1 -- it is NOT a Python integer we can do
+    # arithmetic on. So for the default per-packet case we emit the handshake
+    # unconditionally (as before); only a contracted value >1 wraps it in a
+    # C-level `if (iter % N == 0)` guard.
+    # chip_acc_measure reconcile (DESIGN §3.5 order contract): pre-send
+    # rendezvous BEFORE the SEND; the single_qconv nop_delay (v2/atomic-conv
+    # timing) AFTER the SEND. single_qconv off (ResNet8 / v1 multi-core) ->
+    # nop_delay == "" -> byte-identical to the 934ec1001 output.
+    # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
+    # per-packet POST-send SENDER-pattern sync (SEND then _get_sync_code_str);
+    # knob=off keeps the 934 pre-send rendezvous below.
+    if not bugfix_off_mode():
+      def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id):
+        code = f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
+        sync_code = self._get_sync_code_str_a8af()
+        if sync_code:
+          code += sync_code
+        return code
+      self.body.add(SimpleFor(recv_count, send_body_with_sync))
+      return
+
+    send_per_sync = getattr(self.edge_info, "producer_send_per_sync", None) or 1
     nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
-    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id, nop_delay=nop_delay):
-      code = f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
+    def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr,
+                            fifo_id=fifo_id, send_per_sync=send_per_sync, nop_delay=nop_delay):
+      code = ""
+      pre = self._get_presend_sync_code_str()
+      if pre:
+        if send_per_sync == 1:
+          code += pre                      # per-packet (default, unchanged)
+        else:
+          # group N packets under one handshake: guard at C level.
+          guarded = "".join(f"  {ln}\n" for ln in pre.splitlines() if ln.strip())
+          code += f"if (({iter}) % {send_per_sync} == 0) {{\n{guarded}}}\n"
+      code += f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
       code += nop_delay
-      # Add sync after each send
-      sync_code = self._get_sync_code_str()
-      if sync_code:
-        code += sync_code
       return code
     self.body.add(SimpleFor(recv_count, send_body_with_sync))
 
@@ -411,32 +447,97 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
 
-    # Per-packet sync: Send one packet, then sync immediately
+    # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
+    # per-packet POST-send SENDER-pattern sync; knob=off keeps the 934 pre-send
+    # rendezvous below.
+    if not bugfix_off_mode():
+      def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id):
+        code = f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
+        sync_code = self._get_sync_code_str_a8af()
+        if sync_code:
+          code += sync_code
+        return code
+      self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
+      return
+
+    # handcraft: data-input SEND is preceded (per-packet) by a pre-send
+    # rendezvous with the receiving imce. weight/const SEND is bare.
+    # chip_acc_measure reconcile (DESIGN §3.5): pre-send rendezvous BEFORE the
+    # SEND, single_qconv nop_delay AFTER (== "" when single_qconv off).
     nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
     def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id, nop_delay=nop_delay):
-      code = f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
+      code = ""
+      pre = self._get_presend_sync_code_str()
+      if pre:
+        code += pre
+      code += f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
       code += nop_delay
-      # Add sync after each send
-      sync_code = self._get_sync_code_str()
-      if sync_code:
-        code += sync_code
       return code
     self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
 
-  def _get_sync_code_str(self):
-    """Get sync code as a string (for inline insertion in loops) - SENDER pattern"""
+  def _get_presend_sync_code_str(self):
+    """Get PRE-send rendezvous code (handcraft, SENDER side for data input).
+
+    handcraft inode_0_0 data-input SEND (per-packet):
+        STANDBY(imce, 1); SET_FLAG(1); STANDBY(imce, 0); SET_FLAG(0); SEND
+    Only emitted for inode -> imce *data input* edges whose receiver is the
+    main-pipeline imce (plain-int dst id, e.g. imce_0_2). weight/const SENDs and
+    the fused/composite receiver (imce_0_1) get NO pre-send (bare).
+    """
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return ""
+
+    edge_or_edges = self._get_edge()
+    if edge_or_edges is None:
+      return ""
+    edges = edge_or_edges if isinstance(edge_or_edges, list) else [edge_or_edges]
+
+    pm = self.builder.pair_manager
+    # Rendezvous only with data-input receivers (plain-int dst) of this SEND.
+    # Each edge maps to exactly ONE receiver (its own dst hw node); do NOT pull
+    # in the other multicast receivers (e.g. the fused imce_0_1 whose dst is a
+    # tuple must stay bare).
+    target_imces = []
+    for e in edges:
+      if not pm.is_inode_data_input_recv(e):
+        continue
+      rnode = pm._get_hw_node(e.dst_id)
+      if isinstance(rnode, tuple):
+        rnode = rnode[0]
+      if rnode is not None and rnode.is_imce() and rnode not in target_imces:
+        target_imces.append(rnode)
+
+    if not target_imces:
+      return ""
+
+    target_imces.sort(key=lambda x: x.value)
+
+    sync_lines = []
+    for rnode in target_imces:
+      sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, 1); // sync with {rnode.name} before SEND")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG(1);")
+      sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, 0);")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
+    return "\n".join(sync_lines) + "\n"
+
+  def _get_sync_code_str_a8af(self):
+    """a8af POST-send SENDER-pattern sync (knob=on fallback).
+
+    SENDER: STANDBY(receiver, uuid); SETFLAG(uuid); STANDBY(receiver, 0); SETFLAG(0)
+    emitted AFTER each SEND. Verbatim from a8af _get_sync_code_str (debug prints
+    preserved for byte-identity of stdout side-effects only; they do not affect
+    the emitted .cpp).
+    """
     if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
       print(f"[DEBUG _get_sync_code_str] No pair_manager")
-      return ""  # No pair manager, no sync
+      return ""
 
     edge_or_edges = self._get_edge()
     if edge_or_edges is None:
       print(f"[DEBUG _get_sync_code_str] Edge is None")
       return ""
 
-    # Handle multicast (list of edges) vs single edge
     if isinstance(edge_or_edges, list):
-      # Multicast case - find edge with split_idx to get correct pair
       edge = None
       for e in edge_or_edges:
         if e.split_idx is not None:
@@ -455,37 +556,28 @@ class SendBlock(InodeCodeBlock):
     pair = self.builder.pair_manager.get_pair(edge)
     if pair is None:
       print(f"[DEBUG _get_sync_code_str] No pair for edge: {edge}")
-      return ""  # No sync needed for this edge
+      return ""
 
-    # Skip sync if sender == all receivers (same node, no real communication)
     if len(pair.receiver_nodes) == 1 and pair.sender_node in pair.receiver_nodes:
       print(f"[DEBUG _get_sync_code_str] Skipping sync: sender==receiver for edge={edge}")
-      return ""  # No sync needed for same-node communication
+      return ""
 
-    # Get current node from edge_info
     current_node = self.edge_info.policy_info[0].router_id
 
-    # DEBUG: Print pair info
     print(f"[DEBUG _get_sync_code_str] edge={edge}")
     print(f"[DEBUG _get_sync_code_str] pair.uuid={pair.uuid}, pair.sender_node={pair.sender_node}, pair.receiver_nodes={pair.receiver_nodes}")
     print(f"[DEBUG _get_sync_code_str] pair.all_nodes={pair.all_nodes}")
     print(f"[DEBUG _get_sync_code_str] current_node={current_node} (type={type(current_node)})")
 
-    # Generate sync code inline - SENDER pattern
-    # SENDER: STANDBY(receiver, uuid) → SETFLAG(uuid) → STANDBY(receiver, 0) → SETFLAG(0)
     sync_lines = []
-    # First wait for receiver to be ready (receiver sets its flag first)
     for node in pair.all_nodes:
       print(f"[DEBUG _get_sync_code_str] Checking node={node}, node != current_node = {node != current_node}")
       if node != current_node:
         sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, {pair.uuid});")
-    # Then set sender flag to acknowledge
     sync_lines.append(f"__builtin_INODE_SET_FLAG({pair.uuid});")
-    # Wait for receiver to clear flag (receiver processed data)
     for node in pair.all_nodes:
       if node != current_node:
         sync_lines.append(f"__builtin_INODE_STANDBY({node.value}, 0);")
-    # Clear sender flag
     sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
 
     print(f"[DEBUG _get_sync_code_str] Generated sync_lines: {sync_lines}")
@@ -565,15 +657,23 @@ class SendBlockInterleaved(InodeCodeBlock):
       # Identify blocks active in this interval
       active_infos = [x for x in info_list if x['recv_count'] > current_base]
 
-      # Generate loop for this interval
-      nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+      # Generate loop for this interval.
+      # BUGFIX knob: knob=off appends "\n"+nop_delay after the SEND (934); knob=on
+      # (bugfix_off_mode()==False) reproduces a8af's bare SEND line (no trailing
+      # newline / nop_delay).
+      if bugfix_off_mode():
+        nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+        _suffix = "\n"
+      else:
+        nop_delay = ""
+        _suffix = ""
       for x in active_infos:
         # var = UniqueVar("send_offset_address", dtype="int")
         var = UniqueVar(x['owner'], dtype="int")
         self.body.add(TextBlock(f"{var} = {x['offset']};"))
         self.body.add(SimpleFor(duration,
-            lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid'], nop_delay=nop_delay:
-              f"__builtin_INODE_SEND({offset_var} + ({f'{base} + {iter}' if base > 0 else iter})*32, 0, {policy}, {fid});\n" + nop_delay))
+            lambda iter, base=current_base, offset_var=var, policy=x['policy'], fid=x['fid'], nop_delay=nop_delay, _suffix=_suffix:
+              f"__builtin_INODE_SEND({offset_var} + ({f'{base} + {iter}' if base > 0 else iter})*32, 0, {policy}, {fid});" + _suffix + nop_delay))
 
         # Add sync after each send in interleaved block
         self._add_sync_for_edge(x['owner'], x['edge_info'])

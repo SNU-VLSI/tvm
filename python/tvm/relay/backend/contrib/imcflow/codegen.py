@@ -13,6 +13,7 @@ from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.relay.backend.contrib.imcflow.transform_utils import getNodeDebugID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import CodegenContext
+from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -145,7 +146,6 @@ class CodegenSuite:
         output_lines.append(f"    Total - Send: {item['total_send']}, Recv: {item['total_recv']}")
         output_lines.append(f"    Mismatch: {item['total_send']} sends vs {item['total_recv']} recvs")
       output_lines.append("\n" + "="*40)
-      # raise AssertionError(f"Recv/Send consistency check failed for function {func_name}")
     else:
       output_lines.append(f"✓ All edges have consistent send/recv counts")
       output_lines.append("="*40)
@@ -163,7 +163,71 @@ class CodegenSuite:
     output_file = os.path.join(model_dir, "recv_send_consistency.txt")
     with open(output_file, "a") as f:
       f.write("\n".join(output_lines) + "\n")
+
+    # P2 (DESIGN §2.4): fail at COMPILE TIME on a fifo-count mismatch instead of
+    # letting it surface as a 20000-poll RTL deadlock (state 0x1). ΣSEND==ΣRECV
+    # per edge is a hardware invariant (fifo occupancy conservation): if a
+    # producer sends more than the consumer receives, the producer wedges on a
+    # full fifo forever; fewer, the consumer wedges on empty. ResNet8 is already
+    # fully consistent, so this never fires there. dwconv granularity mismatches
+    # (the P3/P4 work) now show up here as an assert with the exact offending
+    # edges, not as an opaque hang. Opt out with IMCFLOW_SKIP_SYNC_ASSERT=1.
+    # BUGFIX knob: the P2 fifo-count assert is part of the 934+P0-P3 sync work.
+    # knob=on (bugfix_off_mode()==False) restores a8af, which did NOT raise here.
+    if bugfix_off_mode() and inconsistencies and os.environ.get("IMCFLOW_SKIP_SYNC_ASSERT", "0") != "1":
+      detail = "; ".join(
+        f"{it['edge']}: send {it['total_send']} vs recv {it['total_recv']}"
+        for it in inconsistencies)
+      raise AssertionError(
+        f"[recv/send fifo-count mismatch] function {func_name}: "
+        f"{len(inconsistencies)} edge(s) would deadlock in RTL. {detail}. "
+        f"(see {output_file}; set IMCFLOW_SKIP_SYNC_ASSERT=1 to bypass)")
     print(f"Recv/send consistency appended to: {output_file}")
+
+    # P4 (DESIGN §2.4, invariant II): flag-rendezvous handshake balance. Unlike
+    # (I) fifo-count (a byte-conservation invariant), (II) checks that a
+    # producer's SETFLAG barrier count equals EACH consumer's window count for a
+    # flag-rendezvous edge. A mismatch means one side raises/waits the wrong
+    # number of times on the single per-node flag slot -> lost-wakeup / 20000-poll
+    # hang (exactly the dwconv middle-stage deadlock P4 fixes). Populated only for
+    # edges the codeblocks explicitly contract (dwconv output); the map is empty
+    # for ResNet8, so this never fires there.
+    # BUGFIX knob: the entire P4 flag-rendezvous handshake validation is part of
+    # the 934+P4 sync work. knob=on (bugfix_off_mode()==False) restores a8af,
+    # which had no such validation. (Under knob=on handshake_num_map is empty
+    # anyway because the imce-side emission that populates it is gated, but skip
+    # the whole block explicitly for a8af parity.)
+    if bugfix_off_mode():
+      from tvm.relay.backend.contrib.imcflow.imce_codeblock import handshake_num_map
+      if handshake_num_map:
+        print(f"[FLAG rendezvous] {func_name} handshake balance: {handshake_num_map}")
+      flag_mismatches = []
+      for uuid, hs in handshake_num_map.items():
+        prod = hs.get("producer", 0)
+        for cnode, cwin in hs.get("consumer", {}).items():
+          if prod != cwin:
+            flag_mismatches.append((uuid, cnode, prod, cwin))
+      if flag_mismatches:
+        print("="*40)
+        print(f"[FLAG rendezvous] function {func_name}: {len(flag_mismatches)} mismatch(es)")
+        for uuid, cnode, prod, cwin in flag_mismatches:
+          print(f"  pair uuid={uuid}: producer_handshakes={prod} vs consumer(node {cnode}) windows={cwin}")
+        with open(output_file, "a") as f:
+          f.write(f"\n[FLAG rendezvous] {len(flag_mismatches)} mismatch(es): "
+                  + "; ".join(f"uuid={u} prod={p} vs node{c}={w}"
+                              for u, c, p, w in flag_mismatches) + "\n")
+      if flag_mismatches and os.environ.get("IMCFLOW_SKIP_SYNC_ASSERT", "0") != "1":
+        detail = "; ".join(
+          f"uuid={u}: producer {p} vs consumer(node {c}) {w}"
+          for u, c, p, w in flag_mismatches)
+        raise AssertionError(
+          f"[flag-rendezvous handshake mismatch] function {func_name}: "
+          f"{len(flag_mismatches)} edge(s) would lost-wakeup deadlock in RTL. {detail}. "
+          f"(set IMCFLOW_SKIP_SYNC_ASSERT=1 to bypass)")
+
+      # Reset the flag-handshake map for the next function (per-function scope, like
+      # the codegen context). fifo maps are handled by construct_recv_send_map.
+      handshake_num_map.clear()
 
   def transform_function(self, _, func):
     # Note: the function name strips off the "_impl" suffix to match the original funcion name
@@ -212,8 +276,12 @@ class CodegenSuite:
     for edge in sorted_edges:
       print(f"  {edge}")
 
-    # Create send-recv pair manager for synchronization
-    pair_manager = SendRecvPairManager(sorted_edges, exclude_const=True)
+    # Create send-recv pair manager for synchronization.
+    # BUGFIX knob: knob=off (bugfix_off_mode) keeps ALL inter-node pairs
+    # (filter_contention=False) so the 934 pipeline sync set is complete; knob=on
+    # restores a8af's contention-only filtering (filter_contention=True default).
+    _filter_contention = bugfix_off_mode() is False  # False => keep all pairs (934); True => a8af
+    pair_manager = SendRecvPairManager(sorted_edges, exclude_const=True, filter_contention=_filter_contention)
     print(f"SendRecvPairManager created: {len(pair_manager.pairs)} send-recv pairs")
 
     # get use def chain

@@ -805,7 +805,17 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.generateDevicePointerSetup()
     code += self.emitReset()
     if self.os == "linux":
-      code += self.emitWarmup()
+      # Per-kernel warmup gate. emitWarmup() forks `make clear_time && make warmup`
+      # (a full accelerator hard-reset + 16 warmup binaries) on EVERY kernel call.
+      # warmup is GLOBAL (identical make target, not per-kernel state), so once per
+      # run suffices; run_dataset_eval.sh already issues a single pre-run warmup.
+      # Set IMCFLOW_NO_PERKERNEL_WARMUP=1 to drop the per-kernel warmup and measure
+      # its cost (this re-applies the reverted 9857698bf, but as an opt-in switch so
+      # it can be A/B'd against the warmup baseline for accuracy/wedge regressions).
+      if os.environ.get("IMCFLOW_NO_PERKERNEL_WARMUP", "") not in ("", "0"):
+        pass  # per-kernel warmup intentionally skipped
+      else:
+        code += self.emitWarmup()
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt

@@ -33,6 +33,52 @@ SMALL_DEBUG = 0
 
 BIG_IMEM = os.getenv("IMCFLOW_BIG_IMEM", "0") == "1"
 
+
+# ---------------------------------------------------------------------------
+# Master BUGFIX knob (IMCFLOW_BUGFIX = on | off, default off)
+# ---------------------------------------------------------------------------
+# ONE knob that switches the whole imcflow codegen flow between two behaviors:
+#
+#   * knob=off (DEFAULT): current-HEAD behavior = the 934 + P0-P3 + P4 NoC-sync
+#     code path (deadlock-free codegen that passes the BUGFIX-off RTL). This is
+#     the chip_acc_measure behavior we ship today. The RTL runner defaults to
+#     the BUGFIX-off build (gem5_bugfixoff_wt).
+#
+#   * knob=on: fall back to the merge-base a8af0e4cf behavior (the "BUGFIX-on
+#     golden") -- the 934/P0-P4 rendezvous + barrier sync emission is turned OFF
+#     and codegen reproduces a8af byte-for-byte. The RTL runner defaults to the
+#     BUGFIX-on build (gem5).
+#
+# `bugfix_off_mode() == True`  => knob is OFF => emit the 934 + P4 NoC sync
+#                                 (opt-in, for the BUGFIX-off RTL co-sim path).
+# `bugfix_off_mode() == False` => knob is ON  => a8af fallback (no new sync).
+#
+# DEFAULT is ON (a8af). This keeps IMCFLOW_BUGFIX-unset runs byte-identical to
+# pristine chip_acc_measure, so existing chip / driver-v2 / FPGA workflows (which
+# never set the knob) are unaffected by this branch. The deadlock-avoidance
+# 934+P4 sync is emitted ONLY when a run explicitly opts in with IMCFLOW_BUGFIX=off
+# (the BUGFIX-off RTL co-sim path). See DWCONV_SYNC_GRANULARITY_DESIGN.md.
+#
+# Mirror of the existing _is_multl_swfix_enabled() precedent in
+# relay/backend/contrib/imcflow/imce_codeblock.py. Import this helper at every
+# sync call site instead of scattering raw os.environ.get(...) reads.
+def bugfix_off_mode() -> bool:
+  """Return True when IMCFLOW_BUGFIX=off -> emit 934+P4 NoC sync (opt-in).
+
+  Return False when IMCFLOW_BUGFIX is unset or =on (the DEFAULT) -> reproduce
+  a8af (no new sync emission), i.e. pristine chip_acc_measure behavior.
+  """
+  return os.environ.get("IMCFLOW_BUGFIX", "on").lower() == "off"
+
+
+def overflow_sw_default_on() -> bool:
+  """Default for the SEPARATE IMCFLOW_BUGFIX_OVERFLOW_SW knob, coupled to the
+  master knob: the BUGFIX-off RTL lacks the HW overflow fix, so codegen should
+  SW-compensate when the master knob is off. The explicit
+  IMCFLOW_BUGFIX_OVERFLOW_SW env var still overrides this default (see
+  _is_multl_swfix_enabled)."""
+  return bugfix_off_mode()
+
 class NodeID(Enum):
   inode_0_0 = 0
   imce_0_1 = 1
@@ -561,6 +607,46 @@ class TensorEdgeInfo(EdgeInfo):
     self.owner = None
     self.block_tiling_info = block_tiling_info
     self.producer_sync_granularity = producer_sync_granularity  # Number of SENDs per STANDBY from producer IMCE
+    # --- Sync-granularity contract (DWCONV_SYNC_GRANULARITY_DESIGN.md) ---
+    # PnR fills these once; inode/imce codeblocks READ them instead of each
+    # recomputing packet/handshake granularity locally. All default to None
+    # (== "not yet contracted"), so codegen that has not been migrated to read
+    # them behaves exactly as before. See design doc sections 2.1 / 2.3.
+    #   channels_per_issue     : channels the consumer op processes per issue
+    #                            (conv-fed=64, dwconv/pool/quant-fed=16). HW:
+    #                            post_imcu NumChannels / vpu NumBlocks.
+    #   fill_order             : axis order the consumer fills data in
+    #                            (e.g. ["ch_pass","h","w","bitplane"] for a
+    #                            linebuffer LOAD_LB consumer; None == flat RF).
+    #   producer_send_per_sync : producer SENDs emitted per SETFLAG/STANDBY pair
+    #                            (== the old producer_sync_granularity meaning;
+    #                            1 == per-packet handshake, the current default).
+    #   consumer_recv_per_sync : consumer RECV/LOAD_LB per receiver-side window.
+    #   needs_flag_rendezvous  : True iff a same-fifo matched SEND/RECV count
+    #                            does NOT already order this edge (cyclic /
+    #                            compute-gating / transitive). If False, raw
+    #                            SEND/RECV + fifo backpressure suffices.
+    self.channels_per_issue = None
+    self.fill_order = None
+    self.producer_send_per_sync = None
+    self.consumer_recv_per_sync = None
+    self.needs_flag_rendezvous = None
+
+  def set_sync_contract(self, channels_per_issue=None, fill_order=None,
+                        producer_send_per_sync=None, consumer_recv_per_sync=None,
+                        needs_flag_rendezvous=None):
+    """Populate the sync-granularity contract (called once from PnR /
+    policy_table_builder). Only overwrites fields explicitly provided."""
+    if channels_per_issue is not None:
+      self.channels_per_issue = channels_per_issue
+    if fill_order is not None:
+      self.fill_order = fill_order
+    if producer_send_per_sync is not None:
+      self.producer_send_per_sync = producer_send_per_sync
+    if consumer_recv_per_sync is not None:
+      self.consumer_recv_per_sync = consumer_recv_per_sync
+    if needs_flag_rendezvous is not None:
+      self.needs_flag_rendezvous = needs_flag_rendezvous
 
   def set_fifo_id(self, fifo_id):
     self.fifo_id = fifo_id

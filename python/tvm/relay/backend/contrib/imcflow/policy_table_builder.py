@@ -29,6 +29,7 @@ from tvm.contrib.imcflow import (
     InstEdgeInfo,
     RouterEntry,
     DataBlock,
+    bugfix_off_mode,
 )
 from tvm.relay.op.contrib.imcflow import CustomIDToName, CustomIDToNode
 from tvm.relay.backend.contrib.imcflow.transform import debug_print
@@ -504,6 +505,42 @@ class EdgeInfoGenerator:
                 fifo_id_cnt[dest_node] += 1
                 if fifo_id_cnt[dest_node] >= 8:
                     raise ValueError("FIFO ID cannot be over 7!")
+
+            # P3 (DESIGN §2.2): fill the sync-granularity contract for a data
+            # edge feeding a conv/dwconv. channels_per_issue distinguishes the
+            # two array widths (conv=64 via post_imcu NumChannels, dwconv=16 via
+            # vpu NumBlocks). producer_send_per_sync / consumer_recv_per_sync
+            # default to 1 (per-packet handshake) -- codegen that reads these
+            # emits byte-identical output to the current per-packet behavior.
+            # needs_flag_rendezvous=True: an inode->imce data input is a
+            # cross-fifo compute-gating edge, so a same-fifo count-match does not
+            # by itself order it (§2.0). Non-conv consumers keep None (untouched).
+            # fill_order records the axis order the linebuffer consumer fills
+            # (DESIGN §4.5): a hardware counter auto-increments (bitpos->col->row)
+            # so a LOAD_LB consumer expects [ch_pass, h, w, bitplane] with 4
+            # bitplanes/pixel. P4's dwconv-output SEND emits 4 parts per ch_group
+            # that map 1:1 onto those 4 bitplanes -- documenting the layout
+            # correspondence the producer barrier is paired with.
+            # BUGFIX knob: the P3/P4 sync-granularity contract is only read by the
+            # gated knob=off codegen; a8af (knob=on) had no set_sync_contract, so
+            # leave the fields None for a8af parity.
+            if bugfix_off_mode() and dst_node_name == "nn.imcflow_qconv":
+                edgeinfo.set_sync_contract(channels_per_issue=64,
+                                           fill_order=["ch_pass", "h", "w", "bitplane"],
+                                           producer_send_per_sync=1,
+                                           consumer_recv_per_sync=1,
+                                           needs_flag_rendezvous=True)
+            elif bugfix_off_mode() and dst_node_name == "nn.imcflow_qdwconv":
+                # dwconv data-input edge: the minmaxquant producer (imce_0_1)
+                # MULTICASTS its split odata to this LOAD_LB consumer plus a
+                # sibling. The middle-stage rendezvous is a node-level flag-2
+                # barrier (Fix-B), so consumer_recv_per_sync counts the 4-bitplane
+                # burst per window; needs_flag_rendezvous stays True.
+                edgeinfo.set_sync_contract(channels_per_issue=16,
+                                           fill_order=["ch_pass", "h", "w", "bitplane"],
+                                           producer_send_per_sync=1,
+                                           consumer_recv_per_sync=4,
+                                           needs_flag_rendezvous=True)
 
             ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
 
