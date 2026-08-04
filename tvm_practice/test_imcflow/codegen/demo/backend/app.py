@@ -174,6 +174,10 @@ def config():
             # 워크로드 전환 버튼용. 지금 무엇이 떠 있는지 + 고를 수 있는 목록.
             "workload": _WORKLOAD,
             "workloads": available_workloads(),
+            # 뷰어가 사진을 그릴 수 있는 샘플 수. num_samples 가 이보다 크면 그 뒤 샘플은
+            # 사진만 안 나온다(칩 실행은 정상). kws/vww 는 fixtures 박제본이 100장이라
+            # 쉽게 걸리므로 프론트가 미리 알 수 있게 내보낸다.
+            "viewer_images": (len(_IMAGES) if _IMAGES is not None else 0),
             # pipelined 빠른 실행 패널 설정. 없는 워크로드(vww)는 null 이고 프론트가 패널을 숨긴다.
             "pipelined": _pipelined_meta(),
             # display hints for the frontend (aspect ratio + pixelation) so the
@@ -267,6 +271,17 @@ def image(staged_idx: int):
         idx = _SAMPLE_MAP[staged_idx] if staged_idx < len(_SAMPLE_MAP) else staged_idx
     else:
         idx = staged_idx
+
+    # 뷰어용 배열이 run.num_samples 보다 작으면 여기서 IndexError 가 나 500 트레이스백이
+    # 뜬다. kws/vww 는 fixtures 에 100장만 박제돼 있어(용량) 100 을 넘기는 순간 걸린다.
+    # 칩 실행 자체는 정상이므로 죽이지 않고, 무엇이 모자란지 알려주는 404 로 답한다.
+    if not (0 <= idx < len(_IMAGES)):
+        return Response(
+            status_code=404,
+            content=(f"sample {staged_idx} (idx {idx}) is outside the viewer image array "
+                     f"({len(_IMAGES)} images for workload '{_WORKLOAD}'). "
+                     f"chip run is unaffected — only the picture is missing.").encode(),
+        )
 
     arr = _IMAGES[idx].astype(np.float32)
 

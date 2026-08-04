@@ -61,8 +61,8 @@ chip:
   # _stagedN  = fixtures/cifar10_test_images.npy[0:N] + cifar10_test_labels.npy[0:N] 슬라이스.
   #             `python3 make_staged.py N` 으로 생성(라벨 10000장 박제로 500 상한 없음, 최대 N=10000).
   #             생성물의 배열 값이 서버 _staged 와 픽셀 일치함을 검증했다(동일 소스).
-  images_path: dataset/cifar10/_staged100/images.npy
-  labels_path: dataset/cifar10/_staged100/labels.npy
+  images_path: dataset/cifar10/_staged10000/images.npy
+  labels_path: dataset/cifar10/_staged10000/labels.npy
   remote_result_path: /tmp/tvm_dataset_results.txt
 
 run:
@@ -71,7 +71,7 @@ run:
   # 실측 소요(warmup-off 바이너리): 샘플당 ~0.27s. 100=27초 / 500=2.2분 / 10000=45분.
   #   (옛 warmup-on 공유 바이너리는 ~4.0s/샘플 = 100샘플 6.7분이었음. per-kernel warmup 제거로 16x.)
   # 정확도는 표본↑ 일수록 컴파일 정확도(76.4%)로 수렴: 20샘플 90% → 100샘플 80% → 500↓.
-  num_samples: 100
+  num_samples: 1000
 
 # 화면에 띄울 사진의 소스.
 #   "full_npy"    : 노트북 기본. fixtures/cifar10_test_images.npy (10000장 정규화 float32, git-lfs 박제)를

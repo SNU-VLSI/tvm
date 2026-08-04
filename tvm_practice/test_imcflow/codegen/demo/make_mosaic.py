@@ -39,7 +39,7 @@ _VIRIDIS_STOPS = np.array([
 ], dtype=np.float32)
 
 # 워크로드별 입력 배열 후보 경로 + 렌더 방식.
-# kws 전체(12105) 배열은 git-lfs 박제본이 100장뿐이라 칩에서 받아온 로컬 사본을 먼저 본다.
+# kws 는 fixtures/kws_full_images.npy 에 전체 12105장이 git-lfs 로 박제돼 있다.
 SOURCES = {
     "resnet8": {
         "display": "cifar_denorm",
@@ -47,10 +47,7 @@ SOURCES = {
     },
     "kws": {
         "display": "mfcc_heatmap",
-        "paths": [
-            os.path.join(DEMO_ROOT, "dataset", "kws_sc", "images_full.npy"),
-            os.path.join(FIX, "kws_staged_images.npy"),
-        ],
+        "paths": [os.path.join(FIX, "kws_full_images.npy")],
     },
     "vww": {
         "display": "raw01",
