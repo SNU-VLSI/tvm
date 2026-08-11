@@ -156,6 +156,39 @@ def getOne1x1ConvModel(iH=8, iW=8, IC=256):
 
   return out, param_dict
 
+def getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=64):
+  """K=1 quant conv for QUADRU max-util: K=1 => NO 0-feed STEPs (every output
+  pixel reads fresh input), which avoids the QUADRU zero-feed-STEP linebuffer
+  wedge. IC=256 fills the crossbar rows. Mirrors getOneConvQuantModel but K=1."""
+  N, H, W = 1, iH, iW
+  KH, KW = 1, 1
+  stride, padding = 1, 0
+  input = relay.var("conv_input", shape=(N, IC, H, W), dtype="uint8")
+
+  y = imcflow_qconv2d(
+    input,
+    relay.var("conv_weight", shape=(OC, IC, KH, KW), dtype="int8"),
+    ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+    in_channels=IC,
+    channels=OC,
+    kernel_size=(KH, KW),
+    padding=(padding, padding),
+    out_dtype="int16"
+  )
+  y = imcflow_min_max_quantize(
+    y,
+    relay.var("quant_min", shape=(), dtype="int16"),
+    relay.var("quant_max", shape=(), dtype="int16"),
+    axis=1, out_dtype="uint8", channel=16)
+
+  param_dict = {
+    "conv_weight": np.random.randint(-8, 8, size=(OC, IC, KH, KW), dtype=np.int8),
+    "quant_min": np.array(-128, dtype="int16"),
+    "quant_max": np.array(127, dtype="int16"),
+  }
+  out = tvm.IRModule.from_expr(y)
+  return out, param_dict
+
 def getOneConvModel(iH=4, iW=4, IC=28):
   N, IC, H, W = 1, IC, iH, iW
   OC = 64

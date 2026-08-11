@@ -96,6 +96,8 @@ MODEL_REGISTRY = {
     "s2_conv_quant_conv_big": (lambda: models_for_test.getS2ConvQuantConvModel(iH=32, iW=64), "random"),
     "one_mmquant": (models_for_test.getOneMMQuantModel, "linear"),
     "one_conv_quant": (models_for_test.getOneConvQuantModel, "ones"),
+    "one_1x1_quant": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256), "ones"),
+    "one_1x1_quant_big": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=32, iW=32, IC=256), "ones"),
     "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
     "one_conv_bn": (models_for_test.getOneConvBnModel, "ones"),
     "big_conv": (lambda: models_for_test.getBigConvModel(False), "random"),
