@@ -9,6 +9,7 @@ from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -207,7 +208,7 @@ def get_total_bytes(ttype):
 class LoadLBBlock(ImceCodeBlock):
   """ Code block for receiving data from given fifo id to the line buffer """
 
-  def __init__(self, count: int, repeat: int, edge: TensorEdge, edge_info: TensorEdgeInfo, builder=None, annotation: str = "", bare: bool = False):
+  def __init__(self, count: int, repeat: int, edge: TensorEdge, edge_info: TensorEdgeInfo, builder=None, annotation: str = "", bare: bool = False, prefetch_fifo_base: int = None):
     super().__init__(annotation)
     self.count = count
     self.repeat = repeat
@@ -215,6 +216,12 @@ class LoadLBBlock(ImceCodeBlock):
     self.edge_info = edge_info
     self.builder = builder
     self.bare = bare
+    # Max-throughput lever (IMCFLOW_FEED_PREFETCH): when set, this LOAD_LB burst's
+    # `repeat` bitplanes use fifos prefetch_fifo_base..+repeat-1 (a per-pixel slot
+    # in the P*repeat-wide window) instead of the edge's own spread. The caller
+    # (_build_structure_a8af col_group unroll) assigns a distinct base per pixel
+    # in the P-pixel group so 2 pixels' bitplanes occupy 8 distinct RECV fifos.
+    self.prefetch_fifo_base = prefetch_fifo_base
     self._rz_uuid = None
     self._rz_consumer = None
 
@@ -262,6 +269,12 @@ class LoadLBBlock(ImceCodeBlock):
         rn = pm._get_hw_node(self.edge.dst_id)
         self._rz_consumer = rn[0].value if isinstance(rn, tuple) else rn.value
 
+    # Max-throughput feed-spread (IMCFLOW_FEED_SPREAD): fifo_id is a compile-time
+    # immediate, so spreading requires UNROLLING the bitplane loop with a literal
+    # rotated fifo_id per bitplane (see _build_a8af for the same rationale). eff==1
+    # (flag off / repeat==1) keeps the classic single-fifo emission byte-identical.
+    eff = self.edge_info.effective_spread_n(self.repeat)
+
     def load_lb_line(iter, fid=load_fifo_id, annot=annotation):
       return f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
 
@@ -300,17 +313,30 @@ class LoadLBBlock(ImceCodeBlock):
         body += "\n".join(post_lines) + "\n"
       return body
 
+    def _spread_bitplane_lines(line_fn):
+      # unroll the `repeat` bitplane loop, one literal rotated fifo_id each.
+      out = ""
+      for b in range(self.repeat):
+        fid = self.edge_info.spread_fifo_id(b, self.repeat)
+        out += line_fn(b, fid=fid)
+      return out
+
     def burst_body(iter):
       # one window per outer-loop iteration wrapping the `repeat` LOAD_LBs
       body = ""
       if per_load_lb_window:
         # inode-fed dwconv: one flag-1 handshake PER LOAD_LB to match the inode
         # SendBlock's per-packet rendezvous frequency.
-        body += SimpleFor(self.repeat, windowed_load_lb_line).render() + "\n"
+        if self.repeat > 1 and eff > 1:
+          body += _spread_bitplane_lines(windowed_load_lb_line) + "\n"
+        else:
+          body += SimpleFor(self.repeat, windowed_load_lb_line).render() + "\n"
         return body
       if pre_lines:
         body += "\n".join(pre_lines) + "\n"
-      if self.repeat > 1:
+      if self.repeat > 1 and eff > 1:
+        body += _spread_bitplane_lines(load_lb_line) + "\n"
+      elif self.repeat > 1:
         body += SimpleFor(self.repeat, load_lb_line).render() + "\n"
       else:
         body += load_lb_line(iter)
@@ -331,6 +357,16 @@ class LoadLBBlock(ImceCodeBlock):
     load_fifo_id = self.edge_info.fifo_id
     annotation = f"{self.edge}, {self.edge_info.node_info_str}"
 
+    # Max-throughput feed-spread (IMCFLOW_FEED_SPREAD): the LOAD_LB fifo_id is a
+    # compile-time immediate (int_IMCE_LOAD_LB ImmArg<0>), so we cannot emit
+    # LOAD_LB(iter % n) as a runtime expression -- we UNROLL the inner `repeat`
+    # (bitplane) loop and emit a literal rotated fifo_id per bitplane instead of
+    # the single pinned fifo_id. eff==1 (flag off / repeat==1) -> the classic
+    # single-fifo emission (byte-identical). See DESIGN in TensorEdgeInfo
+    # .effective_spread_n: eff divides `repeat`, so the per-pixel bitplane index
+    # b matches the INODE SEND's flat-index rotation for the same word.
+    eff = self.edge_info.effective_spread_n(self.repeat)
+
     # Per-packet sync: Load one packet, then sync immediately
     def inner_body_with_sync(iter, fid=load_fifo_id, annot=annotation):
       code = f"__builtin_IMCE_LOAD_LB({fid}); // {annot}\n"
@@ -339,7 +375,29 @@ class LoadLBBlock(ImceCodeBlock):
         code += sync_code
       return code
 
-    if self.repeat > 1:
+    # Max-throughput lever (IMCFLOW_FEED_PREFETCH): a per-pixel prefetch slot was
+    # assigned by the col_group unroll (prefetch_fifo_base). Emit this pixel's
+    # `repeat` bitplanes at fifos base..base+repeat-1 (a distinct slot in the
+    # P*repeat-wide window) so the NEXT pixel's bitplanes land in different RECV
+    # fifos and are resident during the current compute.
+    if self.repeat > 1 and self.prefetch_fifo_base is not None:
+      base = self.prefetch_fifo_base
+      def prefetch_inner(iter):
+        body = ""
+        for b in range(self.repeat):
+          body += inner_body_with_sync(b, fid=(base + b) % 8)
+        return body
+      self.body = SimpleFor(self.count, prefetch_inner, "load_block_prefetch")
+    elif self.repeat > 1 and eff > 1:
+      # spread: unroll the bitplane loop, one literal fifo_id per bitplane
+      def spread_inner(iter):
+        body = ""
+        for b in range(self.repeat):
+          fid = self.edge_info.spread_fifo_id(b, self.repeat)
+          body += inner_body_with_sync(b, fid=fid)
+        return body
+      self.body = SimpleFor(self.count, spread_inner, "load_block")
+    elif self.repeat > 1:
       inner_loop = SimpleFor(self.repeat, inner_body_with_sync)
       self.body = SimpleFor(self.count, inner_loop, "load_block")
     else:
@@ -1228,8 +1286,28 @@ class ConvBlock(ImceCallCodeBlock):
     # return self.out_channels//16
     return 4
 
+  def _prefetch_group_for_load_edge(self):
+    """Return (P, width) prefetch group for the conv activation load edge, or None
+    (see TensorEdgeInfo.prefetch_group). Used to unroll the col_group loop for
+    IMCFLOW_FEED_PREFETCH. repeat == num_blocks (4 conv bitplanes)."""
+    for edge in self.in_edges:
+      try:
+        arg_id = edge.src_id.graph_node_id
+        if ConstPat.match(CustomIDToNode()[arg_id]):
+          continue
+      except KeyError:
+        pass
+      te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
+      if not te_infos:
+        continue
+      te_info = te_infos[0]
+      if te_info is None or te_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+        continue
+      return te_info.prefetch_group(self.num_blocks)
+    return None
+
   # -------- a8af (knob=on) fallback: no Marker A / padding-drain / window sync --
-  def _build_loop_body_a8af(self, recv_count: int) -> CodeBlock:
+  def _build_loop_body_a8af(self, recv_count: int, prefetch_fifo_base: int = None) -> CodeBlock:
     load_info = []
     for edge in self.in_edges:
       te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
@@ -1249,14 +1327,24 @@ class ConvBlock(ImceCallCodeBlock):
     self.load_edge_info = load_edge_info
 
     comp = SequentialBlock()
-    comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info, builder=self.builder))
+    comp.add(LoadLBBlock(recv_count, self.num_blocks, load_edge, load_edge_info, builder=self.builder, prefetch_fifo_base=prefetch_fifo_base))
     comp.add(TextBlock("__builtin_IMCE_STEP();\n"))
 
-    creg_code = TextBlock("")
-    for i in range(self.num_out_blocks):
-      var_o = UniqueVar((self, i))
-      creg_code += f"{var_o} = __builtin_IMCE_GET_CREG((short){i});"
-    comp.add(creg_code)
+    # Max-throughput lever (IMCFLOW_DROP_PSUM): DON'T-CARE output. The post_imcu
+    # out_fifo is drained by OP_STEP itself (imce_ctrl.sv:69
+    # compute_if.ready==OP_STEP), NOT by GET_CREG; GET_CREG only reads the latched
+    # creg from the regfile and SEND ships it. So for garbage output we can drop
+    # BOTH GET_CREG and SEND without touching the STEP<->feed handshake. Only for
+    # a plain conv (no post_ops consume the creg vars). Gated by env; default OFF.
+    _drop_psum = drop_psum_send() and not self.post_ops
+    if not _drop_psum:
+      creg_code = TextBlock("")
+      for i in range(self.num_out_blocks):
+        var_o = UniqueVar((self, i))
+        creg_code += f"{var_o} = __builtin_IMCE_GET_CREG((short){i});"
+      comp.add(creg_code)
+    else:
+      comp.add(TextBlock("// [DROP_PSUM] omitted 4x GET_CREG\n"))
 
     if self.post_ops:
       all_in_edges = copy(self.in_edges)
@@ -1330,14 +1418,32 @@ class ConvBlock(ImceCallCodeBlock):
     row_pattern = self.conv.extract_2d_pattern()
     pprint(f"[ConvBlock] row pattern for node {getNodeID(self.call.call)}:")
     pprint(row_pattern)
+    # Max-throughput lever (IMCFLOW_FEED_PREFETCH): determine the prefetch group
+    # (P pixels, width=P*repeat fifos) for the conv activation load edge. When
+    # active AND the col_group pixel count is a multiple of P, UNROLL the col_group
+    # loop by P: the P pixels in each unrolled group use distinct fifo slots
+    # (pixel p -> base p*repeat), so 2 pixels' bitplanes occupy 8 RECV fifos and
+    # the next pixel is resident during the current compute. None -> unchanged.
+    pf = self._prefetch_group_for_load_edge()
+
     root = SequentialBlock()
     for idx, row_pat in enumerate(row_pattern):
       outer_body = SequentialBlock()
       tag = self.annotation + f"_row_group{idx}"
       for inner_idx, pat in enumerate(row_pat["pattern"]):
-         inner_loop = SimpleFor(pat["count"],
-                                self._build_loop_body_a8af(pat["pattern"]),
-                                f"{tag}_col_group{inner_idx}")
+         cnt = pat["count"]
+         if pf is not None and cnt % pf[0] == 0 and cnt >= pf[0]:
+           p_group, width = pf
+           group_body = SequentialBlock()
+           for p in range(p_group):
+             group_body.add(self._build_loop_body_a8af(pat["pattern"],
+                                                       prefetch_fifo_base=p * 4))
+           inner_loop = SimpleFor(cnt // p_group, group_body,
+                                  f"{tag}_col_group{inner_idx}_prefetch{p_group}")
+         else:
+           inner_loop = SimpleFor(cnt,
+                                  self._build_loop_body_a8af(pat["pattern"]),
+                                  f"{tag}_col_group{inner_idx}")
          outer_body.add(inner_loop)
       outer_loop = SimpleFor(row_pat["count"], outer_body, f"{tag}_outer_loop(iterate row offset)")
       root.add(outer_loop)
@@ -2907,9 +3013,25 @@ class RecvSendWrapper(ImceCodeBlock):
       if isinstance(self.send_block, VecOpBlock):
         actual_send_block = self.send_block.get_send_block()
 
+      # Max-throughput lever (IMCFLOW_DROP_PSUM): DON'T-CARE output. Drop the
+      # per-pixel psum NoC SEND so the next pixel's feed/OUTPUT_HS issues earlier.
+      # Only applies to a plain ConvBlock output (the qconv psum drain) to keep
+      # every other SEND (weights/config/pipeline) byte-identical. eff bounded:
+      # keep 1 SEND per drop_psum_keep_every() pixels (0 -> drop all). Gated by
+      # env only; default OFF -> byte-identical.
+      _drop_psum = (drop_psum_send()
+                    and isinstance(actual_send_block, ConvBlock)
+                    and not actual_send_block.post_ops)
+
       for i in range(self.num_out_blocks):
         for te_out_info in [te_out_info]:
           if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+            continue
+
+          if _drop_psum:
+            # bounded-keep is handled at the whole-pixel granularity by the caller
+            # (ConvBlock loop); here we simply omit the NoC SEND entirely.
+            code += f"// [DROP_PSUM] omitted IMCE_SEND blk {i}\n"
             continue
 
           var_o = UniqueVar((actual_send_block, i))

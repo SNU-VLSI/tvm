@@ -79,6 +79,90 @@ def bugfix_off_mode() -> bool:
   return get_imcflow_bugfix_mode() == "off"
 
 
+def feed_spread_n() -> int:
+  """Max-throughput lever: spread the conv activation feed across N RECV FIFOs.
+
+  The conv activation feed (inode->imce data input for imcflow_qconv/qdwconv)
+  is normally pinned to RECV fifo 0 (a single depth-2 FIFO). The INODE send-fifo
+  then PUSH_STALLs because the IMCE drains one word per LOAD_LB through that one
+  depth-2 fifo -> the ~3cyc/word pacing that dominates the per-STEP feed tail.
+
+  When IMCFLOW_FEED_SPREAD=N (N in 2..8, default 4 when set to a non-numeric
+  truthy value), the 4 bitplanes of each pixel are round-robined across RECV
+  fifos 0..N-1 instead of all landing in fifo 0. This is HARDWARE-CORRECT because
+  the linebuffer assembles bitplanes purely by LOAD_LB *issue order* (a modN
+  input-handshake counter in addr_shfl_gen.sv), NOT by source fifo; the packet
+  carries the fifo_id (fifo_block.sv push_id) so a SEND(...,fid=N) lands in RECV
+  fifo N and a subsequent LOAD_LB(N) pops it; and backpressure is strictly
+  per-fifo, so up to N depth-2 fifos (2*N words) can be resident at once,
+  relieving the depth-2 drain. The global SETFLAG/STANDBY window (a separate flag
+  register file, imce_ctrl.sv) is orthogonal to fifo selection, so the per-pixel
+  window still bounds the whole 4-bitplane burst.
+
+  Returns the spread width N (>=2) when enabled, else 0 (feature off ->
+  byte-identical to the pinned-fifo-0 behavior). Default OFF: unset env var
+  keeps SINGLE / non-QUADRU paths byte-identical to stock.
+  """
+  raw = os.environ.get("IMCFLOW_FEED_SPREAD", "")
+  if not raw:
+    return 0
+  raw = raw.strip().lower()
+  if raw in ("0", "off", "false", "no"):
+    return 0
+  try:
+    n = int(raw)
+  except ValueError:
+    # any other truthy value -> default spread of 4 (the 4-bitplane option (a))
+    n = 4
+  if n <= 1:
+    return 0
+  if n > 8:
+    n = 8  # HW has only 8 RECV FIFOs
+  return n
+
+
+def drop_psum_send() -> bool:
+  """Max-throughput lever (IMCFLOW_DROP_PSUM): DON'T-CARE output mode. Drop the
+  per-pixel psum drain (GET_CREG + IMCE_SEND) after each STEP so the NEXT pixel's
+  LOAD_LB / OUTPUT_HS can issue earlier. Only legal when conv correctness is
+  irrelevant (garbage output). Default OFF -> byte-identical to stock.
+
+  RTL caveat (BUGFIX_STEP build, imcu_ctrl.sv:73
+  `core_rx.ready = core_ready && !core_tx.valid`): the next feed is gated on the
+  post_imcu output being consumed. Dropping ALL SENDs leaves core_tx.valid stuck
+  high once the depth-32 out_fifo fills -> feed wedges. Bounded via
+  drop_psum_keep_every()."""
+  return os.environ.get("IMCFLOW_DROP_PSUM", "").strip().lower() in ("1", "on", "true", "yes")
+
+
+def drop_psum_keep_every() -> int:
+  """When IMCFLOW_DROP_PSUM is on, still emit ONE psum SEND every N pixels to
+  drain the depth-32 post_imcu out_fifo and keep core_tx.valid from sticking
+  (see drop_psum_send). N=0 (default) -> drop every SEND (may wedge; use only if
+  the STEP count is bounded < fifo depth). N>=1 -> keep 1 SEND per N pixels."""
+  raw = os.environ.get("IMCFLOW_DROP_PSUM_KEEP", "").strip()
+  if not raw:
+    return 0
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 0
+
+
+def feed_prefetch_n() -> int:
+  """Max-throughput lever (IMCFLOW_FEED_PREFETCH): reserved gate for extending
+  the feed spread to 8 fifos AND pre-sending P pixels ahead so the next pixel's
+  bitplanes are resident during the current compute. Returns P (pixels ahead),
+  0 = off. Spread width itself is still IMCFLOW_FEED_SPREAD."""
+  raw = os.environ.get("IMCFLOW_FEED_PREFETCH", "").strip()
+  if not raw:
+    return 0
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 0
+
+
 def overflow_sw_default_on() -> bool:
   """Default for the SEPARATE IMCFLOW_BUGFIX_OVERFLOW_SW knob, coupled to the
   master knob: the BUGFIX-off RTL lacks the HW overflow fix, so codegen should
@@ -639,6 +723,64 @@ class TensorEdgeInfo(EdgeInfo):
     self.producer_send_per_sync = None
     self.consumer_recv_per_sync = None
     self.needs_flag_rendezvous = None
+    # --- Max-throughput feed-spread (IMCFLOW_FEED_SPREAD) ---
+    # When >0, the conv activation feed round-robins its per-packet fifo_id
+    # across fifo_id .. fifo_id+spread_fifo_n-1 (mod the 8 HW RECV fifos)
+    # instead of pinning every packet to `fifo_id`. Set ONLY on the inode->imce
+    # data-input edge of an imcflow_qconv/qdwconv, ONLY when the env flag is on
+    # (feed_spread_n() > 0). Default 0 -> spread_fifo_id() == fifo_id for every
+    # packet -> byte-identical to the pinned behavior. The route (policy_info)
+    # is unchanged; only the terminal fifo_id operand of SEND/LOAD_LB rotates
+    # (HW dispatches to RECV fifo N by the packet's fifo_id field).
+    self.spread_fifo_n = 0
+
+  def effective_spread_n(self, repeat: int) -> int:
+    """Clamp the requested spread width to the largest divisor of `repeat`
+    (the per-pixel bitplane count) that is <= spread_fifo_n. This guarantees
+    the fifo pattern repeats exactly every `repeat` packets, so the IMCE
+    LOAD_LB (which rotates on the per-pixel bitplane index b in 0..repeat-1)
+    and the INODE SEND (which rotates on the FLAT packet index k = pixel*repeat
+    + b) select the SAME fifo for the same word: with repeat % n == 0 we have
+    (pixel*repeat + b) % n == b % n. Returns 1 (== no spread) when disabled."""
+    n = self.spread_fifo_n
+    if n <= 1 or self.fifo_id < 0 or repeat <= 1:
+      return 1
+    n = min(n, repeat, 8)
+    # largest divisor of `repeat` that is <= n
+    for d in range(n, 1, -1):
+      if repeat % d == 0:
+        return d
+    return 1
+
+  def prefetch_group(self, repeat: int):
+    """Max-throughput lever (IMCFLOW_FEED_PREFETCH): return (pixels_per_group,
+    width) when prefetch is active for THIS edge, else None. Prefetch spreads a
+    P-pixel flat window (P*repeat words) across width = P*repeat fifos (<=8) so
+    the next pixel's bitplanes are resident in distinct RECV fifos during the
+    current compute. Requires spread enabled on the edge, repeat==4 (conv
+    bitplanes), P*repeat<=8. Both LOAD_LB (unrolled P pixels x repeat bitplanes)
+    and INODE SEND (unrolled P*repeat words) index the flat word k and pick fifo
+    k%width, so they agree. Returns None (-> fall back to effective_spread_n)
+    when off / not applicable."""
+    from tvm.contrib.imcflow import feed_prefetch_n
+    p = feed_prefetch_n()
+    if p < 2 or self.spread_fifo_n <= 1 or self.fifo_id != 0 or repeat <= 1:
+      return None
+    width = p * repeat
+    if width > 8:
+      return None  # HW has only 8 RECV fifos; P*repeat must fit
+    return (p, width)
+
+  def spread_fifo_id(self, packet_index: int, repeat: int) -> int:
+    """Terminal RECV fifo_id for the packet at `packet_index` (may be a flat
+    stream index or a per-pixel bitplane index -- see effective_spread_n for
+    why both agree). With spread OFF this is always `self.fifo_id`
+    (byte-identical). With spread ON, round-robin across
+    fifo_id .. fifo_id+eff_n-1, wrapping within the 8 HW RECV fifos."""
+    eff = self.effective_spread_n(repeat)
+    if eff <= 1:
+      return self.fifo_id
+    return (self.fifo_id + (int(packet_index) % eff)) % 8
 
   def set_sync_contract(self, channels_per_issue=None, fill_order=None,
                         producer_send_per_sync=None, consumer_recv_per_sync=None,

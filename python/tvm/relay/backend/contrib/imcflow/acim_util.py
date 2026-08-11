@@ -165,6 +165,19 @@ class ConfigData(dict):
   def __init__(self, data_shape, weight_shape, padding, stride,
                 adcmode=ADCMode.SIX, vmode=None, multmode_set=MultModeSet.S4,
                acc_mask=None, use_imcu=1):
+    # --- TOPS/util-stress KNOB (env override) ---
+    # Select the crossbar precision/packing mode without editing the graph:
+    #   IMCFLOW_ADCMODE      in {SIX, FIVE, FOUR}      (ADC precision)
+    #   IMCFLOW_MULTMODE_SET in {S4, Q1, D2, ...}      (bitplane packing)
+    # Output correctness is NOT preserved when these differ from the trained
+    # config; this is intended for power / max-TOPS stress experiments.
+    import os as _os
+    _adc_env = _os.getenv("IMCFLOW_ADCMODE")
+    if _adc_env:
+      adcmode = cast_str_to_enum(_adc_env, ADCMode)
+    _mm_env = _os.getenv("IMCFLOW_MULTMODE_SET")
+    if _mm_env:
+      multmode_set = cast_str_to_enum(_mm_env, MultModeSet)
     if vmode is None:
       vmode = _default_vmode
     if acc_mask is None:

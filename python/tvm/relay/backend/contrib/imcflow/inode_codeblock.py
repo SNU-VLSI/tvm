@@ -2,6 +2,7 @@ from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import drop_psum_send
 from textwrap import indent
 import math
 import pdb
@@ -144,6 +145,16 @@ class RecvBlock(InodeCodeBlock):
 
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
+
+    # Max-throughput lever (IMCFLOW_DROP_PSUM): the producing imce drops its psum
+    # SEND for garbage output, so this matching inode RECV loop would wedge waiting
+    # for packets that never arrive. Drop it too (keep the count read + nop for
+    # imem/label parity). Only the func_out (imce->inode output collector) tiled
+    # RECV is affected; input/weight RECVs are separate blocks. Gated by env;
+    # default OFF -> byte-identical.
+    if drop_psum_send():
+      self.body.add(TextBlock(f"// [DROP_PSUM] omitted tiled INODE_RECV loop ({loop_cnt_var} iters)"))
+      return
 
     # Per-packet sync: Receive one packet, then sync immediately
     def recv_body_with_sync(iter, base_addr_var=base_var, fid=fifo_id):
@@ -395,6 +406,19 @@ class SendBlock(InodeCodeBlock):
     # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
     # per-packet POST-send SENDER-pattern sync (SEND then _get_sync_code_str);
     # knob=off keeps the 934 pre-send rendezvous below.
+    # Max-throughput feed-spread (IMCFLOW_FEED_SPREAD): the INODE_SEND fifo_id is
+    # a compile-time immediate (int_INODE_SEND ImmArg<3>), so a per-packet
+    # rotating fifo_id cannot be a runtime `iter % n` expression -- we UNROLL the
+    # flat send loop by `eff` and emit a literal rotated fifo_id per unrolled
+    # packet. `eff` is >1 ONLY for the conv activation edge (spread_fifo_n set in
+    # policy_table_builder); weight/const/other SENDs have spread_fifo_n==0 ->
+    # eff==1 -> the classic single flat loop (byte-identical). `eff` divides the
+    # bitplane count so the unrolled packet j (j in 0..eff-1) selects the SAME
+    # fifo as the matching IMCE LOAD_LB bitplane. recv_count is a multiple of the
+    # 4-bitplane pixel stride, hence of eff (eff|4); a remainder tail is emitted
+    # defensively.
+    eff = self.edge_info.effective_spread_n(4)
+
     if not bugfix_off_mode():
       def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr, fifo_id=fifo_id):
         code = f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
@@ -402,6 +426,22 @@ class SendBlock(InodeCodeBlock):
         if sync_code:
           code += sync_code
         return code
+
+      if eff > 1:
+        def spread_group_a8af(iter, var=var, next_policy_addr=next_policy_addr):
+          body = ""
+          for j in range(eff):
+            fid = self.edge_info.spread_fifo_id(j, 4)
+            body += f"__builtin_INODE_SEND({var} + (({iter})*{eff} + {j})*32, 0, {next_policy_addr}, {fid});\n"
+            sync_code = self._get_sync_code_str_a8af()
+            if sync_code:
+              body += sync_code
+          return body
+        self.body.add(SimpleFor(recv_count // eff, spread_group_a8af))
+        for r in range(recv_count - (recv_count % eff), recv_count):
+          fid = self.edge_info.spread_fifo_id(r, 4)
+          self.body.add(TextBlock(send_body_with_sync(r, fifo_id=fid).rstrip("\n")))
+        return
       self.body.add(SimpleFor(recv_count, send_body_with_sync))
       return
 
@@ -421,6 +461,28 @@ class SendBlock(InodeCodeBlock):
       code += f"__builtin_INODE_SEND({var} + {iter}*32, 0, {next_policy_addr}, {fifo_id});\n"
       code += nop_delay
       return code
+
+    if eff > 1:
+      def spread_group_hc(iter, var=var, next_policy_addr=next_policy_addr,
+                          send_per_sync=send_per_sync, nop_delay=nop_delay):
+        body = ""
+        for j in range(eff):
+          fid = self.edge_info.spread_fifo_id(j, 4)
+          pre = self._get_presend_sync_code_str()
+          if pre:
+            if send_per_sync == 1:
+              body += pre
+            else:
+              guarded = "".join(f"  {ln}\n" for ln in pre.splitlines() if ln.strip())
+              body += f"if ((({iter})*{eff} + {j}) % {send_per_sync} == 0) {{\n{guarded}}}\n"
+          body += f"__builtin_INODE_SEND({var} + (({iter})*{eff} + {j})*32, 0, {next_policy_addr}, {fid});\n"
+          body += nop_delay
+        return body
+      self.body.add(SimpleFor(recv_count // eff, spread_group_hc))
+      for r in range(recv_count - (recv_count % eff), recv_count):
+        fid = self.edge_info.spread_fifo_id(r, 4)
+        self.body.add(TextBlock(send_body_with_sync(r, fifo_id=fid).rstrip("\n")))
+      return
     self.body.add(SimpleFor(recv_count, send_body_with_sync))
 
   def _build_tiled(self):
@@ -447,6 +509,41 @@ class SendBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
 
+    # Max-throughput feed-spread (IMCFLOW_FEED_SPREAD): the tiled data-input SEND
+    # must rotate a LITERAL fifo_id per packet (int_INODE_SEND fifo_id is an
+    # ImmArg). The INODE ISA cannot lower arithmetic on the loop index for the
+    # fifo select (no `and`, no `/`, no unsigned compare -- those fail INODE
+    # instruction selection), and fully unrolling all packets overflows the small
+    # inode imem. The INODE-safe form (verified to compile) is a STEP-BY-eff
+    # hardware loop `for (i=0; i<var6; i += eff)` whose body emits `eff` unrolled
+    # SENDs at constant offsets `(i+j)*32` (ADDI+shift, supported) with literal
+    # rotated fifo_ids. This needs NO division and preserves the runtime tile
+    # count. `var6` is a whole-pixel multiple (4 bitplanes/pixel) and eff | 4, so
+    # the step evenly covers all packets. eff==1 (flag off / non-conv edge) keeps
+    # the original per-packet loop byte-identical.
+    # Max-throughput lever (IMCFLOW_FEED_PREFETCH): when prefetch is active on
+    # this conv activation edge, step the tiled SEND by width=P*4 and unroll that
+    # many SENDs over fifos 0..width-1, so the inode pushes P pixels' worth of
+    # bitplanes into P*4 distinct RECV fifos ahead of the IMCE's consumption. This
+    # matches the IMCE col_group P-pixel unroll (fifo (p*4+b)). Falls back to the
+    # plain feed-spread width (effective_spread_n) when prefetch is off.
+    _pf = self.edge_info.prefetch_group(4)
+    if _pf is not None:
+      eff = _pf[1]
+      _prefetch_fids = [j % 8 for j in range(eff)]
+    else:
+      eff = self.edge_info.effective_spread_n(4)
+      _prefetch_fids = None
+    spread_iv = UniqueVar(f"{target_edge.simple_name()}_spread_iv", dtype="int") if eff > 1 else None
+
+    def _spread_fid(j):
+      return _prefetch_fids[j] if _prefetch_fids is not None else self.edge_info.spread_fifo_id(j, 4)
+
+    def _spread_loop(inner_lines):
+      return (f"for (int {spread_iv} = 0; {spread_iv} < {loop_cnt_var}; "
+              f"{spread_iv} += {eff}) {{ // feed-spread group loop\n"
+              f"{inner_lines}}}")
+
     # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
     # per-packet POST-send SENDER-pattern sync; knob=off keeps the 934 pre-send
     # rendezvous below.
@@ -457,6 +554,20 @@ class SendBlock(InodeCodeBlock):
         if sync_code:
           code += sync_code
         return code
+
+      if eff > 1:
+        # a8af POST-send sync (empty "" for the plain conv data edge) re-derived
+        # per unrolled SEND to preserve its per-packet semantics.
+        inner = ""
+        for j in range(eff):
+          fid = _spread_fid(j)
+          inner += (f"  __builtin_INODE_SEND({base_var} + ({spread_iv} + {j})*32, 0, "
+                    f"{next_policy_addr}, {fid});\n")
+          sync_code = self._get_sync_code_str_a8af()
+          if sync_code:
+            inner += indent(sync_code.rstrip("\n"), "  ") + "\n"
+        self.body.add(TextBlock(_spread_loop(inner)))
+        return
       self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
       return
 
@@ -473,6 +584,20 @@ class SendBlock(InodeCodeBlock):
       code += f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
       code += nop_delay
       return code
+
+    if eff > 1:
+      inner = ""
+      for j in range(eff):
+        fid = self.edge_info.spread_fifo_id(j, 4)
+        pre = self._get_presend_sync_code_str()
+        if pre:
+          inner += indent(pre.rstrip("\n"), "  ") + "\n"
+        inner += (f"  __builtin_INODE_SEND({base_var} + ({spread_iv} + {j})*32, 0, "
+                  f"{next_policy_addr}, {fid});\n")
+        if nop_delay:
+          inner += indent(nop_delay.rstrip("\n"), "  ") + "\n"
+      self.body.add(TextBlock(_spread_loop(inner)))
+      return
     self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
 
   def _get_presend_sync_code_str(self):

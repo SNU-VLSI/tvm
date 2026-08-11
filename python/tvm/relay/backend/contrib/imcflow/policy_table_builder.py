@@ -30,6 +30,7 @@ from tvm.contrib.imcflow import (
     RouterEntry,
     DataBlock,
     bugfix_off_mode,
+    feed_spread_n,
 )
 from tvm.relay.op.contrib.imcflow import CustomIDToName, CustomIDToNode
 from tvm.relay.backend.contrib.imcflow.transform import debug_print
@@ -500,6 +501,16 @@ class EdgeInfoGenerator:
 
             if dst_node_name in ["nn.imcflow_qconv", "nn.imcflow_qdwconv"]:
                 edgeinfo = TensorEdgeInfo(router_entry_list, None, 0)
+                # Max-throughput lever (IMCFLOW_FEED_SPREAD): spread this conv
+                # activation feed across `spread_n` RECV fifos (0..spread_n-1)
+                # instead of pinning every packet to fifo 0. Base fifo stays 0
+                # so with the flag OFF (spread_n==0) spread_fifo_id() == 0 for
+                # every packet -> byte-identical to stock. The route
+                # (router_entry_list) is unchanged; only the terminal fifo_id
+                # operand of the SEND/LOAD_LB rotates (HW dispatches to RECV
+                # fifo N by the packet's fifo_id field). Gated by the env flag
+                # only, so SINGLE / non-QUADRU default paths are untouched.
+                edgeinfo.spread_fifo_n = feed_spread_n()
             else:
                 edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
                 fifo_id_cnt[dest_node] += 1
