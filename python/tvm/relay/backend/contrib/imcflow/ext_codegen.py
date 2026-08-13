@@ -6,6 +6,7 @@ from tvm.contrib.imcflow import DataBlock
 from tvm.relay.ty import TensorType, TupleType
 from . import transform as imcflow_transform
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, TensorEdge
+from tvm.contrib.imcflow import mmio_block_barrier_usec
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
@@ -333,6 +334,27 @@ class KernelCodeGenerator:
 
   def generateHeader(self):
     """Generate C header includes."""
+    # Stage-heartbeat instrumentation (IMCFLOW_STAGE_HB, default OFF). When ON,
+    # IMCFLOW_STAGE_HB(msg) writes an unbuffered stderr line AND appends+fsyncs a
+    # line to /var/volatile/imcflow_stage_hb.txt on the board, so a host-side
+    # wedge monitor SSH-polling that file can record the LAST stage reached even
+    # after the SoC hard-wedges (stderr may be lost at the freeze). Localizes the
+    # region3 kernel-entry wedge (reset / warmup / compiled-block / const-block /
+    # policy-update / invoke). Host-side prints ONLY -- emits no accelerator
+    # (inode/imce) code, so region cpp/bin blobs stay byte-identical. When OFF the
+    # macro expands to nothing -> byte-identical to stock.
+    stage_hb_macro = ("""
+// --- IMCFLOW_STAGE_HB instrumentation (opt-in) ---
+#define IMCFLOW_STAGE_HB(msg) do { \\
+  fprintf(stderr, "[STAGE] %s\\n", (msg)); fflush(stderr); \\
+  int _hbfd = open("/var/volatile/imcflow_stage_hb.txt", O_WRONLY|O_CREAT|O_APPEND, 0644); \\
+  if (_hbfd >= 0) { \\
+    char _hbbuf[256]; int _n = snprintf(_hbbuf, sizeof(_hbbuf), "%s\\n", (msg)); \\
+    if (_n > 0) { ssize_t _w = write(_hbfd, _hbbuf, (size_t)_n); (void)_w; } \\
+    fsync(_hbfd); close(_hbfd); \\
+  } \\
+} while (0)
+""") if os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0") else ""
     return ("""
 #include <stdlib.h>
 #include <string.h>
@@ -348,7 +370,7 @@ class KernelCodeGenerator:
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <unistd.h>
-
+""" + stage_hb_macro + """
 // Global failure flag: set by kernel on timeout, checked by host loop
 extern volatile int g_imcflow_kernel_failed;
 """)
@@ -450,6 +472,15 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     if (poll_count % POLL_LOG_INTERVAL == 0) {
       fprintf(stderr,"[POLLING] Still waiting... (poll count: %u, current state: 0x%x)\\n",
              poll_count, state);
+      // [PROBE] region3-entry wedge localizer: dump all 8 ctrl_regs each interval.
+      // STATE=0x1 busy + INTR_ID/INTR_DONE unchanged across polls => wedge is BEFORE
+      // any inode's launch-end INTRT, i.e. stuck in imem/IMCU load + 255-barrier
+      // (Phase A), not the Phase-B fused-add SEND/RECV. fflush: SoC goes SSH-dead
+      // seconds after wedge, so unbuffered output is essential.
+      fprintf(stderr,"[PROBE] ctrl_reg: STATE=0x%x CMD=0x%x INODE_PC[0..3]=0x%x 0x%x 0x%x 0x%x INTR_ID=0x%x INTR_DONE=0x%x\\n",
+             npu_pointer[0],npu_pointer[1],npu_pointer[2],npu_pointer[3],
+             npu_pointer[4],npu_pointer[5],npu_pointer[6],npu_pointer[7]);
+      fflush(stderr);
     }
   }
 }
@@ -647,12 +678,27 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += f"}}\n"
       return code
 
+    _hb_on = os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0")
+    # Host-side MMIO write-ordering barrier between block transfers (root-cause fix
+    # for the region3 chip wedge; see imcflow.mmio_block_barrier_usec). -1 == OFF ->
+    # emit nothing -> byte-identical. Accelerator blobs untouched (host-side only).
+    _mmio_barrier = mmio_block_barrier_usec()
     code = CodeWriter()
     code += "// Transfer data into NPU memory\n"
     for block in blocks:
       base_address = block.base_address
       base_address_name = makeBaseAddrName(block)
       self.base_address_macros.update({base_address_name: base_address})
+
+      # Per-block stage heartbeat (opt-in) so a mid-transfer SoC wedge localizes to
+      # the exact block whose MMIO write hung. Host-side print only.
+      if _hb_on:
+        try:
+          _blk_name = str(block.id)
+        except Exception:
+          _blk_name = base_address_name
+        _blk_name = _blk_name.replace('"', "'")[:120]
+        code += f"IMCFLOW_STAGE_HB(\"{self.func_name}: xfer block {base_address_name} ({_blk_name}) sz={block.size}\");\n"
 
       # Add tiling comment if applicable
       if block.tiling_info is not None:
@@ -664,6 +710,14 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         code = _appendLoopForObjectFileTransfer(code, block, base_address_name, self.func_name, tile_idx)
       else:
         code = _appendLoopForCVarTransfer(code, block, base_address_name, self.func_name, tile_idx)
+
+      # MMIO write-ordering barrier AFTER this block's stores (drains the CPU store
+      # buffer so the accelerator sees complete, in-order blocks; fixes the region3
+      # host-side MMIO overrun wedge). usleep adds a real-time drain if needed.
+      if _mmio_barrier >= 0:
+        code += "__sync_synchronize();\n"
+        if _mmio_barrier > 0:
+          code += f"usleep({_mmio_barrier});\n"
 
     return code
 
@@ -802,8 +856,17 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += "}\n"
     code += "#endif\n"
 
+    # Stage-heartbeat markers (IMCFLOW_STAGE_HB, default OFF -> emit nothing ->
+    # byte-identical). Host-side only; localizes the region3 kernel-entry wedge.
+    _hb_on = os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0")
+    def _hb(stage):
+      return f"IMCFLOW_STAGE_HB(\"{self.func_name}: {stage}\");\n" if _hb_on else ""
+
+    code += _hb("before device_pointer_setup")
     code += self.generateDevicePointerSetup()
+    code += _hb("before reset")
     code += self.emitReset()
+    code += _hb("after reset")
     if self.os == "linux":
       # Per-kernel warmup gate. emitWarmup() forks `make clear_time && make warmup`
       # (a full accelerator hard-reset + 16 warmup binaries) on EVERY kernel call.
@@ -815,12 +878,20 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       if os.environ.get("IMCFLOW_NO_PERKERNEL_WARMUP", "") not in ("", "0"):
         pass  # per-kernel warmup intentionally skipped
       else:
+        code += _hb("before warmup")
         code += self.emitWarmup()
+        code += _hb("after warmup")
+    code += _hb("before compiled_blocks transfer")
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
+    code += _hb("after compiled_blocks transfer / before const_blocks transfer")
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
+    code += _hb("after const_blocks transfer / before policy_update")
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
+    code += _hb("after policy_update")
     code += self.generateRetryCheck("policy_update")
+    code += _hb("before invoke")
     code += self.generateInvokeCode() # proceed up to halt
+    code += _hb("after invoke / before poll")
     code += self.generateRetryCheck("invoke")
 
     # kernel tiling factor

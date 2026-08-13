@@ -149,6 +149,189 @@ def drop_psum_keep_every() -> int:
     return 0
 
 
+def serialize_imcu_load() -> bool:
+  """Silicon-SAFE lever (IMCFLOW_SERIALIZE_IMCU, default OFF).
+
+  ResNet8 region3 wedges the real B2 chip (SoC SSH-dead at region3 kernel entry,
+  before the first input transfer) while passing the BUGFIX-off RTL. Root cause
+  localized by the subset ladder: subset21 (only inode_2_0 streams WR_IMCU, even
+  though it streams 2 bursts back-to-back) PASSES; subset22 (all 4 inodes stream
+  WR_IMCU concurrently after the shared 255-barrier) WEDGES. So the trigger is
+  4-inode-CONCURRENT IMCU weight-load bursts hammering the NoC / IMCU write path
+  at silicon speed. The idealized RTL timing tolerates it; the silicon does not.
+
+  When ON, codegen.py.initialize() serializes the IMCU-write phase: it inserts a
+  255 barrier (SyncAllINodes, the proven inter-inode primitive) BEFORE each
+  inode's WriteIMCUBlock in a fixed inode order, so at any instant only one inode
+  streams a WR_IMCU burst instead of all four at once. Turns concurrent bursts
+  into sequential ones -> removes the silicon NoC/IMCU write-contention wedge.
+
+  Default OFF -> byte-identical to stock (no new blocks emitted). Independent of
+  IMCFLOW_BUGFIX; safe to set alongside IMCFLOW_BUGFIX=off.
+
+  ROUND-2 UPDATE (chip result): the inter-inode serialization got the chip through
+  region1+region2 but region3 STILL wedged at kernel entry (same signature as
+  stock). So inter-inode concurrency is NOT the region3 mechanism. The residual
+  differentiator is inode_3_0's TWO consecutive WR_IMCU bursts (512 words
+  back-to-back). See imcu_intra_drain_nops() (IMCFLOW_IMCU_INTRA_DRAIN) -- the
+  preferred region3 fix -- which drains between an inode's back-to-back bursts
+  WITHOUT any inter-inode handshake (so it cannot introduce the rendezvous
+  deadlock that the barrier variant caused in region2). This IMCFLOW_SERIALIZE_IMCU
+  barrier variant is kept switchable so drain+barrier can be combined if drain
+  alone is insufficient."""
+  return os.environ.get("IMCFLOW_SERIALIZE_IMCU", "").strip().lower() in (
+      "1", "on", "true", "yes")
+
+
+def imcu_intra_drain_nops() -> int:
+  """Silicon-SAFE lever (IMCFLOW_IMCU_INTRA_DRAIN, integer nop count, default 0=OFF).
+
+  ResNet8 region3 wedges the real B2 chip at region3 kernel entry (INIT phase,
+  during the IMCU weight-load) while the BUGFIX-off RTL passes. Chip-ladder +
+  round-2 evidence narrows the trigger to a SINGLE inode streaming TWO consecutive
+  256-word WR_IMCU bursts back-to-back (inode_3_0 in region3: -> imce col 2 then
+  col 4). Inter-inode serialization (IMCFLOW_SERIALIZE_IMCU) did NOT fix it;
+  neither concurrency alone (region2 = 4x single burst PASS) nor a lone double
+  burst under light init (subset21 PASS) wedges -- it is the back-to-back double
+  burst under region3's heavy 4-inode init that overruns the IMCU write path on
+  silicon.
+
+  When >0, WriteIMCUBlock._build() inserts a NOP-delay loop of this many nops
+  BETWEEN consecutive WR_IMCU burst loops within one inode (i.e. only when an
+  inode has >=2 weight blocks), so the first burst fully commits to the IMCU
+  before the second starts. The NOP-delay (NopLoopBlock) is the same proven,
+  self-contained timing primitive used for the single_qconv nop_delay -- it is
+  purely local to the inode (no NoC handshake), so unlike the 255-barrier variant
+  it cannot deadlock a rendezvous.
+
+  Value = nop count. A 256-word burst issues in ~256 inode cycles; default
+  suggestion 256 gives a full-burst drain margin. 0 (default) -> byte-identical to
+  stock (no nops emitted). Independent of IMCFLOW_BUGFIX and IMCFLOW_SERIALIZE_IMCU
+  (both can be combined)."""
+  raw = os.environ.get("IMCFLOW_IMCU_INTRA_DRAIN", "").strip()
+  if not raw:
+    return 0
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 0
+
+
+def mmio_block_barrier_usec() -> int:
+  """Silicon-SAFE HOST-SIDE lever (IMCFLOW_MMIO_BARRIER, default -1 = OFF).
+
+  ROOT CAUSE (round-4 localizer result): ResNet8 region3 wedges the real B2 chip
+  NOT in the inode program but on the HOST side, while streaming the region's
+  ~61 back-to-back block transfers (inode/imce imem+policy + const weights) into
+  the accelerator as tight non-volatile MMIO stores `npu_pointer[..]=..`. The
+  IMCFLOW_STAGE_HB localizer PROVED this: stock codegen (all inode/imce blobs
+  byte-identical, all four codegen-sync fix attempts irrelevant) + ONLY host-side
+  per-block fsync heartbeats -> subset22 PASSES region3 end-to-end. The fsync's
+  syscall (kernel entry drains the CPU store buffer + yields) between block
+  transfers is the accidental fix; without it the un-ordered/buffered MMIO store
+  stream overruns the SoC<->accelerator bus and wedges (region3 = largest xfer).
+
+  When >= 0, generateToNpuTransferCode() emits a `__sync_synchronize()` full
+  memory barrier AFTER each block's transfer loop (drains the store buffer, no
+  syscall), plus a `usleep(<value>)` when value > 0 (matches the fsync's
+  CPU-yield / real-time drain if the bare barrier is insufficient). value == 0 ->
+  barrier only. value < 0 (default, env unset) -> emit nothing -> byte-identical
+  to stock. Host-side ONLY: accelerator (inode/imce) blobs are untouched, so no
+  RTL rerun is required. Independent of all codegen-sync levers."""
+  raw = os.environ.get("IMCFLOW_MMIO_BARRIER", "").strip()
+  if not raw:
+    return -1
+  try:
+    return int(raw)
+  except ValueError:
+    return -1
+
+
+def multiblock_fusedadd_bare() -> bool:
+  """Silicon-deadlock lever (IMCFLOW_MULTIBLOCK_FUSEDADD_BARE, default OFF).
+
+  Removes the inode->imce data-input rendezvous (the Fix-D merged
+  SETFLAG(1);STANDBY(inode,1);...;SETFLAG(0) consumer window AND the matching
+  inode-side 4-phase _get_presend_sync_code_str per-word handshake) for a
+  MULTI-BLOCK (num_blocks > 1) 2-inode fused-add consumer -- e.g. ResNet8
+  region3 imce_1_1 (lhs from inode_0_0, rhs from inode_1_0, num_blocks==2).
+
+  WHY: that consumer wraps EACH block's RECV pair in its own window (Fix E
+  per-block re-emission), so the node's SINGLE flag register (imce_ctrl.sv)
+  toggles 1->0->1->0 TWICE per loop iteration while TWO independent producer
+  inodes each re-arm a 4-phase STANDBY/SETFLAG gate PER WORD on that same flag.
+  On the BUGFIX-off *simv* the fixed NoC latency keeps the two producers'
+  arrivals ordered so the level handshake resolves; on real silicon the two
+  producers race and the consumer's flag edge (1->0->1) can be collapsed/missed
+  by a producer polling at silicon speed -> a STANDBY(6,0)/STANDBY(6,1) never
+  fires -> wedge at region3 entry (localized: chip-v1-region3-fusedadd-wedge).
+
+  Correctness after removal relies on FIFO backpressure (DESIGN baseline: the
+  standalone RecvSendWrapper is bare RECV/compute/SEND). Each producer->consumer
+  edge is a SINGLE dedicated RECV fifo (lhs=fifo2, rhs=fifo3) with SEND count ==
+  RECV count (same tile loop bound), so the depth-2 backpressured fifo already
+  guarantees lossless, in-order delivery -- the rendezvous was added only to
+  satisfy simv pacing. region2 imce_1_3 (the other Fix-D fused-add) is
+  num_blocks==1 (single window per iter, no mid-iteration toggle) so it is
+  EXCLUDED and unaffected -> its RTL sync is preserved.
+
+  Default OFF -> byte-identical to the P4 output (RTL/everything unchanged);
+  opt in only for the silicon fused-add probe.
+  """
+  return os.environ.get(
+      "IMCFLOW_MULTIBLOCK_FUSEDADD_BARE", "").strip().lower() in (
+      "1", "on", "true", "yes")
+
+
+# Silicon-SAFE fused-add rendezvous: the monotonic phase-token base value. Both
+# the consumer window (imce_codeblock RecvSendWrapper) and the producer pre-send
+# (inode_codeblock SendBlock) MUST use this identical base so their STANDBY/
+# SETFLAG values match. Base 3 skips the reserved consumer-flag values on the
+# fused-add node: 0 (idle), 1 (legacy input invite), 2 (OUTPUT multicast barrier
+# that downstream imce receivers STANDBY on). block b -> {base+2b, base+2b+1};
+# num_blocks<=8 -> max base+2*7+1 = 18 < 255 (SYNC_REG_WIDTH=8).
+SAFE_TOKEN_BASE = 3
+
+
+def multiblock_fusedadd_safe() -> bool:
+  """Silicon-SAFE fused-add rendezvous REDESIGN (IMCFLOW_MULTIBLOCK_FUSEDADD_SAFE,
+  default OFF). Replaces -- does NOT remove -- the 2-inode fused-add consumer's
+  rendezvous with a monotonic phase-token, fully-interlocked, order-independent
+  handshake that survives BOTH the BUGFIX-off simv AND real silicon.
+
+  Target: the 2-producer fused-add consumer (ResNet8 region3: lhs from inode_0_0
+  fifo2, rhs from inode_1_0 fifo3). In v1-multicore subset the consumer is
+  imce_1_1 emitted via the standalone-VecBlock (call_created_loop) path with BARE
+  RECV/SEND (no pacing at all); in the full-region3 handcraft topology it is
+  imce_0_2 with the old per-word 1->0->1->0 4-phase toggle. BOTH are unsafe on
+  silicon (fsim-proven edge-collapse: a producer drives the consumer's single
+  8-bit level flag 1->0 ~167us before the back-pressured consumer arms its
+  matching STANDBY -> awaited value gone -> wedge state 0x1).
+
+  REDESIGN (per outer iter, per block b in 0..num_blocks-1):
+    consumer C:  SETFLAG(2b+1); STANDBY(P0,2b+1); STANDBY(P1,2b+1);
+                 SETFLAG(2b+2); RECV(lhs_b); RECV(rhs_b)
+    producer Pk: STANDBY(C,2b+1); SETFLAG(2b+1); STANDBY(C,2b+2); SEND(word_b)
+  Every flag VALUE is unique within the live window (no repeated 1/0 toggle ->
+  no edge aliasing). Every write is INTERLOCKED: C writes 2b+2 only after it saw
+  BOTH producers' 2b+1, then BLOCKS on RECV (which cannot complete until each Pk
+  SENDs, i.e. observed 2b+2) so C never overwrites FC past 2b+2 before both
+  producers consumed it -> no lost wakeup, ORDER-INDEPENDENT (either producer may
+  arrive first; its level simply waits). See DESIGN_region3_fusedadd_redesign.md.
+
+  Token width: values 2b+1,2b+2 with num_blocks<=8 -> max 16, well under the
+  8-bit (0..255) SYNC_REG_WIDTH; reused each outer iteration (uniqueness only
+  needed within the interlock-bounded one-iteration window).
+
+  Mutually exclusive with the (dead-end) _BARE lever. Default OFF -> baseline
+  P0-P4 / standalone path emitted byte-identically; opt in only for the silicon
+  fused-add probe after the RTL regression passes region3.
+  """
+  return os.environ.get(
+      "IMCFLOW_MULTIBLOCK_FUSEDADD_SAFE", "").strip().lower() in (
+      "1", "on", "true", "yes")
+
+
 def feed_prefetch_n() -> int:
   """Max-throughput lever (IMCFLOW_FEED_PREFETCH): reserved gate for extending
   the feed spread to 8 fifos AND pre-sending P pixels ahead so the next pixel's
