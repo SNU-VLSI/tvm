@@ -1224,10 +1224,9 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
   # Determine directory name based on IMCFLOW_HOST_OS
   host_os = os.getenv("IMCFLOW_HOST_OS", "baremetal")
   dir_name = f"eval_dir/{test_name}_evl.{host_os}"
-  # BUGFIX-off (opt-in) uses a distinct eval_dir so its artifacts (codegen,
-  # fsdb, output) do NOT overwrite the default/BUGFIX-on run's. Default (knob
-  # unset/on) keeps the original name for backward compat with existing chip
-  # workflows. See bugfix_off_mode() in tvm.contrib.imcflow.
+  # BUGFIX-off (the default) uses a distinct eval_dir so its artifacts (codegen,
+  # fsdb, output) do NOT overwrite an explicit BUGFIX-on run. See
+  # bugfix_off_mode() in tvm.contrib.imcflow.
   from tvm.contrib.imcflow import bugfix_off_mode
   if bugfix_off_mode():
     dir_name = f"{dir_name}.bugfixoff"

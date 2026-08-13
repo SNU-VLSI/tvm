@@ -437,18 +437,15 @@ class RTLRunner(ImcFlowRunner):
 
     @property
     def directory_path(self) -> str:
-        # RTL runner dir selection:
-        #   * IMCFLOW_RTL_RUNNER_DIR set -> always honored (explicit override).
-        #   * else pick by the master IMCFLOW_BUGFIX knob:
-        #       knob=off (bugfix_off_mode) -> BUGFIX-off build (gem5_bugfixoff_wt)
-        #       knob=on                    -> BUGFIX-on  build (gem5)
+        # Both BUGFIX modes use one runner/build directory.  The build manifest
+        # notices the effective defines (including a mode change) and rebuilds.
         override = os.environ.get("IMCFLOW_RTL_RUNNER_DIR")
         if override:
             return override
-        from tvm.contrib.imcflow import bugfix_off_mode
-        if bugfix_off_mode():
-            return "/root/project/imcflow/pmap/ISA_sim/gem5_bugfixoff_wt/tests/imcflow/rtl_runner"
-        return "/root/project/imcflow/pmap/ISA_sim/gem5/tests/imcflow/rtl_runner"
+        imcflow_dir = os.environ.get("IMCFLOW_DIR", "/root/project/imcflow")
+        return os.path.join(
+            imcflow_dir, "pmap", "ISA_sim", "gem5", "tests", "imcflow", "rtl_runner"
+        )
 
     @property
     def timeout(self) -> int:
@@ -558,21 +555,19 @@ class RTLRunner(ImcFlowRunner):
                 self._allocated_port = None
 
     def setup(self) -> None:
-        """Setup for rtl_runner: compile VCS if needed"""
+        """Ensure that the VCS binary matches the complete build manifest."""
         print(f"Using {self.name} (VCS RTL co-simulation)")
 
         if not os.path.exists(self.directory_path):
             raise FileNotFoundError(f"rtl_runner directory not found at: {self.directory_path}")
 
-        # Check if VCS simulator binary exists
-        vcs_binary = os.path.join(self.directory_path, "build", "simv_imcflow_gem5")
-        if os.path.exists(vcs_binary):
-            print(f"VCS simulator found at: {vcs_binary}")
-            return
-
-        # Need to compile VCS
-        print(f"VCS simulator not found, compiling RTL...")
-        compile_command = ["direnv", "exec", ".", "make", "compile"]
+        from tvm.contrib.imcflow import get_imcflow_bugfix_mode
+        bugfix_mode = get_imcflow_bugfix_mode()
+        print(f"Checking RTL build manifest (IMCFLOW_BUGFIX={bugfix_mode})")
+        compile_command = [
+            "direnv", "exec", ".", "make", "ensure-compiled",
+            f"IMCFLOW_BUGFIX={bugfix_mode}",
+        ]
         compile_log = os.path.join(self.directory_path, "vcs_compile.log")
 
         try:
@@ -582,14 +577,14 @@ class RTLRunner(ImcFlowRunner):
                 log_path=compile_log,
                 timeout=600  # 10 minutes for compilation
             )
-            print(f"VCS compilation successful")
+            print("VCS RTL build is ready")
         except subprocess.CalledProcessError as e:
-            print(f"VCS compilation failed (exit code {e.returncode})")
+            print(f"VCS RTL build setup failed (exit code {e.returncode})")
             print(f"   Check log at: {compile_log}")
-            raise RuntimeError(f"VCS compilation failed. See {compile_log} for details") from e
+            raise RuntimeError(f"VCS RTL build setup failed. See {compile_log} for details") from e
         except subprocess.TimeoutExpired:
-            print(f"VCS compilation timed out after 600 seconds")
-            raise RuntimeError("VCS compilation timed out")
+            print("VCS RTL build setup timed out after 600 seconds")
+            raise RuntimeError("VCS RTL build setup timed out")
 
     def get_output_path(self, test_name: str, sample_idx: Optional[int] = None) -> str:
         """Get the path to rtl_runner output file

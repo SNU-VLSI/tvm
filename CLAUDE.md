@@ -65,26 +65,25 @@ Use `imcflow-compiler-expert` for ANY task including:
 
 ## IMCFLOW_BUGFIX master knob (BUGFIX-on vs BUGFIX-off RTL) — READ FIRST
 
-The RTL exists in two builds: **BUGFIX-on** (the original, chip/tapeout HW model)
-and **BUGFIX-off** (a co-sim build with BUGFIX_STEP/DWCONV/OVERFLOW/ROUTER macros
-commented out). BUGFIX-off deadlocks unless codegen emits extra NoC sync
+The RTL has two compile configurations: **BUGFIX-on** (the original,
+chip/tapeout HW model) and **BUGFIX-off** (BUGFIX_STEP/DWCONV/OVERFLOW/ROUTER
+macros omitted). BUGFIX-off deadlocks unless codegen emits extra NoC sync
 (rendezvous/barrier); BUGFIX-on works with the original a8af sync. ONE env var
 switches BOTH codegen and the RTL runner consistently:
 
-- **`IMCFLOW_BUGFIX` unset or `=on` (DEFAULT)** → codegen = a8af (no new sync,
-  byte-identical to pristine); RTL runner = `gem5/tests/imcflow/rtl_runner`
-  (BUGFIX-on simv); `IMCFLOW_BUGFIX_OVERFLOW_SW` default OFF. This is what all
-  existing chip / driver-v2 / FPGA workflows get — they never set the knob, so
-  they are unaffected.
-- **`IMCFLOW_BUGFIX=off`** (explicit opt-in) → codegen = 934+P0-P3+P4 sync;
-  RTL runner = `gem5_bugfixoff_wt/tests/imcflow/rtl_runner` (BUGFIX-off simv);
+- **`IMCFLOW_BUGFIX` unset or `=off` (DEFAULT)** → codegen = 934+P0-P3+P4
+  sync; the shared RTL runner compiles without the BUGFIX_* defines;
   overflow-SW fix default ON; eval_dir gets a `.bugfixoff` suffix so its
-  artifacts (codegen/fsdb/output) never overwrite the default run's.
+  artifacts (codegen/fsdb/output) do not overwrite an explicit BUGFIX-on run.
+- **`IMCFLOW_BUGFIX=on`** → codegen = a8af (no new sync, byte-identical to
+  pristine); the same RTL runner compiles with the BUGFIX_* defines;
+  `IMCFLOW_BUGFIX_OVERFLOW_SW` defaults OFF.
 
-Helper: `tvm.contrib.imcflow.bugfix_off_mode()` (default False = a8af). Gated at
+Helper: `tvm.contrib.imcflow.bugfix_off_mode()` (default True). Gated at
 all sync call sites in send_recv_sync.py / imce_codeblock.py / inode_codeblock.py
-/ codegen.py, and at `runners/imcflow_runner.py` RTLRunner.directory_path.
-`IMCFLOW_RTL_RUNNER_DIR` still overrides the runner dir when set explicitly.
+/ codegen.py. The RTL runner uses `build/build_manifest.json` to rebuild when
+the mode, defines/options, source/include inputs, compile paths, or VCS identity
+changes. `IMCFLOW_RTL_RUNNER_DIR` still overrides the shared runner directory.
 Background & design: `DWCONV_SYNC_GRANULARITY_DESIGN.md`, `P4_HANDOFF.md`.
 
 ## Running the BUGFIX-off RTL co-simulation (deadlock-check path)
@@ -94,9 +93,9 @@ Model names: `resnet8_subset31_pretrained_orig`, `ds_cnn_subset08_pretrained`
 (fast), `ds_cnn_full_pretrained`. Required env (from the codegen dir):
 
 ```bash
-export IMCFLOW_BUGFIX=off            # <- the knob (BUGFIX-off codegen + runner)
+export IMCFLOW_BUGFIX=off            # optional: this is the default
 export IMCFLOW_RUNNER=rtl IMCFLOW_HOST_OS=baremetal IMCFLOW_HOST_ISA=x86
-export IMCFLOW_DIR=/root/project/imcflow_march_rtl
+export IMCFLOW_DIR=/root/project/imcflow
 export SNPSLMD_LICENSE_FILE=1727@147.46.168.128   # VCS/XProp license
 export CKPT=n32_signed_sample        # resnet8 (b2_half.json); ds_cnn -> kws_dscnn_base
 # PYTHONPATH/TVM_HOME must point at THIS checkout (worktree-aware)
