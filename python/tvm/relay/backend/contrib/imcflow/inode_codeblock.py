@@ -3,6 +3,7 @@ from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID, TensorEdge, T
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send
+from tvm.contrib.imcflow import imcu_intra_drain_nops
 from textwrap import indent
 import math
 import pdb
@@ -83,13 +84,28 @@ class WriteIMCUBlock(InodeCodeBlock):
     self._build()
 
   def _build(self):
+    # Intra-inode IMCU drain (IMCFLOW_IMCU_INTRA_DRAIN, default 0=OFF): when an
+    # inode streams >=2 consecutive WR_IMCU bursts (e.g. region3 inode_3_0's two
+    # 256-word bursts), the back-to-back streaming overruns the IMCU write path on
+    # real silicon and wedges region3 at kernel entry (BUGFIX-off RTL tolerates
+    # it). Inserting a NOP-delay loop BETWEEN the bursts lets the first burst fully
+    # commit before the second starts. NopLoopBlock is purely local to this inode
+    # (no NoC handshake) so it cannot deadlock. drain=0 -> byte-identical to stock.
+    # See imcflow.imcu_intra_drain_nops().
+    drain = imcu_intra_drain_nops()
+    first_burst = True
     region = DevConfig().CurrFuncMemLayout[f"{self.node_id.name}_data"]
     for db in region.blocks.values():
       if isinstance(db.id, TensorEdge) and "weight" == db.id.src_id.tensor_type:
         info = DevConfig().get_tensor_edge_info(db.id)
         assert info.fifo_id == 1, f"IMCU fifo id should be set to 1 (although not used), but got {info.fifo_id} for {db.id}"
         var = UniqueVar("imcu_start_address", dtype="int")
-        
+
+        # Drain between consecutive bursts within this inode (not before the first).
+        if drain > 0 and not first_burst:
+          self.body.add(NopLoopBlock(drain, "imcu intra-inode drain between WR_IMCU bursts"))
+        first_burst = False
+
         self.body.add(TextBlock(f"{var} = {db.offset};"))
         self.body.add(TextBlock(f"__builtin_INODE_SET_ADDR_CNT(0);"))
         self.body.add(SimpleFor(math.ceil(db.size / 32),
@@ -450,7 +466,7 @@ class SendBlock(InodeCodeBlock):
     def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr,
                             fifo_id=fifo_id, send_per_sync=send_per_sync, nop_delay=nop_delay):
       code = ""
-      pre = self._get_presend_sync_code_str()
+      pre = self._get_presend_sync_code_str(iter_var=iter)
       if pre:
         if send_per_sync == 1:
           code += pre                      # per-packet (default, unchanged)
@@ -468,7 +484,7 @@ class SendBlock(InodeCodeBlock):
         body = ""
         for j in range(eff):
           fid = self.edge_info.spread_fifo_id(j, 4)
-          pre = self._get_presend_sync_code_str()
+          pre = self._get_presend_sync_code_str(iter_var=f"(({iter})*{eff} + {j})")
           if pre:
             if send_per_sync == 1:
               body += pre
@@ -482,6 +498,27 @@ class SendBlock(InodeCodeBlock):
       for r in range(recv_count - (recv_count % eff), recv_count):
         fid = self.edge_info.spread_fifo_id(r, 4)
         self.body.add(TextBlock(send_body_with_sync(r, fifo_id=fid).rstrip("\n")))
+      return
+    # Silicon-SAFE lever (non-tiled path): same step-by-num_blocks unroll with
+    # LITERAL phase-tokens as _build_tiled. recv_count is a Python int here so we
+    # step a plain C for by num_blocks. Only fires when this SEND feeds a 2-inode
+    # fused-add consumer (else None -> byte-identical legacy loop below).
+    safe_nb = self.is_safe_fusedadd_send()
+    if safe_nb is not None and eff == 1:
+      _cval, nb = safe_nb
+      safe_iv = UniqueVar(f"send_safe_iv_{fifo_id}", dtype="int")
+      inner = ""
+      for b in range(nb):
+        pre = self._get_presend_sync_code_str(safe_block=b)
+        if pre:
+          inner += indent(pre.rstrip("\n"), "  ") + "\n"
+        inner += (f"  __builtin_INODE_SEND({var} + ({safe_iv} + {b})*32, 0, "
+                  f"{next_policy_addr}, {fifo_id});\n")
+        if nop_delay:
+          inner += indent(nop_delay.rstrip("\n"), "  ") + "\n"
+      self.body.add(TextBlock(
+          f"for (int {safe_iv} = 0; {safe_iv} < {recv_count}; "
+          f"{safe_iv} += {nb}) {{ // SAFE fused-add step-by-{nb} loop\n{inner}}}"))
       return
     self.body.add(SimpleFor(recv_count, send_body_with_sync))
 
@@ -578,18 +615,43 @@ class SendBlock(InodeCodeBlock):
     nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
     def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id, nop_delay=nop_delay):
       code = ""
-      pre = self._get_presend_sync_code_str()
+      pre = self._get_presend_sync_code_str(iter_var=iter)
       if pre:
         code += pre
       code += f"__builtin_INODE_SEND({base_addr_var} + {iter}*32, 0, {policy_addr}, {fid});\n"
       code += nop_delay
       return code
 
+    # Silicon-SAFE lever: this data edge feeds a 2-inode fused-add consumer.
+    # INODE cannot lower a runtime `iter % num_blocks` flag value (backend
+    # 'Cannot select and'), so emit a STEP-BY-num_blocks hardware loop with
+    # num_blocks UNROLLED bodies, each carrying LITERAL phase-tokens (block b:
+    # base+2b / base+2b+1). Mirrors the feed-spread step-by-eff idiom above.
+    # eff==1 always here (fused-add data isn't feed-spread). Word (i+b) maps to
+    # consumer block b -- exactly the consumer's per-block unroll order.
+    safe_nb = self.is_safe_fusedadd_send()
+    if safe_nb is not None and eff == 1:
+      _cval, nb = safe_nb
+      safe_iv = UniqueVar(f"{target_edge.simple_name()}_safe_iv", dtype="int")
+      inner = ""
+      for b in range(nb):
+        pre = self._get_presend_sync_code_str(safe_block=b)
+        if pre:
+          inner += indent(pre.rstrip("\n"), "  ") + "\n"
+        inner += (f"  __builtin_INODE_SEND({base_var} + ({safe_iv} + {b})*32, 0, "
+                  f"{next_policy_addr}, {fifo_id});\n")
+        if nop_delay:
+          inner += indent(nop_delay.rstrip("\n"), "  ") + "\n"
+      self.body.add(TextBlock(
+          f"for (int {safe_iv} = 0; {safe_iv} < {loop_cnt_var}; "
+          f"{safe_iv} += {nb}) {{ // SAFE fused-add step-by-{nb} loop\n{inner}}}"))
+      return
+
     if eff > 1:
       inner = ""
       for j in range(eff):
         fid = self.edge_info.spread_fifo_id(j, 4)
-        pre = self._get_presend_sync_code_str()
+        pre = self._get_presend_sync_code_str(iter_var=f"({spread_iv} + {j})")
         if pre:
           inner += indent(pre.rstrip("\n"), "  ") + "\n"
         inner += (f"  __builtin_INODE_SEND({base_var} + ({spread_iv} + {j})*32, 0, "
@@ -600,7 +662,30 @@ class SendBlock(InodeCodeBlock):
       return
     self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
 
-  def _get_presend_sync_code_str(self):
+  def is_safe_fusedadd_send(self):
+    """SAFE lever: return (consumer_value, num_blocks) if THIS SendBlock's data
+    edge feeds a 2-inode fused-add consumer (so its per-word SEND loop must be
+    unrolled by num_blocks with literal phase-tokens), else None. Used by the
+    caller to switch the flat SEND loop into a step-by-num_blocks unrolled loop
+    (INODE cannot lower a runtime `iter % nb` flag value -- verified: backend
+    'Cannot select and' -- so tokens must be compile-time literals)."""
+    from tvm.contrib.imcflow import multiblock_fusedadd_safe
+    if not multiblock_fusedadd_safe():
+      return None
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return None
+    edge_or_edges = self._get_edge()
+    if edge_or_edges is None:
+      return None
+    edges = edge_or_edges if isinstance(edge_or_edges, list) else [edge_or_edges]
+    pm = self.builder.pair_manager
+    for e in edges:
+      nb = pm.fusedadd_consumer_num_blocks(e)
+      if nb is not None:
+        return nb  # (consumer_value, num_blocks)
+    return None
+
+  def _get_presend_sync_code_str(self, iter_var=None, safe_block=None):
     """Get PRE-send rendezvous code (handcraft, SENDER side for data input).
 
     handcraft inode_0_0 data-input SEND (per-packet):
@@ -608,6 +693,12 @@ class SendBlock(InodeCodeBlock):
     Only emitted for inode -> imce *data input* edges whose receiver is the
     main-pipeline imce (plain-int dst id, e.g. imce_0_2). weight/const SENDs and
     the fused/composite receiver (imce_0_1) get NO pre-send (bare).
+
+    `iter_var` is the C loop-variable NAME (unused by the SAFE path -- kept for
+    the legacy signature). `safe_block` is the LITERAL (Python int) block index
+    b in 0..num_blocks-1 for the SAFE unrolled path; when not None, the SAFE
+    branch emits its monotonic phase-token with literal values base+2b/base+2b+1
+    (INODE requires literal flag values).
     """
     if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
       return ""
@@ -618,6 +709,44 @@ class SendBlock(InodeCodeBlock):
     edges = edge_or_edges if isinstance(edge_or_edges, list) else [edge_or_edges]
 
     pm = self.builder.pair_manager
+    # Silicon-deadlock lever (IMCFLOW_MULTIBLOCK_FUSEDADD_BARE): drop this
+    # inode-side 4-phase pre-send handshake for a MULTI-BLOCK 2-inode fused-add
+    # receiver (region3 imce_1_1). Kept in LOCKSTEP with the consumer window
+    # (RecvSendWrapper drops the matching SETFLAG window under the same lever);
+    # if only one side were bared the other would STANDBY forever. region2
+    # imce_1_3 (num_blocks==1) fails the predicate -> handshake preserved.
+    from tvm.contrib.imcflow import (multiblock_fusedadd_bare,
+                                     multiblock_fusedadd_safe, SAFE_TOKEN_BASE)
+    if multiblock_fusedadd_bare() and any(
+        pm.is_multiblock_fusedadd_input_edge(e) for e in edges):
+      return ""
+
+    # Silicon-SAFE lever (IMCFLOW_MULTIBLOCK_FUSEDADD_SAFE): REPLACE the per-word
+    # 4-phase 1/0 toggle with a monotonic phase-token, fully-interlocked,
+    # order-independent handshake keyed on the per-word block index
+    # b = (iter_var % num_blocks). Producer Pk, block b:
+    #     STANDBY(C, 2b+1); SET_FLAG(2b+1); STANDBY(C, 2b+2); SEND
+    # (matching consumer sets 2b+1 to invite, waits both producers' 2b+1, sets
+    # 2b+2 to release, then RECVs -- the RECV is the ack that lets C advance).
+    # Distinct token values per block (no repeated 1->0->1 edge to collapse) +
+    # RECV-as-ack interlock => lost-wakeup-proof on silicon AND simv. See
+    # multiblock_fusedadd_safe() docstring / DESIGN_region3_fusedadd_redesign.md.
+    if multiblock_fusedadd_safe() and safe_block is not None:
+      safe_targets = []  # (consumer_value, num_blocks)
+      for e in edges:
+        nb = pm.fusedadd_consumer_num_blocks(e)
+        if nb is not None and nb not in safe_targets:
+          safe_targets.append(nb)
+      if safe_targets:
+        b = int(safe_block)
+        rdy = SAFE_TOKEN_BASE + 2 * b        # literal (INODE requires literal flag)
+        go = SAFE_TOKEN_BASE + 2 * b + 1
+        lines = []
+        for cval, _nb in sorted(safe_targets):
+          lines.append(f"__builtin_INODE_STANDBY({cval}, {rdy}); // SAFE: wait consumer ready(block {b})")
+          lines.append(f"__builtin_INODE_SET_FLAG({rdy});        // SAFE: announce ready(block {b})")
+          lines.append(f"__builtin_INODE_STANDBY({cval}, {go});  // SAFE: wait consumer GO(block {b})")
+        return "\n".join(lines) + "\n"
     # Rendezvous only with data-input receivers (plain-int dst) of this SEND.
     # Each edge maps to exactly ONE receiver (its own dst hw node); do NOT pull
     # in the other multicast receivers (e.g. the fused imce_0_1 whose dst is a

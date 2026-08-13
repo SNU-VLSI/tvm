@@ -682,6 +682,109 @@ class SendRecvPairManager:
         # imce -> imce pipeline: burst window, no STANDBY on receiver side.
         return ["__builtin_IMCE_SETFLAG(1);"], ["__builtin_IMCE_SETFLAG(0);"]
 
+    def is_multiblock_fusedadd_input_edge(self, edge: TensorEdge) -> bool:
+        """Silicon-deadlock discriminator (used by IMCFLOW_MULTIBLOCK_FUSEDADD_BARE).
+
+        True iff `edge` is an inode->imce data-input edge whose RECEIVER is a
+        2-inode-fed fused-add (Fix-D merged case) with num_blocks > 1 (i.e. the
+        consumer's output has > 16 channels, so its RECV window is re-armed per
+        block -- ResNet8 region3 imce_1_1 has 32ch -> 2 blocks). Both the
+        consumer window (imce side) and the producer 4-phase handshake (inode
+        side) key on THIS predicate so they stay in lockstep when the lever
+        bares them. region2 imce_1_3 (16ch -> 1 block) returns False and keeps
+        its rendezvous.
+        """
+        pair = self.get_pair(edge)
+        if pair is None or not pair.sender_node.is_inode():
+            return False
+        if not self.is_inode_data_input_recv(edge):
+            return False
+        recv_hw = self._get_hw_node(edge.dst_id)
+        if isinstance(recv_hw, tuple):
+            recv_hw = recv_hw[0]
+        # count DISTINCT inode senders feeding data inputs into this receiver
+        inode_senders = set()
+        for p in self.pairs.values():
+            if not p.sender_node.is_inode():
+                continue
+            if recv_hw not in p.receiver_nodes:
+                continue
+            for e in p.edges:
+                if self.is_inode_data_input_recv(e):
+                    inode_senders.add(p.sender_node.value)
+                    break
+        if len(inode_senders) < 2:
+            return False  # not a 2-inode fused-add -> Fix-D merge doesn't apply
+        # num_blocks = ceil(consumer output channels / 16). Compute from the
+        # consumer relay call's output shape (NCHW: channel = dim 1).
+        try:
+            import math as _math
+            from tvm.relay.frontend.common import infer_shape
+            dst_gid = edge.dst_id.graph_node_id
+            inner = dst_gid[-1] if isinstance(dst_gid, tuple) else dst_gid
+            node = CustomIDToNode()[inner]
+            out_shape = infer_shape(node)
+            if isinstance(out_shape, (list, tuple)) and len(out_shape) and \
+               isinstance(out_shape[0], (list, tuple)):
+                out_shape = out_shape[0]
+            channels = out_shape[1]
+            num_blocks = _math.ceil(channels / 16.0)
+            return num_blocks > 1
+        except Exception:
+            return False
+
+    def fusedadd_consumer_num_blocks(self, edge: TensorEdge):
+        """Silicon-SAFE redesign helper (IMCFLOW_MULTIBLOCK_FUSEDADD_SAFE).
+
+        For an inode->imce data-input edge feeding a 2-inode fused-add consumer,
+        return (consumer_node_value, num_blocks) where num_blocks =
+        ceil(consumer output channels / 16). Returns None if `edge` is not such
+        an edge (so the SAFE handshake only replaces the 2-inode fused-add
+        rendezvous and every other edge is byte-identical). Mirrors the detector
+        in is_multiblock_fusedadd_input_edge but returns the block count (which
+        the token scheme needs) rather than a bool, and does NOT gate on
+        num_blocks>1 (num_blocks==1 == region2 imce_1_3 is also made safe: its
+        single window carries token (1,2) with the same interlock -- see NOTE).
+        """
+        pair = self.get_pair(edge)
+        if pair is None or not pair.sender_node.is_inode():
+            return None
+        if not self.is_inode_data_input_recv(edge):
+            return None
+        recv_hw = self._get_hw_node(edge.dst_id)
+        if isinstance(recv_hw, tuple):
+            recv_hw = recv_hw[0]
+        if recv_hw is None or not recv_hw.is_imce():
+            return None
+        # require >=2 DISTINCT inode senders feeding data inputs into recv_hw
+        inode_senders = set()
+        for p in self.pairs.values():
+            if not p.sender_node.is_inode():
+                continue
+            if recv_hw not in p.receiver_nodes:
+                continue
+            for e in p.edges:
+                if self.is_inode_data_input_recv(e):
+                    inode_senders.add(p.sender_node.value)
+                    break
+        if len(inode_senders) < 2:
+            return None
+        try:
+            import math as _math
+            from tvm.relay.frontend.common import infer_shape
+            dst_gid = edge.dst_id.graph_node_id
+            inner = dst_gid[-1] if isinstance(dst_gid, tuple) else dst_gid
+            node = CustomIDToNode()[inner]
+            out_shape = infer_shape(node)
+            if isinstance(out_shape, (list, tuple)) and len(out_shape) and \
+               isinstance(out_shape[0], (list, tuple)):
+                out_shape = out_shape[0]
+            channels = out_shape[1]
+            num_blocks = _math.ceil(channels / 16.0)
+            return (recv_hw.value, int(num_blocks))
+        except Exception:
+            return None
+
     def collect_inode_data_input_edges(self, edges: List[TensorEdge]) -> List[TensorEdge]:
         """Return the subset of `edges` that are inode->imce *data input*
         rendezvous edges (the ones get_recv_window_sync wraps in a

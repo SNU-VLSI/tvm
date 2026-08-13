@@ -14,6 +14,7 @@ from tvm.relay.backend.contrib.imcflow.transform_utils import getNodeDebugID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import CodegenContext
 from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import serialize_imcu_load
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -784,9 +785,51 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       self.codeblocks.append(imce.master(), block, CodePhase.INIT)
 
     # imcu write
-    for node in NodeID.inodes():
-      block = WriteIMCUBlock(node, "imcu write")
-      self.codeblocks.append(node, block, CodePhase.INIT)
+    # Silicon-SAFE serialization lever (IMCFLOW_SERIALIZE_IMCU, default OFF):
+    # ResNet8 region3 wedges the real B2 chip while the BUGFIX-off RTL passes.
+    # Chip-ladder root cause (all warmup-ON, IMCFLOW_BUGFIX=off, iter_003):
+    #   - subset21: only inode_2_0 streams WR_IMCU (2 bursts, no concurrency) -> PASS
+    #   - region2 (passes): all 4 inodes stream WR_IMCU, but each exactly 1 burst -> PASS
+    #   - region3 (wedges): all 4 inodes concurrent AND inode_3_0 streams 2
+    #     consecutive bursts (512 words) -> WEDGE at region3 kernel entry.
+    # So the trigger is a DOUBLE (consecutive) WR_IMCU burst in one inode running
+    # concurrently with the other inodes' bursts (neither concurrency alone nor a
+    # double-burst alone wedges). When ON, serialize the IMCU-write phase with a
+    # 255 barrier (SyncAllINodes) BEFORE each inode's IMCU write in a fixed inode
+    # order so only one inode streams weight bursts at a time.
+    #
+    # GUARD: apply ONLY to functions where some inode has >=2 weight blocks
+    # (i.e. region3). Functions with <=1 weight block per inode (region1/2/4) are
+    # left byte-identical -- inserting the barrier there previously WEDGED region2
+    # on silicon (its clean 4x single-burst pattern does not need serialization).
+    def _inode_has_double_imcu_burst():
+      try:
+        for node in NodeID.inodes():
+          region = DevConfig().CurrFuncMemLayout[f"{node.name}_data"]
+          n_wt = sum(
+              1 for db in region.blocks.values()
+              if isinstance(db.id, TensorEdge) and "weight" == db.id.src_id.tensor_type)
+          if n_wt >= 2:
+            return True
+      except Exception:
+        return False
+      return False
+
+    if serialize_imcu_load() and _inode_has_double_imcu_burst():
+      for node in NodeID.inodes():
+        # Barrier so the previous inode's IMCU burst fully drains before this
+        # inode starts streaming (all inodes rendezvous, then only `node`
+        # proceeds to WR_IMCU while the others wait at the NEXT gate / the
+        # step-6 "sync before compute enable" barrier).
+        for inode in NodeID.inodes():
+          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}")
+          self.codeblocks.append(inode, bar, CodePhase.INIT)
+        block = WriteIMCUBlock(node, "imcu write")
+        self.codeblocks.append(node, block, CodePhase.INIT)
+    else:
+      for node in NodeID.inodes():
+        block = WriteIMCUBlock(node, "imcu write")
+        self.codeblocks.append(node, block, CodePhase.INIT)
 
     # # sync before imce compute
     for inode in NodeID.inodes():

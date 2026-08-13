@@ -10,6 +10,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
+from tvm.contrib.imcflow import multiblock_fusedadd_bare, multiblock_fusedadd_safe, SAFE_TOKEN_BASE
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -2769,6 +2770,43 @@ class RecvSendWrapper(ImceCodeBlock):
         # single-window behaviour, so region2 is unchanged.
         if merged_input_pre is not None and edge in merged_input_edges:
           if not merged_window_emitted:
+            # Silicon-deadlock lever (IMCFLOW_MULTIBLOCK_FUSEDADD_BARE): for a
+            # MULTI-BLOCK 2-inode fused-add consumer (region3 imce_1_1,
+            # num_blocks==2) drop the per-block SETFLAG(1);STANDBY;SETFLAG(0)
+            # window entirely and emit BARE RECVs (backpressure suffices; each
+            # edge is a single count-matched RECV fifo). This removes the
+            # 1->0->1->0 mid-iteration flag toggle + per-word producer re-arm
+            # that races/wedges on real silicon. num_blocks==1 (region2
+            # imce_1_3) never enters this branch -> unaffected. Default OFF ->
+            # window emitted as before (byte-identical, RTL preserved).
+            drop_merged_window = (multiblock_fusedadd_bare()
+                                  and self.num_blocks > 1)
+            # Silicon-SAFE lever (IMCFLOW_MULTIBLOCK_FUSEDADD_SAFE): REPLACE the
+            # per-block SETFLAG(1);STANDBY(P0,1);STANDBY(P1,1);SETFLAG(0) window
+            # (which re-arms the SAME value 1 each block -> a 1->0->1->0 toggle
+            # collapsible on silicon) with a monotonic phase-token, interlocked,
+            # order-independent handshake. For block i:
+            #   SETFLAG(2i+1); STANDBY(P0,2i+1); STANDBY(P1,2i+1); SETFLAG(2i+2);
+            #   RECV(lhs_i); RECV(rhs_i)
+            # Distinct token per block (no repeated edge to alias) + the RECV is
+            # the ack: C cannot loop to block i+1 (SETFLAG(2(i+1)+1)) until both
+            # producers SENT block i, which requires they observed 2i+2 -> no
+            # lost wakeup, any producer arrival order. Producers use the matching
+            # token in _get_presend_sync_code_str (keyed on iter%num_blocks).
+            # See multiblock_fusedadd_safe() / DESIGN_region3_fusedadd_redesign.
+            safe_window = multiblock_fusedadd_safe()
+            safe_senders = None
+            if safe_window:
+              # producer hw-node values feeding this consumer, ASCENDING (matches
+              # the baseline STANDBY(P0,..);STANDBY(P1,..) order).
+              sset = []
+              for me in [e for e in self.in_edges if e in merged_input_edges]:
+                p = pm.get_pair(me)
+                if p is not None and p.sender_node.value not in sset:
+                  sset.append(p.sender_node.value)
+              safe_senders = sorted(sset)
+              if len(safe_senders) < 2:
+                safe_window = False  # only the 2-inode fused-add is retargeted
             # emit ALL merged edges here, block-outer, so the remaining merged
             # edges skip their own emission below.
             merged_edges_ordered = [e for e in self.in_edges if e in merged_input_edges]
@@ -2789,7 +2827,23 @@ class RecvSendWrapper(ImceCodeBlock):
                 add_to_map(me_info.owner, RecvSendNum("recv", 1), is_send=False)
               if not any_recv:
                 continue
-              code += "\n".join(merged_input_pre)
+              if safe_window:
+                # Token base = 3: skip the reserved consumer-flag values on this
+                # node -- 0 (idle), 1 (legacy input invite), 2 (OUTPUT multicast
+                # barrier watched by the downstream imce receivers, e.g.
+                # STANDBY(imce_0_2,2)). Aliasing the output value 2 into an input
+                # token would false-trigger a downstream RECV. base 3 -> block b
+                # uses {3+2b, 3+2b+1}; num_blocks<=8 -> max 18 < 255 (SYNC_REG),
+                # and the producer side uses the identical base 3 (kept in sync
+                # by SAFE_TOKEN_BASE below).
+                rdy, go = SAFE_TOKEN_BASE + 2 * i, SAFE_TOKEN_BASE + 2 * i + 1
+                safe_pre = [f"__builtin_IMCE_SETFLAG({rdy}); // SAFE: invite block {i}"]
+                for s in safe_senders:
+                  safe_pre.append(f"__builtin_IMCE_STANDBY({s}, {rdy});")
+                safe_pre.append(f"__builtin_IMCE_SETFLAG({go}); // SAFE: release block {i} (RECV=ack)")
+                code += "\n".join(safe_pre)
+              elif not drop_merged_window:
+                code += "\n".join(merged_input_pre)
               for line in block_lines:
                 code += line
             merged_window_emitted = True
