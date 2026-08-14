@@ -93,7 +93,7 @@ class VecOpHandler(OperationHandler):
       except KeyError:
         is_const = False
       if is_const:
-        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, self._const_annotation())
+        block = RecvConstBlock(in_edge, RecvConstBlock.ConstType.NORMAL, self._const_annotation(), builder=self.builder)
         call.codeblocks.append(hid, block, CodePhase.INIT)
         IMCECodeBlockInfo().append_const_edge_info(in_edge, hid)
         const_edge = in_edge
@@ -552,7 +552,7 @@ class MinMaxQuantizeHandler(OperationHandler):
       # TODO: inode code block needs to put appropriate address for min/max reg.
       # TODO: two ways to set min/max reg. RecvConst vs. ADDI
       const_type = RecvConstBlock.ConstType.MIN if tag == "min" else RecvConstBlock.ConstType.MAX
-      block = RecvConstBlock(edge, const_type, f"{edge}, {tag} write")
+      block = RecvConstBlock(edge, const_type, f"{edge}, {tag} write", builder=self.builder)
       call.codeblocks.append(hid, block, CodePhase.INIT)
       # add constedge info to codeblock info
       IMCECodeBlockInfo().append_const_edge_info(edge, hid)
@@ -664,11 +664,11 @@ class BatchNormHandler(OperationHandler):
     bias_edge = call.get_tensor_edge_from_tag("fused_bias")
 
     print(f"[IMCE CODE BUILDER] BatchNormHandler: append recv const block hid={hid}, scale_edge={scale_edge}, bias_edge={bias_edge}")
-    block = RecvConstBlock(scale_edge, RecvConstBlock.ConstType.NORMAL, f"{scale_edge}, fused_scale write")
+    block = RecvConstBlock(scale_edge, RecvConstBlock.ConstType.NORMAL, f"{scale_edge}, fused_scale write", builder=self.builder)
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(scale_edge, hid)
-    block = RecvConstBlock(bias_edge, RecvConstBlock.ConstType.NORMAL, f"{bias_edge}, fused_bias write")
+    block = RecvConstBlock(bias_edge, RecvConstBlock.ConstType.NORMAL, f"{bias_edge}, fused_bias write", builder=self.builder)
     call.codeblocks.append(hid, block, CodePhase.INIT)
     # add constedge info to codeblock info
     IMCECodeBlockInfo().append_const_edge_info(bias_edge, hid)

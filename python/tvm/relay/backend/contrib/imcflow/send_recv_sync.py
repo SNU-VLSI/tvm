@@ -13,6 +13,7 @@ from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
+from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
 import logging
 
@@ -460,6 +461,82 @@ class SendRecvPairManager:
             return False
         dst_gid = edge.dst_id.graph_node_id
         return not isinstance(dst_gid, tuple)
+
+    def is_packed_postop_const_edge(self, edge: TensorEdge) -> bool:
+        """IMCFLOW_PACK_BN_MINMAX capacity-deadlock guard (BUGFIX-off RTL).
+
+        When BN + min_max_quantize are folded into the qconv composite (IMCE
+        packing), a single packed conv (e.g. region2 qconv_bn_multiply_add,
+        node 72) grows extra inode->imce CONSTANT operands -- the BN
+        fused_scale/fused_bias and the multiply/add `scale` operands (dst
+        tensor_type "rhs"). These const SENDs are BARE (const edges are
+        excluded from the pair manager, so they carry no rendezvous) and are
+        pushed into the NoC eagerly. On a packed conv the burst is large enough
+        (config + fused_scale x2 + fused_bias x2 + mult x2 + add x2 = 9 words,
+        plus the sibling minmax's min/max on the same inode->column path) to
+        overflow the inode send FIFO before the (transitively pipeline-blocked)
+        receiving imce drains it. The inode then wedges on PUSH_STALL and can
+        never reach either its all-inode 255 barrier or its pipeline-root
+        data-input SEND -> the observed region2 hard deadlock (imce_0_2 starved
+        forever on its input STANDBY).
+
+        Fix: pace these extra packed-postop consts with the SAME per-word
+        inode<->imce flag-1 rendezvous the data input already uses, so the inode
+        cannot outrun the imce's const drain. Both the inode SEND (pre-send
+        STANDBY/SETFLAG in inode_codeblock.SendBlock) and the imce RECV
+        (SETFLAG window in RecvConstBlock) key on THIS predicate so they stay in
+        lockstep.
+
+        DISCRIMINATOR / OFF-invariance: returns True only when
+        pack_bn_minmax_mode() is on AND the edge is an inode->imce const whose
+        dst is a fused/composite (tuple gid) post-op operand of a packed conv
+        (tensor_type in {fused_scale, fused_bias, rhs, scale}). With the lever
+        OFF these folded post-ops do not exist (BN/minmax are separate IMCEs),
+        so the mode short-circuits to False for every edge -> the const-send /
+        const-recv path is byte-identical to the OFF build. Config and weight
+        (tensor_type "config"/"weight") are excluded: they exist in the OFF
+        build too and must stay bare to preserve byte-identity there.
+        """
+        if not pack_bn_minmax_mode():
+            return False
+        # dst must be a fused/composite post-op operand of a packed conv
+        dst_gid = edge.dst_id.graph_node_id
+        if not isinstance(dst_gid, tuple):
+            return False
+        if getattr(edge.dst_id, "tensor_type", None) not in (
+                "fused_scale", "fused_bias", "rhs", "scale", "min", "max"):
+            return False
+        # src must be a constant fed by an inode; dst must resolve to an imce.
+        # (const edges are unpaired -- derive hw nodes directly.)
+        try:
+            src_hw = self._get_hw_node(edge.src_id)
+            dst_hw = self._get_hw_node(edge.dst_id)
+        except Exception:
+            return False
+        if isinstance(dst_hw, tuple):
+            dst_hw = dst_hw[0]
+        if src_hw is None or dst_hw is None:
+            return False
+        if isinstance(src_hw, tuple):
+            return False
+        return src_hw.is_inode() and dst_hw.is_imce()
+
+    def packed_postop_const_endpoints(self, edge: TensorEdge):
+        """(inode_hw, imce_hw) for a packed-postop const edge, or None.
+
+        Used by the inode SendBlock (pre-send STANDBY on the imce) and the imce
+        RecvConstBlock (SETFLAG window + STANDBY on the inode) to build the
+        per-word flag-1 rendezvous WITHOUT a pair (const edges are unpaired).
+        """
+        if not self.is_packed_postop_const_edge(edge):
+            return None
+        src_hw = self._get_hw_node(edge.src_id)
+        dst_hw = self._get_hw_node(edge.dst_id)
+        if isinstance(dst_hw, tuple):
+            dst_hw = dst_hw[0]
+        if isinstance(src_hw, tuple):
+            return None
+        return (src_hw, dst_hw)
 
     def _receiver_is_output_node(self, recv_hw_node) -> bool:
         """True iff every inter-node edge sent BY recv_hw_node goes to an inode

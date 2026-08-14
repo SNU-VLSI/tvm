@@ -15,6 +15,8 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import CodegenContext
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import serialize_imcu_load
+from tvm.contrib.imcflow import drop_psum_send
+from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -175,6 +177,16 @@ class CodegenSuite:
     # edges, not as an opaque hang. Opt out with IMCFLOW_SKIP_SYNC_ASSERT=1.
     # BUGFIX knob: the P2 fifo-count assert is part of the 934+P0-P3 sync work.
     # knob=on (bugfix_off_mode()==False) restores a8af, which did NOT raise here.
+    # DROP_PSUM (Design A, DON'T-CARE output) INTENTIONALLY creates a func_out
+    # send/recv mismatch (imce SEND + inode RECV + host read all dropped as a
+    # matched set). That would "deadlock in RTL" but on chip the un-written
+    # inode_3_0 port is simply never read, so it is safe. Auto-bypass the assert
+    # for func_out* edges when DROP_PSUM is on (so the deploy doesn't need to also
+    # remember IMCFLOW_SKIP_SYNC_ASSERT=1). Non-func_out mismatches still raise.
+    if drop_psum_send():
+      inconsistencies = [
+        it for it in inconsistencies
+        if "func_out" not in str(it.get("edge", ""))]
     if bugfix_off_mode() and inconsistencies and os.environ.get("IMCFLOW_SKIP_SYNC_ASSERT", "0") != "1":
       detail = "; ".join(
         f"{it['edge']}: send {it['total_send']} vs recv {it['total_recv']}"
@@ -1031,6 +1043,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
             send_count = sum(block.tiling_info.pkt_cnts)
           else:
             send_count = math.ceil(block.size / 32)
+          # STEP_FREERUN: the inode activation feed is wrapped in a runtime (1+N)x
+          # hardware loop (inode_codeblock.py SendBlock) to match the imce ConvBlock's
+          # (1+N)x LOAD_LB, whose recorded recv IS scaled by the loop stack. The
+          # inode send_count here is size-derived (loop-agnostic), so scale it by the
+          # SAME (1+N) for the activation feed edge so recv/send stays balanced (both
+          # base*(1+N)). Only the qconv/qdwconv "data" feed; never weight/const.
+          _fr = step_freerun_n()
+          if (_fr > 0
+              and getattr(edge.dst_id, "tensor_type", None) == "data"
+              and dst_node.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv")):
+            # Use the ACTUAL nested-loop factor product (may slightly exceed 1+N),
+            # matching the imce recv scaling (count_stack = product of the same
+            # factors) so recv/send stays exactly balanced.
+            _prod = 1
+            for _f in step_freerun_factors(1 + _fr):
+              _prod *= _f
+            send_count *= _prod
           add_to_map(send_map, edge, send_count)
 
 

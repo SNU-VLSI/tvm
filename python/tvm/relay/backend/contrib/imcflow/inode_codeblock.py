@@ -3,7 +3,10 @@ from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID, TensorEdge, T
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send
+from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import imcu_intra_drain_nops
+from tvm.relay.op.contrib.imcflow import CustomIDToNode
+from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
 from textwrap import indent
 import math
 import pdb
@@ -395,9 +398,44 @@ class SendBlock(InodeCodeBlock):
       self._build_tiled()
     else:
       self._build()
+    # STEP_FREERUN is applied INSIDE _build() by lengthening recv_count (the
+    # per-packet rendezvous loop), NOT by wrapping self.body in a new outer loop --
+    # an unsynchronized outer back-edge slips the scalar-flag toggle phase at the
+    # rep seam and deadlocks (chip-proven). See recv_count *= (1+N) in _build().
+
+  def _is_conv_activation_feed(self) -> bool:
+    """True iff this SEND is the conv/dwconv ACTIVATION feed (paired with the imce
+    ConvBlock LOAD_LB). Weight/const/config/psum SENDs -> False, so they are NEVER
+    repeated under STEP_FREERUN. The activation edge is the one policy_table_builder
+    (:499-513) gives dst tensor_type "data" + base fifo_id 0 feeding a qconv/qdwconv."""
+    e = self.block.id if isinstance(self.block.id, TensorEdge) else None
+    if e is None:
+      return False
+    if getattr(e.dst_id, "tensor_type", None) != "data":
+      return False
+    if getattr(self.edge_info, "fifo_id", -1) != 0:
+      return False
+    try:
+      dst = CustomIDToNode()[getInnerNodeID(e.dst_id.graph_node_id)]
+      return dst.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv")
+    except Exception:
+      # fifo_id==0 + dst "data" already uniquely identifies the activation feed;
+      # fall back to that if the node lookup is unavailable.
+      return True
 
   def _build(self):
     recv_count = math.ceil(self.block.size / 32)
+    # Power-measurement lever (IMCFLOW_STEP_FREERUN): LENGTHEN the activation feed's
+    # per-packet rendezvous loop by (1+N) so it matches the imce's (1+N)x-longer row
+    # loop as ONE continuous SETFLAG/STANDBY toggle stream. Scaling recv_count (not
+    # wrapping self.body in a new outer loop) keeps the toggle phase monotonic across
+    # the whole length -> no scalar-flag lost-wakeup deadlock at a rep seam (the
+    # chip-proven failure of the old outer-wrap). Only the conv activation feed; N=0
+    # -> unchanged. SimpleFor -> hardware loop; the spread/flat loops below inherit
+    # the multiplied count. Nest if it exceeds 16384 elsewhere (spread loop already
+    # divides by eff; recv_count*(1+N) stays a valid trip since factors compose).
+    if step_freerun_n() > 0 and self._is_conv_activation_feed():
+      recv_count *= (1 + step_freerun_n())
     fifo_id = self.edge_info.fifo_id
     assert fifo_id >= 0, "fifo id should be assigned to a positive id"
     next_policy_addr = self.edge_info.policy_info[0].address
@@ -543,7 +581,17 @@ class SendBlock(InodeCodeBlock):
     base_var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
-    self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+    # Power-measurement lever (IMCFLOW_STEP_FREERUN): the tiled feed loop trips on
+    # the RUNTIME tile count cnt_addr_var[0]; scale it by (1+N) so the activation
+    # feed emits (1+N)x SENDs, matching the imce's (1+N)x-longer row loop as ONE
+    # continuous rendezvous stream (no new outer loop -> no scalar-flag toggle-phase
+    # deadlock at a rep seam; chip-proven the outer wrap stalls). Only the conv
+    # activation feed; N=0 -> unchanged.
+    _fr_mult = (1 + step_freerun_n()) if (step_freerun_n() > 0 and self._is_conv_activation_feed()) else 1
+    if _fr_mult != 1:
+      self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0] * {_fr_mult};"))
+    else:
+      self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
 
     # Max-throughput feed-spread (IMCFLOW_FEED_SPREAD): the tiled data-input SEND
@@ -747,6 +795,25 @@ class SendBlock(InodeCodeBlock):
           lines.append(f"__builtin_INODE_SET_FLAG({rdy});        // SAFE: announce ready(block {b})")
           lines.append(f"__builtin_INODE_STANDBY({cval}, {go});  // SAFE: wait consumer GO(block {b})")
         return "\n".join(lines) + "\n"
+    # IMCFLOW_PACK_BN_MINMAX capacity fix: the packed-conv EXTRA post-op consts
+    # (BN fused_scale/bias + multiply/add scale rhs) are otherwise BARE and
+    # overflow the NoC send FIFO before the (pipeline-blocked) imce drains them
+    # -> region2 hard deadlock. Pace them with the same per-word flag-1
+    # rendezvous the data input uses, keyed on the receiving imce derived from
+    # the edge (const edges are unpaired). Lockstep with RecvConstBlock's window
+    # (both gate on pair_manager.is_packed_postop_const_edge). Lever OFF ->
+    # predicate False -> bare (byte-identical).
+    for e in edges:
+      eps = pm.packed_postop_const_endpoints(e)
+      if eps is not None:
+        _inode_hw, imce_hw = eps
+        return (
+          f"__builtin_INODE_STANDBY({imce_hw.value}, 1); // pack-const sync with {imce_hw.name}\n"
+          f"__builtin_INODE_SET_FLAG(1);\n"
+          f"__builtin_INODE_STANDBY({imce_hw.value}, 0);\n"
+          f"__builtin_INODE_SET_FLAG(0);\n"
+        )
+
     # Rendezvous only with data-input receivers (plain-int dst) of this SEND.
     # Each edge maps to exactly ONE receiver (its own dst hw node); do NOT pull
     # in the other multicast receivers (e.g. the fused imce_0_1 whose dst is a

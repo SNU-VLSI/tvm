@@ -79,6 +79,20 @@ def bugfix_off_mode() -> bool:
   return get_imcflow_bugfix_mode() == "off"
 
 
+# IMCE-packing lever (IMCFLOW_PACK_BN_MINMAX): fold a conv's consumer-side
+# BN (imcflow.fused_batch_norm) and min_max_quantize into the qconv composite
+# so they render as same-IMCE post_ops instead of a dedicated preop-minmax /
+# vecops IMCE (see BN_MINMAX_PACKING_HANDOFF.md). Gates ONLY the two
+# make_postop_pattern_start_with chains in relay/op/contrib/imcflow.py.
+# merge_composite_ops runs AFTER split_conv_to_atomic, so the chain matches
+# per-atom convs: unsplit convs and the IC-split psum-merge atom (BN after the
+# complete psum add) fuse; OC-split BN sits after concat (a pattern terminal)
+# and is never absorbed. Default OFF -> byte-identical to stock. Defined in
+# relay/op/contrib/imcflow.py (this module imports it there) because the
+# pattern tables are built at that module's import time.
+from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode  # noqa: F401
+
+
 def feed_spread_n() -> int:
   """Max-throughput lever: spread the conv activation feed across N RECV FIFOs.
 
@@ -127,19 +141,119 @@ def drop_psum_send() -> bool:
   LOAD_LB / OUTPUT_HS can issue earlier. Only legal when conv correctness is
   irrelevant (garbage output). Default OFF -> byte-identical to stock.
 
-  RTL caveat (BUGFIX_STEP build, imcu_ctrl.sv:73
-  `core_rx.ready = core_ready && !core_tx.valid`): the next feed is gated on the
-  post_imcu output being consumed. Dropping ALL SENDs leaves core_tx.valid stuck
-  high once the depth-32 out_fifo fills -> feed wedges. Bounded via
-  drop_psum_keep_every()."""
+  Design A (chip-safe, the ONLY silicon-verified way to keep the full SEND-drop
+  cycle win): this ONE env gates a MATCHED SET of three drops that must move
+  together --
+    1. imce psum IMCE_SEND + GET_CREG   (imce_codeblock.py)
+    2. inode INODE_RECV collector loop  (inode_codeblock.py)
+    3. HOST read-back of func_out0       (ext_codegen.py drop_output_readback())
+  Dropping only (1)+(2) but leaving (3) HANGS THE BUS on chip: func_out0 is
+  inode_3_0's local NoC-node data memory (base 0x31080); with the RECV dropped the
+  node's mem/NoC port never reaches an arbitration-complete host-readable idle, so
+  the host's fixed 2048-word MMIO read to 0x31080 gets no bus completion and never
+  returns (STATE=IDLE still passes -- separate always-live decode -- so launch
+  "looks" done). Dropping (3) too means the host never issues that read, so the
+  un-completed port can't hang anything. All three off by default -> byte-identical.
+
+  RTL note (corrected): the depth-32 post_imcu out_fifo is drained by OP_STEP, NOT
+  by the psum SEND (imce_ctrl.sv:69 compute_if.ready==OP_STEP pops one entry per
+  STEP; there is one STEP per pixel). So dropping ALL SENDs does NOT overflow the
+  fifo or wedge the feed -- the earlier `core_tx.valid` overflow worry was a
+  mis-model. The only real constraint was the collector/host coupling above, which
+  Design A removes wholesale by also dropping the host read. drop_psum_keep_every()
+  is therefore unnecessary for the fifo and is left only as an optional matched
+  SEND/RECV count knob (see its docstring)."""
   return os.environ.get("IMCFLOW_DROP_PSUM", "").strip().lower() in ("1", "on", "true", "yes")
 
 
+def step_freerun_n() -> int:
+  """IMCFLOW_STEP_FREERUN (power-measurement, DON'T-CARE output): repeat the fed
+  conv STEP body this many EXTRA times so the crossbar free-runs for a bounded,
+  wall-clock-sized burst that a bench DMM (e.g. Keysight 34410A) can integrate.
+  0/unset -> byte-identical. N>=1 -> the whole conv body runs (1+N) times.
+
+  MUST be a FED repeat (a LOAD_LB per STEP), NOT a bare STEP-repeat: a stale
+  linebuffer supplies only a finite set of pad windows then STALLs (all_recived=1,
+  addr_shfl_gen.sv:178/236), and under QUADRU the first zero-feed STEP WEDGEs (the
+  reason K=1 was chosen). Repeating the fed K=1 body keeps every STEP fed ->
+  QUADRU-safe. Emitted via SimpleFor -> clang -force-hardware-loops -> a real imem
+  backward-branch loop (hw_loop.sv, 6 nested levels x 14-bit = 16384 each), so
+  millions of STEPs cost NO extra imem. Both the imce LOAD_LB+STEP loop AND the
+  matching inode activation-feed loop must scale by the SAME N (producer/consumer
+  packet balance on the depth-2 NoC fifo). Pair with IMCFLOW_DROP_PSUM=1 so there
+  is no psum/output back-channel to balance. Keep N FINITE so STATE returns to IDLE
+  and the chip lock releases. At 100MHz, ~22 cyc/STEP -> ~4.5M STEPs ~= 1 s."""
+  try:
+    return max(0, int(os.environ.get("IMCFLOW_STEP_FREERUN", "0")))
+  except ValueError:
+    return 0
+
+
+def step_freerun_factors(reps: int):
+  """Split a STEP_FREERUN repeat count into nested-loop factors each <= 16384, the
+  IMCE hardware-loop counter limit (IMCE_LOOP_LEN=14 bits -> 2^14). A single
+  SimpleFor(reps) with reps>16384 makes clang -force-hardware-loops emit a counter
+  that overflows -> clang fatal error. So emit nested SimpleFors whose product
+  >= reps. Returns a list of factors (outer..inner). For reps<=16384 -> [reps].
+  For larger, [ceil(reps/16384), 16384] (product may slightly exceed reps; the
+  extra STEPs only lengthen the power-measurement burst, which is harmless)."""
+  LIMIT = 16384
+  if reps <= LIMIT:
+    return [reps]
+  outer = -(-reps // LIMIT)  # ceil
+  # keep nesting if outer itself exceeds the limit (reps up to 16384^2 = 268M)
+  if outer <= LIMIT:
+    return [outer, LIMIT]
+  return step_freerun_factors(outer) + [LIMIT]
+
+
+def step_freerun_wall_sec() -> int:
+  """Wall-clock ceiling (seconds) for the STEP_FREERUN completion wait
+  (IMCFLOW_STEP_FREERUN_WALL, default 3). Raise it when the free-run loop needs
+  longer than 3s to reach OP_HALT so the host blocks until the array is genuinely
+  IDLE and reports the EXACT held-busy time (=> exact silicon cyc/STEP), instead of
+  bailing early as 'measurement incomplete'. Only consulted when STEP_FREERUN>0."""
+  try:
+    return max(1, int(os.environ.get("IMCFLOW_STEP_FREERUN_WALL", "3")))
+  except ValueError:
+    return 3
+
+
+def step_freerun_hold_sec() -> int:
+  """IMCFLOW_STEP_FREERUN_HOLD_SEC (0=off, default). When >0, the freerun wait
+  BUSY-HOLDS the host for exactly this many seconds after SET_RUN, IGNORING STATE,
+  so a bench DMM integrates a deterministic array-active window and the outer eval
+  loop cannot re-fire the kernel mid-measurement. STATE=0x1(S_RUN) alone does NOT
+  prove the crossbar is converting (an inode can sit in S_RUN while STANDBY-stalled,
+  no STEP retiring, no ADC current); the fixed hold gives a clean window and the DMM
+  (DDA/ADC rail) is the discriminator -- DDA rises => STEPs retiring, DDA flat =>
+  rendezvous slipped. Pair with a HUGE IMCFLOW_STEP_FREERUN so the fed STEP loop
+  out-lasts the hold. 0 -> byte-identical (original busy-first wait)."""
+  try:
+    return max(0, int(os.environ.get("IMCFLOW_STEP_FREERUN_HOLD_SEC", "0")))
+  except ValueError:
+    return 0
+
+
+def drop_output_readback() -> bool:
+  """Design A host-side half of IMCFLOW_DROP_PSUM (DON'T-CARE output). When the
+  psum SEND (imce) and INODE_RECV collector loop (inode) are dropped, the func_out0
+  region (inode_3_0's local NoC-node data mem @ 0x31080) is never written and its
+  port never returns to a host-readable idle -> a host MMIO read of it HANGS THE
+  BUS on silicon. So under DROP_PSUM the host must ALSO skip the func_out* read-back
+  loop (generateFromNpuTransferCode). Gated by the same env so the three drops stay
+  a matched set; default OFF -> byte-identical (host still reads real output)."""
+  return drop_psum_send()
+
+
 def drop_psum_keep_every() -> int:
-  """When IMCFLOW_DROP_PSUM is on, still emit ONE psum SEND every N pixels to
-  drain the depth-32 post_imcu out_fifo and keep core_tx.valid from sticking
-  (see drop_psum_send). N=0 (default) -> drop every SEND (may wedge; use only if
-  the STEP count is bounded < fifo depth). N>=1 -> keep 1 SEND per N pixels."""
+  """Optional matched SEND/RECV count knob for IMCFLOW_DROP_PSUM. NOTE: the original
+  "drain the depth-32 out_fifo" rationale was WRONG -- OP_STEP drains that fifo, not
+  the SEND (see drop_psum_send). So keep-every is NOT needed for the fifo. It is kept
+  only for a *count-matched* variant (Design B) where the host read is NOT dropped:
+  imce keeps 1 SEND per N pixels and inode RECVs the same count, leaving the collector
+  port clean. In Design A (host read dropped) this is unused. N=0 (default) -> drop all
+  SENDs (correct under Design A). N>=1 -> keep 1 SEND per N pixels (Design B)."""
   raw = os.environ.get("IMCFLOW_DROP_PSUM_KEEP", "").strip()
   if not raw:
     return 0

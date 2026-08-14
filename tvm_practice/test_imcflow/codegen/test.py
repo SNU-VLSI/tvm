@@ -1232,6 +1232,13 @@ def run_test_pipeline(test_name: str, options: PipelineOptions):
   from tvm.contrib.imcflow import bugfix_off_mode
   if bugfix_off_mode():
     dir_name = f"{dir_name}.bugfixoff"
+  # Optional extra eval_dir suffix (IMCFLOW_EVAL_SUFFIX) so an A/B run of the
+  # same model+os into two dirs doesn't clobber itself -- e.g. tools/
+  # compare_packing.py points the packing-ON run at "...<suffix>.packon".
+  # Empty/unset -> no change (default), so normal single runs are unaffected.
+  _eval_suffix = os.getenv("IMCFLOW_EVAL_SUFFIX", "")
+  if _eval_suffix:
+    dir_name = f"{dir_name}{_eval_suffix}"
 
   # Extract flags from options for directory setup logic
   skip_setup = options.should_skip_transform()
