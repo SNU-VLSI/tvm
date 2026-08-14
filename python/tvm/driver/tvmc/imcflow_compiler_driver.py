@@ -267,6 +267,21 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     # Step 23: NoC visualizations
     imcflow_transform.generateNoCVisualizations(mod, output_dir + "/noc_visualizations")
 
+    # Step 23b: region->IMCE->NN-layer + XY-routed NoC-channel maps (reusable tool,
+    # tools/noc_mapping_viz.py). Best-effort; a viz failure must NEVER fail compile.
+    try:
+        import importlib.util as _ilu, os as _os
+        _viz = _os.path.join(_os.path.dirname(__file__),
+                             "../../../../tvm_practice/test_imcflow/codegen/tools/noc_mapping_viz.py")
+        _viz = _os.environ.get("IMCFLOW_NOC_VIZ_TOOL", _os.path.normpath(_viz))
+        if save_intermediate and _os.path.exists(_viz):
+            _spec = _ilu.spec_from_file_location("noc_mapping_viz", _viz)
+            _m = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_m)
+            _m.generate(output_dir)
+    except Exception as _e:  # noqa: BLE001 - viz must never break a compile
+        import warnings as _w
+        _w.warn(f"[noc_mapping_viz] skipped: {type(_e).__name__}: {_e}")
+
     # Step 24: FIFO conflict monitoring
     fifo_monitor = imcflow_transform.FIFOConflictMonitor()
     fifo_monitor.run(mod)
@@ -708,6 +723,21 @@ def transform_model_single_qconv(mod, param_dict, output_dir, placements, top_ou
 
     # Step 23: NoC visualizations
     imcflow_transform.generateNoCVisualizations(mod, output_dir + "/noc_visualizations")
+
+    # Step 23b: region->IMCE->NN-layer + XY-routed NoC-channel maps (reusable tool,
+    # tools/noc_mapping_viz.py). Best-effort; a viz failure must NEVER fail compile.
+    try:
+        import importlib.util as _ilu, os as _os
+        _viz = _os.path.join(_os.path.dirname(__file__),
+                             "../../../../tvm_practice/test_imcflow/codegen/tools/noc_mapping_viz.py")
+        _viz = _os.environ.get("IMCFLOW_NOC_VIZ_TOOL", _os.path.normpath(_viz))
+        if save_intermediate and _os.path.exists(_viz):
+            _spec = _ilu.spec_from_file_location("noc_mapping_viz", _viz)
+            _m = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_m)
+            _m.generate(output_dir)
+    except Exception as _e:  # noqa: BLE001 - viz must never break a compile
+        import warnings as _w
+        _w.warn(f"[noc_mapping_viz] skipped: {type(_e).__name__}: {_e}")
 
     # Step 24: FIFO conflict monitoring
     fifo_monitor = imcflow_transform.FIFOConflictMonitor()
