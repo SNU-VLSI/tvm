@@ -51,44 +51,10 @@
 #include <dlpack/dlpack.h>
 #include <tvm/runtime/crt/internal/graph_executor/graph_executor.h>
 
-// ============================================================================
-// Timing instrumentation (opt-in via IMCFLOW_TIMING=1)
-// ============================================================================
-// When enabled, the opaque TVMGraphExecutor_Run() is expanded into the same
-// node-by-node op_execs loop the graph executor runs internally (NO tensor
-// dumping), so we can separately time the imcflow HW-region nodes vs the CPU
-// ops vs the per-sample input setup. Off by default: behavior identical to the
-// original single Run() call (still node-by-node but with timing disabled the
-// only overhead is a monotonic clock read per node).
-static int g_timing_enabled = 0;
-
-// Per-run accumulators (reset each sample), in nanoseconds.
-static uint64_t g_ns_hw = 0;      // sum of imcflow-region node Call()s
-static uint64_t g_ns_cpu = 0;     // sum of all other node Call()s
-static int      g_hw_calls = 0;   // # imcflow-region nodes executed this sample
-
-// Cross-sample aggregates for the final summary.
-static uint64_t g_sum_total_ns = 0, g_sum_hw_ns = 0, g_sum_cpu_ns = 0;
-static uint64_t g_sum_setin_ns = 0, g_sum_overhead_ns = 0;
-static int      g_timed_samples = 0;
-
-static inline uint64_t now_ns(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-// A node runs on the imcflow accelerator iff its offloaded primitive function is
-// named tvmgen_default_imcflow_main_<N> (the codegen's per-region HW kernel).
-// NOTE: match "imcflow_main_" specifically — several *CPU* ops also carry the
-// substring "imcflow" (e.g. fused_qnn_imcflow_min_max_quantize,
-// fused_imcflow_fused_batch_norm) and must NOT be counted as HW.
-static inline int node_is_imcflow(const char* name) {
-  return name && strstr(name, "imcflow_main_") != NULL;
-}
-
 // Dataset loader
 #include "npy_dataset_loader.h"
+// Output writer (for per-node debug dumping)
+#include "test_output_writer.h"
 
 // Result file handle (global for use by helper functions)
 static FILE* g_result_file = NULL;
@@ -299,12 +265,6 @@ int main(int argc, char** argv) {
   const char* images_path = argv[3];
   const char* labels_path = argv[4];
   const char* result_path = argc > 6 ? argv[6] : DEFAULT_RESULT_PATH;
-
-  // Timing instrumentation toggle
-  {
-    const char* t = getenv("IMCFLOW_TIMING");
-    g_timing_enabled = (t && t[0] && t[0] != '0');
-  }
 
   // Parse 5th argument: comma-separated indices or num_samples
   int num_samples_arg = 0;
@@ -601,8 +561,6 @@ int main(int argc, char** argv) {
     // Reset failure flag before each inference
     g_imcflow_kernel_failed = 0;
 
-    uint64_t t_sample0 = g_timing_enabled ? now_ns() : 0;
-
     // Copy image data to input tensor
     void* sample_data = get_sample(&images, sample_idx);
     if (!sample_data) {
@@ -612,28 +570,100 @@ int main(int argc, char** argv) {
     memcpy(input_tensor.data, sample_data, images.sample_size);
 
     // Set input
-    uint64_t t_setin0 = g_timing_enabled ? now_ns() : 0;
     TVMGraphExecutor_SetInput(exec, input_name, &input_tensor);
-    uint64_t t_setin1 = g_timing_enabled ? now_ns() : 0;
 
-    // Run inference
-    if (!g_timing_enabled) {
-      TVMGraphExecutor_Run(exec);
-    } else {
-      // Expand Run() into its node-by-node op_execs loop so HW-region nodes can
-      // be timed separately from CPU ops. This mirrors TVMGraphExecutor_Run's
-      // internal loop (no tensor dumping, no behavior change).
-      g_ns_hw = 0; g_ns_cpu = 0; g_hw_calls = 0;
-      for (uint32_t nid = 0; nid < exec->op_execs_count; nid++) {
-        if (!exec->op_execs[nid].fexec) continue;
-        int is_hw = node_is_imcflow(exec->nodes[nid].name);
-        uint64_t a = now_ns();
-        exec->op_execs[nid].Call(&(exec->op_execs[nid]));
-        uint64_t b = now_ns();
-        if (is_hw) { g_ns_hw += (b - a); g_hw_calls++; }
-        else       { g_ns_cpu += (b - a); }
-        if (g_imcflow_kernel_failed) break;
+    // Per-sample heartbeat: flush progress + free memory to a tmpfs file (and
+    // stderr) BEFORE running the sample, so if the chip hangs/dies mid-sample we
+    // know exactly which sample and its pre-run state. Written to tmpfs (RAM) so
+    // it survives an SD stall and adds no SD wear. Overwritten each sample (tiny).
+    {
+      const char* hb_path = getenv("IMCFLOW_HEARTBEAT_PATH");
+      if (!hb_path || !hb_path[0]) hb_path = "/var/volatile/imcflow_chip_heartbeat.txt";
+      long mem_avail_kb = -1;
+      FILE* mi = fopen("/proc/meminfo", "r");
+      if (mi) {
+        char k[64]; long v; char u[16];
+        while (fscanf(mi, "%63s %ld %15s", k, &v, u) == 3) {
+          if (strcmp(k, "MemAvailable:") == 0) { mem_avail_kb = v; break; }
+        }
+        fclose(mi);
       }
+      time_t now = time(NULL);
+      FILE* hb = fopen(hb_path, "w");
+      if (hb) {
+        fprintf(hb, "sample_iter=%zu/%zu sample_idx=%zu mem_avail_kb=%ld epoch=%ld\n",
+                iter + 1, num_samples, sample_idx, mem_avail_kb, (long)now);
+        fflush(hb); fclose(hb);
+      }
+      fprintf(stderr, "[HB] sample %zu/%zu (idx=%zu) mem_avail_kb=%ld\n",
+              iter + 1, num_samples, sample_idx, mem_avail_kb);
+      fflush(stderr);
+    }
+
+    // Run inference (node-by-node debug mode)
+    // Create debug output directory for this sample. Base dir is overridable via
+    // IMCFLOW_DEBUG_DUMP_DIR; on the chip it is pointed at tmpfs (/var/volatile)
+    // so the ~900 tiny per-node .npy files per sample (×100 samples ≈ 90k files)
+    // never touch the SD card's ext4 — that write/unlink churn was corrupting the
+    // SD directory htree ("Bad message"). Defaults to "debug_nodes" (unchanged
+    // behavior for the x86 py_runner / local paths).
+    const char* dump_base = getenv("IMCFLOW_DEBUG_DUMP_DIR");
+    if (!dump_base || !dump_base[0]) dump_base = "debug_nodes";
+    char debug_dir[512];
+    snprintf(debug_dir, sizeof(debug_dir), "%s/sample_%zu", dump_base, sample_idx);
+    {
+      char mkdir_cmd[600];
+      snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", debug_dir);
+      system(mkdir_cmd);
+    }
+
+    int sample_failed = 0;
+    for (uint32_t nid = 0; nid < exec->op_execs_count; nid++) {
+      if (exec->op_execs[nid].fexec) {
+        exec->op_execs[nid].Call(&(exec->op_execs[nid]));
+
+        if (g_imcflow_kernel_failed) {
+          fprintf(stderr, "  ⚠️  [%u] IMCFlow kernel timeout on node '%s' (sample %zu)\n",
+                  nid, exec->nodes[nid].name, sample_idx);
+          sample_failed = 1;
+          break;
+        }
+
+        // Save each output of this node
+        // if(nid != 164) {
+        //   continue;  // Only save outputs for node 164 (for now)
+        // }
+        for (uint32_t out_idx = 0; out_idx < exec->nodes[nid].param.num_outputs; out_idx++) {
+          uint32_t eid = TVMGraphExecutor_GetEntryId(exec, nid, out_idx);
+          DLTensor* tensor = &(exec->data_entry[eid].dl_tensor);
+
+          char fname[256];
+          if (exec->nodes[nid].param.num_outputs == 1) {
+            snprintf(fname, sizeof(fname), "%03u_%s", nid, exec->nodes[nid].name);
+          } else {
+            snprintf(fname, sizeof(fname), "%03u_%s_%u", nid, exec->nodes[nid].name, out_idx);
+          }
+          save_tensor_to_dir(debug_dir, fname, tensor);
+        }
+      }
+    }
+
+    if (sample_failed) {
+      fprintf(stderr, "[SKIP] Sample %zu failed (timeout)\n", sample_idx);
+      if (g_result_file) {
+        fprintf(g_result_file, "\n[Sample %zu] FAILED (timeout)\n", sample_idx);
+      }
+      failed_indices[failed_count++] = (int)sample_idx;
+      g_imcflow_kernel_failed = 0;
+      // Print progress after skip so progress bar stays updated
+      {
+        int evaluated = (int)(iter + 1) - failed_count;
+        double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
+        printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
+               iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
+        fflush(stdout);
+      }
+      continue;
     }
 
     // Check if kernel failed (timeout)
@@ -643,12 +673,15 @@ int main(int argc, char** argv) {
         fprintf(g_result_file, "\n[Sample %zu] FAILED (timeout)\n", sample_idx);
       }
       failed_indices[failed_count++] = (int)sample_idx;
+      g_imcflow_kernel_failed = 0;
       // Print progress after skip so progress bar stays updated
-      int evaluated = (int)(iter + 1) - failed_count;
-      double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
-      printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
-             iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
-      fflush(stdout);
+      {
+        int evaluated = (int)(iter + 1) - failed_count;
+        double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
+        printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
+               iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
+        fflush(stdout);
+      }
       continue;
     }
 
@@ -657,22 +690,6 @@ int main(int argc, char** argv) {
     if (rc != 0) {
       fprintf(stderr, "GetOutput failed for sample %zu: %d\n", sample_idx, rc);
       continue;
-    }
-
-    uint64_t t_sample1 = g_timing_enabled ? now_ns() : 0;
-    if (g_timing_enabled) {
-      uint64_t total_ns   = t_sample1 - t_sample0;
-      uint64_t setin_ns   = t_setin1  - t_setin0;
-      // "other" = getoutput/argmax happen after t_sample1, so total ≈
-      // setin + hw + cpu + small get_sample/memcpy overhead.
-      uint64_t overhead_ns = total_ns > (setin_ns + g_ns_hw + g_ns_cpu)
-                           ? total_ns - (setin_ns + g_ns_hw + g_ns_cpu) : 0;
-      fprintf(stderr,
-        "[TIMING] sample=%zu total_ms=%.3f hw_ms=%.3f cpu_ms=%.3f setin_ms=%.3f other_ms=%.3f hw_calls=%d\n",
-        sample_idx, total_ns/1e6, g_ns_hw/1e6, g_ns_cpu/1e6, setin_ns/1e6, overhead_ns/1e6, g_hw_calls);
-      fflush(stderr);
-      g_sum_total_ns += total_ns; g_sum_hw_ns += g_ns_hw; g_sum_cpu_ns += g_ns_cpu;
-      g_sum_setin_ns += setin_ns; g_sum_overhead_ns += overhead_ns; g_timed_samples++;
     }
 
     // Get prediction (argmax)
@@ -730,30 +747,6 @@ int main(int argc, char** argv) {
       fprintf(f, "\n");
     }
     fprintf(f, "========================================\n\n");
-  }
-
-  // Timing summary (averaged over timed samples)
-  if (g_timing_enabled && g_timed_samples > 0) {
-    double n = (double)g_timed_samples;
-    FILE* outs2[] = { stderr, g_result_file };
-    int num_outs2 = g_result_file ? 2 : 1;
-    for (int o = 0; o < num_outs2; o++) {
-      FILE* f = outs2[o];
-      fprintf(f, "\n========================================\n");
-      fprintf(f, "  PER-SAMPLE TIMING BREAKDOWN (avg of %d samples)\n", g_timed_samples);
-      fprintf(f, "========================================\n");
-      fprintf(f, "  total   : %8.3f ms/sample\n", g_sum_total_ns/1e6/n);
-      fprintf(f, "  hw (imcflow region calls): %8.3f ms/sample  (%.1f%%)\n",
-              g_sum_hw_ns/1e6/n, 100.0*g_sum_hw_ns/g_sum_total_ns);
-      fprintf(f, "  cpu (all other nodes)    : %8.3f ms/sample  (%.1f%%)\n",
-              g_sum_cpu_ns/1e6/n, 100.0*g_sum_cpu_ns/g_sum_total_ns);
-      fprintf(f, "  set_input                : %8.3f ms/sample  (%.1f%%)\n",
-              g_sum_setin_ns/1e6/n, 100.0*g_sum_setin_ns/g_sum_total_ns);
-      fprintf(f, "  other (get_sample/memcpy): %8.3f ms/sample  (%.1f%%)\n",
-              g_sum_overhead_ns/1e6/n, 100.0*g_sum_overhead_ns/g_sum_total_ns);
-      fprintf(f, "========================================\n\n");
-    }
-    fflush(stderr);
   }
 
   // ============================================================================
