@@ -102,6 +102,19 @@ if(NOT EXISTS "${TVM_ROOT}/src/runtime/crt")
 endif()
 
 set(CRT_LIB_BASE "${TVM_ROOT}/src/runtime/crt")
+
+# --- DMM in-kernel power measurement (IMCFLOW_MEASURE_POWER=1, linux only) ---
+set(IMCFLOW_MEASURE_POWER_BUILD "$ENV{IMCFLOW_MEASURE_POWER}")
+if("${IMCFLOW_MEASURE_POWER_BUILD}" STREQUAL "1")
+  set(DMM_CAPI_DIR "${TVM_ROOT}/3rdparty/measurement_utils/capi")
+  if(NOT EXISTS "${DMM_CAPI_DIR}/dmm_measure.c")
+    message(FATAL_ERROR "IMCFLOW_MEASURE_POWER=1 but ${DMM_CAPI_DIR}/dmm_measure.c not found -- run: git submodule update --init 3rdparty/measurement_utils")
+  endif()
+  set(IMCFLOW_DMM_ENABLE ON)
+  message(STATUS "IMCFLOW_MEASURE_POWER=1: linking dmm_measure.c from ${DMM_CAPI_DIR}")
+else()
+  set(IMCFLOW_DMM_ENABLE OFF)
+endif()
 if(NOT EXISTS "${CRT_LIB_BASE}")
   message(FATAL_ERROR "TVM CRT directory not found at: ${CRT_LIB_BASE}\nSet -DTVM_ROOT=/path/to/tvm (or export TVM_ROOT/TVM_HOME)")
 endif()
@@ -212,6 +225,11 @@ endforeach()
 # Build Model Library
 # ============================================================================
 add_library(tvm_model STATIC)
+if(IMCFLOW_DMM_ENABLE)
+  target_sources(tvm_model PRIVATE "${DMM_CAPI_DIR}/dmm_measure.c")
+  set_source_files_properties("${DMM_CAPI_DIR}/dmm_measure.c" PROPERTIES LANGUAGE C)
+  target_include_directories(tvm_model PRIVATE "${DMM_CAPI_DIR}")
+endif()
 set_source_files_properties(${TVM_MODEL_SRCS} PROPERTIES LANGUAGE CXX)
 target_sources(tvm_model PRIVATE ${TVM_MODEL_SRCS} ${TVM_MODEL_OBJS} ${HOST_OBJ_FILES})
 
@@ -319,6 +337,9 @@ if(TVM_BUILD_HOST_RUNNER)
 
   # Common settings
   target_link_libraries(${HOST_RUNNER_NAME} PRIVATE ${TARGET_LIB_NAME} tvm_model ${CRT_LIBS} m stdc++ cnpy)
+  if(IMCFLOW_DMM_ENABLE)
+    target_include_directories(${HOST_RUNNER_NAME} PRIVATE "${DMM_CAPI_DIR}")
+  endif()
   target_include_directories(${HOST_RUNNER_NAME} PRIVATE
     "${CRT_LIB_BASE}/include"
     "${TVM_ROOT}/include"

@@ -12,6 +12,7 @@ from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
 import math
 import os
+from enum import Enum
 
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
@@ -21,18 +22,72 @@ if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   INT_ACK_GEN_LEN = 0
   big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
   if big_imem:
-    RESET_GEN_ADDR = 0x80000000 + 270464 + 4 
+    RESET_GEN_ADDR = 0x80000000 + 270464 + 4
   else:
-    RESET_GEN_ADDR = 0x80000000 + 266368 + 4 
+    RESET_GEN_ADDR = 0x80000000 + 266368 + 4
+  MEASURE_POWER = False
 elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   print("IMCFLOW_HOST_OS: linux")
   IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
   IMCFLOW_LEN = os.environ["IMCFLOW_LEN"]
   INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
   INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
-  RESET_GEN_ADDR = 0xa0130000 
+  RESET_GEN_ADDR = 0xa0130000
 else:
   raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
+
+# --- DMM in-kernel power measurement (IMCFLOW_MEASURE_POWER, default OFF) ---
+# Ported from origin/power. When OFF (default) NO dmm_* code is emitted so the
+# generated C is byte-identical to stock. When ON (linux only) the kernel brackets
+# EXACTLY its own SET_RUN compute invoke with a non-blocking dmm_start_current_now()
+# right before SET_RUN and a blocking dmm_get_result_now()x N + dmm_close() right
+# after wait_for_freerun_done()/wait_imcflow_interrupt() returns. Because the kernel
+# itself brackets the array-active window there is no host<->DMM clock-sync problem.
+MEASURE_POWER = os.getenv("IMCFLOW_MEASURE_POWER", "0").lower() in ("1", "true", "yes")
+
+class PowerMeasurePhase(Enum):
+  MODEL = 0    # one Start at region1 entry .. one End at last-region exit (whole model)
+  REGION = 1   # one Start/End pair per region kernel, bracketing its single SET_RUN exec
+  TILE = 2     # one Start/End pair per tile invoke
+
+# Which granularity to bracket. REGION is the right choice for the STEP_FREERUN
+# single-conv power sweep: each region kernel has exactly ONE SET_RUN compute invoke
+# (our tree's generateInvokeCode; the program-load uses SET_PROGRAM_CODE via
+# generatePolicyUpdateCode and is intentionally NOT bracketed), so REGION yields
+# exactly ONE dmm_start/dmm_get pair around the real compute.
+POWER_MEASURE_PHASE = PowerMeasurePhase.REGION
+
+# Per-DMM config. DMM_NAMES selects which supply rails to sample. For the imcflow
+# board: VDD = digital core, DDA = analog/ADC rail (rises only when STEPs actually
+# retire -> the discriminator for "crossbar converting"), DDC = crossbar rail.
+#
+# KNOBS (must be tuned so the DMM window ~= the compute window):
+#   nplc          integration time per sample in power-line-cycles. 0.001 = ~fastest
+#                 (~a few us/sample on a 34410A-class DMM).
+#   interval_s    inter-sample interval; -1 == MIN (back-to-back, fastest sampling).
+#   sample_count  how many samples dmm_get_result_now() BLOCKS for. dmm_start is
+#                 NON-blocking; dmm_get returns only after this many samples land.
+#                 So (sample_count * per_sample_time) must be >= the compute window,
+#                 otherwise dmm_get returns before compute finishes and you clip the
+#                 window; if it is much larger, dmm_get blocks after compute ends and
+#                 you integrate idle current. origin/power default = 50000 samples,
+#                 which at nplc=0.001 spans ~a large fraction of a 1s STEP_FREERUN
+#                 burst. With STEP_FREERUN_HOLD_SEC the compute busy-holds a fixed
+#                 wall time, so size sample_count to match that hold (raise it if the
+#                 hold is long; lower it if the fed conv is short).
+#   curr_range    ammeter range in Amps (0.1 A here).
+#   reset         1 -> reset the DMM before this measurement.
+if POWER_MEASURE_PHASE in (PowerMeasurePhase.REGION, PowerMeasurePhase.TILE,
+                           PowerMeasurePhase.MODEL):
+  DMM_NAMES       = ["VDD", "DDA", "DDC"]
+  NPLCs           = [0.001, 0.001, 0.001]
+  INTERVALs       = [-1, -1, -1]
+  SAMPLE_COUNTs   = [50000, 50000, 50000]
+  CURR_RANGEs     = [0.1, 0.1, 0.1]
+  RESETs          = [1, 1, 1]
+  OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
+else:
+  raise ValueError(f"Unsupported POWER_MEASURE_PHASE: {POWER_MEASURE_PHASE}")
 
 # Device paths
 IMCFLOW_DEVICE = "/dev/uio5"
@@ -370,7 +425,7 @@ class KernelCodeGenerator:
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <unistd.h>
-""" + stage_hb_macro + """
+""" + stage_hb_macro + ('#include "dmm_measure.h"\n' if (self.os == "linux" and MEASURE_POWER) else "") + """
 // Global failure flag: set by kernel on timeout, checked by host loop
 extern volatile int g_imcflow_kernel_failed;
 """)
@@ -518,6 +573,117 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   }
 }
     """)
+
+  def generatePowerMeasureStart(self, t_idx=None):
+    """Generate C code to start DMM current measurement (NON-blocking).
+
+    Ported verbatim from origin/power. Emits a dmm_config_t array and a single
+    dmm_start_current_now() call that returns immediately; the DMM then samples in
+    the background while the accelerator runs the SET_RUN compute. Paired with
+    generatePowerMeasureEnd() which blocks on dmm_get_result_now(). Only ever
+    called when self.os == 'linux' and MEASURE_POWER is set."""
+    assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
+
+    n_dmms = len(DMM_NAMES)
+    code = CodeWriter()
+
+    if t_idx is not None:
+      code += f"// --- Power measurement start (tile {t_idx}) ---\n"
+    else:
+      code += f"// --- Power measurement start ---\n"
+
+    code += f"fprintf(stderr, \"[DMM] starting measurement...\\n\");\n"
+
+    code += "{\n"
+    code.nextIndent()
+    code += f"dmm_config_t dmm_cfgs[{n_dmms}] = {{\n"
+    code.nextIndent()
+
+    for i in range(n_dmms):
+      interval_val = -1 if INTERVALs[i] == "MIN" else INTERVALs[i]
+
+      if t_idx is not None:
+        ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}.txt"
+        server_ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}_server.txt"
+      else:
+        ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}.txt"
+        server_ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}_server.txt"
+
+      trailing = "," if i < n_dmms - 1 else ""
+      code += "{\n"
+      code.nextIndent()
+      code += f".name = \"{DMM_NAMES[i]}\",\n"
+      code += f".nplc = {NPLCs[i]},\n"
+      code += f".interval_s = {interval_val},\n"
+      code += f".sample_count = {SAMPLE_COUNTs[i]},\n"
+      code += f".curr_range = {CURR_RANGEs[i]},\n"
+      code += f".reset = {RESETs[i]},\n"
+      code += f".ofname = \"{ofname}\",\n"
+      code += f".server_ofname = \"{server_ofname}\",\n"
+      code.prevIndent()
+      code += "}" + trailing + "\n"
+    code.prevIndent()
+    code += "};\n"
+    code += f"if (dmm_start_current_now({n_dmms}, dmm_cfgs) != 0) {{\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_start_current_now failed: %s\\n\", dmm_last_error());\n"
+    code += f"  exit(1);\n"
+    code += f"}}\n"
+
+    if t_idx is not None:
+      code += f"fprintf(stderr, \"[DMM] measurement started (tile {t_idx})\\n\");\n"
+    else:
+      code += f"fprintf(stderr, \"[DMM] measurement started \\n\");\n"
+
+    code.prevIndent()
+    code += "}\n"
+    return code
+
+  def generatePowerMeasureEnd(self, t_idx=None):
+    """Generate C code to wait for DMM results and close (BLOCKING).
+
+    Ported verbatim from origin/power. Calls dmm_get_result_now() once per DMM
+    (each blocks until its configured sample_count samples arrive), prints the
+    per-rail average current, then dmm_close(). Placed immediately after the
+    SET_RUN compute wait returns so the sampled window spans exactly the compute."""
+    assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
+
+    n_dmms = len(DMM_NAMES)
+    code = CodeWriter()
+    if t_idx is not None:
+      code += f"// --- Power measurement end (tile {t_idx}) ---\n"
+    else:
+      code += f"// --- Power measurement end ---\n"
+    if t_idx is not None:
+      code += f"fprintf(stderr, \"[DMM] getting measurement result... (tile {t_idx})\\n\");\n"
+    else:
+      code += f"fprintf(stderr, \"[DMM] getting measurement result... \\n\");\n"
+    code += "{\n"
+    code.nextIndent()
+    code += f"char dmm_name[64];\n"
+    code += f"double dmm_avg;\n"
+    code += f"int dmm_count;\n"
+    code += f"for (int dmm_i = 0; dmm_i < {n_dmms}; dmm_i++) {{\n"
+    code.nextIndent()
+    code += f"int rc = dmm_get_result_now(dmm_name, sizeof(dmm_name), &dmm_avg, &dmm_count);\n"
+    code += f"if (rc == -2) {{\n"
+    code += f"  fprintf(stderr, \"DMM ERROR [%s]: %s\\n\", dmm_name, dmm_last_error());\n"
+    code += f"  continue;\n"
+    code += f"}} else if (rc != 0) {{\n"
+    code += f"  fprintf(stderr, \"ERROR: dmm_get_result_now failed: %s\\n\", dmm_last_error());\n"
+    code += f"  dmm_close();\n"
+    code += f"  exit(1);\n"
+    code += f"}}\n"
+    code += f"fprintf(stderr, \"[DMM] [%s] avg = %.9g A  (%d samples)\\n\", dmm_name, dmm_avg, dmm_count);\n"
+    code.prevIndent()
+    code += f"}}\n"
+    code += f"dmm_close();\n"
+    if t_idx is not None:
+      code += f"fprintf(stderr, \"[DMM] measurement ended (tile {t_idx})\\n\");\n"
+    else:
+      code += f"fprintf(stderr, \"[DMM] measurement ended \\n\");\n"
+    code.prevIndent()
+    code += "}\n"
+    return code
 
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
@@ -889,9 +1055,26 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
     code += _hb("after policy_update")
     code += self.generateRetryCheck("policy_update")
+
+    # Power measurement (IMCFLOW_MEASURE_POWER, default OFF -> nothing emitted ->
+    # byte-identical). CRITICAL PLACEMENT: bracket ONLY the SET_RUN compute invoke
+    # below -- NOT generatePolicyUpdateCode() above (that is the SET_PROGRAM_CODE
+    # program/policy load, not the array compute). generateInvokeCode() emits the
+    # single SET_RUN exec (busy-holds for the whole STEP_FREERUN burst when active),
+    # so dmm_start() fires immediately before SET_RUN and dmm_get()/dmm_close() fire
+    # immediately after the compute wait returns -> the DMM window == the compute.
+    # NOTE: the FIRST invoke below (right after policy_update, BEFORE any input
+    # transfer) runs with the array effectively idle -- STATE stays 0x0 and NO real
+    # crossbar compute happens (chip-observed: bracketing here gave DDA==idle). The
+    # REAL array-active compute is the per-tile invoke inside the tile loop, which
+    # fires AFTER generateToNpuTransferCode(input_blocks). So power measurement must
+    # bracket the TILE invoke, not this one.
+    power_measure_active = self.os == "linux" and MEASURE_POWER
+
     code += _hb("before invoke")
-    code += self.generateInvokeCode() # proceed up to halt
+    code += self.generateInvokeCode() # proceed up to halt (pre-input SET_RUN)
     code += _hb("after invoke / before poll")
+
     code += self.generateRetryCheck("invoke")
 
     # kernel tiling factor
@@ -902,7 +1085,16 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
-      code += self.generateInvokeCode() # end of exec
+      # Power measurement (IMCFLOW_MEASURE_POWER, default OFF -> byte-identical):
+      # bracket the ACTUAL array-active compute -- this per-tile invoke fires with
+      # input present so the crossbar really runs. dmm_start non-blocking right
+      # before SET_RUN; dmm_get/close blocking right after the compute wait returns
+      # -> the DMM window == the real compute window.
+      if power_measure_active:
+        code += self.generatePowerMeasureStart(t_idx)
+      code += self.generateInvokeCode() # end of exec (SET_RUN compute, array active)
+      if power_measure_active:
+        code += self.generatePowerMeasureEnd(t_idx)
       code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
 
