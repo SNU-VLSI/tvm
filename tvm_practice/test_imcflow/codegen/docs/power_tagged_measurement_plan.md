@@ -1,4 +1,4 @@
-# Tag 기반 power 측정 재설계 계획
+# Tag 기반 power 측정 및 DMM metadata 시간 정렬 계획
 
 ## 목표
 
@@ -19,13 +19,17 @@
 9. 기존 TCP bridge/RPyC 코드는 삭제하거나 재작성하지 않고, 새 경로에서는
    사용하지 않는다.
 10. TVM/CMake/codegen을 수정하기 전에 board의 standalone C test로
-    `START → TAG → STOP → artifact` 전체 경로를 먼저 통과시킨다.
+    `START → TAG → STOP_BEGIN → FINALIZE → artifact` 전체 경로를 먼저 통과시킨다.
+11. sample의 주 시간축은 measurement server의 GET 호출 midpoint가 아니라 DMM이
+    저장한 reading metadata의 첫 sample 시각과 실제 sample interval로 만든다.
+    Board tag와 DMM sample은 measurement server 시간축으로 변환하고 변환
+    불확실성도 결과에 함께 저장한다.
 
 현재 변경 대상 repository는 다음 두 개다.
 
 | Repository | 담당 기능 |
 |---|---|
-| `SNU-VLSI/measurement_utils` | direct PyVISA server, protocol v2, C API, standalone smoke test, artifact writer/loader |
+| `SNU-VLSI/measurement_utils` | direct PyVISA server, current protocol v2와 planned v3, C API, standalone smoke test, artifact writer/loader |
 | `SNU-VLSI/tvm` | measurement_utils submodule pin, DMM/runner config, CMake, host wrapper, codegen tag, runner, 문서 |
 
 IMCFlow repository의 RTL이나 runner source를 변경하는 것은 현재 범위에 없다.
@@ -94,6 +98,217 @@ ResNet single-input과 KWS/VWW dataset 장시간 acceptance는 코드나 연결 
 아니라, 사용자가 실제 DMM probe rail 이름과 수동 설정한 voltage를 확정한 별도
 power config로 수행해야 하므로 이 implementation run에서는 실행하지 않았다.
 placeholder default로 장시간 power 값을 생성하지 않는 것이 원칙이다.
+
+## 추가 구현 및 수행 결과: DMM reading metadata 기반 3-clock 정렬 (2026-08-16)
+
+### 완료된 구현과 revision
+
+추가 계획의 Phase M0~M5를 실제 GPIB3에서 완료했다. 현재 implementation 기준
+revision은 다음과 같다.
+
+| Repository | Revision | 내용 |
+|---|---|---|
+| `measurement_utils` | `3a81f83dc2d15e88d3ea496aff548aac577a4e09` | protocol v3, DMM metadata/clock primitive, raw CSV, schema-v2 정렬, freeze coverage 수정 |
+| `tvm` | `aced9789a0dea9ced2f2a83163b82e52223d8adc` | 위 submodule pin, protocol-v3 daemon probe, schema-v2 loader/validator/plot |
+
+구현 결과는 다음과 같다.
+
+- Board C client와 measurement server가 `HELLO 3`, start/end 8-round clock sync,
+  Board realtime/monotonic anchor, `STOP_BEGIN → STOP_READY → end sync → FINALIZE`를
+  사용한다. public `dmm_session_stop()` API는 바꾸지 않았다.
+- DMM sample의 canonical origin은 GET midpoint가 아니라 raw CSV의 `Start time`과
+  `Sample interval`이다. GET bracket은 `trigger_get_diagnostic`으로만 보존한다.
+- `time_alignment.json`, byte-preserved `raw/DMM_GPIB3.csv`, SHA-256 manifest와
+  schema-v2 NPZ를 생성한다. NPZ에는 reading number/current, DMM-first/trigger 기준
+  시간, server wall/monotonic 시간, power, tag state와 boundary ambiguity가 있다.
+- 실제 hardware path에서 metadata가 없거나 raw/buffer 값이 다르면 GET 시간으로
+  fallback하지 않고 run을 실패시킨다. schema-v1은 fake/legacy artifact reader에만
+  남겼다.
+- TVM utility는 schema-v2 completeness와 raw path/checksum을 검증하고, plot의 기본
+  축을 DMM first-reading time으로 사용한다. summary는 ambiguous sample 제외 옵션을
+  제공한다.
+
+### M0 GPIB3 characterization 결과
+
+대상 장비는 `Keysight Technologies,34465A,MY60036079`이며 firmware 응답은
+`A.03.03-03.15-03.03-00.52-05-02`였다.
+
+- `SYST:DATE?;TIME?` 한 번의 GPIB query bracket은 대략 92~94 ms였다. query 응답은
+  millisecond를 포함하지만 이 bracket 때문에 한 번의 절대 clock 관측 uncertainty는
+  약 42~49 ms다.
+- 10 ms, 1 ms, 100 us에서 각각 20 readings를 저장했다. CSV `Sample interval`은
+  각각 `0.010000`, `0.001000`, `0.000100`이었고 CSV count, DMM buffer count와 값이
+  모두 정확히 일치했다.
+- CSV first-reading timestamp는 millisecond 세 자리이므로 metadata 자체의
+  resolution uncertainty 하한을 1 ms로 둔다.
+- `SYST:TIME`은 fractional-second 문법을 오류 없이 받지만 fractional 값을
+  안정적으로 적용하지 않는다. 현재 초에 fractional lead를 더해 즉시 쓰면 clock
+  phase에 따라 약 1초 오차가 남을 수 있었다. 최종 구현은 미래의 정수 초 경계를
+  기다린 뒤 `.000`을 쓰며 scheduled target과 write bracket을 artifact에 기록한다.
+  실제 경계 실험에서 0 ms lead의 offset은 약 2.37 ms였고, 전체 관측 uncertainty는
+  약 49 ms였다.
+- 모든 시험에서 `MMEM:FORM:READ:INF`는 기존 `OFF`로 복구했고 정확히 생성한
+  `INT:\\ptm_*.csv`만 삭제했다.
+
+### M5 standalone hardware gate 결과
+
+`meas-2`의 `imcflow` conda Python과 Keysight VISA backend, board의 PetaLinux C
+client를 `147.46.117.49:9910`으로 직접 연결했다. master/board TVM과
+master/board/meas-2 measurement_utils revision을 매 run 전에 일치시켰다.
+
+| Session | Interval | Samples | Status | Sample uncertainty | Ambiguous | Raw/NPZ |
+|---|---:|---:|---|---:|---:|---|
+| `m5_metadata_10ms_retry2_3a81f83` | 10 ms | 173 | complete | 49,007,284 ns | 30 | exact match |
+| `m5_metadata_1ms_3a81f83` | 1 ms | 1,797 | complete | 69,939,146 ns | 423 | exact match |
+| `m5_metadata_100us_3a81f83` | 100 us | 18,723 | complete | 36,866,756 ns | 2,225 | exact match |
+| `m5_disconnect_partial_3a81f83` | 10 ms | 46 | partial | 38,050,835 ns | 7 | exact match |
+| `m5_post_disconnect_recovery_3a81f83` | 10 ms | 176 | complete | 54,386,691 ns | 33 | exact match |
+
+세 정상 interval run 모두 idle/busy/event/clear tag 순서를 보존했고 runner의
+schema-v2 validator를 통과했다. 10 ms run의 clock setter는 DMM/server offset을
+약 344 ms에서 41 ms로 줄였고, 1 ms run에서는 약 197 ms에서 4.5 ms로 줄였다.
+100 us run은 시작 offset 약 77 ms가 policy limit 안이라 persistent clock을 쓰지
+않았다.
+
+100 us run의 첫 reading nominal time은 GET midpoint보다 약 20 ms 앞이었지만 전체
+sample uncertainty 36.9 ms 안에 있다. 따라서 이 결과는 sample 간 100 us 간격은
+정확히 보존하지만 tag와 sample의 sub-millisecond absolute 경계를 확정한다고
+주장하지 않는다. 세 경계 주변 2,225 readings를 ambiguous로 표시한 것이 의도한
+보수적 결과다.
+
+강제 disconnect는 client exit 124 뒤 `reason=client disconnected`인 partial
+artifact를 남겼다. raw checksum/value, metadata 복원과 internal-file 삭제가 모두
+정상이며 daemon을 재시작하지 않은 다음 session도 complete로 끝났다. 최종 장비
+상태는 metadata `OFF`, `SYST:ERR? = +0,"No error"`였다.
+
+hardware에서 다음 세 통합 오류를 발견해 함께 수정했다.
+
+1. TVM daemon probe가 protocol v2를 기대하던 문제를 v3로 맞췄다.
+2. fractional clock write의 phase-dependent 약 1초 오차를 whole-second scheduling으로
+   바꿨다.
+3. `now` mode에서 post-ABOR stop time을 coverage 기준으로 써 정상 run을
+   `truncated`로 분류하던 문제를 DMM freeze command 시작 시각 기준으로 바꿨다.
+
+검증은 measurement_utils 관련 79 tests, metadata/protocol 17 focused tests,
+TVM workflow 10 tests, C client `-Wall -Wextra -Werror` build를 통과했다. Phase M6의
+최종 TVM runner hardware 결과는 아래 acceptance 절차를 수행한 뒤 추가한다.
+
+### 현재 baseline과 변경 이유
+
+현재 `measurement_utils` `ca3a9b923c126e4eba0f2c9c8a3e23c41f8bf096`은
+GPIB interface open/close 시간을 제외하고 실제 GET 호출만
+`trigger_before_monotonic_ns`와 `trigger_after_monotonic_ns`로 감싼다. TVM
+`491eb94e38241aa82d1910a8734d88056e45d8aa`가 이 revision을 pin한다. 기존 sample
+origin은 이 GET bracket의 midpoint이고, Board tag는 8-round TCP clock sync로
+measurement server monotonic clock에 변환된다.
+
+GPIB3의 Keysight 34465A에서 PyVISA로 다음 command를 실제 검증했다.
+
+```text
+MMEM:FORM:READ:INF ON
+MMEM:STOR:DATA RDG_STORE,"INT:\imcflow_timestamp_test_20260816.csv"
+MMEM:UPL? "INT:\imcflow_timestamp_test_20260816.csv"
+```
+
+20개 reading을 0.01 s 간격으로 저장한 파일에는 다음 정보가 들어갔다.
+
+```csv
+Start date:,08/15/2026,Start time:,14:09:17.620
+Sample interval:,0.010000
+Reading #,Reading
+1,+2.68086926E-02
+```
+
+`MMEM:FORM:READ:INF?`는 테스트 전 `0`, 테스트 중 `1`, 복구 후 `0`이었고 DMM은
+`No error`를 반환했다. 이 결과에 따라 DMM이 기록한 첫 reading 시각을 sample
+origin으로 사용한다. GET bracket은 제거하지 않고 DMM metadata가 비정상이거나
+장비 동작을 분석할 때 쓰는 진단값으로 남긴다.
+
+관찰된 CSV 시작 시각은 millisecond 세 자리까지만 표현됐다. 실제 100 us sampling
+에서는 시작 위치에 여러 sample의 모호성이 생길 수 있으므로, 구현은 보이지 않는
+정밀도를 가정하지 않는다. hardware characterization에서 CSV/지원 format의 실제
+정밀도와 timestamp 의미를 확인하고, 확인된 해상도를 정렬 uncertainty의 하한으로
+반드시 기록한다.
+
+### 시간 동기화의 목적과 기준 clock
+
+목표는 세 장비 화면의 시계를 같은 숫자로 만드는 것이 아니라 다음 두 사건을 같은
+시간축에서 비교하는 것이다.
+
+1. Board C 코드가 tag 함수에서 timestamp를 얻은 순간
+2. DMM이 각 current reading을 얻은 순간
+
+measurement server를 canonical clock으로 사용한다. 정렬에는 wall clock 하나만
+쓰지 않고 다음 clock domain과 변환을 명시한다.
+
+```text
+Bmono: Board CLOCK_MONOTONIC
+Mmono: measurement server CLOCK_MONOTONIC
+Mwall: measurement server CLOCK_REALTIME, UTC
+Dwall: DMM reading metadata calendar clock, UTC로 해석
+
+Bmono ──TCP minimum-RTT sync────────────▶ Mmono
+Dwall ──bracketed DMM clock calibration─▶ Mwall
+Mwall ──paired wall/monotonic anchor────▶ Mmono
+```
+
+sample과 tag를 비교하는 최종 축은 `Mmono`다. monotonic clock을 사용하면 측정 중
+NTP 보정이나 사용자의 wall-clock 변경으로 sample/tag 순서가 뒤집히는 것을 막을 수
+있다. `Mwall`은 DMM의 calendar timestamp를 `Mmono`에 연결하고 사람이 읽을 수 있는
+UTC 결과를 만드는 데 사용한다.
+
+Board wall clock은 정렬의 필수 입력이 아니다. 기존처럼 tag마다 `Bmono`를 보내고
+TCP sync로 바로 `Mmono`에 변환하는 경로가 더 안정적이다. 다만 세 장비 상태를
+감사할 수 있도록 session 시작 시 Board의 tightly-paired realtime/monotonic anchor와
+가능하면 NTP 상태를 진단 metadata로 저장한다.
+
+Master server clock은 workload 명령과 artifact 회수 시각을 기록할 뿐 sample/tag
+정렬 공식에는 들어가지 않는다. 따라서 master와 다른 두 server의 wall clock 차이가
+sample boundary를 바꾸면 안 된다. measurement server의 NTP 상태는 absolute UTC의
+신뢰도를 설명하는 metadata이며, Board tag 정렬은 NTP 대신 session별 monotonic TCP
+sync 결과를 사용한다.
+
+### 반드시 파악하고 저장할 관계
+
+| 관계 | 주 용도 | 측정 방법 | 주요 불확실성 |
+|---|---|---|---|
+| `Bmono → Mmono` | tag 호출 시각 변환 | 기존 8-round TCP sync에서 minimum RTT round 선택 | network asymmetry, RTT/2, C timestamp 후 socket write까지의 비용 |
+| `Dwall → Mwall` | DMM 첫 reading 시각 변환 | DMM 날짜/시간 query 전후의 server wall/monotonic bracket; session 전후 반복 | VISA/GPIB 왕복, DMM clock query 해상도, clock drift |
+| `Mwall → Mmono` | DMM wall time을 tag 비교 축으로 변환 | server에서 `monotonic-before → realtime → monotonic-after` anchor 기록 | local clock read bracket, 측정 중 wall-clock step |
+| `Bmono → Dwall` | 직접 측정하지 않음 | 위 변환을 합성 | 각 변환 uncertainty의 합 |
+
+DMM clock offset이 0이어야 할 필요는 없다. offset과 drift를 충분히 정확하게 알면
+변환할 수 있다. 기본 정책은 먼저 read-only calibration으로 관계를 측정하는 것이다.
+DMM 시간이 설정한 허용 범위를 벗어난 경우에만 server inventory의 명시적 policy에
+따라 PyVISA로 시간을 맞춘 뒤 다시 calibration한다. 시간 설정 전후 값과 실행한 SCPI
+command는 모두 기록하며, session마다 무조건 DMM persistent clock을 덮어쓰지 않는다.
+
+### Tag 적용 규칙
+
+첫 DMM reading 시각을 `D0`, metadata의 sample interval을 `P`, 첫 reading 번호를
+1이라고 하면 다음처럼 계산한다.
+
+```text
+Dsample[i] = D0 + (i - 1) * P
+Msample[i] = DMM-to-server-wall(Dsample[i])
+Msample_mono[i] = wall-to-monotonic(Msample[i])
+Mtag = board-to-server-monotonic(Btag)
+```
+
+tag state 변경은 `Msample_mono[i] >= Mtag`인 첫 sample부터 적용한다. DMM timestamp가
+reading integration의 시작/중앙/끝 중 무엇을 의미하는지는 장비 문서와 controlled
+test로 확정하여 `timestamp_semantics`로 저장한다. tag와 sample의 uncertainty interval이
+겹치면 임의로 한쪽에 넣었다고 숨기지 않고 해당 경계를 `ambiguous`로 표시한다.
+
+```text
+tag interval:    [Mtag - Utag, Mtag + Utag]
+sample interval: [Msample - Usample, Msample + Usample]
+```
+
+정렬 uncertainty에는 최소한 Board/server sync, DMM/server calibration, DMM metadata
+해상도, session 동안의 DMM drift bound, server wall/monotonic anchor bracket과 DMM
+integration aperture의 의미가 포함된다. 기존 GET uncertainty는 metadata origin의
+uncertainty에 더하지 않고 독립 진단값으로 보존한다.
 
 두 repository의 작업 branch 이름은 동일하게 맞춘다.
 
@@ -283,15 +498,17 @@ FPGA board (PetaLinux ARM)
   ├─ 실행 전체 동안 측정 session 유지
   ├─ dmm_tag_set()/dmm_tag_clear()/dmm_tag_event()
   └─ dmm_session_stop()
-             │ direct TCP (START/TAG/STOP)
+             │ direct TCP v3 (START/TAG/two-phase STOP)
              ▼
 Measurement server (SSH alias: meas-2)
   ├─ runner request 검증
   ├─ measurement target을 server inventory의 실제 DMM으로 resolve
+  ├─ Board/server와 DMM/server clock 관계 calibration
   ├─ local DmmManager/PyVISA로 group trigger와 sampling 시작
   ├─ tag event와 clock metadata 기록
-  ├─ STOP에서 모든 DMM을 중단하고 sample 회수
-  ├─ sample timestamp와 active tag를 결합
+  ├─ STOP_BEGIN에서 DMM buffer freeze
+  ├─ reading metadata 포함 raw file 저장/upload/검증
+  ├─ DMM metadata sample timestamp와 active tag를 결합
   └─ session artifact 저장
              │ local USB
              ▼
@@ -502,7 +719,9 @@ TAG phase=output
 output read/write
 TAG phase=cleanup
 TVM cleanup
-STOP and result finalize
+STOP_BEGIN: DMM buffer freeze
+Board/server end clock sync
+FINALIZE: metadata/raw upload and result materialization
 ```
 
 ### Dataset runner
@@ -516,7 +735,9 @@ for each sample:
     graph execution
     output/accuracy calculation
 cleanup
-STOP and result finalize
+STOP_BEGIN: DMM buffer freeze
+Board/server end clock sync
+FINALIZE: metadata/raw upload and result materialization
 ```
 
 따라서 “전체 시간”은 **host executable이 power session을 시작한 뒤 TVM setup,
@@ -583,16 +804,17 @@ tag마다 DMM에 `DATA:POIN?`를 query하면 tag 호출 자체가 느려지고 s
 2. tag message는 board에서 measurement server로 연결된 같은 TCP stream의
    ordering을 이용하여 fire-and-forget으로 전송한다.
 3. measurement server는 receive timestamp도 함께 저장한다.
-4. STOP은 이전 tag message 뒤에 같은 TCP stream으로 오므로 모든 tag가 먼저
-   처리됐음이 보장된다.
+4. `STOP_BEGIN`은 이전 tag message 뒤에 같은 TCP stream으로 오므로 모든 tag가
+   먼저 처리됐음이 보장된다.
 
 tag API는 정상 경로에서 server ACK를 기다리지 않는다. socket write 실패만
 즉시 반환하여 kernel 실행에 network RTT가 추가되지 않도록 한다.
 
-## Board/server clock 정렬
+## 3-clock 정렬 상세 구현
 
-DMM sample과 board tag는 서로 다른 clock domain에 있다. session 시작 전에
-TCP clock sync를 수행한다.
+### 1. Board와 measurement server monotonic sync
+
+현재 8-round TCP sync와 minimum-RTT 선택을 유지한다.
 
 ```text
 board C util                    measurement server
@@ -600,41 +822,213 @@ board C util                    measurement server
                          ◀───  SYNCED(server_recv_ns, server_send_ns)
 ```
 
-- 여러 번 왕복한 뒤 RTT가 가장 작은 sample로 clock offset을 추정한다.
-- 이 sync는 DMM sampling 시작 전에 수행하므로 측정 구간을 오염시키지 않는다.
-- 각 tag에는 client timestamp, server clock으로 변환한 timestamp, sequence가
-  들어간다.
-- server receive timestamp와 추정 uncertainty도 보존한다.
+- tag 함수는 state를 변경하거나 socket write를 시작하기 직전에 `CLOCK_MONOTONIC`
+  timestamp를 얻는다.
+- 여러 round 중 RTT가 가장 작은 round로 `Bmono → Mmono` offset을 계산한다.
+- 각 tag에는 raw Board monotonic, 변환된 server monotonic, server receive monotonic,
+  sequence, offset과 uncertainty를 보존한다.
+- session 시작과 종료에 sync를 한 번씩 수행하여 offset 변화량을 측정한다. 변화가
+  허용치를 넘으면 중간 tag 시간에 선형 drift correction을 적용하기 전에 clock
+  source의 동작을 검증하고, 검증 전에는 변화량 전체를 uncertainty로 추가한다.
+- Board의 realtime/monotonic anchor는 진단용으로 한 번 전송한다. tag 정렬 자체는
+  realtime이나 Board NTP 상태에 의존하지 않는다.
 
-software clock sync와 TCP를 사용하므로 tag boundary는 cycle-accurate하지 않다.
-정확도 한계는 DMM sample interval, NPLC integration aperture, clock offset 오차의
-합으로 manifest에 기록한다. 수십 microsecond 이하의 정확한 경계가 필요하면
-향후 GPIO/trigger line 같은 hardware marker가 필요하다.
+### 2. Measurement server wall/monotonic anchor
 
-## DMM sample timestamp 생성
-
-measurement server는 group trigger 전후의 `monotonic_ns`를 기록하고 midpoint를
-session sample origin으로 사용한다. `SAMP:TIM MIN`처럼 문자열 interval을 받은
-경우 DMM에서 resolve된 실제 `SAMP:TIM?` 값을 rail별로 저장한다.
-
-rail별 sample timestamp는 다음 convention으로 생성한다.
+measurement server에서 DMM clock query와 GET의 전후에 다음 순서로 anchor를 만든다.
 
 ```text
-sample_time[i] = trigger_origin + i × actual_sample_interval
+Mmono_before = CLOCK_MONOTONIC
+Mwall        = CLOCK_REALTIME
+Mmono_after  = CLOCK_MONOTONIC
 ```
 
-필요하면 NPLC integration aperture의 중앙으로 보정할 수 있도록 원본 NPLC와
-line frequency metadata를 함께 남긴다.
+대표 monotonic 시각은 midpoint로 두고 bracket의 절반을 local-anchor uncertainty로
+저장한다. session 시작과 종료 anchor를 모두 남겨 측정 중 `CLOCK_REALTIME` step이나
+비정상적인 frequency correction이 있었는지 검사한다. step이 발견되면 DMM metadata
+기반 UTC array 생성은 실패 처리하되, raw DMM CSV와 monotonic tag trace는 보존한다.
 
-server는 tag event를 시간순으로 replay하여 각 sample에 다음을 materialize한다.
+모든 calendar timestamp는 내부적으로 UTC epoch nanosecond로 변환한다. DMM에는
+timezone field가 없으므로 server inventory에 `CLOCK.TIMEZONE=UTC`를 명시하고 raw
+date/time string도 함께 저장한다.
 
-- `tag_state_id`: 해당 시점의 active tag map ID
-- `current_A`
-- `time_from_trigger_s`
-- 선택한 rail의 `voltage_V`
-- `power_W = current_A × voltage_V`
+### 3. DMM clock calibration
 
-원본 tag event도 별도로 남겨 재분석이 가능하게 한다.
+`DmmManager`에 다음 책임을 가진 API를 추가한다. 실제 command spelling과 fractional
+second 지원 범위는 Phase 0 hardware characterization에서 34465A로 확정한다.
+
+```text
+query_clock_bracketed(dmm_name, rounds=N)
+set_clock_from_server(dmm_name, utc_time)       # policy가 허용할 때만
+verify_reading_metadata_support(dmm_name)
+```
+
+한 calibration round는 다음 순서다.
+
+1. server wall/monotonic before anchor를 기록한다.
+2. PyVISA로 DMM date/time을 query한다.
+3. server wall/monotonic after anchor를 기록한다.
+4. midpoint와 DMM 응답으로 `Dwall → Mwall` offset을 계산한다.
+5. 여러 round 중 유효 응답이면서 bracket이 가장 작은 결과를 대표값으로 선택한다.
+
+session 시작 전과 reading 회수 후에 calibration을 수행한다. 두 offset 차이를
+`observed_dmm_clock_drift_ns`로 저장한다. DMM RTC와 sampling interval이 같은 oscillator를
+쓴다는 사실이 확인되기 전에는 drift를 sample interval에 자동 보정하지 않고 정렬
+uncertainty에 보수적으로 포함한다.
+
+server DMM inventory의 기존 `POWER.DMM_GPIB3` entry에 다음 policy를 추가한다.
+`_inventory_targets()`는 현재 logical name에서 VISA address만 반환하므로, 구현 시
+address와 clock/metadata policy를 가진 structured target을 반환하도록 확장한다.
+
+```json
+{
+  "POWER": {
+    "DMM_GPIB3": {
+      "DEVICE": "dmm_gpib3",
+      "READING_METADATA": true,
+      "CLOCK": {
+        "TIMEZONE": "UTC",
+        "POLICY": "verify_and_set_if_needed",
+        "MAX_OFFSET_MS": 100,
+        "CALIBRATION_ROUNDS": 8
+      }
+    }
+  }
+}
+```
+
+- `verify_only`: offset만 측정하고 DMM clock을 변경하지 않는다.
+- `verify_and_set_if_needed`: offset이 threshold를 넘으면 PyVISA로 맞춘 후 다시
+  calibration한다.
+- `disabled`는 unit-test fake backend와 명시적인 legacy 분석에만 허용한다.
+- 실제 tagged power 기본값은 `POLICY=verify_and_set_if_needed`와
+  `READING_METADATA=true`다.
+
+DMM clock을 변경한 경우 `before`, `set_request`, `after`, SCPI error queue와
+setting precision을 session에 기록한다. 장비 시간이 parse되지 않거나 재설정 후에도
+offset/uncertainty threshold를 만족하지 못하면 workload 시작 전에 실패한다.
+
+### 4. DMM metadata와 raw reading 회수
+
+각 DMM은 session 시작 전에 현재 metadata setting을 저장하고 다음 순서로 준비한다.
+
+```text
+old_metadata_mode = MMEM:FORM:READ:INF?
+MMEM:FORM:READ:INF ON
+configure current acquisition
+GET
+```
+
+`STOP`의 `now` mode에서는 다음 순서를 사용한다.
+
+1. 현재처럼 모든 DMM에 먼저 `ABORt`를 보내 buffer를 freeze한다.
+2. rail별로 collision이 없는 session 전용 internal filename을 만든다.
+3. `MMEM:STOR:DATA RDG_STORE,<filename>`으로 같은 reading buffer를 저장한다.
+4. `MMEM:UPL? <filename>`의 IEEE block payload를 byte 단위 그대로 회수한다.
+5. raw CSV를 artifact에 먼저 durable write하고 SHA-256을 계산한다.
+6. metadata와 current values를 strict parser로 읽는다.
+7. 기존 `DATA:REM?` 결과와 count/value를 비교한 뒤 buffer를 비운다. NPZ의
+   `current_A[]`는 검증을 통과한 raw CSV reading을 source of truth로 사용한다.
+8. 업로드와 checksum 확인이 끝난 정확한 session 파일만 DMM 내부 저장소에서
+   삭제한다. wildcard나 directory 단위 삭제는 사용하지 않는다.
+9. 성공/실패와 관계없이 `MMEM:FORM:READ:INF`를 session 전 값으로 복구하고
+   복구 query 결과를 기록한다.
+
+파일명에는 전체 user-provided string을 직접 넣지 않고 sanitized session hash와 rail
+index만 사용한다. metadata restore나 DMM file cleanup이 실패하면 current data가
+있더라도 session에 cleanup error를 남기고 reservation을 해제한다. 다음 session은
+preflight에서 DMM state를 다시 검증한다.
+
+raw CSV parser는 다음을 모두 검사한다.
+
+- `Start date`, `Start time`, `Sample interval`이 하나씩 존재하는지
+- reading number가 1부터 연속인지
+- CSV sample count와 `DATA:POIN?`/`DATA:REM?` count가 같은지
+- metadata interval과 사전에 query한 `SAMP:TIM?` 값이 tolerance 안에서 같은지
+- current 값이 finite number인지
+- date/time precision과 fractional digit 수가 예상 format인지
+
+### 5. DMM metadata 기반 sample timestamp 생성
+
+rail별 primary sample origin은 GET midpoint가 아니라 CSV의 첫 reading timestamp다.
+
+```text
+dmm_sample_wall[i] = dmm_first_reading_wall + i * metadata_sample_interval
+server_sample_wall[i] = dmm_sample_wall[i] + dmm_to_server_wall_offset
+server_sample_mono[i] = wall_to_monotonic(server_sample_wall[i])
+```
+
+여기서 array index `i=0`은 CSV `Reading #=1`이다. `SAMP:TIM?` 값은 설정 검증용,
+CSV `Sample interval`은 해당 raw file의 최종 시간축 source로 사용한다. 두 값이
+tolerance를 벗어나면 자동으로 하나를 선택하지 않고 artifact를 `aborted`로 만든다.
+
+기존 값은 다음 용도로 유지한다.
+
+- `trigger_before_monotonic_ns`, `trigger_after_monotonic_ns`: 실제 GET 전달 구간
+- `trigger_origin_monotonic_ns`: GET 진단용 midpoint
+- `time_from_trigger_s[]`: compatibility array; 새 분석에서는 사용 중단 예정
+
+새 NPZ에는 다음 array와 scalar를 추가한다.
+
+```text
+reading_number[]
+current_A[]
+power_W[]
+time_from_first_reading_s[]
+server_wall_time_ns[]
+server_monotonic_time_ns[]
+tag_state_id[]
+tag_boundary_ambiguous[]
+sample_time_uncertainty_ns
+voltage_V
+```
+
+`server_monotonic_time_ns[]`는 한 boot 안에서 비교하기 위한 값이고, 장기 보존과
+cross-server 분석에는 UTC `server_wall_time_ns[]`와 time-alignment metadata를
+사용한다. integer nanosecond array를 먼저 만들고 초 단위 float는 표시/plot 단계에서
+변환하여 긴 session의 float precision 손실을 피한다.
+
+### 6. Tag state materialization과 uncertainty
+
+현재 `_materialize_states()`가 사용하는 sample time 입력을 GET midpoint 기반 array에서
+metadata 기반 `server_monotonic_time_ns[]`로 바꾼다. 각 tag boundary에 대해 확실하게
+이전/이후인 sample은 기존 규칙으로 분류하고 uncertainty interval이 겹치는 sample은
+`tag_boundary_ambiguous=true`로 표시한다.
+
+```text
+tag_uncertainty = board_server_sync_uncertainty
+sample_uncertainty = dmm_server_clock_uncertainty
+                   + server_wall_mono_anchor_uncertainty
+                   + dmm_metadata_resolution_uncertainty
+                   + dmm_clock_drift_bound
+                   + timestamp_semantics_uncertainty
+```
+
+`sample_alignment_uncertainty_ns`는 tag별로
+`tag_uncertainty + sample_uncertainty`를 기록한다. energy/average summary는 기본적으로
+ambiguous sample을 포함하되 개수를 명시하고, loader/plot option으로 제외하여 민감도
+분석을 할 수 있게 한다.
+
+software clock sync와 TCP만 사용하므로 이 경로는 cycle-accurate하지 않다. 계산된
+uncertainty가 요구 sample boundary보다 크면 결과를 더 정밀한 것처럼 표시하지 않는다.
+수십 microsecond 이하의 확정 경계가 필요하면 GPIO/trigger line 같은 hardware marker가
+별도로 필요하다.
+
+### 7. Failure와 fallback 정책
+
+실제 hardware run의 기본 `timestamp_source`는 `dmm_reading_metadata`다. 다음 경우에는
+GET midpoint로 조용히 fallback하지 않는다.
+
+- metadata enable/query 실패
+- raw file 저장/업로드 실패
+- timestamp parse 실패
+- CSV와 DMM buffer의 sample count/value 불일치
+- DMM/server clock calibration 실패 또는 uncertainty threshold 초과
+- session 중 measurement server wall clock step 발견
+
+이 경우 가능한 raw file, tag trace, GET bracket과 error queue를 남기고 session을
+`aborted` 또는 `partial`로 끝낸다. 기존 GET-midpoint path는 fake backend, 과거 artifact
+loader와 명시적인 `timestamp_source=trigger_bracket_legacy` 분석에만 남긴다.
 
 ## 장시간 측정과 50,000 sample 제한
 
@@ -690,37 +1084,54 @@ const char* dmm_last_error(void);
 - session 중 socket이 끊기면 server는 DMM을 중단하고 가능한 result를 `partial`
   상태로 저장한 뒤 reservation을 해제한다. 명시적 `ABORT`는 `aborted`다.
 
-## Protocol v2
+## Tagged protocol v3 전환 계획
 
 기존 command-line-like `START --names ...` v1 protocol과 그 bridge/RPyC 코드는
 그대로 남기되 새 tagged measurement server에서는 사용하지 않는다. 새 C API와
-새 server는 versioned v2 frame protocol만 사용한다.
+server의 현재 protocol은 v2다. DMM metadata time model은 artifact 의미와 stop
+sequence를 바꾸므로 tagged client/server를 v3로 함께 올리고, HELLO에서 구 version
+혼용을 fail-fast한다. v1 bridge/RPyC protocol은 변경하지 않는다.
 
 ```text
-HELLO 2
-SYNC ...
-CLOCK_SYNC <offset_ns> <best_rtt_ns> <uncertainty_ns> <sample_count>
+HELLO 3
+SYNC <phase> <client_send_monotonic_ns>
+CLOCK_SYNC <phase> <offset_ns> <best_rtt_ns> <uncertainty_ns> <sample_count>
+BOARD_CLOCK <phase> <mono_before_ns> <realtime_ns> <mono_after_ns>
 START_JSON <payload_length>\n<payload>
 TAG_SET <seq> <client_ns> <key_len> <value_len>\n<key><value>
 TAG_CLEAR <seq> <client_ns> <key_len>\n<key>
 TAG_EVENT <seq> <client_ns> <name_len>\n<name>
-STOP
+STOP_BEGIN
+SYNC end ...
+CLOCK_SYNC end ...
+BOARD_CLOCK end ...
+FINALIZE
 ABORT <reason_length>\n<reason>
 ```
 
 대표 응답:
 
 ```text
-HELLO_OK 2
-CLOCK_SYNCED
+HELLO_OK 3
+CLOCK_SYNCED <phase>
+BOARD_CLOCKED <phase>
 STARTED <session_id> <resolved_config_length>\n<resolved_config_json>
+STOP_READY <session_id>
 STOPPED <session_id> <summary_length>\n<summary_json>
 ERROR <code> <message>
 ```
 
-기존 v1 client/server test는 기존 코드에 대한 regression test로 유지한다. 새
-v2 server가 v1을 동시에 지원하게 만들지는 않는다. 두 경로를 분리하여 새
-server에 불필요한 compatibility layer와 RPyC dependency가 들어오지 않게 한다.
+`phase`는 `start` 또는 `end`다. `STOP_BEGIN`을 받으면 server는 먼저 모든 DMM을
+ABORt하여 measurement buffer를 freeze하고 `STOP_READY`를 반환한다. 그 뒤 Board가
+end sync를 수행하므로 clock drift 측정을 위한 network/CPU activity가 current
+measurement에 섞이지 않는다. `FINALIZE`에서 metadata 저장/업로드, raw-data 검증,
+tag materialization과 artifact 작성을 수행한다. `STOP_BEGIN` 이후 disconnect되면
+server가 독립적으로 partial finalize한다.
+
+기존 v1 client/server test와 tagged v2 artifact loader test는 regression으로
+유지한다. 새 v3 server가 v1/v2 frame을 동시에 받아들이게 만들지는 않는다. 두
+실행 경로를 분리하여 새 server에 불필요한 compatibility layer와 RPyC dependency가
+들어오지 않게 한다.
 
 ## Result artifact
 
@@ -732,28 +1143,46 @@ measurement server의 canonical directory는 server가 관리하는 root 아래�
 ├── request.json
 ├── resolved_config.json
 ├── session.json
+├── time_alignment.json
 ├── tags.jsonl
 ├── summary.json
+├── raw/
+│   ├── DMM_GPIB3.csv
+│   └── checksums.json
 └── rails/
-    ├── VDD.npz
-    ├── DDA.npz
-    └── DDC.npz
+    └── DMM_GPIB3.npz
 ```
 
 rail NPZ에는 최소한 다음 array가 들어간다.
 
 ```text
+reading_number[]
 current_A[]
 time_from_trigger_s[]
+time_from_first_reading_s[]
+server_wall_time_ns[]
+server_monotonic_time_ns[]
 power_W[]
 tag_state_id[]
+tag_boundary_ambiguous[]
+sample_time_uncertainty_ns
 ```
+
+`raw/DMM_GPIB3.csv`는 DMM에서 upload한 byte를 newline이나 숫자 format 변경 없이
+그대로 저장한다. plot, NPZ와 summary가 사용한 `current_A[]`는 이 파일에서 parse한
+값이어야 한다. `checksums.json`에는 raw byte SHA-256, size, parser version, CSV와
+`DATA:REM?` 비교 결과를 기록한다.
 
 `session.json`에는 다음 정보를 저장한다.
 
-- schema version과 session status: `complete`, `partial`, `aborted`, `truncated`
-- 시작/종료 시간과 trigger timing
-- clock sync offset/RTT/uncertainty
+- artifact schema version 2와 session status: `complete`, `partial`, `aborted`,
+  `truncated`
+- 시작/종료 UTC와 monotonic 시각, trigger timing
+- Board/server start/end clock sync offset/RTT/uncertainty
+- DMM/server start/end clock calibration, offset, drift bound와 SCPI bracket
+- server wall/monotonic anchor와 wall-clock step 검사 결과
+- DMM raw start date/time string, UTC 해석, fractional precision,
+  `timestamp_semantics`와 metadata restore 결과
 - requested/resolved DMM configuration
 - rail별 실제 sample interval/count/coverage
 - configured buffer coverage와 실제 회수된 `collected_coverage_s`; 완료 session은
@@ -761,9 +1190,14 @@ tag_state_id[]
 - TVM model, board, chip, checkpoint, git revision 등 runner metadata
 - tag drop/send error 여부
 
+`time_alignment.json`에는 위 clock 변환의 원시 관측값과 선택된 calibration round,
+공식, uncertainty component를 machine-readable 형태로 저장한다. 분석 utility는 이
+파일과 raw CSV만으로 sample timestamp와 tag state를 다시 생성할 수 있어야 한다.
+
 `tags.jsonl`은 원본 tag event와 active state snapshot ID mapping을 보존한다.
 `summary.json`은 rail별/active-tag별 평균 current, 평균 power, energy를 제공하되
-NPZ 원본으로 언제든 다시 계산할 수 있게 한다.
+ambiguous sample 수와 비율도 함께 제공하고 NPZ/raw 원본으로 언제든 다시 계산할 수
+있게 한다.
 
 ## Runner interface
 
@@ -904,17 +1338,25 @@ fingerprint를 통해 자연스럽게 rebuild 대상이 된다.
 |---|---|
 | invalid config/unknown measurement target | DMM 시작 전 실패, workload 실행 안 함 |
 | measurement server 연결 실패 | power-enabled run 실패 |
+| DMM clock/metadata capability 또는 pre-start calibration 실패 | workload 시작 전 실패, GET midpoint fallback 금지 |
 | 일부 DMM start 실패 | 시작한 DMM 모두 중단, reservation 해제, workload 실행 안 함 |
 | tag send 실패 | workload는 계속, session을 degraded로 표시 |
 | workload non-zero exit | partial sample finalize 후 원래 exit status 보존 |
 | board SSH timeout/process kill | measurement server가 disconnect 감지 후 partial finalize |
+| raw metadata upload/parse/count 검증 실패 | 보존 가능한 raw와 SCPI error를 남기고 `aborted`/`partial`, synthetic timestamp 생성 금지 |
+| metadata mode restore/internal-file cleanup 실패 | cleanup error 기록, reservation 해제, 다음 session preflight 강제 |
 | runner가 결과를 못 받음 | measurement 결과는 server에 보존, session ID로 재-fetch 가능 |
 | sample buffer 조기 종료 | `truncated`, power 단계 실패 |
 
 runner는 executable status와 power status를 별도로 보고한다. accuracy 실행은
 성공했지만 power artifact가 불완전한 경우 전체를 단순 성공으로 표시하지 않는다.
 
-## 구현 단계
+## 기존 구현 단계 (완료된 baseline)
+
+아래 Phase 0~7은 2026-08-15에 완료된 direct-PyVISA protocol v2와 GET-midpoint
+baseline을 설명한다. 이 절의 v2/STOP/trigger-origin 표현은 당시 구현 기록이며,
+앞 절의 metadata protocol v3 설계로 교체할 대상이다. 기존 vertical-slice 순서와
+회귀 범위를 보존하기 위해 삭제하지 않는다.
 
 ### Phase 0: 최소 환경 preflight
 
@@ -1062,7 +1504,110 @@ standalone vertical slice에서 검증한 경로를 유지하면서 production �
 3. tag timeline plot 추가
 4. 기존 txt notebook 대신 versioned artifact를 읽는 notebook/script 추가
 
+## Metadata time alignment 구현 단계
+
+### Phase M0: DMM timestamp capability 확정
+
+Test 계획의 GPIB3 hardware characterization을 먼저 수행한다. 이 단계에서 DMM clock
+query/set command, reading metadata raw format, first-reading timestamp precision과
+semantics를 확정한다. 관찰 결과가 계획의 가정과 다르면 parser나 uncertainty model을
+먼저 고치며, GET midpoint로 되돌아가서 통과시키지 않는다.
+
+### Phase M1: DMM raw metadata pipeline
+
+1. `DmmManager`에 metadata mode query/enable/restore와 exact internal file
+   store/upload/delete API를 추가한다.
+2. `now` 중단을 `abort/freeze`, `store/upload`, `drain/compare` 단계로 분리한다.
+3. raw byte writer, SHA-256, strict reading metadata parser를 추가한다.
+4. exception injection test로 각 단계 실패 시 metadata restore, exact-file cleanup과
+   VISA reservation 해제를 검증한다.
+5. 기존 manager/RPyC 경로의 public behavior는 바꾸지 않고 tagged backend만 새 API를
+   사용한다.
+
+### Phase M2: Clock calibration과 time model
+
+1. measurement server wall/monotonic paired anchor utility를 추가한다.
+2. DMM clock multi-round bracket, minimum-bracket selection, UTC conversion과
+   start/end drift 관측을 구현한다.
+3. `TimeAlignment` data model에 raw observations, selected mapping, uncertainty
+   components와 validation result를 모은다.
+4. DMM first-reading timestamp와 interval로 integer-nanosecond sample axis를 만든다.
+5. GET timing은 별도 diagnostic field로 유지하고 metadata path와 섞이지 않는지
+   fake-clock unit test로 확인한다.
+
+### Phase M3: Protocol v3와 Board end sync
+
+1. C client와 tagged server를 함께 HELLO v3로 올린다.
+2. Board realtime/monotonic start/end anchor와 phase가 있는 clock sync frame을
+   추가한다.
+3. `STOP_BEGIN`에서 DMM을 먼저 freeze하고 `STOP_READY` 뒤 end clock sync,
+   `FINALIZE`에서 raw 회수와 artifact 생성을 수행한다.
+4. `STOP_BEGIN` 전후 disconnect, timeout과 duplicate frame의 idempotency/partial
+   finalize를 검증한다.
+5. `dmm_session_stop()` public C API는 그대로 유지하여 TVM host code 변경을
+   최소화한다.
+
+### Phase M4: Schema v2 artifact와 분석 utility
+
+1. `time_alignment.json`, raw file/checksum, metadata-aligned NPZ를 생성한다.
+2. `_materialize_states()`를 metadata sample monotonic axis로 전환한다.
+3. ambiguous boundary flag와 uncertainty-aware summary/filter를 추가한다.
+4. schema-v1 loader는 read-only compatibility로 유지하고 새 run을 schema v1로
+   쓰는 기능은 제공하지 않는다.
+5. raw file에서 NPZ/tag state를 재생성하는 deterministic rebuild test를 추가한다.
+
+### Phase M5: Standalone hardware gate
+
+1. `meas-2`에 같은 measurement_utils revision을 배포하고 `imcflow` conda로 daemon을
+   실행한다.
+2. `petalinux`에서 같은 revision으로 link한 standalone C smoke를 실행한다.
+3. 10 ms controlled tag boundary로 raw/clock/artifact contract를 확인한다.
+4. 1 ms와 100 us로 반복하고 timestamp resolution보다 작은 경계가 ambiguous로
+   표시되는지 확인한다.
+5. 연속 run, 강제 disconnect와 partial finalize를 거쳐 DMM state 누출이 없는지
+   확인한다.
+
+### Phase M6: TVM/runner 통합과 acceptance
+
+1. 검증된 measurement_utils commit을 TVM gitlink로 pin하고 Board/`meas-2`를
+   `pull --ff-only`로 맞춘다.
+2. master runner가 raw/time-alignment/schema-v2 completeness와 checksum을 검사하고
+   모두 SCP하도록 갱신한다.
+3. loader/plot default x-axis를 DMM metadata time으로 전환한다.
+4. one-conv에서 gate를 통과한 뒤 ResNet, KWS, VWW 순으로 acceptance를 수행한다.
+5. 각 run에서 실제 rail/voltage, revision identity, uncertainty와 ambiguous sample
+   비율을 함께 보고한다.
+
 ## Test 계획
+
+### Phase M0: GPIB3 timestamp hardware characterization
+
+TVM이나 Board C code를 변경하기 전에 `ssh meas-2`에서 `imcflow` conda 환경을
+사용하여 Keysight 34465A 한 대만 대상으로 다음을 검증한다. 이 단계는 장비의
+읽기/설정 capability를 확정하는 read-mostly test다. metadata mode처럼 원래 상태로
+돌릴 수 있는 persistent 값은 기존 값을 먼저 저장하고 `finally`에서 복구한다.
+DMM clock은 테스트 목적으로 과거 값으로 복구하지 않으며, 설정 capability 검증이
+필요하면 inventory policy를 명시적으로 켠 뒤 UTC로 맞추고 재검증한다.
+
+1. IDN/options/firmware와 `MMEM:FORM:READ:INF?` support를 기록한다.
+2. DMM date/time query command, 응답 format, timezone 부재, fractional-second
+   precision과 query RTT 분포를 확인한다.
+3. server time을 DMM에 설정할 때 지원되는 최소 단위와 setting latency를 확인한다.
+   clock을 실제 변경했다면 UTC로 맞은 상태를 재확인하고 before/set/after를 남긴다.
+4. 10 ms, 1 ms, 실제 target 100 us interval로 각각 짧게 측정한다.
+5. CSV와 장비가 지원하는 다른 reading file format의 start timestamp precision을
+   비교한다. 더 정밀한 format이 있으면 raw canonical format으로 선택하되 사람이
+   볼 수 있는 CSV도 함께 보존한다.
+6. metadata의 `Start time`이 첫 reading의 integration 시작/중앙/끝 중 어느 쪽인지
+   manual과 controlled delayed-trigger test로 확인한다.
+7. metadata sample interval, `SAMP:TIM?`, reading count와 `DATA:REM?` 값을 비교한다.
+8. session 전후 DMM/server offset으로 짧은 시간 동안의 drift와 반복성을 측정한다.
+9. exact internal test file만 정리되었고 metadata setting이 이전 값으로 복구됐는지
+   query한다.
+
+결과는 실제 command/응답, 최소·중앙·최대 bracket, timestamp resolution과 선택한
+`timestamp_semantics`를 이 문서의 수행 결과에 추가한다. 이 결과 없이 100 us
+sample에 sub-millisecond absolute alignment를 주장하지 않는다.
 
 ### Standalone board-to-DMM gate
 
@@ -1077,11 +1622,18 @@ check만 수행한 뒤 바로 실행하며, production hardening과 TVM 구현 *
 4. `ssh petalinux`에서 standalone C smoke binary를 실행한다.
 5. packet capture 없이도 양쪽 log의 session ID, sequence, client/server
    timestamp로 동일 session임을 대조한다.
-6. 정상 START/TAG/STOP 한 번을 수행한다.
+6. 정상 `START → TAG → STOP_BEGIN → end sync → FINALIZE`를 한 번 수행한다.
 7. 두 번째 실행으로 이전 session의 VISA resource와 reservation이 남지 않았는지
    확인한다.
-8. artifact에서 sample count, ordered tag event, tag state ID를 확인한다.
+8. artifact에서 raw CSV checksum, metadata first-reading time, sample count, ordered
+   tag event, tag state ID와 ambiguous boundary를 확인한다.
 9. 결과를 master로 SCP하고 `activate` 환경에서 loader로 읽는다.
+10. 10 ms interval과 의도적인 50 ms sleep/tag를 먼저 사용하여 예상 sample boundary와
+    계산 결과를 사람이 확인한 뒤 실제 100 us 설정으로 반복한다.
+11. Board/server 및 DMM/server start/end offset, drift, 모든 uncertainty component가
+    artifact에 존재하고 계산 결과가 component 합과 같은지 확인한다.
+12. metadata mode가 이전 값으로 복구되고 DMM internal test file과 reservation이
+    남지 않았는지 확인한다.
 
 이 gate에서는 TVM model, graph executor, IMCFlow kernel을 사용하지 않는다.
 문제가 생기면 세 장비 간 최소 경로만 디버깅할 수 있어야 한다.
@@ -1096,21 +1648,33 @@ check만 수행한 뒤 바로 실행하며, production hardening과 TVM 구현 *
 - session ID/path traversal reject
 - protocol frame partial read/write
 - tag sequence/order/state replay
+- DMM date/time parser와 UTC epoch 변환
+- DMM clock calibration에서 minimum-bracket round 선택과 offset 계산
+- server wall/monotonic paired anchor와 wall-clock step 검출
+- metadata CSV header/reading strict parse와 raw byte checksum
+- metadata interval/count/value mismatch reject
+- metadata enable/restore와 예외 경로의 exact-file cleanup
+- DMM/server start/end drift bound 계산
+- metadata sample time을 server monotonic으로 변환하고 tag state를 materialize
+- uncertainty interval이 겹치는 tag boundary의 ambiguous 표시
+- 실제 hardware request에서 metadata 실패 시 GET midpoint로 fallback하지 않음
 - disconnect 시 partial finalize와 reservation release
 - fake DMM record를 tag state별로 정확히 분류
 - duration budget coverage 부족 시 preflight reject
 - truncated session 판정
-- 기존 bridge/RPyC v1 START/GO test regression
+- 기존 bridge/RPyC v1 START/GO와 tagged artifact schema v1 loader regression
 
 ### C API test
 
-- fake measurement TCP server 대상 START/TAG/STOP
+- fake measurement TCP server 대상 v3 START/TAG/two-phase STOP
 - standalone smoke source가 TVM header/library 없이 ARM용으로 build됨
 - config size/invalid path/error response
 - tag fire-and-forget ordering
 - broken pipe와 timeout
 - inactive session tag no-op
-- clock sync offset 선택
+- start/end clock sync offset 선택과 Board wall/monotonic anchor
+- `STOP_BEGIN` 뒤 DMM freeze ACK를 받은 후 end sync와 `FINALIZE` 순서
+- `STOP_BEGIN` 이후 disconnect 시 server-side partial finalize
 - old `dmm_start_current_now()` compatibility
 
 ### TVM/codegen test
@@ -1140,19 +1704,29 @@ check만 수행한 뒤 바로 실행하며, production hardening과 TVM 구현 *
 - board-routable measurement host와 master SSH alias가 서로 달라도 정상 동작
 - SCP 실패 시 session ID를 포함한 재시도 안내
 - 결과 manifest에 model/board/chip/checkpoint/build metadata 포함
+- raw CSV, checksum, `time_alignment.json`, schema-v2 NPZ completeness 검사
+- plot/summary가 `time_from_trigger_s`가 아니라 metadata-aligned time을 기본 사용
+- ambiguous sample 포함/제외 option이 동일 raw artifact에서 재현 가능한지 검사
 
 ### Hardware acceptance test
 
 standalone gate가 끝난 뒤 TVM 통합 결과만 여기서 검증한다.
 
-1. `DMM_GPIB3`를 선택한 one-conv 측정
-2. tag가 없는 구간도 implicit session tag로 분류되는지 확인
-3. region/tile tag가 trace에서 순서대로 보이는지 확인
-4. ResNet single input 전체 실행 coverage 확인
-5. KWS/VWW dataset 실행에서 sample index tag 확인
-6. timeout/강제 종료 후 partial artifact와 DMM reservation 해제 확인
-7. `meas-2` artifact가 master output으로 자동 회수되는지 확인
-8. power disabled baseline과 accuracy/runtime regression 비교
+1. `DMM_GPIB3`를 선택한 one-conv에서 raw CSV와 metadata-aligned NPZ를 생성한다.
+2. GET midpoint와 metadata first-reading time 차이는 진단값으로 기록하되 tag
+   materialization이 metadata time을 사용했는지 확인한다.
+3. tag가 없는 구간도 implicit session tag로 분류되는지 확인한다.
+4. region/tile tag가 trace에서 순서대로 보이고 경계 sample의 ambiguity가 기대한
+   위치에만 나타나는지 확인한다.
+5. ResNet single input 전체 실행 coverage와 start/end clock drift를 확인한다.
+6. KWS/VWW dataset 실행에서 sample index tag와 장시간 drift bound를 확인한다.
+7. timeout/강제 종료 후 raw/partial artifact, DMM metadata restore와 reservation
+   해제를 확인한다.
+8. `meas-2` artifact가 master output으로 자동 회수되고 raw checksum이 유지되는지
+   확인한다.
+9. power disabled baseline과 accuracy/runtime regression을 비교한다.
+10. daemon을 재시작하지 않고 두 번 연속 실행하여 DMM clock/metadata/internal-file
+    state가 다음 session에 누출되지 않는지 확인한다.
 
 ## 완료 기준
 
@@ -1169,6 +1743,18 @@ standalone gate가 끝난 뒤 TVM 통합 결과만 여기서 검증한다.
 - `DMM_GPIB3`가 tracked config에서 `GPIB1::3::INSTR`로 유일하게 resolve된다.
 - tag key/value를 C 코드 어디서든 추가할 수 있다.
 - 모든 rail sample에 `tag_state_id`가 존재한다.
+- 실제 hardware run의 sample origin은 DMM reading metadata의 first-reading timestamp다.
+  GET midpoint는 진단값이며 silent fallback으로 사용되지 않는다.
+- Board tag, DMM sample과 measurement server clock의 모든 변환, start/end offset,
+  drift와 uncertainty component가 `time_alignment.json`에 저장된다.
+- DMM에서 upload한 raw reading file이 byte 그대로 보존되고, NPZ/plot에 사용한
+  `current_A[]`와 checksum 및 sample count가 일치한다.
+- tag가 어느 sample boundary에 속하는지 uncertainty로 확정할 수 없는 경우
+  `tag_boundary_ambiguous`가 표시된다.
+- metadata mode와 DMM clock persistent setting은 policy대로 관리되고 성공/실패
+  경로 모두에서 이전 metadata mode가 복구된다.
+- 100 us sampling 결과는 실제 확인한 DMM timestamp resolution보다 높은 absolute
+  time precision을 주장하지 않는다.
 - result artifact가 session ID 아래 생성되고 runner로 자동 회수된다.
 - 새 tagged 실행 경로에서 board가 measurement server에 직접 TCP로 접속하고,
   measurement server가 RPyC 없이 로컬 PyVISA를 호출한다.
@@ -1177,26 +1763,47 @@ standalone gate가 끝난 뒤 TVM 통합 결과만 여기서 검증한다.
 - power config가 없을 때 기존 chip execution과 accuracy에 변화가 없다.
 - current retry, warmup, MMIO barrier, chip lock, remote `.env` 구조가 유지된다.
 
-## 권장 commit 순서
+## 권장 추가 commit 순서
+
+아래는 이미 완료된 direct server/tagged session 구현 위에 metadata time model을
+추가하는 순서다. 현재 두 repository의 `feat/power_tagged_measurement` branch를
+그대로 사용하며 새 worktree나 추가 branch를 만들지 않는다. 각 단계는 local test와
+해당 server smoke를 통과한 뒤 push하고, 다른 server에서는 dirty tree가 없는 것을
+확인한 후 `pull --ff-only`로 동기화한다.
 
 ### `measurement_utils` repository
 
-1. `feat(power): add versioned measurement request schema`
-2. `feat(power): add direct PyVISA tagged measurement server`
-3. `feat(capi): add tagged session client and standalone board smoke test`
-4. `test(power): validate standalone board-to-DMM vertical slice`
-5. `feat(power): harden tagged protocol and clock metadata`
-6. `feat(power): materialize tagged rail artifacts`
-7. `test(power): cover direct server, tagging, abort, and legacy regression`
+1. `feat(dmm): capture reading metadata and preserve raw records`
+   - metadata support query, enable/restore, unique internal filename, upload/parser,
+     SHA-256와 exact-file cleanup을 한 commit에 묶는다.
+2. `feat(power): calibrate DMM and server clock domains`
+   - DMM date/time bracket, UTC policy, wall/monotonic anchor, offset/drift/uncertainty
+     model을 추가한다.
+3. `feat(capi): add end clock sync and two-phase measurement stop`
+   - tagged protocol v3, Board clock anchor, `STOP_BEGIN/FINALIZE`, disconnect partial
+     finalize를 구현한다.
+4. `feat(power): align samples from DMM reading metadata`
+   - GET midpoint 대신 metadata first-reading time을 사용하고 schema-v2 NPZ와
+     `time_alignment.json`을 만든다.
+5. `feat(power): report uncertain tag boundaries`
+   - uncertainty component, ambiguous sample flag, summary 포함/제외 계산을 추가한다.
+6. `test(power): verify metadata timing, raw integrity, and clock failure paths`
+   - fake unit/integration, v1 regression, schema-v1 loader, GPIB3 standalone 결과를
+     포함한다.
 
 ### TVM repository
 
-1. `build(imcflow): link a single measurement runtime for Linux hosts`
-2. `feat(imcflow): wrap host executables in whole-run power sessions`
-3. `feat(imcflow): emit generic kernel power tags`
-4. `feat(codegen): manage power requests and fetch session artifacts`
-5. `test(imcflow): verify tagged power build and runner workflows`
-6. `docs(imcflow): document tagged whole-run power measurement`
+1. `build(imcflow): update measurement utils for metadata time alignment`
+   - 검증되어 push된 measurement_utils revision으로 gitlink를 갱신한다.
+2. `feat(codegen): validate and fetch metadata-aligned power artifacts`
+   - runner completeness/checksum/schema 검사와 raw artifact SCP를 추가한다.
+3. `feat(imcflow): analyze power samples on DMM metadata timeline`
+   - loader, filter, summary와 plot의 기본 x-axis 및 ambiguous option을 갱신한다.
+4. `test(imcflow): cover metadata power artifact workflows`
+   - schema v1 호환, schema v2 필수 파일, checksum failure, ambiguity option과
+     power-disabled regression을 검증한다.
+5. `docs(imcflow): document three-clock power sample alignment`
+   - Phase 0/standalone/one-conv 실제 측정값과 운영 절차를 이 문서에 반영한다.
 
 이 순서에서는 `measurement_utils`의 API와 artifact contract를 먼저 고정하고,
 그 commit을 TVM submodule pointer로 반영한 뒤 TVM 통합을 진행한다. 기존
