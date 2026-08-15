@@ -2655,7 +2655,14 @@ class VecOpBlock(ImceCallCodeBlock):
     First op's external inputs and final SEND are handled by RecvSendWrapper.
     """
     comp = SequentialBlock()
+    # RecvSendWrapper RECVs ALL external_in_edges of the composite up front (see
+    # VecOpCompositeHandler: to_process_in_edges = block.external_in_edges). So any
+    # op's external input is ALREADY received by the wrapper -- generating another
+    # RECV here duplicates it (a diverge input feeding two ops, e.g. a residual's
+    # skip tensor consumed by both relu and add, would be RECV'd twice -> send/recv
+    # fifo-count mismatch). Skip every external_in_edge, not just the first op's.
     first_op_edges = set(self.ops[0].in_edges) if self.ops else set()
+    wrapper_recv_edges = set(getattr(self, "external_in_edges", first_op_edges))
     received_edges = set()
 
     for op in self.ops:
@@ -2665,6 +2672,8 @@ class VecOpBlock(ImceCallCodeBlock):
           continue  # Output from prior op -> input to current (no RECV needed)
         if edge in first_op_edges:
           continue  # First op's external inputs handled by RecvSendWrapper
+        if edge in wrapper_recv_edges:
+          continue  # Any external input is already RECV'd by RecvSendWrapper
         if edge in received_edges:
           continue  # Already received
 
