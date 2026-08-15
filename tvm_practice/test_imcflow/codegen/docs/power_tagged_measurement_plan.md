@@ -32,6 +32,60 @@ IMCFlow repository의 RTL이나 runner source를 변경하는 것은 현재 범�
 추후 IMCFlow 변경이 필요해지면 이 두 branch에 섞지 않고 별도 branch와 commit
 계획을 추가한다.
 
+## 수행 결과 (2026-08-15)
+
+이 문서의 Phase 0~7 구현과 standalone/one-conv hardware gate를 완료했다.
+
+- `measurement_utils`에는 RPyC를 거치지 않는 direct-PyVISA v2 server, POSIX C
+  client, 8-round clock sync, process-wide VISA lock/reservation, disconnect partial
+  finalize, canonical JSON/NPZ artifact와 tag-state summary가 구현됐다.
+- TVM에는 single/dataset의 normal/debug 네 host wrapper, 정확히 한 개의 shared
+  C measurement runtime, Linux-only generated kernel tag, runner request/daemon/SCP
+  자동화, summary/filter/plot utility가 구현됐다.
+- master/board/meas-2의 기존 checkout만 재사용했다. 기존 원격 변경은 각각
+  `wip/meas2_pre_power_tagged_20260815`와
+  `wip/petalinux_pre_power_tagged_20260815`에 commit/push하여 보존했다.
+- measurement_utils 구현 및 hardware 수정 revision은
+  `76da38695d9ca986da6e9b1be99c04f72a43c064`이다.
+- `ssh petalinux`, `ssh meas-2`, master `activate`, meas-2 `imcflow` conda,
+  Keysight backend의 `GPIB1::3::INSTR` IDN과 tracked GPIB3 mapping을 확인했다.
+- board standalone C smoke를 실제 GPIB3에서 반복 실행했다. trigger-aligned run
+  `20260815T110050Z_board_c_trigger_aligned_ac8c9ffe_3252672`는 287 samples,
+  0.006 s interval, 8 clock-sync samples, 약 0.214 ms uncertainty, ordered
+  idle/busy/event/clear와 두 active phase state를 기록했다.
+- 2초 강제 종료 session
+  `20260815T110302Z_board_c_forced_disconnect_ac8c9ffe_3267909`는 `partial` artifact를
+  남겼고, 직후 정상 session이 성공하여 DMM/VISA reservation 해제를 확인했다.
+- `scan_gen/scan_reg_files`가 `const_scan_reg_files/0x00`을 가리키고 16개 NPZ의
+  nonzero count가 모두 0임을 확인한 뒤 board에서 zero scan programming을 했다.
+- 실제 `one_conv_small` Linux/ARM 실행
+  `20260815T111838Z_one_conv_small_final_0abc04bd_3377103`이 workload와 측정 모두
+  exit 0으로 끝났고 22개 phase/kernel/stage/tile tag가 순서대로 저장됐다.
+  이 run의 default config `voltage_V=1.0`과 `measured_power` 값은 placeholder이므로
+  current path/tag 검증용이며, 물리 rail power 결과로 인용하면 안 된다.
+- power-disabled one-conv도 정상 종료했다. enabled/disabled raw output은 exact
+  match하지 않았지만 disabled 반복끼리도 906/1024 element가 달라졌고 평균 절대
+  차이가 각각 약 60.93, 60.82로 같아, 이번 한 샘플에서는 power tag 유무보다
+  기존 analog repeat variation이 지배적이었다. 정확도 회귀 결론은 dataset 반복
+  통계로 내려야 한다.
+- 코드 검증은 tagged server 10 tests, legacy bridge/RPC 58 tests, TVM workflow
+  9 tests, 실제 Linux-generated one-conv AArch64 link, single/dataset normal/debug
+  AArch64 link를 통과했다.
+
+최종 runner는 hardware 접근 전에 다음을 모두 fail-fast로 검사한다.
+
+1. master/board/meas-2 tracked working tree가 clean인지
+2. master와 board TVM revision이 같은지
+3. master gitlink/board submodule/meas-2 measurement_utils revision이 같은지
+4. `build_metadata.json`의 clean codegen revision이 현재 revision과 같은지
+5. 배포 binary의 `--power-build-info` clean link revision이 현재 revision과 같은지
+6. daemon HELLO protocol/revision이 같은지
+
+ResNet single-input과 KWS/VWW dataset 장시간 acceptance는 코드나 연결 실패 때문이
+아니라, 사용자가 실제 DMM probe rail 이름과 수동 설정한 voltage를 확정한 별도
+power config로 수행해야 하므로 이 implementation run에서는 실행하지 않았다.
+placeholder default로 장시간 power 값을 생성하지 않는 것이 원칙이다.
+
 두 repository의 작업 branch 이름은 동일하게 맞춘다.
 
 ```text
@@ -144,6 +198,13 @@ standalone 단계에서는 세 장비의 measurement_utils SHA가 모두 같아�
 통합 이후에는 master/board TVM SHA도 같고, master TVM gitlink, board submodule,
 `meas-2` measurement_utils SHA도 모두 같아야 한다. 하나라도 다르면 DMM을
 시작하지 않는다.
+
+revision 숫자만 같고 generated MLF나 배포 binary가 오래된 경우도 막는다.
+codegen은 `build_metadata.json`에 TVM/measurement_utils revision과 tracked-tree
+dirty 여부를 기록한다. CMake는 host executable에 link 시점의 두 revision과
+dirty 여부를 내장하며 binary는 `--power-build-info`로 이를 출력한다. runner는
+master/board/meas-2 tracked tree clean, codegen metadata, deployed binary를 모두
+검사한 뒤에만 daemon/DMM 단계로 진행한다.
 
 revision은 runner log와 `session.json`에 최소 다음 필드로 남긴다.
 
@@ -403,7 +464,14 @@ tracked example config를 다음 위치에 추가한다.
 
 ```text
 tvm_practice/test_imcflow/codegen/power_configs/default.json
+tvm_practice/test_imcflow/codegen/power_configs/short_run.json
 ```
+
+`default.json`은 최대 300초 실행 전체 coverage를 우선하여 50,000 samples에
+대해 약 6 ms interval을 선택한다. `short_run.json`은 최대 5초 실행에서 높은
+시간 해상도를 얻기 위한 one-conv/smoke profile이다. 두 파일 모두
+`voltage_V=1.0`과 `measured_power`가 placeholder이므로 실제 rail/voltage를
+확인한 실험 config를 복사해 값만 명시적으로 바꾼다.
 
 board/chip별 실제 voltage나 선택 rail이 다른 config는 별도 파일로 두고,
 credential이나 server private path는 `.env`에서 관리한다.
@@ -610,8 +678,8 @@ const char* dmm_last_error(void);
 - active session은 process당 하나만 허용한다.
 - STOP은 `now`에서 모든 선택 DMM에 먼저 `ABORt`를 보내고 그 다음 결과를
   순서와 무관하게 회수한다.
-- session 중 socket이 끊기면 server는 DMM을 중단하고 가능한 partial result를
-  `aborted` 상태로 저장한 뒤 reservation을 해제한다.
+- session 중 socket이 끊기면 server는 DMM을 중단하고 가능한 result를 `partial`
+  상태로 저장한 뒤 reservation을 해제한다. 명시적 `ABORT`는 `aborted`다.
 
 ## Protocol v2
 
@@ -622,6 +690,7 @@ const char* dmm_last_error(void);
 ```text
 HELLO 2
 SYNC ...
+CLOCK_SYNC <offset_ns> <best_rtt_ns> <uncertainty_ns> <sample_count>
 START_JSON <payload_length>\n<payload>
 TAG_SET <seq> <client_ns> <key_len> <value_len>\n<key><value>
 TAG_CLEAR <seq> <client_ns> <key_len>\n<key>
@@ -634,6 +703,7 @@ ABORT <reason_length>\n<reason>
 
 ```text
 HELLO_OK 2
+CLOCK_SYNCED
 STARTED <session_id> <resolved_config_length>\n<resolved_config_json>
 STOPPED <session_id> <summary_length>\n<summary_json>
 ERROR <code> <message>
@@ -677,6 +747,8 @@ tag_state_id[]
 - clock sync offset/RTT/uncertainty
 - requested/resolved DMM configuration
 - rail별 실제 sample interval/count/coverage
+- configured buffer coverage와 실제 회수된 `collected_coverage_s`; 완료 session은
+  두 coverage 모두에 대해 truncation 검사를 통과해야 함
 - TVM model, board, chip, checkpoint, git revision 등 runner metadata
 - tag drop/send error 여부
 

@@ -44,6 +44,14 @@ def test_default_config_prepares_now_request(tmp_path):
     assert value["rails"][0]["name"] == "DMM_GPIB3"
     assert value["metadata"]["model"] == "resnet8"
 
+    short_config = json.loads(
+        (CODEGEN_DIR / "power_configs" / "short_run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert short_config["mode"] == "now"
+    assert short_config["duration_budget_s"] == 5
+
 
 def test_disabled_config_does_not_prepare_session(tmp_path):
     config = tmp_path / "disabled.json"
@@ -279,6 +287,7 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert "binary_tvm_git_rev" in runner
     assert "validate-build-identity" in runner
     assert "codegen_tvm_git_rev" in runner
+    assert "tracked repository changes must be committed" in runner
 
     pipeline = (CODEGEN_DIR / "test.py").read_text(encoding="utf-8")
     assert 'metadata["tvm_git_rev"]' in pipeline

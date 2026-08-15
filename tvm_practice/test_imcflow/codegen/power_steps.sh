@@ -45,6 +45,9 @@ power_revision_preflight() {
     local result_ssh="${POWER_RESULT_SSH_HOST:-meas-2}"
     local binary_info=""
     local expected_binary_info=""
+    local master_status=""
+    local board_status=""
+    local server_status=""
 
     tvm_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)" || return 1
     POWER_MASTER_TVM_REV="$(git -C "$tvm_root" rev-parse HEAD)" || return 1
@@ -56,6 +59,18 @@ power_revision_preflight() {
     POWER_BOARD_TVM_REV="${POWER_BOARD_TVM_REV//$'\r'/}"
     POWER_BOARD_MEASUREMENT_REV="${POWER_BOARD_MEASUREMENT_REV//$'\r'/}"
     POWER_SERVER_MEASUREMENT_REV="${POWER_SERVER_MEASUREMENT_REV//$'\r'/}"
+    master_status="$(git -C "$tvm_root" status --porcelain --untracked-files=no)" || return 1
+    board_status="$(scan_ssh "git -C $board_tvm_root status --porcelain --untracked-files=no")" || return 1
+    server_status="$(ssh "$result_ssh" "git -C $meas_repo status --porcelain --untracked-files=no")" || return 1
+    board_status="${board_status//$'\r'/}"
+    server_status="${server_status//$'\r'/}"
+    if [[ -n "$master_status" || -n "$board_status" || -n "$server_status" ]]; then
+        echo "Error: tracked repository changes must be committed before a power run" >&2
+        [[ -n "$master_status" ]] && echo "  master: $master_status" >&2
+        [[ -n "$board_status" ]] && echo "  board: $board_status" >&2
+        [[ -n "$server_status" ]] && echo "  meas-2: $server_status" >&2
+        return 1
+    fi
     if [[ "$POWER_MASTER_TVM_REV" != "$POWER_BOARD_TVM_REV" ]]; then
         echo "Error: TVM revision mismatch before power run" >&2
         echo "  master=$POWER_MASTER_TVM_REV" >&2
