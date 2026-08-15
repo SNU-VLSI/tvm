@@ -124,7 +124,7 @@ power_revision_preflight() {
 power_probe_server() {
     local result_ssh="${POWER_RESULT_SSH_HOST:-meas-2}"
     local meas_python="${POWER_MEASUREMENT_PYTHON:-/home/jaeyongjang/anaconda3/envs/imcflow/bin/python}"
-    ssh "$result_ssh" "$meas_python -c 'import socket; s=socket.create_connection((\"127.0.0.1\", int(\"$POWER_MEASUREMENT_PORT\")), 2); s.sendall(b\"HELLO 2\\n\"); print(s.makefile(\"rb\").readline().decode().strip()); s.close()'" 2>/dev/null
+    ssh "$result_ssh" "$meas_python -c 'import socket; s=socket.create_connection((\"127.0.0.1\", int(\"$POWER_MEASUREMENT_PORT\")), 2); s.sendall(b\"HELLO 3\\n\"); print(s.makefile(\"rb\").readline().decode().strip()); s.close()'" 2>/dev/null
 }
 
 
@@ -149,7 +149,7 @@ power_ensure_server() {
             sleep 0.25
         done
     fi
-    if [[ "$probe" != "HELLO_OK 2 $POWER_MASTER_MEASUREMENT_REV" ]]; then
+    if [[ "$probe" != "HELLO_OK 3 $POWER_MASTER_MEASUREMENT_REV" ]]; then
         echo "Error: tagged measurement server revision/protocol mismatch: ${probe:-unreachable}" >&2
         return 1
     fi
