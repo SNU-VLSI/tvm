@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "dmm_measure.h"
 
@@ -9,6 +10,7 @@
 static int g_power_enabled = 0;
 static int g_power_finished = 0;
 static int g_power_degraded = 0;
+static int g_power_cleanup_started = 0;
 
 
 static void record_tag_result(int result, const char *operation)
@@ -47,6 +49,7 @@ int power_measure_runtime_start(void)
   g_power_enabled = 1;
   g_power_finished = 0;
   g_power_degraded = 0;
+  g_power_cleanup_started = 0;
   if (atexit(power_measure_runtime_atexit) != 0) {
     fprintf(stderr, "[POWER] failed to install finalize handler\n");
     (void)dmm_session_abort("failed to install atexit handler");
@@ -67,6 +70,8 @@ void power_measure_runtime_phase(const char *phase)
   if (!g_power_enabled || g_power_finished)
     return;
   record_tag_result(dmm_tag_set("phase", phase), "phase tag");
+  if (phase != NULL && strcmp(phase, "cleanup") == 0)
+    g_power_cleanup_started = 1;
 }
 
 
@@ -102,7 +107,8 @@ int power_measure_runtime_finish(void)
   if (!g_power_enabled || g_power_finished)
     return 0;
 
-  power_measure_runtime_phase("cleanup");
+  if (!g_power_cleanup_started)
+    power_measure_runtime_phase("cleanup");
   g_power_finished = 1;
   result = dmm_session_stop();
   if (result != 0) {
