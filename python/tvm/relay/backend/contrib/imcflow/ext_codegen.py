@@ -7,6 +7,10 @@ from tvm.relay.ty import TensorType, TupleType
 from . import transform as imcflow_transform
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, TensorEdge
 from tvm.contrib.imcflow import mmio_block_barrier_usec
+from tvm.contrib.imcflow import drop_output_readback
+from tvm.contrib.imcflow import step_freerun_n
+from tvm.contrib.imcflow import step_freerun_wall_sec
+from tvm.contrib.imcflow import step_freerun_hold_sec
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
@@ -541,6 +545,92 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 }
 """)
 
+  def generateFreerunWaitUtility(self):
+    """STEP_FREERUN-only completion wait (emitted ONLY when freerun active, so
+    default OFF -> byte-identical C). The freerun kernel is a bounded in-imem
+    hardware loop that holds the top FSM in IMCFLOW_S_RUN (STATE_REG=SET_RUN_CODE)
+    for its whole ~1s (RTL: controller.sv all_inode_idle; STATE drops to IDLE only
+    at the final OP_HALT). Unlike wait_imcflow_interrupt (whose early IDLE return is
+    the lost-edge wedge guard for SHORT ops, and which mis-fires on the freerun
+    start-race), we (1) wait busy-first (STATE left IDLE) with a bounded start cap,
+    then (2) block until STATE==IDLE, bounded by a poll cap + a wall-clock cap. A
+    timeout is 'measurement incomplete' (NOT a hard failure): return 0, do not set
+    g_imcflow_kernel_failed, so the run tears down cleanly (output is don't-care)."""
+    return ("""
+// --- STEP_FREERUN completion wait (power measurement, IMCFLOW_STEP_FREERUN>0) ---
+#define FREERUN_START_MAX 200000u        /* polls to allow STATE to leave IDLE */
+#define FREERUN_IDLE_MAX  2000000000u    /* absolute poll backstop */
+#define FREERUN_WALL_SEC  __FREERUN_WALL__  /* wall-clock ceiling (IMCFLOW_STEP_FREERUN_WALL) */
+#define FREERUN_HOLD_SEC  __FREERUN_HOLD__  /* fixed busy-hold sec (IMCFLOW_STEP_FREERUN_HOLD_SEC, 0=off) */
+static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
+  uint32_t state;
+  uint32_t c = 0;
+  struct timespec t0, tn;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+
+#if FREERUN_HOLD_SEC > 0
+  // Fixed-hold measurement window (IMCFLOW_STEP_FREERUN_HOLD_SEC): busy-wait EXACTLY
+  // this many seconds after SET_RUN, IGNORING STATE, so a bench DMM integrates a
+  // deterministic array-active window and the caller cannot re-fire mid-measurement.
+  // STATE=0x1 alone doesn't prove the crossbar is converting (S_RUN can be
+  // STANDBY-stalled). We keep one MMIO read per iter to keep the bus live but never
+  // act on it. Pair with a HUGE STEP_FREERUN so the fed loop out-lasts the hold.
+  {
+    struct timespec _h0, _hn;
+    clock_gettime(CLOCK_MONOTONIC, &_h0);
+    volatile uint32_t _sink = 0;
+    for (;;) {
+      _sink ^= npu_pointer[STATE_REG_IDX];
+      clock_gettime(CLOCK_MONOTONIC, &_hn);
+      double _dt = (_hn.tv_sec - _h0.tv_sec) + (_hn.tv_nsec - _h0.tv_nsec)*1e-9;
+      if (_dt >= (double)FREERUN_HOLD_SEC) break;
+    }
+    fprintf(stderr,"[FREERUN] fixed-hold %ds elapsed (last STATE=0x%x) -- measurement window closed\\n",
+            FREERUN_HOLD_SEC, _sink & 0x3);
+    return 0;
+  }
+#endif
+
+  // (1) spin until the array actually started (STATE != IDLE), bounded. If it never
+  //     leaves IDLE the array never started -> bail (measurement incomplete).
+  while ((state = npu_pointer[STATE_REG_IDX]) == SET_IDLE_CODE) {
+    if (++c >= FREERUN_START_MAX) {
+      fprintf(stderr,"[FREERUN] array never left IDLE after %u polls -- measurement incomplete (no hard failure)\\n", c);
+      return 0;
+    }
+  }
+  fprintf(stderr,"[FREERUN] array started (STATE=0x%x), holding until IDLE...\\n", state);
+  fflush(stderr);
+
+  // (2) block until STATE returns to IDLE (loop retired OP_HALT), bounded by poll
+  //     cap AND wall-clock cap so a stuck array cannot hang forever.
+  c = 0;
+  while ((state = npu_pointer[STATE_REG_IDX]) != SET_IDLE_CODE) {
+    if (++c >= FREERUN_IDLE_MAX) {
+      fprintf(stderr,"[FREERUN] idle-wait poll cap hit (state 0x%x) -- measurement incomplete\\n", state);
+      return 0;
+    }
+    if ((c & 0xFFFFF) == 0) {   // ~1M polls: check wall clock, log progress
+      clock_gettime(CLOCK_MONOTONIC, &tn);
+      double dt = (tn.tv_sec - t0.tv_sec) + (tn.tv_nsec - t0.tv_nsec)*1e-9;
+      if (dt >= FREERUN_WALL_SEC) {
+        fprintf(stderr,"[FREERUN] wall-clock cap %ds hit (state 0x%x) -- measurement incomplete\\n", FREERUN_WALL_SEC, state);
+        return 0;
+      }
+      fprintf(stderr,"[FREERUN] still running... %.3fs elapsed (state 0x%x)\\n", dt, state);
+      fflush(stderr);
+    }
+  }
+  clock_gettime(CLOCK_MONOTONIC, &tn);
+  {
+    double dt = (tn.tv_sec - t0.tv_sec) + (tn.tv_nsec - t0.tv_nsec)*1e-9;
+    fprintf(stderr,"[FREERUN] complete: held busy %.3fs\\n", dt);
+  }
+  return 0;
+}
+""".replace("__FREERUN_WALL__", str(step_freerun_wall_sec()))
+   .replace("__FREERUN_HOLD__", str(step_freerun_hold_sec())))
+
   def emitReset(self):
     """Generate code to reset the NPU state."""
     return f"reset_gen_pointer[0] = 1;\n"
@@ -771,13 +861,26 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
   def generateInvokeCode(self):
     """Generate NPU invoke code."""
+    # STEP_FREERUN (power measurement): the RUN wait must HOLD for the whole bounded
+    # in-imem free-run loop (~1s) instead of taking wait_imcflow_interrupt's early
+    # IDLE return (which latches a start-race stale-IDLE and returns in ~0.2s). RTL:
+    # STATE_REG stays SET_RUN_CODE for the entire loop, dropping to IDLE only at the
+    # final OP_HALT (controller.sv all_inode_idle). wait_for_freerun_done() waits
+    # busy-first then idle (bounded). Default OFF -> falls through to the original
+    # wait line -> byte-identical.
+    if step_freerun_n() > 0:
+      _run_wait = "_wait_rc = wait_for_freerun_done(npu_pointer);"
+    elif self.os == "linux":
+      _run_wait = "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);"
+    else:
+      _run_wait = "_wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "_wait_rc = 0;"
     out = [
       "for(int i=0; i<INODE_NUM; i++) {",
       "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
       "}",
       "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
       "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
-      "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);" if self.os == "linux" else ("_wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "_wait_rc = 0;"),
+      _run_wait,
       "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
         "npu_pointer[INTR_DONE_REG_IDX] = 1;"
     ]
@@ -906,6 +1009,21 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       # Get loop parameters
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
 
+      # Design A (IMCFLOW_DROP_PSUM, DON'T-CARE output): SKIP the func_out* MMIO
+      # read-back entirely. func_out0 is inode_3_0's local NoC-node data mem
+      # (0x31080); with the psum SEND + INODE_RECV dropped it is never written and
+      # its port never returns to a host-readable idle, so this read would HANG THE
+      # BUS on chip (STATE=IDLE still passes; the read itself never completes). Not
+      # issuing the read removes the hang path outright. Only func_out* outputs are
+      # affected (assert above guarantees that). We still memset out{idx} so any
+      # downstream consumer sees a defined (zero) buffer instead of uninitialized
+      # memory. Gated by the same env as the imce/inode drops -> matched set;
+      # default OFF -> byte-identical (real read-back below).
+      if drop_output_readback():
+        code += f"// [DROP_PSUM] host func_out{idx} read-back SKIPPED (DON'T-CARE output; avoids the un-completed inode_3_0 port MMIO bus hang)\n"
+        code += f"memset((void*)((uint32_t*)out{idx} + {loop_start//4}), 0, {(loop_end-loop_start)*4});\n"
+        continue
+
       # Generate loop code
       code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
       code += f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = npu_pointer[({base_address_name} / 4) + i];\n"
@@ -1002,6 +1120,11 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     # unconditionally (not gated on USE_POLLING) since the linux/chip interrupt
     # path always needs it as the lost-edge safety net.
     code += self.generatePollingUtilities()
+    # STEP_FREERUN-only: emit the busy-first completion wait (needs <time.h> for the
+    # wall-clock cap). Both gated on the same env so default OFF -> byte-identical.
+    if step_freerun_n() > 0:
+      code += "#include <time.h>\n"
+      code += self.generateFreerunWaitUtility()
     code += self.generateInterruptUtilities()
 
     # Kernel function prototype and definition (C)

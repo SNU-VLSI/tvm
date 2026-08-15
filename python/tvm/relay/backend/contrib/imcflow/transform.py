@@ -3746,6 +3746,30 @@ class AnnotGenerator:
             # All branches in same region -> deadlock risk
             debug_print(f"[ConvergeCheck] All branches in same region - DEADLOCK RISK")
 
+            # Residual-in-region lever (IMCFLOW_RESIDUAL_IN_REGION, default OFF):
+            # normally we FORCE a new region here to avoid an in-region converge
+            # rendezvous deadlock, which round-trips the skip tensor through inode
+            # host memory across the boundary. When the lever is on AND the merged
+            # region (the shared branch region + this converge node) still fits the
+            # IMCE cap, keep the residual add in-region instead. (The rendezvous
+            # must then be made race-free via a dedicated skip flag -- a later
+            # step; this step only stops forcing the split so we can observe where
+            # codegen first needs that.) OFF -> unchanged -> byte-identical.
+            if imcflow.residual_in_region_mode():
+              shared_region = unique_regions[0]
+              merged_cost = self.getRegionSize(shared_region) + self.getCost(node)
+              if merged_cost <= ImcflowDeviceConfig.IMCE_NUM:
+                debug_print(f"[ConvergeCheck] RESIDUAL_IN_REGION: keeping converge "
+                            f"in-region (merged cost {merged_cost} <= "
+                            f"{ImcflowDeviceConfig.IMCE_NUM})")
+                self._record_converge_summary(node, diverge_node, converge_type,
+                                              branch_info_list, True,
+                                              "residual_in_region (split suppressed)")
+                return False, False
+              else:
+                debug_print(f"[ConvergeCheck] RESIDUAL_IN_REGION: merged cost "
+                            f"{merged_cost} > cap -> fall back to forced split")
+
             if IsComposite:
               debug_print(f"[ConvergeCheck] Recording composite for deferred split")
               needs_split = self._record_composite_split(node, candidate_regions)

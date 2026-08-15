@@ -564,6 +564,30 @@ class RTLRunner(ImcFlowRunner):
         from tvm.contrib.imcflow import get_imcflow_bugfix_mode
         bugfix_mode = get_imcflow_bugfix_mode()
         print(f"Checking RTL build manifest (IMCFLOW_BUGFIX={bugfix_mode})")
+
+        # Cross-repo-skew fallback: the manifest-managed `make ensure-compiled`
+        # target (added TVM-side in 23f83656b) does not exist in the current
+        # imcflow RTL checkout's runner Makefile. When it is absent AND a
+        # pre-built simv is already present in this runner dir, reuse the existing
+        # simv (pre-rebase behavior) instead of failing. The CALLER must point
+        # IMCFLOW_RTL_RUNNER_DIR at a runner whose simv matches the requested
+        # BUGFIX mode (e.g. gem5_bugfixoff_wt for BUGFIX=off). Normal manifest
+        # builds are unaffected when the target exists.
+        _has_ensure = False
+        try:
+            _q = subprocess.run(
+                ["make", "-n", "ensure-compiled", f"IMCFLOW_BUGFIX={bugfix_mode}"],
+                cwd=self.directory_path, capture_output=True, text=True, timeout=60)
+            _has_ensure = (_q.returncode == 0)
+        except Exception:
+            _has_ensure = False
+        _prebuilt_simv = os.path.join(self.directory_path, "build", "simv_imcflow_gem5")
+        if not _has_ensure and os.path.exists(_prebuilt_simv):
+            print(f"[RTLRunner] 'make ensure-compiled' unavailable (imcflow repo not "
+                  f"manifest-updated); reusing pre-built simv at {_prebuilt_simv}. "
+                  f"Ensure it matches IMCFLOW_BUGFIX={bugfix_mode}.")
+            return
+
         compile_command = [
             "direnv", "exec", ".", "make", "ensure-compiled",
             f"IMCFLOW_BUGFIX={bugfix_mode}",

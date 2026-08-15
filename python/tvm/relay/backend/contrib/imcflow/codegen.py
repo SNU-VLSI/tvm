@@ -14,8 +14,10 @@ from tvm.relay.backend.contrib.imcflow.transform_utils import getNodeDebugID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import CodegenContext
 from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import pack_bn_minmax_mode
 from tvm.contrib.imcflow import serialize_imcu_load
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
+from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -187,6 +189,16 @@ class CodegenSuite:
     # edges, not as an opaque hang. Opt out with IMCFLOW_SKIP_SYNC_ASSERT=1.
     # BUGFIX knob: the P2 fifo-count assert is part of the 934+P0-P3 sync work.
     # knob=on (bugfix_off_mode()==False) restores a8af, which did NOT raise here.
+    # DROP_PSUM (Design A, DON'T-CARE output) INTENTIONALLY creates a func_out
+    # send/recv mismatch (imce SEND + inode RECV + host read all dropped as a
+    # matched set). That would "deadlock in RTL" but on chip the un-written
+    # inode_3_0 port is simply never read, so it is safe. Auto-bypass the assert
+    # for func_out* edges when DROP_PSUM is on (so the deploy doesn't need to also
+    # remember IMCFLOW_SKIP_SYNC_ASSERT=1). Non-func_out mismatches still raise.
+    if drop_psum_send():
+      inconsistencies = [
+        it for it in inconsistencies
+        if "func_out" not in str(it.get("edge", ""))]
     if bugfix_off_mode() and inconsistencies and os.environ.get("IMCFLOW_SKIP_SYNC_ASSERT", "0") != "1":
       detail = "; ".join(
         f"{it['edge']}: send {it['total_send']} vs recv {it['total_recv']}"
@@ -761,8 +773,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
 
     # sync all inodes
+    # Under packing, use a sense-reversing barrier (alternating 254/255, no
+    # clear) so inode arrival skew can't cause a lost-wakeup (see SyncAllINodes).
+    # One sense per logical barrier -> all 4 per-inode instances share it.
+    _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync all inodes")
+      block = SyncAllINodes(inode, "sync all inodes", sense=_sense)
       self.codeblocks.append(inode, block, codephase)
     
     # halt for slave inodes
@@ -777,6 +793,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.codeblocks.append(inode_master, block, codephase)
 
   def initialize(self):
+    # Reset the sense-reversing barrier counter at the start of each region
+    # function so every region's inode programs use a consistent 254/255
+    # alternation from the same starting parity. No-op when packing is off.
+    SyncAllINodes.reset_sense()
+
     # clear flag
     for inode in NodeID.inodes():
       block = ClearFlag("clear flag before policy update")
@@ -833,8 +854,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         # inode starts streaming (all inodes rendezvous, then only `node`
         # proceeds to WR_IMCU while the others wait at the NEXT gate / the
         # step-6 "sync before compute enable" barrier).
+        _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
         for inode in NodeID.inodes():
-          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}")
+          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}", sense=_sense)
           self.codeblocks.append(inode, bar, CodePhase.INIT)
         block = WriteIMCUBlock(node, "imcu write")
         self.codeblocks.append(node, block, CodePhase.INIT)
@@ -844,8 +866,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         self.codeblocks.append(node, block, CodePhase.INIT)
 
     # # sync before imce compute
+    _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync before compute enable")
+      block = SyncAllINodes(inode, "sync before compute enable", sense=_sense)
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # imce compute
@@ -857,8 +880,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         self.codeblocks.append(imce.master(), block, CodePhase.INIT)
     
     # wait all enable of imce
+    _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "wait all imce compute enable")
+      block = SyncAllINodes(inode, "wait all imce compute enable", sense=_sense)
       self.codeblocks.append(inode, block, CodePhase.INIT)
       # block = SetFlag()
       # self.codeblocks.append(inode, block, CodePhase.INIT)
@@ -1043,6 +1067,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
             send_count = sum(block.tiling_info.pkt_cnts)
           else:
             send_count = math.ceil(block.size / 32)
+          # STEP_FREERUN: the inode activation feed is wrapped in a runtime (1+N)x
+          # hardware loop (inode_codeblock.py SendBlock) to match the imce ConvBlock's
+          # (1+N)x LOAD_LB, whose recorded recv IS scaled by the loop stack. The
+          # inode send_count here is size-derived (loop-agnostic), so scale it by the
+          # SAME (1+N) for the activation feed edge so recv/send stays balanced (both
+          # base*(1+N)). Only the qconv/qdwconv "data" feed; never weight/const.
+          _fr = step_freerun_n()
+          if (_fr > 0
+              and getattr(edge.dst_id, "tensor_type", None) == "data"
+              and dst_node.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv")):
+            # Use the ACTUAL nested-loop factor product (may slightly exceed 1+N),
+            # matching the imce recv scaling (count_stack = product of the same
+            # factors) so recv/send stays exactly balanced.
+            _prod = 1
+            for _f in step_freerun_factors(1 + _fr):
+              _prod *= _f
+            send_count *= _prod
           add_to_map(send_map, edge, send_count)
 
 

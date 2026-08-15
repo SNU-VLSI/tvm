@@ -421,6 +421,41 @@ def make_qnn_dense_pattern():
 
     return "imcflow.qnn.dense", pat
 
+def pack_bn_minmax_mode() -> bool:
+  """IMCE-packing lever (IMCFLOW_PACK_BN_MINMAX): fold consumer-side BN/minmax
+  into the qconv composite postop chain so they render as same-IMCE post_ops
+  (see BN_MINMAX_PACKING_HANDOFF.md). Read at module import time -- the
+  registered pattern tables are constructed once when this module loads, so
+  set the env var before starting python. Default OFF -> tables unchanged ->
+  codegen byte-identical to stock. Defined here (not tvm.contrib.imcflow,
+  which re-exports it) because contrib.imcflow imports this module.
+  """
+  import os
+  return os.environ.get("IMCFLOW_PACK_BN_MINMAX", "").strip().lower() in (
+    "1", "on", "true", "yes")
+
+
+def residual_in_region_mode() -> bool:
+  """Residual-in-region lever (IMCFLOW_RESIDUAL_IN_REGION): keep a residual
+  (skip-connection) converge ADD in the SAME region as its producer convs
+  instead of forcing a new region at the converge point.
+
+  Today partitionRound FORCES a new region whenever a converge point's branches
+  are unbalanced and both branch tails are in one region (transform.py
+  _handle_unbalanced_converge, "deadlock risk"), which pushes the residual add
+  into its own region and round-trips the skip tensor through inode host memory
+  across the boundary. When this lever is on (and the merged region fits the
+  IMCE cap), the split is suppressed so the residual is resolved in-region with
+  the inode buffering the skip tensor.
+
+  Read at pass time (not import time). Default OFF -> partitioning unchanged ->
+  codegen byte-identical to stock.
+  """
+  import os
+  return os.environ.get("IMCFLOW_RESIDUAL_IN_REGION", "").strip().lower() in (
+    "1", "on", "true", "yes")
+
+
 def makeBNPattern(data):
   gamma = is_constant()
   beta = is_constant()
@@ -697,11 +732,37 @@ def pattern_table():
       # for i in range(1, 10):
       #   out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
       # BN is separated from Conv composite and integrated with min_max_quant as imcflow.bn-minmax
-      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeMulPattern(data)
+      # -- unless IMCFLOW_PACK_BN_MINMAX is on: then BN/minmax rejoin the conv
+      # postop chain so they render as same-IMCE post_ops (IMCE packing).
+      # merge_composite_ops runs AFTER split_conv_to_atomic, so OC-split BN
+      # (which sits after concat, a pattern terminal) is never absorbed.
+      _pack_bn_minmax = pack_bn_minmax_mode()
+      # base = stock 5-op chain; the split/concat terminals stay attached to
+      # base ONLY. Packed chains (containing bn/minmax) must NOT absorb a
+      # trailing split: a tuple-returning composite breaks layout legalize
+      # (TupleGetItem input must be a tuple or split CALL, not a composite).
+      base = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeMulPattern(data)
+      if _pack_bn_minmax:
+        # Packed BN/minmax fusion is LINEAR-only: conv -> [linear unary]* -> bn
+        # -> minmax?. We deliberately do NOT let the packed tail continue into
+        # add/multiply. A residual block is conv -> bn -> multiply(skip,scale)
+        # -> add(skip): absorbing bn here would drag the converging multiply+add
+        # into the conv IMCE (composite qconv_bn_multiply_add). That fuses a
+        # 2-input (skip-path NoC RECV) converging op into the conv's per-STEP
+        # output rhythm, which produces X on the packed SEND under BUGFIX-off
+        # (imce_1_1 region2). Converging-add fusion is a separate, harder change
+        # (handoff direction 4); keep it out. bias_add/relu/divide ARE linear
+        # unary and safe to precede bn.
+        lin = makeBiasAddPattern(data) | makeReluPattern(data) | makeDivPattern(data)
+        packed_pre = data | lin
+        for _ in range(1, 5):
+          packed_pre = packed_pre | makeBiasAddPattern(packed_pre) | makeReluPattern(packed_pre) | makeDivPattern(packed_pre)
+        bn = makeBNPattern(packed_pre)
+        full = bn | makeMinMaxQauntPattern(bn) | makeMinMaxQauntPattern(packed_pre)
       for i in range(1, 10):
-        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeMulPattern(out)
+        base = base | makeBiasAddPattern(base) | makeAddPattern(base) | makeReluPattern(base) | makeDivPattern(base) | makeMulPattern(base)
 
-      out = out | makeSplitPatern(out) | imcflow_concat(out)
+      out = (full | base if _pack_bn_minmax else base) | makeSplitPatern(base) | imcflow_concat(base)
 
       return out
 
@@ -787,11 +848,29 @@ def pattern_table_for_partition():
         data = is_op(conv_type)(data1, weight)
 
       # BN is separated from Conv composite and integrated with min_max_quant as imcflow.bn-minmax
-      out = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeMulPattern(data)
+      # -- unless IMCFLOW_PACK_BN_MINMAX is on (see full pattern_table above);
+      # keep both tables consistent so partitionRound groups conv+bn+minmax
+      # into the same region that the final merge will fuse.
+      _pack_bn_minmax = pack_bn_minmax_mode()
+      # base = stock 5-op chain; the split/concat terminals stay attached to
+      # base ONLY. Packed chains (containing bn/minmax) must NOT absorb a
+      # trailing split: a tuple-returning composite breaks layout legalize
+      # (TupleGetItem input must be a tuple or split CALL, not a composite).
+      base = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeMulPattern(data)
+      if _pack_bn_minmax:
+        # LINEAR-only packed tail (see full pattern_table for rationale): conv ->
+        # [bias_add|relu|divide]* -> bn -> minmax?. No add/multiply in the packed
+        # tail -> residual converging blocks stay OUT of the conv composite.
+        lin = makeBiasAddPattern(data) | makeReluPattern(data) | makeDivPattern(data)
+        packed_pre = data | lin
+        for _ in range(1, 5):
+          packed_pre = packed_pre | makeBiasAddPattern(packed_pre) | makeReluPattern(packed_pre) | makeDivPattern(packed_pre)
+        bn = makeBNPattern(packed_pre)
+        full = bn | makeMinMaxQauntPattern(bn) | makeMinMaxQauntPattern(packed_pre)
       for i in range(1, 10):
-        out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeDivPattern(out) | makeMulPattern(out)
+        base = base | makeBiasAddPattern(base) | makeAddPattern(base) | makeReluPattern(base) | makeDivPattern(base) | makeMulPattern(base)
 
-      out = out | makeSplitPatern(out) | imcflow_concat(out)
+      out = (full | base if _pack_bn_minmax else base) | makeSplitPatern(base) | imcflow_concat(base)
 
       return out
 

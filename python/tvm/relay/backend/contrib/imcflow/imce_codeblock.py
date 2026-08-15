@@ -9,7 +9,7 @@ from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import bugfix_off_mode
-from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
+from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every, step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import multiblock_fusedadd_bare, multiblock_fusedadd_safe, SAFE_TOKEN_BASE
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
@@ -159,6 +159,29 @@ class ImceCallCodeBlock(ImceCodeBlock):
       return UniqueVar((edge, i))
     else:
       return UniqueVar(edge)
+
+  def effective_blocks(self) -> int:
+    """Number of blocks a fused post-op must actually compute.
+
+    In a ConvBlock post_op chain, the first post-op (e.g. BatchNormBlock) fixes
+    its output to `real_blocks` = ceil(out_channels/16) valid blocks (2 for
+    OC=32), even though num_blocks is padded to the producer's GRANULARITY (4).
+    A downstream post-op that renders num_blocks (4) iterations would read
+    blocks [real_blocks..num_blocks) that its predecessor never produced ->
+    undefined vars -> X-propagation. So a fused post-op walks back up the
+    prev_op chain and uses the earliest `real_blocks` it finds; standalone ops
+    (prev_op is None) keep num_blocks, so non-fused / lever-OFF output is
+    unchanged.
+    """
+    if self.prev_op is None:
+      return self.num_blocks
+    node = self.prev_op
+    while node is not None:
+      rb = getattr(node, "real_blocks", None)
+      if rb is not None:
+        return rb
+      node = getattr(node, "prev_op", None)
+    return self.num_blocks
 
   @property
   def num_blocks(self) -> int:
@@ -451,11 +474,15 @@ class RecvConstBlock(ImceCodeBlock):
     SCAN = "SCAN"
     NORMAL = "NORMAL"
 
-  def __init__(self, in_edge: TensorEdge, type : ConstType, annotation: str = "", recv_count: int = None):
+  def __init__(self, in_edge: TensorEdge, type : ConstType, annotation: str = "", recv_count: int = None, builder=None):
     super().__init__(annotation)
     self.in_edge = in_edge
     self.type = type
     self.recv_map = {}
+    # builder carries the pair_manager; used only to pace the packed-postop
+    # const RECVs (IMCFLOW_PACK_BN_MINMAX) in lockstep with the inode SEND
+    # rendezvous. None -> no window (default / OFF -> byte-identical).
+    self.builder = builder
 
     te_info = DevConfig().get_tensor_edge_info_with_id_dir(
         self.in_edge.dst_id, "in")  # a hack to get the tensor edge info
@@ -476,13 +503,36 @@ class RecvConstBlock(ImceCodeBlock):
     else:
       self.recv_count = math.ceil(size / 32.0)  # recv operates on 32-byte word
 
+  def _packed_postop_inode(self):
+    """Return the sending inode hw node if this const RECV must be paced for
+    the IMCFLOW_PACK_BN_MINMAX capacity fix, else None (bare -> byte-identical).
+    Mirrors the inode SendBlock's packed_postop_const_endpoints gate."""
+    pm = getattr(self.builder, "pair_manager", None) if self.builder is not None else None
+    if pm is None:
+      return None
+    eps = pm.packed_postop_const_endpoints(self.in_edge)
+    if eps is None:
+      return None
+    inode_hw, _imce_hw = eps
+    return inode_hw
+
   def _render(self) -> str:
     owner_edge = self.te_info.owner
     add_to_map(owner_edge, RecvSendNum("recv",  self.recv_count), is_send=False)
+    # Packed-postop const pacing: wrap each RECV in a flag-1 window that
+    # rendezvouses with the inode's per-word pre-send handshake so the inode
+    # cannot outrun this imce's drain (prevents NoC send-FIFO overflow ->
+    # region2 deadlock). Only fires under IMCFLOW_PACK_BN_MINMAX for the folded
+    # BN/mult/add const operands; None otherwise -> no window (OFF unchanged).
+    pace_inode = self._packed_postop_inode()
     code = TextBlock("")
     for i in range(self.recv_count):
       var = UniqueVar((self.in_edge, i))
       var.set_static()
+      if pace_inode is not None:
+        code += "__builtin_IMCE_SETFLAG(1);"
+        code += f"__builtin_IMCE_STANDBY({pace_inode.value}, 1);"
+        code += "__builtin_IMCE_SETFLAG(0);"
       if self.type == RecvConstBlock.ConstType.MIN:
         code += f"__builtin_IMCE_RECV_MIN({self.te_info.fifo_id});"
       elif self.type == RecvConstBlock.ConstType.MAX:
@@ -592,7 +642,21 @@ class VecBlock(ImceCallCodeBlock):
     1. Both operands from in_edges (no constant)
     2. One operand from in_edges, one constant
     3. One operand from prev_op (VecOpBlock chaining), one constant
+    Plus an internal-converge case (see below).
     """
+    # Internal-converge case (IMCFLOW_RESIDUAL_IN_REGION): an inner op whose
+    # operands are BOTH other inner ops of the same composite (e.g. residual
+    # add(BN_out, mult_out)). These have no TensorEdge (intra-composite Call->Call
+    # links are not materialized) and no const, so the edge/prev_op paths yield
+    # empty operands. Use the producer op blocks resolved in VecOpBlock.__init__.
+    # Only fires when >=2 internal producers resolved -> unreachable for linear /
+    # OFF composites (which have <=1 internal-Call operand per op).
+    internal_ops = getattr(self, "_internal_operand_ops", None)
+    if internal_ops is not None and self.const_edge is None:
+      resolved = [op for op in internal_ops if op is not None]
+      if len(resolved) >= 2:
+        return [UniqueVar((op, i)) for op in internal_ops if op is not None]
+
     # Build variables from non-constant edges only
     non_const_edges = [edge for edge in self.in_edges if edge != self.const_edge]
     var_ins_from_edges = [self._make_unique_input_var_for_post_op(
@@ -621,7 +685,10 @@ class VecBlock(ImceCallCodeBlock):
     """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
 
-    for i in range(self.num_blocks):
+    # Fused post-op: only the predecessor's real_blocks are valid (see
+    # effective_blocks). Standalone (prev_op None) -> num_blocks, unchanged.
+    n = self.effective_blocks()
+    for i in range(n):
       var_ins = self._build_var_ins(i)
       var_o = UniqueVar((self, i))
       var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
@@ -669,7 +736,8 @@ class MultlBlock(VecBlock):
     # SW fix enabled: use MultlSWFixOp
     code = TextBlock("")
 
-    for i in range(self.num_blocks):
+    n = self.effective_blocks()  # fused -> predecessor real_blocks; else num_blocks
+    for i in range(n):
       var_ins = self._build_var_ins(i)
       var_o = UniqueVar((self, i))
       code += MultlSWFixOp(var_ins[0], var_ins[1], var_o, (self, i), self.imm_value)
@@ -995,6 +1063,15 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     if channels is None:
       channels = 64  # Default
 
+    # Fused post-op: the predecessor only produced real_blocks valid outputs
+    # (BN over an OC=32 conv -> 2 blocks, not the GRANULARITY-padded 4). Cap the
+    # channel span to that so we don't MM_QUANT undefined input blocks -> X
+    # (blocks [real..num] were never written). Standalone (prev_op None) keeps
+    # the shape-derived channels, so non-fused / lever-OFF output is unchanged.
+    if self.prev_op is not None:
+      eff = self.effective_blocks()
+      channels = min(channels, eff * 16)
+
     #TODO: maybe we need to clear qreg before
     src_masks = [min(15, channels - i - 1) for i in range(0, channels, 16)]
 
@@ -1183,6 +1260,26 @@ class ConvBlock(ImceCallCodeBlock):
     for op in self.post_ops:
       op.prev_op = prev
       prev = op
+
+    # Propagate the fused chain's valid-block count to the SEND block. A post-op
+    # like BatchNormBlock fixes real_blocks = ceil(OC/16) (2 for OC=32) while
+    # num_out_blocks stays GRANULARITY-padded (4). The final post_op is what
+    # RecvSendWrapper SENDs; without a real_blocks it would emit num_out_blocks
+    # real SENDs, but only effective_blocks() of its compute vars are defined ->
+    # the tail SENDs reference undefined vars -> X. Stamp the chain's
+    # effective real_blocks onto the last post_op so RecvSendWrapper's existing
+    # dummy-0 burst-pad (i >= real_blocks -> SEND 0) kicks in. Only when the
+    # chain actually carries a real_blocks (fused BN/minmax packing); otherwise
+    # untouched, so non-packed / lever-OFF output is byte-identical.
+    if self.post_ops:
+      chain_real = None
+      for op in self.post_ops:
+        rb = getattr(op, "real_blocks", None)
+        if rb is not None:
+          chain_real = rb if chain_real is None else min(chain_real, rb)
+      last = self.post_ops[-1]
+      if chain_real is not None and getattr(last, "real_blocks", None) is None:
+        last.real_blocks = chain_real
 
     # Marker A (RTL-derived boundary-STEP reorder) discriminator.
     # has_noc_rhs == True when a post_op (e.g. fused add) takes one operand over
@@ -1446,7 +1543,18 @@ class ConvBlock(ImceCallCodeBlock):
                                   self._build_loop_body_a8af(pat["pattern"]),
                                   f"{tag}_col_group{inner_idx}")
          outer_body.add(inner_loop)
-      outer_loop = SimpleFor(row_pat["count"], outer_body, f"{tag}_outer_loop(iterate row offset)")
+      # STEP_FREERUN (a8af path, mirrors _build_structure): lengthen the balanced
+      # row loop by (1+N) rather than adding an outer wrap (which deadlocks the
+      # scalar-flag rendezvous). N=0 -> unchanged.
+      _fr = step_freerun_n()
+      _rows = row_pat["count"] * (1 + _fr) if _fr > 0 else row_pat["count"]
+      if _fr > 0 and _rows > 16384:
+        _wrapped = outer_body
+        for _lvl, _f in enumerate(reversed(step_freerun_factors(_rows))):
+          _wrapped = SimpleFor(_f, _wrapped, f"{tag}_outer_loop_fr{_lvl}")
+        outer_loop = _wrapped
+      else:
+        outer_loop = SimpleFor(_rows, outer_body, f"{tag}_outer_loop(iterate row offset)")
       root.add(outer_loop)
 
     if self.remain > 0:
@@ -1456,6 +1564,9 @@ class ConvBlock(ImceCallCodeBlock):
       add_to_map(self.load_edge_info.owner, RecvSendNum("recv", self.remain*4), is_send=False)
       root.add(tail_loop)
 
+    # STEP_FREERUN is applied by LENGTHENING the rendezvous-balanced row loop above
+    # (search "IMCFLOW_STEP_FREERUN"), NOT by wrapping the whole conv here -- a new
+    # outer back-edge slips the scalar-flag toggle phase and deadlocks (chip-proven).
     return root
 
   def _build_loop_body(self, recv_count: int, skip_presend: bool = False,
@@ -2035,9 +2146,27 @@ class ConvBlock(ImceCallCodeBlock):
                                 f"{tag}_col_group{inner_idx}")
          outer_body.add(inner_loop)
 
-      outer_loop = SimpleFor(row_pat["count"], outer_body, f"{tag}_outer_loop(iterate row offset)")
+      # Power-measurement lever (IMCFLOW_STEP_FREERUN): LENGTHEN the already-
+      # rendezvous-balanced row loop by (1+N) instead of wrapping the whole conv in
+      # a NEW outer loop. The per-LOAD_LB SETFLAG/STANDBY toggle stream (paired 1:1
+      # with the inode feed by pair_manager) must stay MONOTONIC -- a hand-added
+      # outer back-edge that the sync bookkeeping doesn't know about slips the
+      # single scalar flag reg's toggle phase by one at the rep seam -> lost-wakeup
+      # STANDBY deadlock (chip-confirmed: N=1 stalls same as N=huge). Multiplying
+      # the native row trip keeps ONE continuous toggle stream (same structure the
+      # freerun-OFF multi-pixel loop proves clean), just longer. Nest into <=16384
+      # factors for the IMCE 14-bit hardware-loop limit. N=0 -> unchanged.
+      _fr = step_freerun_n()
+      _rows = row_pat["count"] * (1 + _fr) if _fr > 0 else row_pat["count"]
+      if _fr > 0 and _rows > 16384:
+        _wrapped = outer_body
+        for _lvl, _f in enumerate(reversed(step_freerun_factors(_rows))):
+          _wrapped = SimpleFor(_f, _wrapped, f"{tag}_outer_loop_fr{_lvl}")
+        outer_loop = _wrapped
+      else:
+        outer_loop = SimpleFor(_rows, outer_body, f"{tag}_outer_loop(iterate row offset)")
       root.add(outer_loop)
-    
+
     # read remaining pixels if any
     if self.remain > 0:
       print(f"[ConvBlock] node {getNodeID(self.call.call)} has remaining pixels to read: {self.remain}")
@@ -2068,6 +2197,9 @@ class ConvBlock(ImceCallCodeBlock):
       add_to_map(self.load_edge_info.owner, RecvSendNum("recv", self.remain*4), is_send=False)
       root.add(tail_loop)
 
+    # STEP_FREERUN is applied by LENGTHENING the rendezvous-balanced row loop above
+    # (search "IMCFLOW_STEP_FREERUN"), NOT by wrapping the whole conv here -- a new
+    # outer back-edge slips the scalar-flag toggle phase and deadlocks (chip-proven).
     return root
 
   def _render(self) -> str:
@@ -2488,6 +2620,43 @@ class VecOpBlock(ImceCallCodeBlock):
       op.prev_op = prev
       prev = op
 
+    # Resolve INTERNAL converge operands. The prev_op chain only expresses a
+    # LINEAR producer (each op's single internal producer = the op before it).
+    # An internal CONVERGE op (e.g. a residual add whose two operands are BOTH
+    # inner Calls -- BN output + multiply output) has two internal producers,
+    # and constructTensorEdgeList emits NO TensorEdge for intra-composite
+    # Call->Call links, so such an op would have empty in_edges -> ADD(,) . This
+    # only arises once a residual add is fused in-region (IMCFLOW_RESIDUAL_IN_REGION);
+    # resolve each op's operand producer blocks from its relay Call args so the
+    # renderer can emit ADD(<prod0 var>, <prod1 var>). Both producers are on the
+    # same IMCE and same loop iteration, so this is a pure intra-IMCE reference
+    # (no NoC edge / buffer needed). For OFF / linear composites every inner op
+    # has at most one internal-Call operand, so _internal_operand_ops stays a
+    # single-entry list and the renderer's fallback is unchanged.
+    # Match by graph node id (gid), NOT python object id: relay Call objects are
+    # re-created during composite processing so id() of an op's arg no longer
+    # equals the producer op's stored call, but getNodeID is stable.
+    from tvm.relay.backend.contrib.imcflow.transform_utils import getNodeID as _gid
+    def _safe_gid(x):
+      try:
+        return _gid(x)
+      except Exception:
+        return None
+    gid_to_op = {}
+    for op in self.ops:
+      g = _safe_gid(op.call.call)
+      if g is not None:
+        gid_to_op[g] = op
+    for op in self.ops:
+      operand_ops = []
+      try:
+        args = op.call.call.args
+      except Exception:
+        args = []
+      for a in args:
+        operand_ops.append(gid_to_op.get(_safe_gid(a), None))
+      op._internal_operand_ops = operand_ops
+
     # Compute edge sets
     self._compute_edges()
     self.body = self._build_structure()
@@ -2533,7 +2702,14 @@ class VecOpBlock(ImceCallCodeBlock):
     First op's external inputs and final SEND are handled by RecvSendWrapper.
     """
     comp = SequentialBlock()
+    # RecvSendWrapper RECVs ALL external_in_edges of the composite up front (see
+    # VecOpCompositeHandler: to_process_in_edges = block.external_in_edges). So any
+    # op's external input is ALREADY received by the wrapper -- generating another
+    # RECV here duplicates it (a diverge input feeding two ops, e.g. a residual's
+    # skip tensor consumed by both relu and add, would be RECV'd twice -> send/recv
+    # fifo-count mismatch). Skip every external_in_edge, not just the first op's.
     first_op_edges = set(self.ops[0].in_edges) if self.ops else set()
+    wrapper_recv_edges = set(getattr(self, "external_in_edges", first_op_edges))
     received_edges = set()
 
     for op in self.ops:
@@ -2543,6 +2719,8 @@ class VecOpBlock(ImceCallCodeBlock):
           continue  # Output from prior op -> input to current (no RECV needed)
         if edge in first_op_edges:
           continue  # First op's external inputs handled by RecvSendWrapper
+        if edge in wrapper_recv_edges:
+          continue  # Any external input is already RECV'd by RecvSendWrapper
         if edge in received_edges:
           continue  # Already received
 
@@ -2986,11 +3164,28 @@ class RecvSendWrapper(ImceCodeBlock):
       if isinstance(self.send_block, VecOpBlock):
         actual_send_block = self.send_block.get_send_block()
 
+      # Max-throughput lever (IMCFLOW_DROP_PSUM), Design A: DON'T-CARE output. Drop
+      # the per-pixel psum NoC SEND to a func_out collector (imce -> inode_3_0). The
+      # matching inode INODE_RECV loop is dropped too (inode_codeblock.py) AND the
+      # host func_out read-back is dropped (ext_codegen.py) -- a matched set so the
+      # un-written inode_3_0 port is simply never read (no bus hang). Only for a
+      # plain ConvBlock psum drain to a func_out edge (dst tensor_type startswith
+      # "func_out"); every other SEND (weights/config/pipeline/imce->imce) stays
+      # byte-identical. Gated by env; default OFF -> byte-identical.
+      _dst_is_func_out = any(
+          str(getattr(e.dst_id, "tensor_type", "")).startswith("func_out")
+          for e in self.out_edges)
+      _drop_psum = (drop_psum_send()
+                    and isinstance(actual_send_block, ConvBlock)
+                    and not actual_send_block.post_ops
+                    and _dst_is_func_out)
+
       # handcraft pre-send sync: emit ONE STANDBY(receiver, 1) BEFORE the SEND
       # loop when the receiver is an imce (pipeline). Output to an inode is bare.
       # Suppressed for zero-load col_groups (skip_presend) whose SEND is padding.
+      # Also suppressed under DROP_PSUM (no SEND -> no pre-send handshake needed).
       if (te_out_info.fifo_id != TensorEdgeInfo.LOCAL_FIFO and not self.skip_presend
-          and not self.suppress_presend_only):
+          and not self.suppress_presend_only and not _drop_psum):
         if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager and output_edges:
           pre_send = self.builder.pair_manager.get_pre_send_sync(output_edges[0])
           if pre_send:
