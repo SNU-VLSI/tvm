@@ -288,6 +288,11 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert "validate-build-identity" in runner
     assert "codegen_tvm_git_rev" in runner
     assert "tracked repository changes must be committed" in runner
+    assert "$DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH" not in runner
+    assert "/home/root/.venv/bin/activate" not in runner
+
+    scan_steps = (CODEGEN_DIR / "scan_steps.sh").read_text(encoding="utf-8")
+    assert "/home/root/.venv/bin/activate" not in scan_steps
 
     pipeline = (CODEGEN_DIR / "test.py").read_text(encoding="utf-8")
     assert 'metadata["tvm_git_rev"]' in pipeline

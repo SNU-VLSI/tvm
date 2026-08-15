@@ -227,9 +227,8 @@ else
     POWER_REMOTE_ENV="$(power_remote_environment)"
     echo "Step 6: Executing on remote chip (timeout: 300s)..."
     echo ""
-    scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && ${POWER_REMOTE_ENV}timeout 300 ./$EXEC_NAME \
-                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
+    scan_ssh "cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && ${POWER_REMOTE_ENV}timeout 300 ./$EXEC_NAME \
+                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME; \
                 tvm_status=\$?; cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1; \
                 exit \$tvm_status"
     EVAL_STATUS=$?
