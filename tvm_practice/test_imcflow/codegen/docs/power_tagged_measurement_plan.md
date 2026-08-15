@@ -190,8 +190,67 @@ hardware에서 다음 세 통합 오류를 발견해 함께 수정했다.
    `truncated`로 분류하던 문제를 DMM freeze command 시작 시각 기준으로 바꿨다.
 
 검증은 measurement_utils 관련 79 tests, metadata/protocol 17 focused tests,
-TVM workflow 10 tests, C client `-Wall -Wextra -Werror` build를 통과했다. Phase M6의
-최종 TVM runner hardware 결과는 아래 acceptance 절차를 수행한 뒤 추가한다.
+TVM workflow 11 tests, C client `-Wall -Wextra -Werror` build를 통과했다.
+
+### M6 TVM one-conv hardware acceptance 결과
+
+BUGFIX default-off인 TVM `02beaed1f6dc9710afa63c2dfb91cf1f0ec69a02`와
+measurement_utils `3a81f83dc2d15e88d3ea496aff548aac577a4e09`에서
+`one_conv_small`을 Linux/AArch64로 다시 codegen/link했다. 이 모델은 tracked
+handcraft directory가 없어서 standard codegen(`with_patch=false`)을 사용했다.
+
+실행 전에 다음 gate가 모두 통과했다.
+
+- master/board TVM SHA와 master/board/meas-2 measurement_utils SHA 일치
+- 세 tracked tree clean
+- `build_metadata.json`의 TVM/measurement_utils revision과 `dirty=0`
+- board `execute_graph --power-build-info`의 동일 revision과 `dirty=0`
+- daemon `HELLO_OK 3`와 measurement_utils revision 일치
+- `scan_gen/scan_reg_files → const_scan_reg_files/0x00`, 16 NPZ 전체 nonzero 0,
+  board scan programming exit 0
+
+session `m6_one_conv_bugfixoff_02beaed_20260816a`에서 ARM graph executor는 input,
+graph execution, output 저장과 cleanup을 모두 성공했고 power session도 정상
+finalize됐다.
+
+| 항목 | 결과 |
+|---|---|
+| status / tags | `complete` / 22 ordered events |
+| interval / samples | 100 us / 3,026 |
+| timestamp source | `dmm_reading_metadata` |
+| raw CSV / NPZ current | 3,026 values exact match |
+| raw checksum / internal file | SHA-256 match / exact file deleted |
+| metadata restore | 기존 `OFF`로 복구 |
+| sample uncertainty | 75,006,562 ns |
+| ambiguous samples | 1,598 |
+| DMM clock set | 약 986 ms → 51 ms, session end 약 99 ms |
+
+`process_setup`, `input_setup`, `graph_execute`, kernel 이름, `device_setup`,
+`compiled_transfer`, `const_transfer`, `policy_update`, tile 0 input/output transfer,
+`output`, `cleanup` tag가 순서대로 저장됐다. workload의 kernel 구간은 수 ms보다
+짧은 반면 DMM clock query uncertainty가 수십 ms이므로 ambiguity를 제외하면 여러
+빠른 state의 확정 sample 수가 0인 것이 정상이다. 이 run으로 tag 호출 순서와 raw
+sample 보존은 검증하지만 per-kernel 절대 power를 정밀하게 분리했다고 해석하지
+않는다.
+
+artifact를 TVM eval result의 `power/<session_id>` 경로로 회수해 schema-v2
+validator, ambiguity-excluding summary와 DMM-first-reading 기본 축 plot을 모두
+실행했다. `power_timeline.png`도 같은 artifact에서 생성됐다. execution 환경의 명령
+정책 때문에 destructive cleanup을 포함한 전체 wrapper는 한 번에 호출하지 않고,
+삭제 없는 rsync와 runner가 사용하는 동일 preflight/request/board execution/SCP/
+validation 단계로 나누어 수행했다.
+
+M6 중 두 runner 문제도 수정했다.
+
+1. `_evl.linux`에서 `main.py` registry key를 만들 때 잘못 `.linux`를 다시 붙이던
+   문제를 수정했다.
+2. BUGFIX default-off의 `_evl.linux.bugfixoff` folder를 허용하고, Linux/ARM target을
+   명시적으로 source하며, handcraft가 없는 모델용 `--no-patch` option을 추가했다.
+
+ResNet/KWS/VWW 장시간 측정은 실제 DMM probe가 물린 rail 이름과 사용자가 설정한
+전압을 placeholder가 아닌 config에 확정한 뒤 수행한다. 현재 one-conv의
+`voltage_V=1.0`과 `measured_power`는 통합 검증용이므로 물리 power 결과로 인용하지
+않는다.
 
 ### 현재 baseline과 변경 이유
 
