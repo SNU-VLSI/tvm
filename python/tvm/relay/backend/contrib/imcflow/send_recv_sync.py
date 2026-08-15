@@ -13,7 +13,7 @@ from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
-from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode
+from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode, residual_in_region_mode
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
 import logging
 
@@ -195,7 +195,7 @@ class SendRecvPairManager:
         # 255 is reserved for the all-inode barrier (SyncAllINodes). Under the
         # BN/minmax packing lever the barrier is sense-reversing over {254,255},
         # so BOTH 254 and 255 are reserved and pair UUIDs must stay <= 253.
-        _uuid_max = 253 if pack_bn_minmax_mode() else 255
+        _uuid_max = 253 if (pack_bn_minmax_mode() or residual_in_region_mode()) else 255
         for src_gid_key, group_edges in sorted(edge_groups.items(), key=lambda x: str(x[0])):
             if uuid > _uuid_max:
                 raise RuntimeError(f"UUID overflow: more than {_uuid_max} send-recv pairs in function")
