@@ -192,9 +192,13 @@ class SendRecvPairManager:
 
         # Assign UUIDs to each group
         uuid = 1  # Start from 1 (0 is reserved for flag clear)
+        # 255 is reserved for the all-inode barrier (SyncAllINodes). Under the
+        # BN/minmax packing lever the barrier is sense-reversing over {254,255},
+        # so BOTH 254 and 255 are reserved and pair UUIDs must stay <= 253.
+        _uuid_max = 253 if pack_bn_minmax_mode() else 255
         for src_gid_key, group_edges in sorted(edge_groups.items(), key=lambda x: str(x[0])):
-            if uuid > 255:
-                raise RuntimeError(f"UUID overflow: more than 255 send-recv pairs in function")
+            if uuid > _uuid_max:
+                raise RuntimeError(f"UUID overflow: more than {_uuid_max} send-recv pairs in function")
 
             # Determine sender node (from first edge's src)
             first_edge = group_edges[0]

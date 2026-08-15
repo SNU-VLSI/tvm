@@ -14,6 +14,7 @@ from tvm.relay.backend.contrib.imcflow.transform_utils import getNodeDebugID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import CodegenContext
 from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import pack_bn_minmax_mode
 from tvm.contrib.imcflow import serialize_imcu_load
 from tvm.contrib.imcflow import drop_psum_send
 from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
@@ -761,8 +762,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
 
     # sync all inodes
+    # Under packing, use a sense-reversing barrier (alternating 254/255, no
+    # clear) so inode arrival skew can't cause a lost-wakeup (see SyncAllINodes).
+    # One sense per logical barrier -> all 4 per-inode instances share it.
+    _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync all inodes")
+      block = SyncAllINodes(inode, "sync all inodes", sense=_sense)
       self.codeblocks.append(inode, block, codephase)
     
     # halt for slave inodes
@@ -777,6 +782,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.codeblocks.append(inode_master, block, codephase)
 
   def initialize(self):
+    # Reset the sense-reversing barrier counter at the start of each region
+    # function so every region's inode programs use a consistent 254/255
+    # alternation from the same starting parity. No-op when packing is off.
+    SyncAllINodes.reset_sense()
+
     # clear flag
     for inode in NodeID.inodes():
       block = ClearFlag("clear flag before policy update")
@@ -833,8 +843,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         # inode starts streaming (all inodes rendezvous, then only `node`
         # proceeds to WR_IMCU while the others wait at the NEXT gate / the
         # step-6 "sync before compute enable" barrier).
+        _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
         for inode in NodeID.inodes():
-          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}")
+          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}", sense=_sense)
           self.codeblocks.append(inode, bar, CodePhase.INIT)
         block = WriteIMCUBlock(node, "imcu write")
         self.codeblocks.append(node, block, CodePhase.INIT)
@@ -844,8 +855,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         self.codeblocks.append(node, block, CodePhase.INIT)
 
     # # sync before imce compute
+    _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync before compute enable")
+      block = SyncAllINodes(inode, "sync before compute enable", sense=_sense)
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # imce compute
@@ -857,8 +869,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         self.codeblocks.append(imce.master(), block, CodePhase.INIT)
     
     # wait all enable of imce
+    _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "wait all imce compute enable")
+      block = SyncAllINodes(inode, "wait all imce compute enable", sense=_sense)
       self.codeblocks.append(inode, block, CodePhase.INIT)
       # block = SetFlag()
       # self.codeblocks.append(inode, block, CodePhase.INIT)

@@ -1067,22 +1067,71 @@ class DoneAndIntrtBlock(InodeCodeBlock):
     self.body.add(TextBlock(f"__builtin_INODE_INTRT(0);"))
 
 class SyncAllINodes(InodeCodeBlock):
-  def __init__(self, node_id : NodeID, annotation: str = ""):
+  # Sense-reversing barrier support (IMCFLOW_PACK_BN_MINMAX): the stock barrier
+  # writes a REUSED constant flag (255) then clears it to 0. Under packing the
+  # per-inode workload is redistributed, so inodes arrive at the barrier with
+  # more skew; a fast inode can SET_FLAG(255) -> ... -> SET_FLAG(0) and re-enter
+  # the NEXT barrier's SET_FLAG(255) before a slow inode's STANDBY samples the
+  # first one -> the slow inode waits on a 255 that was cleared -> lost wakeup
+  # (flags are a persistent LEVEL sampled by STANDBY, not an edge; controller.sv).
+  #
+  # Fix: give consecutive barriers ALTERNATING sense values (254 <-> 255) and
+  # DROP the clear-to-0. Because the flag register is persistent, a slow inode
+  # still sees the previous barrier's value latched until it samples it; a fast
+  # inode re-entering the next barrier writes the OTHER value, so it can never
+  # erase the value a straggler is still waiting on (a straggler is at most one
+  # barrier behind: it cannot pass barrier k until every peer reached k, so no
+  # peer can be at k+2 while it is at k). 254/255 are reserved for this: pair
+  # UUIDs are capped at 253 in SendRecvPairManager when the lever is on.
+  #
+  # A module-level program-order counter gives every barrier instance (across
+  # all inodes at the same logical barrier) the SAME sense, because codegen
+  # emits the 4 per-inode SyncAllINodes for one logical barrier consecutively
+  # -- but to be robust to interleaving we derive the sense from an EXPLICIT
+  # per-logical-barrier index passed by the caller, defaulting to the counter.
+  _sense_counter = 0
+
+  @classmethod
+  def next_sense(cls):
+    """Advance and return the next alternating sense value (254/255)."""
+    v = 254 + (cls._sense_counter % 2)
+    cls._sense_counter += 1
+    return v
+
+  @classmethod
+  def reset_sense(cls):
+    cls._sense_counter = 0
+
+  def __init__(self, node_id : NodeID, annotation: str = "", sense: int = None):
     super().__init__(annotation)
     self.node_id = node_id
+    # sense=None -> stock behavior (255 + clear-to-0), byte-identical to before.
+    # sense=254/255 -> sense-reversing barrier (no clear), used under packing.
+    self.sense = sense
     self._build()
 
   def _build(self):
-    # Use UUID=255 for INODE-to-INODE sync to avoid conflict with SendRecvPairManager UUIDs (1-254)
-    INODE_SYNC_UUID = 255
-    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({INODE_SYNC_UUID});"))
-    for node in NodeID.inodes():
-      if node != self.node_id:
-        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {INODE_SYNC_UUID});"))
-
-    nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
-    self.body.add(TextBlock(f"__asm__ volatile({nops});"))
-    self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(0);"))
+    if self.sense is None:
+      # Stock barrier: reused UUID=255 + clear-to-0. Byte-identical to the
+      # pre-fix codegen (lever OFF / non-packing path).
+      INODE_SYNC_UUID = 255
+      self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({INODE_SYNC_UUID});"))
+      for node in NodeID.inodes():
+        if node != self.node_id:
+          self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {INODE_SYNC_UUID});"))
+      nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
+      self.body.add(TextBlock(f"__asm__ volatile({nops});"))
+      self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(0);"))
+    else:
+      # Sense-reversing barrier: write this barrier's sense, wait for all peers
+      # to present it, and DO NOT clear it (persistence protects stragglers).
+      sense = self.sense
+      self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({sense});"))
+      for node in NodeID.inodes():
+        if node != self.node_id:
+          self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {sense});"))
+      nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
+      self.body.add(TextBlock(f"__asm__ volatile({nops});"))
 
 class Standby(InodeCodeBlock):
   def __init__(self, node_ids: List[NodeID], annotation: str = ""):
