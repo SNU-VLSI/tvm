@@ -12,6 +12,7 @@ from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
 import math
 import os
+import json
 
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
@@ -297,6 +298,29 @@ class KernelCodeGenerator:
 #endif
 """)
 
+  @staticmethod
+  def _power_c_string(value):
+    """Return an ASCII-only quoted C string for a tag literal."""
+    return json.dumps(str(value), ensure_ascii=True)
+
+  def emit_power_tag_set(self, key, value):
+    if self.os != "linux":
+      return ""
+    return (
+        f"dmm_tag_set({self._power_c_string(key)}, "
+        f"{self._power_c_string(value)});\n"
+    )
+
+  def emit_power_tag_clear(self, key):
+    if self.os != "linux":
+      return ""
+    return f"dmm_tag_clear({self._power_c_string(key)});\n"
+
+  def emit_power_tag_event(self, name):
+    if self.os != "linux":
+      return ""
+    return f"dmm_tag_event({self._power_c_string(name)});\n"
+
   def generateRetryCheck(self, location_label):
     """Generate retry check code after a wait call.
     On failure: cleanup device pointers, increment retry count, continue loop.
@@ -307,6 +331,12 @@ class KernelCodeGenerator:
     code += f"if (_wait_rc != 0) {{\n"
     code.nextIndent()
     code += f'fprintf(stderr, "[RETRY] Timeout at {location_label}, attempt %d/%d\\n", _retry_count+1, MAX_RETRY_COUNT);\n'
+    if self.os == "linux":
+      code += "snprintf(_power_retry_value, sizeof(_power_retry_value), \"%d\", _retry_count + 1);\n"
+      code += "dmm_tag_set(\"retry_attempt\", _power_retry_value);\n"
+      code += self.emit_power_tag_event("retry")
+      code += self.emit_power_tag_clear("tile")
+      code += self.emit_power_tag_set("kernel_stage", "retry_cleanup")
     if self.os == "linux":
       # Drain + ack any pending interrupt BEFORE tearing down / re-arming. On the
       # timeout path the success-path acks (generate_ack + INTR_DONE) were skipped,
@@ -325,6 +355,11 @@ class KernelCodeGenerator:
     code += f"#else\n"
     code += f"if (_wait_rc != 0) {{\n"
     code += f'  fprintf(stderr, "[TIMEOUT] {location_label} failed (retry disabled)\\n");\n'
+    code += self.emit_power_tag_set("retry_attempt", "1")
+    code += self.emit_power_tag_event("retry")
+    code += self.emit_power_tag_clear("tile")
+    code += self.emit_power_tag_clear("kernel_stage")
+    code += self.emit_power_tag_clear("kernel")
     code += self.generateDevicePointerCleanup()
     code += f"  g_imcflow_kernel_failed = 1;\n"
     code += f"  return;\n"
@@ -355,6 +390,7 @@ class KernelCodeGenerator:
   } \\
 } while (0)
 """) if os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0") else ""
+    power_header = '#include "dmm_measure.h"\n' if self.os == "linux" else ""
     return ("""
 #include <stdlib.h>
 #include <string.h>
@@ -370,7 +406,7 @@ class KernelCodeGenerator:
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <unistd.h>
-""" + stage_hb_macro + """
+""" + power_header + stage_hb_macro + """
 // Global failure flag: set by kernel on timeout, checked by host loop
 extern volatile int g_imcflow_kernel_failed;
 """)
@@ -845,6 +881,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
     # Early exit if a previous kernel already failed
     code += "if (g_imcflow_kernel_failed) return;\n"
+    if self.os == "linux":
+      code += "char _power_retry_value[32];\n"
+    code += self.emit_power_tag_set("kernel", self.func_name)
 
     # Retry loop start
     code += "#ifndef RETRY_DISABLE\n"
@@ -863,8 +902,10 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       return f"IMCFLOW_STAGE_HB(\"{self.func_name}: {stage}\");\n" if _hb_on else ""
 
     code += _hb("before device_pointer_setup")
+    code += self.emit_power_tag_set("kernel_stage", "device_setup")
     code += self.generateDevicePointerSetup()
     code += _hb("before reset")
+    code += self.emit_power_tag_set("kernel_stage", "reset")
     code += self.emitReset()
     code += _hb("after reset")
     if self.os == "linux":
@@ -879,17 +920,22 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         pass  # per-kernel warmup intentionally skipped
       else:
         code += _hb("before warmup")
+        code += self.emit_power_tag_set("kernel_stage", "warmup")
         code += self.emitWarmup()
         code += _hb("after warmup")
     code += _hb("before compiled_blocks transfer")
+    code += self.emit_power_tag_set("kernel_stage", "compiled_transfer")
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += _hb("after compiled_blocks transfer / before const_blocks transfer")
+    code += self.emit_power_tag_set("kernel_stage", "const_transfer")
     code += self.generateToNpuTransferCode(self.const_blocks) # constant
     code += _hb("after const_blocks transfer / before policy_update")
+    code += self.emit_power_tag_set("kernel_stage", "policy_update")
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
     code += _hb("after policy_update")
     code += self.generateRetryCheck("policy_update")
     code += _hb("before invoke")
+    code += self.emit_power_tag_set("kernel_stage", "invoke")
     code += self.generateInvokeCode() # proceed up to halt
     code += _hb("after invoke / before poll")
     code += self.generateRetryCheck("invoke")
@@ -900,20 +946,34 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"fprintf(stderr,\"Starting tiled execution with factor {tile_factor}\\n\");\n"
     for t_idx in range(tile_factor):
       code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
+      code += self.emit_power_tag_set("tile", t_idx)
+      code += self.emit_power_tag_set("kernel_stage", "compiled_transfer")
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
+      code += self.emit_power_tag_set("kernel_stage", "input_transfer")
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
+      code += self.emit_power_tag_set("kernel_stage", "invoke")
       code += self.generateInvokeCode() # end of exec
       code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
+      code += self.emit_power_tag_set("kernel_stage", "output_transfer")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
+      code += self.emit_power_tag_clear("tile")
 
     # Retry loop end + cleanup
     code += self.generateDevicePointerCleanup()
+    code += self.emit_power_tag_clear("retry_attempt")
+    code += self.emit_power_tag_clear("tile")
+    code += self.emit_power_tag_clear("kernel_stage")
+    code += self.emit_power_tag_clear("kernel")
     code += "#ifndef RETRY_DISABLE\n"
     code += "break; // success\n"
     code.prevIndent()
     code += "} while (_retry_count <= MAX_RETRY_COUNT);\n"
     code += "if (_retry_count > MAX_RETRY_COUNT) {\n"
     code += '  fprintf(stderr, "[RETRY] Exhausted %d retries.\\n", MAX_RETRY_COUNT);\n'
+    code += self.emit_power_tag_clear("retry_attempt")
+    code += self.emit_power_tag_clear("tile")
+    code += self.emit_power_tag_clear("kernel_stage")
+    code += self.emit_power_tag_clear("kernel")
     code += "  g_imcflow_kernel_failed = 1;\n"
     code += "  return;\n"
     code += "}\n"
