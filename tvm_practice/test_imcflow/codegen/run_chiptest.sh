@@ -18,6 +18,7 @@ show_help() {
     echo "Options:"
     echo "  -s, --skip LIST  Comma-separated step numbers to skip (e.g., 1,3)"
     echo "  --power-config FILE  Enable tagged whole-run power measurement"
+    echo "  --no-patch     Generate with standard codegen instead of --with-patch"
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Arguments:"
@@ -43,6 +44,7 @@ SKIP_STEP5=false
 SKIP_STEP6=false
 SKIP_LIST=""
 POWER_CONFIG="${IMCFLOW_POWER_CONFIG:-}"
+USE_PATCH=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             fi
             POWER_CONFIG="$2"
             shift 2
+            ;;
+        --no-patch)
+            USE_PATCH=false
+            shift
             ;;
         --skip1|--skip-1)
             SKIP_STEP1=true
@@ -132,9 +138,13 @@ fi
 TEST_FOLDER="$1"
 INPUT_SETTING="$2"
 
-# Validate test folder name format: must be *_evl.linux
-if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
-    echo "Error: Test folder must end with '_evl.linux' (got: $TEST_FOLDER)"
+# Validate and recover the registry model name for BUGFIX on/off outputs.
+if [[ "$TEST_FOLDER" == *_evl.linux.bugfixoff ]]; then
+    TEST_NAME="${TEST_FOLDER%_evl.linux.bugfixoff}"
+elif [[ "$TEST_FOLDER" == *_evl.linux ]]; then
+    TEST_NAME="${TEST_FOLDER%_evl.linux}"
+else
+    echo "Error: Test folder must end with '_evl.linux' or '_evl.linux.bugfixoff' (got: $TEST_FOLDER)"
     echo ""
     echo "Example:"
     echo "  $0 resnet8_subset31_pretrained_orig_evl.linux random"
@@ -142,10 +152,6 @@ if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
     echo "This is required because chip test runs on ARM Linux platform."
     exit 1
 fi
-
-# Extract the registry model name.  The Linux target belongs to the generated
-# folder name and target environment; it is not part of main.py's model key.
-TEST_NAME="${TEST_FOLDER%_evl.linux}"
 
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
@@ -160,6 +166,7 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/imcflow-linux.sh"
 source "$SCRIPT_DIR/scan_steps.sh"
 load_env
 source "$SCRIPT_DIR/power_steps.sh"
@@ -178,7 +185,10 @@ if [[ "$SKIP_STEP1" == true ]]; then
 else
     echo "Step 1: Running main.py to generate $TEST_FOLDER..."
     echo ""
-    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME" --with-patch)
+    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME")
+    if [[ "$USE_PATCH" == true ]]; then
+        CMD+=(--with-patch)
+    fi
     "${CMD[@]}"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to generate test folder"

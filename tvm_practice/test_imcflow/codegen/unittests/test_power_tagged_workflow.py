@@ -255,10 +255,12 @@ def test_shell_scripts_parse_and_power_runtime_compiles(tmp_path):
     )
 
 
-def test_chip_runner_strips_complete_linux_eval_suffix():
+def test_chip_runner_supports_bugfix_on_and_off_folder_suffixes():
     source = (CODEGEN_DIR / "run_chiptest.sh").read_text(encoding="utf-8")
     assert 'TEST_NAME="${TEST_FOLDER%_evl.linux}"' in source
-    assert 'TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"' not in source
+    assert 'TEST_NAME="${TEST_FOLDER%_evl.linux.bugfixoff}"' in source
+    assert "--no-patch" in source
+    assert 'source "$SCRIPT_DIR/imcflow-linux.sh"' in source
 
 
 def _load_ext_codegen(monkeypatch):
