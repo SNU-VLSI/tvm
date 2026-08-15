@@ -255,6 +255,12 @@ def test_shell_scripts_parse_and_power_runtime_compiles(tmp_path):
     )
 
 
+def test_chip_runner_strips_complete_linux_eval_suffix():
+    source = (CODEGEN_DIR / "run_chiptest.sh").read_text(encoding="utf-8")
+    assert 'TEST_NAME="${TEST_FOLDER%_evl.linux}"' in source
+    assert 'TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"' not in source
+
+
 def _load_ext_codegen(monkeypatch):
     monkeypatch.setenv("IMCFLOW_HOST_OS", "linux")
     monkeypatch.setenv("IMCFLOW_ADDR", "0")

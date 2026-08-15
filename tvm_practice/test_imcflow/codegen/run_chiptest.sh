@@ -143,8 +143,9 @@ if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
     exit 1
 fi
 
-# Extract model name from test folder (remove _evl.linux suffix)
-TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"
+# Extract the registry model name.  The Linux target belongs to the generated
+# folder name and target environment; it is not part of main.py's model key.
+TEST_NAME="${TEST_FOLDER%_evl.linux}"
 
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
