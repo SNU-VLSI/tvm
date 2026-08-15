@@ -184,6 +184,28 @@ endif()
 # ============================================================================
 # Build Dataset Evaluation Executable
 # ============================================================================
+# The host and generated model share exactly one dmm_measure.c instance through
+# this archive, preserving one process-global tagged session state.
+set(IMCFLOW_POWER_RUNTIME_DIR
+    "${TVM_ROOT}/tvm_practice/test_imcflow/codegen/power_runtime")
+set(IMCFLOW_MEASUREMENT_CAPI_DIR
+    "${TVM_ROOT}/3rdparty/measurement_utils/capi")
+if(NOT EXISTS "${IMCFLOW_POWER_RUNTIME_DIR}/power_measure_runtime.c" OR
+   NOT EXISTS "${IMCFLOW_MEASUREMENT_CAPI_DIR}/dmm_measure.c")
+  message(FATAL_ERROR "Tagged power runtime sources are missing")
+endif()
+add_library(imcflow_power_runtime STATIC
+  "${IMCFLOW_POWER_RUNTIME_DIR}/power_measure_runtime.c"
+  "${IMCFLOW_MEASUREMENT_CAPI_DIR}/dmm_measure.c"
+)
+target_include_directories(imcflow_power_runtime PUBLIC
+  "${IMCFLOW_POWER_RUNTIME_DIR}"
+  "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
+)
+target_include_directories(tvm_model PRIVATE
+  "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
+)
+
 # If DEBUG_EXE is set (env or cmake var), use debug_execute_graph_for_dataset.c
 if(NOT DEFINED DEBUG_EXE AND DEFINED ENV{DEBUG_EXE})
   set(DEBUG_EXE "$ENV{DEBUG_EXE}")
@@ -203,7 +225,7 @@ add_executable(${DATASET_EXEC_NAME}
 )
 
 target_link_libraries(${DATASET_EXEC_NAME} PRIVATE
-  tvm_model ${CRT_LIBS} m stdc++
+  tvm_model ${CRT_LIBS} m stdc++ imcflow_power_runtime
 )
 
 target_include_directories(${DATASET_EXEC_NAME} PRIVATE
