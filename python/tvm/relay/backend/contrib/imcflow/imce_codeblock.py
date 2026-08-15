@@ -642,7 +642,21 @@ class VecBlock(ImceCallCodeBlock):
     1. Both operands from in_edges (no constant)
     2. One operand from in_edges, one constant
     3. One operand from prev_op (VecOpBlock chaining), one constant
+    Plus an internal-converge case (see below).
     """
+    # Internal-converge case (IMCFLOW_RESIDUAL_IN_REGION): an inner op whose
+    # operands are BOTH other inner ops of the same composite (e.g. residual
+    # add(BN_out, mult_out)). These have no TensorEdge (intra-composite Call->Call
+    # links are not materialized) and no const, so the edge/prev_op paths yield
+    # empty operands. Use the producer op blocks resolved in VecOpBlock.__init__.
+    # Only fires when >=2 internal producers resolved -> unreachable for linear /
+    # OFF composites (which have <=1 internal-Call operand per op).
+    internal_ops = getattr(self, "_internal_operand_ops", None)
+    if internal_ops is not None and self.const_edge is None:
+      resolved = [op for op in internal_ops if op is not None]
+      if len(resolved) >= 2:
+        return [UniqueVar((op, i)) for op in internal_ops if op is not None]
+
     # Build variables from non-constant edges only
     non_const_edges = [edge for edge in self.in_edges if edge != self.const_edge]
     var_ins_from_edges = [self._make_unique_input_var_for_post_op(
@@ -2558,6 +2572,43 @@ class VecOpBlock(ImceCallCodeBlock):
     for op in self.ops:
       op.prev_op = prev
       prev = op
+
+    # Resolve INTERNAL converge operands. The prev_op chain only expresses a
+    # LINEAR producer (each op's single internal producer = the op before it).
+    # An internal CONVERGE op (e.g. a residual add whose two operands are BOTH
+    # inner Calls -- BN output + multiply output) has two internal producers,
+    # and constructTensorEdgeList emits NO TensorEdge for intra-composite
+    # Call->Call links, so such an op would have empty in_edges -> ADD(,) . This
+    # only arises once a residual add is fused in-region (IMCFLOW_RESIDUAL_IN_REGION);
+    # resolve each op's operand producer blocks from its relay Call args so the
+    # renderer can emit ADD(<prod0 var>, <prod1 var>). Both producers are on the
+    # same IMCE and same loop iteration, so this is a pure intra-IMCE reference
+    # (no NoC edge / buffer needed). For OFF / linear composites every inner op
+    # has at most one internal-Call operand, so _internal_operand_ops stays a
+    # single-entry list and the renderer's fallback is unchanged.
+    # Match by graph node id (gid), NOT python object id: relay Call objects are
+    # re-created during composite processing so id() of an op's arg no longer
+    # equals the producer op's stored call, but getNodeID is stable.
+    from tvm.relay.backend.contrib.imcflow.transform_utils import getNodeID as _gid
+    def _safe_gid(x):
+      try:
+        return _gid(x)
+      except Exception:
+        return None
+    gid_to_op = {}
+    for op in self.ops:
+      g = _safe_gid(op.call.call)
+      if g is not None:
+        gid_to_op[g] = op
+    for op in self.ops:
+      operand_ops = []
+      try:
+        args = op.call.call.args
+      except Exception:
+        args = []
+      for a in args:
+        operand_ops.append(gid_to_op.get(_safe_gid(a), None))
+      op._internal_operand_ops = operand_ops
 
     # Compute edge sets
     self._compute_edges()

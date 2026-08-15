@@ -435,6 +435,27 @@ def pack_bn_minmax_mode() -> bool:
     "1", "on", "true", "yes")
 
 
+def residual_in_region_mode() -> bool:
+  """Residual-in-region lever (IMCFLOW_RESIDUAL_IN_REGION): keep a residual
+  (skip-connection) converge ADD in the SAME region as its producer convs
+  instead of forcing a new region at the converge point.
+
+  Today partitionRound FORCES a new region whenever a converge point's branches
+  are unbalanced and both branch tails are in one region (transform.py
+  _handle_unbalanced_converge, "deadlock risk"), which pushes the residual add
+  into its own region and round-trips the skip tensor through inode host memory
+  across the boundary. When this lever is on (and the merged region fits the
+  IMCE cap), the split is suppressed so the residual is resolved in-region with
+  the inode buffering the skip tensor.
+
+  Read at pass time (not import time). Default OFF -> partitioning unchanged ->
+  codegen byte-identical to stock.
+  """
+  import os
+  return os.environ.get("IMCFLOW_RESIDUAL_IN_REGION", "").strip().lower() in (
+    "1", "on", "true", "yes")
+
+
 def makeBNPattern(data):
   gamma = is_constant()
   beta = is_constant()
