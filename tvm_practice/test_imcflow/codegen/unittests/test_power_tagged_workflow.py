@@ -1,4 +1,5 @@
 import importlib
+import hashlib
 import json
 import os
 import subprocess
@@ -144,6 +145,85 @@ def test_result_validation_and_tag_filter(tmp_path):
     assert '"status": "complete"' in validated.stdout
     filtered = run_tool("summarize", result_dir, "--tag", "phase=graph_execute")
     assert '"phase": "graph_execute"' in filtered.stdout
+
+
+def test_schema_v2_raw_checksum_and_ambiguity_validation(tmp_path):
+    result_dir = tmp_path / "metadata_result"
+    rails_dir = result_dir / "rails"
+    raw_dir = result_dir / "raw"
+    rails_dir.mkdir(parents=True)
+    raw_dir.mkdir()
+    for name in ("request.json", "resolved_config.json"):
+        (result_dir / name).write_text("{}\n", encoding="utf-8")
+    raw = (
+        b"Start date:,08/15/2026,Start time:,17:12:06.310\r\n"
+        b"Sample interval:,0.000100\r\n"
+        b"Reading #,Reading\r\n1,+1.0E-02\r\n2,+2.0E-02\r\n"
+    )
+    raw_path = raw_dir / "DMM_GPIB3.csv"
+    raw_path.write_bytes(raw)
+    checksum = {
+        "DMM_GPIB3": {
+            "path": "raw/DMM_GPIB3.csv",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size": len(raw),
+        }
+    }
+    (raw_dir / "checksums.json").write_text(
+        json.dumps(checksum), encoding="utf-8"
+    )
+    summary = {
+        "schema_version": 2,
+        "session_id": result_dir.name,
+        "status": "complete",
+        "tag_event_count": 1,
+        "rails": {
+            "DMM_GPIB3": {
+                "sample_count": 2,
+                "actual_sample_interval_s": 0.0001,
+                "timestamp_source": "dmm_reading_metadata",
+                "ambiguous_sample_count": 1,
+                "tag_states": [
+                    {
+                        "tag_state_id": 0,
+                        "state": {},
+                        "sample_count": 2,
+                        "ambiguous_sample_count": 1,
+                        "average_current_A": 0.015,
+                        "average_power_W": 0.015,
+                        "energy_J": 0.000003,
+                    }
+                ],
+            }
+        },
+    }
+    for name in ("summary.json", "session.json"):
+        (result_dir / name).write_text(json.dumps(summary), encoding="utf-8")
+    (result_dir / "time_alignment.json").write_text("{}\n", encoding="utf-8")
+    (result_dir / "tags.jsonl").write_text("", encoding="utf-8")
+    np.savez_compressed(
+        rails_dir / "DMM_GPIB3.npz",
+        reading_number=np.asarray([1, 2]),
+        current_A=np.asarray([0.01, 0.02]),
+        time_from_trigger_s=np.asarray([0.0, 0.0001]),
+        time_from_first_reading_s=np.asarray([0.0, 0.0001]),
+        server_wall_time_ns=np.asarray([1000, 101000]),
+        server_monotonic_time_ns=np.asarray([2000, 102000]),
+        power_W=np.asarray([0.01, 0.02]),
+        tag_state_id=np.asarray([0, 0]),
+        tag_boundary_ambiguous=np.asarray([True, False]),
+        sample_time_uncertainty_ns=np.asarray(1_000_000),
+    )
+
+    validated = run_tool("validate-result", result_dir)
+    assert '"status": "complete"' in validated.stdout
+    filtered = run_tool("summarize", result_dir, "--exclude-ambiguous")
+    assert "samples=1" in filtered.stdout
+
+    raw_path.write_bytes(raw + b"corrupt")
+    rejected = run_tool("validate-result", result_dir, check=False)
+    assert rejected.returncode != 0
+    assert "SHA-256 mismatch" in rejected.stderr
 
 
 def test_shell_scripts_parse_and_power_runtime_compiles(tmp_path):

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -192,6 +193,10 @@ def load_result(path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         raise ConfigError("summary session_id does not match directory")
     if session.get("session_id") != path.name:
         raise ConfigError("session manifest ID does not match directory")
+    if int(summary.get("schema_version", 1)) >= 2:
+        for name in ("time_alignment.json", "raw/checksums.json"):
+            if not (path / name).is_file():
+                raise ConfigError(f"missing result file: {name}")
     return summary, session
 
 
@@ -200,6 +205,12 @@ def validate_result(args: argparse.Namespace) -> int:
 
     path = Path(args.result_dir)
     summary, _session = load_result(path)
+    schema_version = int(summary.get("schema_version", 1))
+    checksums = (
+        load_object(path / "raw" / "checksums.json")
+        if schema_version >= 2
+        else {}
+    )
     rails = summary.get("rails")
     if not isinstance(rails, dict) or not rails:
         raise ConfigError("summary has no rail results")
@@ -214,6 +225,14 @@ def validate_result(args: argparse.Namespace) -> int:
                 "power_W",
                 "tag_state_id",
             )
+            if schema_version >= 2:
+                required += (
+                    "reading_number",
+                    "time_from_first_reading_s",
+                    "server_wall_time_ns",
+                    "server_monotonic_time_ns",
+                    "tag_boundary_ambiguous",
+                )
             missing = [key for key in required if key not in artifact]
             if missing:
                 raise ConfigError(f"{name}: missing arrays {missing}")
@@ -222,6 +241,27 @@ def validate_result(args: argparse.Namespace) -> int:
                 raise ConfigError(f"{name}: result arrays are empty or misaligned")
             if int(rail_summary.get("sample_count", -1)) != next(iter(lengths)):
                 raise ConfigError(f"{name}: summary sample count mismatch")
+            if schema_version >= 2:
+                if rail_summary.get("timestamp_source") != "dmm_reading_metadata":
+                    raise ConfigError(f"{name}: DMM metadata timestamp source is required")
+                checksum = checksums.get(name)
+                if not isinstance(checksum, dict):
+                    raise ConfigError(f"{name}: raw checksum entry is missing")
+                relative_path = checksum.get("path")
+                if not isinstance(relative_path, str):
+                    raise ConfigError(f"{name}: raw path is invalid")
+                raw_path = (path / relative_path).resolve()
+                try:
+                    raw_path.relative_to(path.resolve())
+                except ValueError as exc:
+                    raise ConfigError(f"{name}: raw path escapes result directory") from exc
+                if not raw_path.is_file():
+                    raise ConfigError(f"{name}: raw file is missing")
+                actual_hash = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+                if actual_hash != checksum.get("sha256"):
+                    raise ConfigError(f"{name}: raw SHA-256 mismatch")
+                if raw_path.stat().st_size != int(checksum.get("size", -1)):
+                    raise ConfigError(f"{name}: raw size mismatch")
     status = summary.get("status")
     print(
         json.dumps(
@@ -240,6 +280,8 @@ def validate_result(args: argparse.Namespace) -> int:
 
 
 def summarize(args: argparse.Namespace) -> int:
+    import numpy as np
+
     summary, _session = load_result(Path(args.result_dir))
     key = None
     value = None
@@ -248,19 +290,59 @@ def summarize(args: argparse.Namespace) -> int:
             raise ConfigError("--tag must be KEY=VALUE")
         key, value = args.tag.split("=", 1)
     for rail_name, rail in summary.get("rails", {}).items():
-        print(f"[{rail_name}] samples={rail.get('sample_count')} energy_J={rail.get('energy_J')}")
+        artifact = None
+        if args.exclude_ambiguous:
+            artifact_path = Path(args.result_dir) / "rails" / f"{rail_name}.npz"
+            artifact = np.load(artifact_path)
+            if "tag_boundary_ambiguous" not in artifact:
+                artifact.close()
+                raise ConfigError(
+                    f"{rail_name}: artifact has no ambiguity information"
+                )
+        print(
+            f"[{rail_name}] samples={rail.get('sample_count')} "
+            f"ambiguous={rail.get('ambiguous_sample_count', 0)} "
+            f"energy_J={rail.get('energy_J')}"
+        )
         for state in rail.get("tag_states", []):
             tags = state.get("state", {})
             if key is not None and tags.get(key) != value:
                 continue
+            values = {
+                "sample_count": state.get("sample_count"),
+                "average_current_A": state.get("average_current_A"),
+                "average_power_W": state.get("average_power_W"),
+                "energy_J": state.get("energy_J"),
+            }
+            if artifact is not None:
+                state_id = int(state["tag_state_id"])
+                mask = (artifact["tag_state_id"] == state_id) & ~artifact[
+                    "tag_boundary_ambiguous"
+                ]
+                current = artifact["current_A"][mask]
+                power = artifact["power_W"][mask]
+                interval_s = float(rail.get("actual_sample_interval_s", 0.0))
+                values = {
+                    "sample_count": int(mask.sum()),
+                    "average_current_A": (
+                        float(current.mean()) if len(current) else None
+                    ),
+                    "average_power_W": (
+                        float(power.mean()) if len(power) else None
+                    ),
+                    "energy_J": float(power.sum() * interval_s),
+                }
             print(
                 "  "
                 + json.dumps(tags, ensure_ascii=False, sort_keys=True)
-                + f" samples={state.get('sample_count')}"
-                + f" avg_A={state.get('average_current_A')}"
-                + f" avg_W={state.get('average_power_W')}"
-                + f" energy_J={state.get('energy_J')}"
+                + f" samples={values['sample_count']}"
+                + f" ambiguous={state.get('ambiguous_sample_count', 0)}"
+                + f" avg_A={values['average_current_A']}"
+                + f" avg_W={values['average_power_W']}"
+                + f" energy_J={values['energy_J']}"
             )
+        if artifact is not None:
+            artifact.close()
     return 0
 
 
@@ -280,20 +362,38 @@ def plot_timeline(args: argparse.Namespace) -> int:
     if not artifact_path.is_file():
         raise ConfigError(f"unknown rail: {rail_name}")
     with np.load(artifact_path) as artifact:
-        time_s = artifact["time_from_trigger_s"]
+        if "time_from_first_reading_s" in artifact:
+            time_s = artifact["time_from_first_reading_s"]
+            time_label = "time from first DMM reading (s)"
+        else:
+            time_s = artifact["time_from_trigger_s"]
+            time_label = "time from trigger (s)"
         current = artifact["current_A"]
         power = artifact["power_W"]
         state = artifact["tag_state_id"]
+        ambiguous = (
+            artifact["tag_boundary_ambiguous"]
+            if "tag_boundary_ambiguous" in artifact
+            else np.zeros(len(time_s), dtype=np.bool_)
+        )
 
     figure, axes = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
     axes[0].plot(time_s, current, linewidth=0.7, label="current_A")
     axes[0].plot(time_s, power, linewidth=0.7, label="power_W", alpha=0.8)
+    if ambiguous.any():
+        axes[0].scatter(
+            time_s[ambiguous],
+            current[ambiguous],
+            s=8,
+            color="red",
+            label="ambiguous tag boundary",
+        )
     axes[0].set_ylabel("A / W")
     axes[0].legend(loc="best")
     axes[0].grid(alpha=0.25)
     axes[1].step(time_s, state, where="post", linewidth=0.8)
     axes[1].set_ylabel("tag_state_id")
-    axes[1].set_xlabel("time from trigger (s)")
+    axes[1].set_xlabel(time_label)
     axes[1].grid(alpha=0.25)
     figure.suptitle(f"{summary.get('session_id')} / {rail_name}")
     figure.tight_layout()
@@ -333,6 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     summary_parser = subparsers.add_parser("summarize")
     summary_parser.add_argument("result_dir")
     summary_parser.add_argument("--tag")
+    summary_parser.add_argument("--exclude-ambiguous", action="store_true")
     summary_parser.set_defaults(handler=summarize)
 
     plot_parser = subparsers.add_parser("plot")
