@@ -5,7 +5,7 @@ import math
 import os
 from pprint import pprint
 from tvm import relay
-from tvm.relay.op.contrib.imcflow import CustomIDToNode
+from tvm.relay.op.contrib.imcflow import CustomIDToNode, residual_in_region_mode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import bugfix_off_mode
@@ -3380,6 +3380,45 @@ class RecvSendWrapper(ImceCodeBlock):
     return code + sync_block
 
 
+  def _residual_consumer_granularity(self):
+    """Return the block-granularity an in-region consumer FORCES on this node,
+    or None if no consumer imposes a fixed granularity larger than channel-based.
+
+    Only relevant for the residual-in-region fix. A STANDALONE min-max quantize
+    consumer (qnn.imcflow_min_max_quantize, not folded into a conv/vecops
+    composite) hard-codes granularity 4 (MinmaxQuantBlock: it must RECV all input
+    channels before quantizing). When a fused residual add feeds such a consumer,
+    the add must emit 4 blocks/iter to match; otherwise the per-iteration
+    SEND/RECV rendezvous counts disagree -> deadlock. Every other consumer
+    (vecops, another conv, inode func_out) groups by the same channel-based
+    num_blocks the add already uses, so this returns None and the add is left
+    untouched (byte-identical). Guarded by residual_in_region_mode() at the call
+    site, so lever-OFF never reaches here."""
+    MINMAX_GRANULARITY = 4
+    try:
+      dst_gids = {edge.dst_id.graph_node_id for edge in self.out_edges}
+    except Exception:
+      return None
+    gran = None
+    for dst_gid in dst_gids:
+      try:
+        dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+      except Exception:
+        continue
+      is_minmax = False
+      if isinstance(dst_node, relay.Call):
+        # Direct min-max op, or a composite function whose op carries the
+        # preop-minmax Composite attr (standalone -- not a conv/vecops fusion).
+        if getattr(dst_node.op, "name", None) == "qnn.imcflow_min_max_quantize":
+          is_minmax = True
+        elif isinstance(dst_node.op, relay.Function):
+          comp = dst_node.op.attrs.get("Composite", "") if dst_node.op.attrs else ""
+          if str(comp) == "imcflow.preop-minmax":
+            is_minmax = True
+      if is_minmax:
+        gran = MINMAX_GRANULARITY if gran is None else max(gran, MINMAX_GRANULARITY)
+    return gran
+
   def create_loop_from_call(self, call_ctx : 'BuilderContext', to_process_in_edges=None):
     """Wrap the content in a loop based on call's type_args.
 
@@ -3550,6 +3589,42 @@ class RecvSendWrapper(ImceCodeBlock):
         num_out_blocks = vec_num_blocks
       actual_send_block._num_blocks = num_blocks
       actual_send_block._num_out_blocks = num_out_blocks
+
+      # Residual-in-region consumer-granularity fix (IMCFLOW_RESIDUAL_IN_REGION):
+      # A residual ADD fused in-region (VecOpBlock: BN[/relu]/multiply/add) takes
+      # its num_blocks from the composite's FIRST op (BatchNorm) = the *logical*
+      # channel count / 16. For a low-channel block (resnet8 b1 residual = 16ch ->
+      # num_blocks=1) it loops out_total_bytes/32 times, SENDing 1 block/iter. That
+      # is fine WHEN its in-region consumer also groups by the same num_blocks (e.g.
+      # region2's b2 residual -> a vecops consumer, both channel-based num_blocks=2:
+      # they match, no deadlock). It is NOT fine when the consumer is a STANDALONE
+      # min-max quantize, which HARD-CODES granularity 4 (MinmaxQuantBlock: must RECV
+      # all channels before quantizing) and thus RECVs 4 blocks/iter. Then the add's
+      # 1/iter cadence disagrees with the consumer's 4/iter: total blocks match but
+      # the per-iteration SEND/STANDBY rendezvous count is 4x too high (4096 vs 1024)
+      # -> after 1024 the consumer stops handshaking while the producer still has
+      # 3072 SENDs queued -> FIFO backpressure -> region1 tiled-launch deadlock
+      # (fsim: all region1 imces stall on OP_RECV). Fix: pad num_blocks up ONLY to
+      # the consumer's granularity so the add SENDs match/iter blocks; the extra
+      # (num_blocks - real_blocks) SENDs are dummy 0 (RecvSendWrapper burst-pad, via
+      # real_blocks), so the real data is unchanged. Only fires for a fused
+      # VecOpBlock (prev_op set) in residual-in-region mode whose consumer FORCES a
+      # larger granularity; the common case (matching consumer) is left untouched
+      # -> byte-identical to lever-OFF / to the pre-fix in-region output for regions
+      # where producer & consumer already agreed (b2/b3).
+      consumer_gran = self._residual_consumer_granularity()
+      if (residual_in_region_mode() and isinstance(self.send_block, VecOpBlock)
+          and actual_send_block.prev_op is not None
+          and consumer_gran is not None and consumer_gran > num_blocks
+          and (consumer_gran % num_blocks == 0)):
+        real_blocks = actual_send_block.effective_blocks()
+        pad_ratio = consumer_gran // num_blocks
+        count = count // pad_ratio
+        num_blocks = consumer_gran
+        num_out_blocks = consumer_gran
+        actual_send_block.real_blocks = real_blocks
+        actual_send_block._num_blocks = num_blocks
+        actual_send_block._num_out_blocks = num_out_blocks
 
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks,
