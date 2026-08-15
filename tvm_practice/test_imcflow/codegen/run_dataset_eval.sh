@@ -350,6 +350,7 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
+    POWER_REMOTE_BINARY="$REMOTE_BASE_PATH/$BINARY_DIR/build/$DATASET_EXEC_NAME"
     power_prepare "$POWER_CONFIG" "$MODEL_EVL_DIR" "eval_dir/$MODEL_EVL_DIR" \
         "runner=run_dataset_eval" \
         "model=$MODEL_EVL_DIR" \

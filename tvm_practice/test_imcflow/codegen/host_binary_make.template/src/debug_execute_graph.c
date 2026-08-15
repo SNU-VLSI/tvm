@@ -226,6 +226,9 @@ static void print_tensor_info(const char* name, const DLTensor* tensor) {
 // ============================================================================
 
 int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "--power-build-info") == 0)
+    return power_measure_runtime_print_build_info(stdout) == 0 ? 0 : 1;
+
   // Parse command line arguments
   const char* test_name = argc > 1 ? argv[1] : "default_test";
   // test_name already includes "eval_dir/" prefix (e.g., "eval_dir/xxx_evl")

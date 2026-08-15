@@ -2,6 +2,7 @@
 #define IMCFLOW_POWER_MEASURE_RUNTIME_H_
 
 #include <stddef.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,9 @@ int power_measure_runtime_finish(void);
 
 int power_measure_runtime_is_enabled(void);
 int power_measure_runtime_is_degraded(void);
+
+/* Print the revisions embedded by CMake for runner-side identity checks. */
+int power_measure_runtime_print_build_info(FILE *stream);
 
 #ifdef __cplusplus
 }

@@ -6,6 +6,18 @@
 
 #include "dmm_measure.h"
 
+#ifndef IMCFLOW_BUILD_TVM_GIT_REV
+#define IMCFLOW_BUILD_TVM_GIT_REV "unknown"
+#endif
+
+#ifndef IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV
+#define IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV "unknown"
+#endif
+
+#ifndef IMCFLOW_BUILD_TREE_DIRTY
+#define IMCFLOW_BUILD_TREE_DIRTY 1
+#endif
+
 
 static int g_power_enabled = 0;
 static int g_power_finished = 0;
@@ -58,8 +70,11 @@ int power_measure_runtime_start(void)
     return -1;
   }
 
-  fprintf(stderr, "[POWER] session=%s server_revision=%s\n",
-          dmm_session_id(), dmm_server_revision());
+  fprintf(stderr,
+          "[POWER] session=%s server_revision=%s tvm_revision=%s "
+          "measurement_utils_revision=%s build_dirty=%d\n",
+          dmm_session_id(), dmm_server_revision(), IMCFLOW_BUILD_TVM_GIT_REV,
+          IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV, IMCFLOW_BUILD_TREE_DIRTY);
   power_measure_runtime_phase("process_setup");
   return 0;
 }
@@ -131,4 +146,18 @@ int power_measure_runtime_is_enabled(void)
 int power_measure_runtime_is_degraded(void)
 {
   return g_power_degraded;
+}
+
+
+int power_measure_runtime_print_build_info(FILE *stream)
+{
+  if (stream == NULL)
+    return -1;
+  if (fprintf(stream,
+              "IMCFLOW_POWER_BUILD_INFO tvm=%s measurement_utils=%s dirty=%d\n",
+              IMCFLOW_BUILD_TVM_GIT_REV,
+              IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV,
+              IMCFLOW_BUILD_TREE_DIRTY) < 0)
+    return -1;
+  return 0;
 }

@@ -43,6 +43,8 @@ power_revision_preflight() {
     local board_tvm_root="${POWER_BOARD_TVM_ROOT:-/home/root/tvm}"
     local meas_repo="${POWER_MEASUREMENT_UTILS_REPO:-/home/jaeyongjang/project.local/measurement_utils}"
     local result_ssh="${POWER_RESULT_SSH_HOST:-meas-2}"
+    local binary_info=""
+    local expected_binary_info=""
 
     tvm_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)" || return 1
     POWER_MASTER_TVM_REV="$(git -C "$tvm_root" rev-parse HEAD)" || return 1
@@ -67,6 +69,26 @@ power_revision_preflight() {
         echo "  board =$POWER_BOARD_MEASUREMENT_REV" >&2
         echo "  meas-2=$POWER_SERVER_MEASUREMENT_REV" >&2
         return 1
+    fi
+    if [[ -n "${POWER_REMOTE_BINARY:-}" ]]; then
+        if [[ ! "$POWER_REMOTE_BINARY" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+            echo "Error: unsafe POWER_REMOTE_BINARY: $POWER_REMOTE_BINARY" >&2
+            return 1
+        fi
+        binary_info="$(scan_ssh "$POWER_REMOTE_BINARY --power-build-info")" || {
+            echo "Error: cannot read power build identity from $POWER_REMOTE_BINARY" >&2
+            return 1
+        }
+        binary_info="${binary_info//$'\r'/}"
+        expected_binary_info="IMCFLOW_POWER_BUILD_INFO tvm=$POWER_MASTER_TVM_REV measurement_utils=$POWER_MASTER_MEASUREMENT_REV dirty=0"
+        if [[ "$binary_info" != "$expected_binary_info" ]]; then
+            echo "Error: deployed binary revision mismatch before power run" >&2
+            echo "  expected=$expected_binary_info" >&2
+            echo "  binary  =$binary_info" >&2
+            return 1
+        fi
+        POWER_BINARY_TVM_REV="$POWER_MASTER_TVM_REV"
+        POWER_BINARY_MEASUREMENT_REV="$POWER_MASTER_MEASUREMENT_REV"
     fi
     echo "[POWER] revisions: tvm=$POWER_MASTER_TVM_REV measurement_utils=$POWER_MASTER_MEASUREMENT_REV"
 }
@@ -172,6 +194,12 @@ power_prepare() {
         --metadata "board_measurement_utils_git_rev=$POWER_BOARD_MEASUREMENT_REV"
         --metadata "measurement_server_utils_git_rev=$POWER_SERVER_MEASUREMENT_REV"
     )
+    if [[ -n "${POWER_REMOTE_BINARY:-}" ]]; then
+        prepare_args+=(
+            --metadata "binary_tvm_git_rev=$POWER_BINARY_TVM_REV"
+            --metadata "binary_measurement_utils_git_rev=$POWER_BINARY_MEASUREMENT_REV"
+        )
+    fi
     while [[ $# -gt 0 ]]; do
         prepare_args+=(--metadata "$1")
         shift

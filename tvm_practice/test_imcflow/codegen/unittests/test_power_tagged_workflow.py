@@ -215,7 +215,25 @@ def test_host_templates_cover_single_and_dataset_phases():
         assert "power_measure_runtime_start()" in text
         assert 'power_measure_runtime_phase("graph_execute")' in text
         assert "power_measure_runtime_finish()" in text
+        assert '"--power-build-info"' in text
+        assert "power_measure_runtime_print_build_info(stdout)" in text
     for source in sources[2:]:
         text = source.read_text(encoding="utf-8")
         assert "power_measure_runtime_sample(sample_idx)" in text
         assert 'power_measure_runtime_event("sample_timeout")' in text
+
+
+def test_build_and_runner_gate_embed_deployed_revisions():
+    for cmake_file in (
+        CODEGEN_DIR / "host_binary_make.template/CMakeLists.txt",
+        CODEGEN_DIR / "host_binary_make.dataset/CMakeLists.txt",
+    ):
+        text = cmake_file.read_text(encoding="utf-8")
+        assert "IMCFLOW_BUILD_TVM_GIT_REV" in text
+        assert "IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV" in text
+        assert "IMCFLOW_BUILD_TREE_DIRTY" in text
+
+    runner = (CODEGEN_DIR / "power_steps.sh").read_text(encoding="utf-8")
+    assert '"$POWER_REMOTE_BINARY --power-build-info"' in runner
+    assert "deployed binary revision mismatch" in runner
+    assert "binary_tvm_git_rev" in runner

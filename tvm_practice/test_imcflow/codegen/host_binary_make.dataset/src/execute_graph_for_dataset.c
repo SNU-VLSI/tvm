@@ -285,6 +285,9 @@ static void print_class_scores(const DLTensor* tensor, int num_classes,
 // ============================================================================
 
 int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "--power-build-info") == 0)
+    return power_measure_runtime_print_build_info(stdout) == 0 ? 0 : 1;
+
   if (argc < 5) {
     fprintf(stderr, "Usage: %s <graph.json> <params.params> <images.npy> <labels.npy> [num_samples_or_indices] [output_path]\n", argv[0]);
     fprintf(stderr, "\nExample:\n");

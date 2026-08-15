@@ -281,6 +281,38 @@ if(TVM_BUILD_HOST_RUNNER)
      NOT EXISTS "${IMCFLOW_MEASUREMENT_CAPI_DIR}/dmm_measure.c")
     message(FATAL_ERROR "Tagged power runtime sources are missing")
   endif()
+  execute_process(
+    COMMAND git -C "${TVM_ROOT}" rev-parse HEAD
+    OUTPUT_VARIABLE IMCFLOW_BUILD_TVM_GIT_REV
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE IMCFLOW_TVM_GIT_RESULT
+  )
+  execute_process(
+    COMMAND git -C "${IMCFLOW_MEASUREMENT_CAPI_DIR}/.." rev-parse HEAD
+    OUTPUT_VARIABLE IMCFLOW_BUILD_MEASUREMENT_GIT_REV
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE IMCFLOW_MEASUREMENT_GIT_RESULT
+  )
+  if(NOT IMCFLOW_TVM_GIT_RESULT EQUAL 0 OR
+     NOT IMCFLOW_MEASUREMENT_GIT_RESULT EQUAL 0)
+    message(FATAL_ERROR "Cannot resolve tagged power build revisions")
+  endif()
+  execute_process(
+    COMMAND git -C "${TVM_ROOT}" status --porcelain --untracked-files=no
+    OUTPUT_VARIABLE IMCFLOW_TVM_TRACKED_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND git -C "${IMCFLOW_MEASUREMENT_CAPI_DIR}/.." status --porcelain
+            --untracked-files=no
+    OUTPUT_VARIABLE IMCFLOW_MEASUREMENT_TRACKED_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  set(IMCFLOW_BUILD_TREE_DIRTY 0)
+  if(NOT IMCFLOW_TVM_TRACKED_STATUS STREQUAL "" OR
+     NOT IMCFLOW_MEASUREMENT_TRACKED_STATUS STREQUAL "")
+    set(IMCFLOW_BUILD_TREE_DIRTY 1)
+  endif()
   add_library(imcflow_power_runtime STATIC
     "${IMCFLOW_POWER_RUNTIME_DIR}/power_measure_runtime.c"
     "${IMCFLOW_MEASUREMENT_CAPI_DIR}/dmm_measure.c"
@@ -288,6 +320,11 @@ if(TVM_BUILD_HOST_RUNNER)
   target_include_directories(imcflow_power_runtime PUBLIC
     "${IMCFLOW_POWER_RUNTIME_DIR}"
     "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
+  )
+  target_compile_definitions(imcflow_power_runtime PRIVATE
+    IMCFLOW_BUILD_TVM_GIT_REV="${IMCFLOW_BUILD_TVM_GIT_REV}"
+    IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV="${IMCFLOW_BUILD_MEASUREMENT_GIT_REV}"
+    IMCFLOW_BUILD_TREE_DIRTY=${IMCFLOW_BUILD_TREE_DIRTY}
   )
   target_include_directories(tvm_model PRIVATE
     "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
