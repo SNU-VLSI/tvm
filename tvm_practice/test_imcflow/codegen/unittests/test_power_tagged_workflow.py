@@ -55,6 +55,46 @@ def test_disabled_config_does_not_prepare_session(tmp_path):
     assert result.stdout.strip() == "disabled"
 
 
+def test_codegen_build_identity_requires_matching_clean_revisions(tmp_path):
+    metadata = tmp_path / "build_metadata.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "tvm_git_rev": "a" * 40,
+                "measurement_utils_git_rev": "b" * 40,
+                "build_tree_dirty": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    accepted = run_tool(
+        "validate-build-identity",
+        "--metadata",
+        metadata,
+        "--tvm-rev",
+        "a" * 40,
+        "--measurement-rev",
+        "b" * 40,
+    )
+    assert "dirty=0" in accepted.stdout
+
+    value = json.loads(metadata.read_text(encoding="utf-8"))
+    value["build_tree_dirty"] = True
+    metadata.write_text(json.dumps(value), encoding="utf-8")
+    rejected = run_tool(
+        "validate-build-identity",
+        "--metadata",
+        metadata,
+        "--tvm-rev",
+        "a" * 40,
+        "--measurement-rev",
+        "b" * 40,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "dirty tracked tree" in rejected.stderr
+
+
 def test_result_validation_and_tag_filter(tmp_path):
     result_dir = tmp_path / "result_validation"
     rails_dir = result_dir / "rails"
@@ -237,3 +277,10 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert '"$POWER_REMOTE_BINARY --power-build-info"' in runner
     assert "deployed binary revision mismatch" in runner
     assert "binary_tvm_git_rev" in runner
+    assert "validate-build-identity" in runner
+    assert "codegen_tvm_git_rev" in runner
+
+    pipeline = (CODEGEN_DIR / "test.py").read_text(encoding="utf-8")
+    assert 'metadata["tvm_git_rev"]' in pipeline
+    assert 'metadata["measurement_utils_git_rev"]' in pipeline
+    assert 'metadata["build_tree_dirty"]' in pipeline

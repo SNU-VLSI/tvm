@@ -158,6 +158,30 @@ def config_status(args: argparse.Namespace) -> int:
     return 0 if config["enabled"] else 10
 
 
+def validate_build_identity(args: argparse.Namespace) -> int:
+    metadata = load_object(Path(args.metadata))
+    actual_tvm = metadata.get("tvm_git_rev")
+    actual_measurement = metadata.get("measurement_utils_git_rev")
+    dirty = metadata.get("build_tree_dirty")
+    if actual_tvm != args.tvm_rev:
+        raise ConfigError(
+            f"codegen TVM revision mismatch: metadata={actual_tvm!r} "
+            f"expected={args.tvm_rev!r}"
+        )
+    if actual_measurement != args.measurement_rev:
+        raise ConfigError(
+            "codegen measurement_utils revision mismatch: "
+            f"metadata={actual_measurement!r} expected={args.measurement_rev!r}"
+        )
+    if dirty is not False:
+        raise ConfigError("codegen metadata was produced from a dirty tracked tree")
+    print(
+        "IMCFLOW_POWER_CODEGEN_INFO "
+        f"tvm={actual_tvm} measurement_utils={actual_measurement} dirty=0"
+    )
+    return 0
+
+
 def load_result(path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     missing = [name for name in REQUIRED_RESULT_FILES if not (path / name).is_file()]
     if missing:
@@ -295,6 +319,12 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("config-status")
     status_parser.add_argument("config")
     status_parser.set_defaults(handler=config_status)
+
+    build_parser = subparsers.add_parser("validate-build-identity")
+    build_parser.add_argument("--metadata", required=True)
+    build_parser.add_argument("--tvm-rev", required=True)
+    build_parser.add_argument("--measurement-rev", required=True)
+    build_parser.set_defaults(handler=validate_build_identity)
 
     validate_parser = subparsers.add_parser("validate-result")
     validate_parser.add_argument("result_dir")

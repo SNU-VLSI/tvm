@@ -70,6 +70,18 @@ power_revision_preflight() {
         echo "  meas-2=$POWER_SERVER_MEASUREMENT_REV" >&2
         return 1
     fi
+    if [[ -n "${POWER_BUILD_METADATA:-}" ]]; then
+        if [[ ! -f "$POWER_BUILD_METADATA" ]]; then
+            echo "Error: codegen build metadata not found: $POWER_BUILD_METADATA" >&2
+            return 1
+        fi
+        python "$SCRIPT_DIR/scripts/power_request.py" validate-build-identity \
+            --metadata "$POWER_BUILD_METADATA" \
+            --tvm-rev "$POWER_MASTER_TVM_REV" \
+            --measurement-rev "$POWER_MASTER_MEASUREMENT_REV" || return 1
+        POWER_CODEGEN_TVM_REV="$POWER_MASTER_TVM_REV"
+        POWER_CODEGEN_MEASUREMENT_REV="$POWER_MASTER_MEASUREMENT_REV"
+    fi
     if [[ -n "${POWER_REMOTE_BINARY:-}" ]]; then
         if [[ ! "$POWER_REMOTE_BINARY" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
             echo "Error: unsafe POWER_REMOTE_BINARY: $POWER_REMOTE_BINARY" >&2
@@ -198,6 +210,12 @@ power_prepare() {
         prepare_args+=(
             --metadata "binary_tvm_git_rev=$POWER_BINARY_TVM_REV"
             --metadata "binary_measurement_utils_git_rev=$POWER_BINARY_MEASUREMENT_REV"
+        )
+    fi
+    if [[ -n "${POWER_BUILD_METADATA:-}" ]]; then
+        prepare_args+=(
+            --metadata "codegen_tvm_git_rev=$POWER_CODEGEN_TVM_REV"
+            --metadata "codegen_measurement_utils_git_rev=$POWER_CODEGEN_MEASUREMENT_REV"
         )
     fi
     while [[ $# -gt 0 ]]; do
