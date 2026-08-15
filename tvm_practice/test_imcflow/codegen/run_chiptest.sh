@@ -17,6 +17,7 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  -s, --skip LIST  Comma-separated step numbers to skip (e.g., 1,3)"
+    echo "  --power-config FILE  Enable tagged whole-run power measurement"
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Arguments:"
@@ -41,6 +42,7 @@ SKIP_STEP4=false
 SKIP_STEP5=false
 SKIP_STEP6=false
 SKIP_LIST=""
+POWER_CONFIG="${IMCFLOW_POWER_CONFIG:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -53,6 +55,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             SKIP_LIST="$2"
+            shift 2
+            ;;
+        --power-config)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            POWER_CONFIG="$2"
             shift 2
             ;;
         --skip1|--skip-1)
@@ -151,6 +161,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/scan_steps.sh"
 load_env
+source "$SCRIPT_DIR/power_steps.sh"
 
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"
@@ -205,15 +216,25 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
+    power_prepare "$POWER_CONFIG" "$TEST_NAME" "eval_dir/$TEST_FOLDER" \
+        "runner=run_chiptest" \
+        "model=$TEST_NAME" \
+        "board=${BOARD:-unknown}" \
+        "chip=${IMCFLOW_CHIP:-unknown}" \
+        "checkpoint=${CKPT:-}" || exit 1
+    POWER_REMOTE_ENV="$(power_remote_environment)"
     echo "Step 6: Executing on remote chip (timeout: 300s)..."
     echo ""
     scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./$EXEC_NAME \
+                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && ${POWER_REMOTE_ENV}timeout 300 ./$EXEC_NAME \
                 eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
-                cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
-                tvm_status=\$?; exit \$tvm_status"
+                tvm_status=\$?; cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1; \
+                exit \$tvm_status"
+    EVAL_STATUS=$?
+    power_finalize_run "$EVAL_STATUS"
+    FINAL_STATUS=$?
 
-    if [ $? -eq 0 ]; then
+    if [ $FINAL_STATUS -eq 0 ]; then
         echo ""
         echo "=========================================="
         echo "Chip test completed successfully!"

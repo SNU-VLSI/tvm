@@ -182,6 +182,7 @@ perf
 !tvm_practice/test_imcflow/codegen/dataset/kws_sc/metadata.json
 !tvm_practice/test_imcflow/codegen/dataset/vww/metadata.json
 !tvm_practice/test_imcflow/codegen/dmm_configs/dmm_gpib3.json
+!tvm_practice/test_imcflow/codegen/power_configs/default.json
 *.params
 *.ro
 *.onnx

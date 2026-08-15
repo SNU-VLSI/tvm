@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""Prepare and validate tagged whole-run power measurement artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any, Dict, Iterable, Tuple
+
+
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+MAX_SAMPLES = 50_000
+REQUIRED_RESULT_FILES = (
+    "request.json",
+    "resolved_config.json",
+    "session.json",
+    "tags.jsonl",
+    "summary.json",
+)
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def load_object(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"cannot load {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: JSON root must be an object")
+    return value
+
+
+def finite_number(value: Any, label: str, minimum: float = 0.0) -> float:
+    if isinstance(value, bool):
+        raise ConfigError(f"{label} must be numeric")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{label} must be numeric") from exc
+    if not math.isfinite(result) or result < minimum:
+        raise ConfigError(f"{label} must be finite and >= {minimum}")
+    return result
+
+
+def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(config)
+    if normalized.get("schema_version", 1) != 1:
+        raise ConfigError("only schema_version=1 is supported")
+    normalized["schema_version"] = 1
+    enabled = normalized.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("enabled must be boolean")
+    normalized["enabled"] = enabled
+    if not enabled:
+        return normalized
+
+    mode = str(normalized.get("mode", "now")).lower()
+    if mode not in ("now", "wait"):
+        raise ConfigError("mode must be 'now' or 'wait'")
+    normalized["mode"] = mode
+    normalized["duration_budget_s"] = finite_number(
+        normalized.get("duration_budget_s", 300),
+        "duration_budget_s",
+        0.001,
+    )
+
+    defaults = normalized.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ConfigError("defaults must be an object")
+    rails = normalized.get("rails")
+    if not isinstance(rails, list) or not rails:
+        raise ConfigError("rails must be a non-empty array")
+    seen = set()
+    for index, rail in enumerate(rails):
+        if not isinstance(rail, dict):
+            raise ConfigError(f"rails[{index}] must be an object")
+        merged = dict(defaults)
+        merged.update(rail)
+        name = merged.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"rails[{index}].name is required")
+        if name.upper() in seen:
+            raise ConfigError(f"duplicate rail name: {name}")
+        seen.add(name.upper())
+        count = merged.get("sample_count", MAX_SAMPLES)
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ConfigError(f"{name}.sample_count must be an integer")
+        if count < 1 or count > MAX_SAMPLES:
+            raise ConfigError(
+                f"{name}.sample_count must be between 1 and {MAX_SAMPLES}"
+            )
+        interval = merged.get("sample_interval_s", "auto")
+        if isinstance(interval, str):
+            if interval.lower() not in ("auto", "min"):
+                raise ConfigError(
+                    f"{name}.sample_interval_s must be numeric, auto, or MIN"
+                )
+        else:
+            finite_number(interval, f"{name}.sample_interval_s", 0.000001)
+        finite_number(merged.get("nplc", 0.001), f"{name}.nplc", 0.00001)
+        finite_number(merged.get("voltage_V", 0.0), f"{name}.voltage_V", 0.0)
+
+    metadata = normalized.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ConfigError("metadata must be an object")
+    return normalized
+
+
+def parse_metadata(items: Iterable[str]) -> Dict[str, str]:
+    result = {}
+    for item in items:
+        if "=" not in item:
+            raise ConfigError(f"metadata must be KEY=VALUE: {item}")
+        key, value = item.split("=", 1)
+        if not key:
+            raise ConfigError("metadata key cannot be empty")
+        result[key] = value
+    return result
+
+
+def atomic_write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def prepare(args: argparse.Namespace) -> int:
+    config = validate_config(load_object(Path(args.config)))
+    if not config["enabled"]:
+        print("disabled")
+        return 10
+    if not SESSION_RE.fullmatch(args.session_id):
+        raise ConfigError("unsafe session_id")
+    config["session_id"] = args.session_id
+    metadata = dict(config.get("metadata", {}))
+    metadata.update(parse_metadata(args.metadata))
+    config["metadata"] = metadata
+    atomic_write_json(Path(args.output), config)
+    print(Path(args.output).resolve())
+    return 0
+
+
+def config_status(args: argparse.Namespace) -> int:
+    config = validate_config(load_object(Path(args.config)))
+    print("enabled" if config["enabled"] else "disabled")
+    return 0 if config["enabled"] else 10
+
+
+def load_result(path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    missing = [name for name in REQUIRED_RESULT_FILES if not (path / name).is_file()]
+    if missing:
+        raise ConfigError("missing result files: " + ", ".join(missing))
+    summary = load_object(path / "summary.json")
+    session = load_object(path / "session.json")
+    if summary.get("session_id") != path.name:
+        raise ConfigError("summary session_id does not match directory")
+    if session.get("session_id") != path.name:
+        raise ConfigError("session manifest ID does not match directory")
+    return summary, session
+
+
+def validate_result(args: argparse.Namespace) -> int:
+    import numpy as np
+
+    path = Path(args.result_dir)
+    summary, _session = load_result(path)
+    rails = summary.get("rails")
+    if not isinstance(rails, dict) or not rails:
+        raise ConfigError("summary has no rail results")
+    for name, rail_summary in rails.items():
+        artifact_path = path / "rails" / f"{name}.npz"
+        if not artifact_path.is_file():
+            raise ConfigError(f"missing rail artifact: {artifact_path.name}")
+        with np.load(artifact_path) as artifact:
+            required = (
+                "current_A",
+                "time_from_trigger_s",
+                "power_W",
+                "tag_state_id",
+            )
+            missing = [key for key in required if key not in artifact]
+            if missing:
+                raise ConfigError(f"{name}: missing arrays {missing}")
+            lengths = {len(artifact[key]) for key in required}
+            if len(lengths) != 1 or next(iter(lengths)) < 1:
+                raise ConfigError(f"{name}: result arrays are empty or misaligned")
+            if int(rail_summary.get("sample_count", -1)) != next(iter(lengths)):
+                raise ConfigError(f"{name}: summary sample count mismatch")
+    status = summary.get("status")
+    print(
+        json.dumps(
+            {
+                "session_id": summary.get("session_id"),
+                "status": status,
+                "tag_event_count": summary.get("tag_event_count"),
+                "rails": {
+                    name: value.get("sample_count") for name, value in rails.items()
+                },
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if status == "complete" else 2
+
+
+def summarize(args: argparse.Namespace) -> int:
+    summary, _session = load_result(Path(args.result_dir))
+    key = None
+    value = None
+    if args.tag:
+        if "=" not in args.tag:
+            raise ConfigError("--tag must be KEY=VALUE")
+        key, value = args.tag.split("=", 1)
+    for rail_name, rail in summary.get("rails", {}).items():
+        print(f"[{rail_name}] samples={rail.get('sample_count')} energy_J={rail.get('energy_J')}")
+        for state in rail.get("tag_states", []):
+            tags = state.get("state", {})
+            if key is not None and tags.get(key) != value:
+                continue
+            print(
+                "  "
+                + json.dumps(tags, ensure_ascii=False, sort_keys=True)
+                + f" samples={state.get('sample_count')}"
+                + f" avg_A={state.get('average_current_A')}"
+                + f" avg_W={state.get('average_power_W')}"
+                + f" energy_J={state.get('energy_J')}"
+            )
+    return 0
+
+
+def plot_timeline(args: argparse.Namespace) -> int:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    result_dir = Path(args.result_dir)
+    summary, _session = load_result(result_dir)
+    rail_name = args.rail or next(iter(summary.get("rails", {})), None)
+    if not rail_name:
+        raise ConfigError("result has no rails")
+    artifact_path = result_dir / "rails" / f"{rail_name}.npz"
+    if not artifact_path.is_file():
+        raise ConfigError(f"unknown rail: {rail_name}")
+    with np.load(artifact_path) as artifact:
+        time_s = artifact["time_from_trigger_s"]
+        current = artifact["current_A"]
+        power = artifact["power_W"]
+        state = artifact["tag_state_id"]
+
+    figure, axes = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
+    axes[0].plot(time_s, current, linewidth=0.7, label="current_A")
+    axes[0].plot(time_s, power, linewidth=0.7, label="power_W", alpha=0.8)
+    axes[0].set_ylabel("A / W")
+    axes[0].legend(loc="best")
+    axes[0].grid(alpha=0.25)
+    axes[1].step(time_s, state, where="post", linewidth=0.8)
+    axes[1].set_ylabel("tag_state_id")
+    axes[1].set_xlabel("time from trigger (s)")
+    axes[1].grid(alpha=0.25)
+    figure.suptitle(f"{summary.get('session_id')} / {rail_name}")
+    figure.tight_layout()
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=150)
+    plt.close(figure)
+    print(output.resolve())
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    prepare_parser = subparsers.add_parser("prepare")
+    prepare_parser.add_argument("--config", required=True)
+    prepare_parser.add_argument("--output", required=True)
+    prepare_parser.add_argument("--session-id", required=True)
+    prepare_parser.add_argument("--metadata", action="append", default=[])
+    prepare_parser.set_defaults(handler=prepare)
+
+    status_parser = subparsers.add_parser("config-status")
+    status_parser.add_argument("config")
+    status_parser.set_defaults(handler=config_status)
+
+    validate_parser = subparsers.add_parser("validate-result")
+    validate_parser.add_argument("result_dir")
+    validate_parser.set_defaults(handler=validate_result)
+
+    summary_parser = subparsers.add_parser("summarize")
+    summary_parser.add_argument("result_dir")
+    summary_parser.add_argument("--tag")
+    summary_parser.set_defaults(handler=summarize)
+
+    plot_parser = subparsers.add_parser("plot")
+    plot_parser.add_argument("result_dir")
+    plot_parser.add_argument("--rail")
+    plot_parser.add_argument("--output", required=True)
+    plot_parser.set_defaults(handler=plot_timeline)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        return int(args.handler(args))
+    except ConfigError as exc:
+        parser.error(str(exc))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
