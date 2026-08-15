@@ -2908,6 +2908,19 @@ class RecvSendWrapper(ImceCodeBlock):
       merged_input_pre = pm.get_merged_inode_input_window(self.in_edges)
       if merged_input_pre is not None:
         merged_input_edges = set(pm.collect_inode_data_input_edges(self.in_edges))
+      elif residual_in_region_mode():
+        # IMCFLOW_RESIDUAL_IN_REGION: the in-region residual add's two data
+        # operands are a MIXED imce+inode pair (main from imce_3_2, skip from
+        # inode_0_0), both composite `data` dsts. The inode-only merged window
+        # above collects neither (get_merged_inode_input_window requires inode
+        # senders AND a plain-int dst), so fall back to the residual-specific
+        # merged window that STANDBYs BOTH producers at flag 1. Emitted through
+        # the SAME block-outer merged path below (num_blocks==4 -> the window is
+        # re-raised per block, Fix-E style, matching each producer's per-word
+        # pre-send re-arm). OFF -> residual_in_region_mode() False -> unchanged.
+        merged_input_pre = pm.get_merged_residual_input_window(self.in_edges)
+        if merged_input_pre is not None:
+          merged_input_edges = set(pm.collect_residual_data_input_edges(self.in_edges))
     merged_window_emitted = False
 
     if self.in_edges:

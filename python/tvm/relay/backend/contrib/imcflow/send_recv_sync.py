@@ -466,6 +466,77 @@ class SendRecvPairManager:
         dst_gid = edge.dst_id.graph_node_id
         return not isinstance(dst_gid, tuple)
 
+    def is_residual_data_input_recv(self, edge: TensorEdge) -> bool:
+        """IMCFLOW_RESIDUAL_IN_REGION: True if this RECV is one of the TWO data
+        operands of an in-region residual ADD (a fused VecOpBlock: BN + relu +
+        multiply + add) that lives in the SAME region as its producers.
+
+        Unlike is_inode_data_input_recv (which requires an inode sender AND a
+        plain-int dst = the OLD cross-region 2-inode add), the in-region residual
+        add is a MIXED pair:
+          - main path : imce_3_2 (an IMCE conv) -> data  (fifo 2)
+          - skip path : inode_0_0 (an INODE)    -> data  (fifo 3)
+        Both operands land as composite `data` edges whose dst graph_node_id is a
+        TUPLE (the vecops composite), so is_inode_data_input_recv drops both and
+        the OLD merged-window machinery never fires -> both RECVs are bare ->
+        producer/consumer desync -> region1 tiled-launch deadlock.
+
+        Detection (lever-gated so OFF stays byte-identical):
+          * residual_in_region_mode() ON
+          * edge is a paired `data` RECV whose dst is a composite tuple
+          * receiver hw node is an imce
+          * that receiver has >= 2 DISTINCT data-input producers (any mix of imce
+            and inode), i.e. it is a converging residual add.
+        The >=2-producer requirement structurally excludes every ordinary
+        single-input pipeline `data` RECV (which has exactly one producer), so
+        this only ever matches the residual add.
+        """
+        if not residual_in_region_mode():
+            return False
+        pair = self.get_pair(edge)
+        if pair is None:
+            return False
+        if edge.dst_id.tensor_type != "data":
+            return False
+        dst_gid = edge.dst_id.graph_node_id
+        if not isinstance(dst_gid, tuple):
+            return False  # plain-int dst is handled by is_inode_data_input_recv
+        recv_hw = self._get_hw_node(edge.dst_id)
+        if isinstance(recv_hw, tuple):
+            recv_hw = recv_hw[0]
+        if recv_hw is None or not recv_hw.is_imce():
+            return False
+        return len(self._residual_data_producers(recv_hw)) >= 2
+
+    def _residual_data_producers(self, recv_hw: NodeID) -> List[NodeID]:
+        """Distinct hw nodes that SEND a composite `data` operand into recv_hw
+        (imce). Includes BOTH imce and inode senders -- the residual add's mixed
+        producer pair. Ascending-value ordered, deduplicated. Only meaningful
+        under residual_in_region_mode(); callers gate on the lever.
+        """
+        producers = []
+        seen = set()
+        for p in self.pairs.values():
+            if recv_hw not in p.receiver_nodes:
+                continue
+            for e in p.edges:
+                # only the edges whose OWN dst is recv_hw with a composite data
+                rn = self._get_hw_node(e.dst_id)
+                if isinstance(rn, tuple):
+                    rn = rn[0]
+                if rn != recv_hw:
+                    continue
+                if e.dst_id.tensor_type != "data":
+                    continue
+                if not isinstance(e.dst_id.graph_node_id, tuple):
+                    continue
+                if p.sender_node.value not in seen:
+                    seen.add(p.sender_node.value)
+                    producers.append(p.sender_node)
+                break
+        producers.sort(key=lambda x: x.value)
+        return producers
+
     def is_packed_postop_const_edge(self, edge: TensorEdge) -> bool:
         """IMCFLOW_PACK_BN_MINMAX capacity-deadlock guard (BUGFIX-off RTL).
 
@@ -925,6 +996,71 @@ class SendRecvPairManager:
         pre.append("__builtin_IMCE_SETFLAG(0);")
         return pre
 
+    def collect_residual_data_input_edges(self, edges: List[TensorEdge]) -> List[TensorEdge]:
+        """IMCFLOW_RESIDUAL_IN_REGION: the subset of `edges` that are the TWO
+        data operands of the in-region residual ADD (mixed imce+inode producers,
+        composite `data` dst). Empty unless the lever is ON. Order preserved.
+        """
+        if not residual_in_region_mode():
+            return []
+        return [e for e in edges if self.is_residual_data_input_recv(e)]
+
+    def get_merged_residual_input_window(self, edges: List[TensorEdge]):
+        """IMCFLOW_RESIDUAL_IN_REGION: ONE merged input window for the in-region
+        residual add's TWO data operands (main from imce_3_2, skip from
+        inode_0_0). Mirrors get_merged_inode_input_window's Fix-D protocol but
+        collects MIXED imce+inode producers (the inode-only variant drops the
+        imce edge and returns None -> no window at all -> deadlock).
+
+            SETFLAG(1); STANDBY(main_producer,1); STANDBY(skip_producer,1);
+            SETFLAG(0); RECV(main..); RECV(skip..)
+
+        The single scalar flag reg (imce_ctrl.sv) means ONE window covers BOTH
+        producers (two toggling windows would 1->0->1->0 and desync -- the Fix D
+        lesson). Producers STANDBY in ASCENDING node value. Returns the pre_lines
+        or None when there are < 2 residual data producers (so nothing but the
+        real residual add is affected). OFF -> [] collect -> None here.
+        """
+        input_edges = self.collect_residual_data_input_edges(edges)
+        senders = []
+        seen = set()
+        for edge in input_edges:
+            pair = self.get_pair(edge)
+            if pair is None:
+                continue
+            s = pair.sender_node
+            if s.value not in seen:
+                seen.add(s.value)
+                senders.append(s)
+        if len(senders) < 2:
+            return None
+        senders.sort(key=lambda x: x.value)
+        pre = ["__builtin_IMCE_SETFLAG(1);"]
+        for s in senders:
+            pre.append(f"__builtin_IMCE_STANDBY({s.value}, 1);")
+        pre.append("__builtin_IMCE_SETFLAG(0);")
+        return pre
+
+    def residual_add_consumer_of(self, edge: TensorEdge):
+        """IMCFLOW_RESIDUAL_IN_REGION: if `edge` is a producer's SEND whose dst
+        is an in-region residual add's `data` operand, return the consumer add's
+        hw NodeID (so the producer can pre-send STANDBY(add, 1)); else None.
+
+        Used by BOTH producers' pre-send paths:
+          * imce_3_2 (IMCE): its odata SEND -> add gets STANDBY(add,1) (imce side)
+          * inode_0_0 (INODE): its skip-data SEND -> add gets STANDBY(add,1) too
+        matched to the consumer's SETFLAG(1) window (get_merged_residual_input_
+        window). Returns None when OFF or not a residual data edge.
+        """
+        if not residual_in_region_mode():
+            return None
+        if not self.is_residual_data_input_recv(edge):
+            return None
+        recv_hw = self._get_hw_node(edge.dst_id)
+        if isinstance(recv_hw, tuple):
+            recv_hw = recv_hw[0]
+        return recv_hw
+
     def get_pre_send_sync(self, edge: TensorEdge):
         """Return the list of pre-send sync lines for a sender's SEND loop.
 
@@ -934,6 +1070,25 @@ class SendRecvPairManager:
         Returns [] when no pre-send sync is needed.
         """
         pair = self.get_pair(edge)
+
+        # IMCFLOW_RESIDUAL_IN_REGION: an IMCE producer (imce_3_2) whose odata is a
+        # `data` operand of the in-region residual add pre-sends STANDBY(add, 1),
+        # matching the consumer's merged SETFLAG(1) window
+        # (get_merged_residual_input_window). WITHOUT this the conv-odata edge
+        # into the fused add wrapper is (correctly, for OFF) classified as a
+        # composite-boundary / conv-into-fanout edge below and emitted BARE ->
+        # producer/consumer desync -> deadlock. Placed FIRST so it takes
+        # precedence over those bare predicates. Gated on the lever + the mixed-
+        # pair detector, so OFF (and every non-residual imce->composite edge)
+        # is untouched. Inode producers reach the same STANDBY(add,1) via
+        # inode_codeblock's _get_presend_sync_code_str; both use flag value 1 so
+        # they rendezvous with the single consumer window.
+        if (pair is not None
+                and pair.sender_node.is_imce()
+                and self.is_residual_data_input_recv(edge)):
+            add_hw = self.residual_add_consumer_of(edge)
+            if add_hw is not None:
+                return [f"__builtin_IMCE_STANDBY({add_hw.value}, 1);"]
 
         # Marker B' (flag-3 data-multicast barrier): a data-path producer whose
         # odata is MULTICAST to two imce receivers (fused consumer + sibling conv)

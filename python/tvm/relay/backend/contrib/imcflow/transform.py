@@ -3758,7 +3758,9 @@ class AnnotGenerator:
             if imcflow.residual_in_region_mode():
               shared_region = unique_regions[0]
               merged_cost = self.getRegionSize(shared_region) + self.getCost(node)
-              if merged_cost <= ImcflowDeviceConfig.IMCE_NUM:
+              import os as _os
+              _cap = int(_os.environ.get("IMCFLOW_RESID_MERGE_CAP", str(ImcflowDeviceConfig.IMCE_NUM)))
+              if merged_cost <= _cap:
                 debug_print(f"[ConvergeCheck] RESIDUAL_IN_REGION: keeping converge "
                             f"in-region (merged cost {merged_cost} <= "
                             f"{ImcflowDeviceConfig.IMCE_NUM})")

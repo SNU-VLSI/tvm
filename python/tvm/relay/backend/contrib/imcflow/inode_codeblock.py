@@ -5,7 +5,7 @@ from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send
 from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import imcu_intra_drain_nops
-from tvm.relay.op.contrib.imcflow import CustomIDToNode
+from tvm.relay.op.contrib.imcflow import CustomIDToNode, residual_in_region_mode
 from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
 from textwrap import indent
 import math
@@ -828,10 +828,46 @@ class SendBlock(InodeCodeBlock):
       if rnode is not None and rnode.is_imce() and rnode not in target_imces:
         target_imces.append(rnode)
 
+    # IMCFLOW_RESIDUAL_IN_REGION: this same skip SEND is ALSO multicast to the
+    # in-region residual add (imce_0_2), whose dst is a composite tuple ->
+    # is_inode_data_input_recv() above skips it, so the add would never see the
+    # inode's flag. Add the residual add receiver as a second rendezvous target
+    # so the inode pre-send STANDBYs BOTH imce_0_1 AND the add (imce_0_2) in ONE
+    # window (below), matching the consumer's merged SETFLAG(1) window. Lever
+    # OFF -> residual_data_input receivers empty -> byte-identical.
+    residual_target = False
+    if residual_in_region_mode():
+      for e in edges:
+        if not pm.is_residual_data_input_recv(e):
+          continue
+        rnode = pm._get_hw_node(e.dst_id)
+        if isinstance(rnode, tuple):
+          rnode = rnode[0]
+        if rnode is not None and rnode.is_imce() and rnode not in target_imces:
+          target_imces.append(rnode)
+          residual_target = True
+
     if not target_imces:
       return ""
 
     target_imces.sort(key=lambda x: x.value)
+
+    # When a residual add receiver joins the target set the SEND is a single
+    # MIXED multicast to >=2 imces: emit ONE merged window (single scalar inode
+    # flag) that STANDBYs every target's SETFLAG(1), sets flag once, waits every
+    # target to clear, clears once -- then SEND. Two separate per-target windows
+    # would toggle the inode flag 1->0->1->0 and race the second consumer (Fix D
+    # lesson, inode side). The OFF path keeps the original per-target 4-phase
+    # emission byte-identical.
+    if residual_target and len(target_imces) >= 2:
+      sync_lines = []
+      for rnode in target_imces:
+        sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, 1); // sync with {rnode.name} before SEND")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG(1);")
+      for rnode in target_imces:
+        sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, 0);")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
+      return "\n".join(sync_lines) + "\n"
 
     sync_lines = []
     for rnode in target_imces:
