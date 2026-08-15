@@ -2,7 +2,7 @@ from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.contrib.imcflow import DataBlock, InstEdgeInfo, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
-from tvm.contrib.imcflow import drop_psum_send
+from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
 from tvm.contrib.imcflow import imcu_intra_drain_nops
 from textwrap import indent
 import math
@@ -169,7 +169,44 @@ class RecvBlock(InodeCodeBlock):
     # RECV is affected; input/weight RECVs are separate blocks. Gated by env;
     # default OFF -> byte-identical.
     if drop_psum_send():
-      self.body.add(TextBlock(f"// [DROP_PSUM] omitted tiled INODE_RECV loop ({loop_cnt_var} iters)"))
+      _keep_k = drop_psum_keep_every()
+      if _keep_k <= 0:
+        # legacy drop-all: producing imce also drops all psum sends (keep=0). No
+        # packets arrive -> omit the whole RECV loop. Wedges on chip (see
+        # drop_psum_keep_every docstring); kept for regression / bounded STEP.
+        self.body.add(TextBlock(f"// [DROP_PSUM] omitted tiled INODE_RECV loop ({loop_cnt_var} iters, keep=0)"))
+        return
+      # K-keep: the producing imce keeps its BLK-block psum drain per K PIXELS
+      # (out_fifo drain; imce_codeblock ConvBlock._build_structure splits the pixel
+      # loop into keep/skip tiers -- 1 drain per K pixels). The imce SENDs only the
+      # kept pixels' BLK packets, and they arrive contiguously (skip pixels send
+      # nothing), so the inode just RECVs the kept count in a flat COUNTED loop.
+      # The INODE, like the IMCE, only supports counted hardware loops AND cannot
+      # select a runtime `/K` (sra) or `%K`/`if` (and+br_cc) -> "Cannot select".
+      # So compute the kept count as a COMPILE-TIME literal from the static packet
+      # count (tiling_info.pkt_cnts), divided by K in Python. Valid because the
+      # func_out drain is a single-tile block (tiling_factor==1 -> one pkt_cnts
+      # entry). K MUST divide the per-tile packet count (choose K | pixels, e.g.
+      # K=8 for an 8-wide col_group); assert if not so the imbalance surfaces at
+      # compile time instead of an RTL fifo deadlock.
+      _pkt_cnts = getattr(self.block.tiling_info, "pkt_cnts", None) if self.block.tiling_info else None
+      assert _pkt_cnts and len(_pkt_cnts) >= 1, \
+        f"[DROP_PSUM keep] func_out block {target_edge.simple_name()} has no static pkt_cnts"
+      _total_pkts = int(_pkt_cnts[0])
+      assert _total_pkts % int(_keep_k) == 0, \
+        (f"[DROP_PSUM keep] K={_keep_k} must divide the func_out packet count "
+         f"{_total_pkts} (choose K | packets so imce kept-SEND == inode kept-RECV; "
+         f"else fifo deadlock)")
+      _kept_pkts = _total_pkts // int(_keep_k)
+      self.body.add(TextBlock(
+        f"// [DROP_PSUM] keep {_kept_pkts}/{_total_pkts} psum RECVs (1 per {int(_keep_k)} pixels)"))
+      def recv_body_kept(iter, base_addr_var=base_var, fid=fifo_id):
+        code = f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
+        sync_code = self._get_recv_sync_code_str()
+        if sync_code:
+          code += sync_code
+        return code
+      self.body.add(SimpleFor(_kept_pkts, recv_body_kept))
       return
 
     # Per-packet sync: Receive one packet, then sync immediately

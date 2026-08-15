@@ -15,6 +15,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import CodegenContext
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import serialize_imcu_load
+from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
 from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
@@ -41,6 +42,17 @@ TuplePat = is_tuple(None)
 TupleGetItemPat = is_tuple_get_item(wildcard())
 VarPat = is_var()
 ConstPat = is_constant()
+
+
+def _is_func_out_psum_edge(edge) -> bool:
+  """True iff this tensor edge is a conv psum drain to an inode func_out collector
+  (dst tensor_type starts with 'func_out'). Used to scope the IMCFLOW_DROP_PSUM
+  K-keep recv-count division to exactly the edge the imce/inode K-keep affects."""
+  try:
+    dst_tt = getattr(edge.dst_id, "tensor_type", "")
+    return isinstance(dst_tt, str) and dst_tt.startswith("func_out")
+  except Exception:
+    return False
 
 
 @util.create_imcflow_function_pass(opt_level=0)
@@ -1062,6 +1074,21 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           recv_count = sum(block.block.tiling_info.pkt_cnts)
         else:
           recv_count = math.ceil(block.block.size / 32)
+        # Max-throughput lever (IMCFLOW_DROP_PSUM + IMCFLOW_DROP_PSUM_KEEP=K): the
+        # producing imce keeps only 1 psum drain per K pixels (structural keep/skip
+        # tiers in ConvBlock._build_structure), and the inode RECV loop
+        # (RecvBlock._build_tiled) receives only kept_pkts == recv_count // K. Record
+        # the SAME kept count here so validate_recv_send_consistency matches the
+        # imce kept-SEND count (else 32 vs 256 false mismatch). K=0 -> whole RECV
+        # loop omitted (drop-all) -> recv_count stays as-is on both sides (imce also
+        # omits all sends -> both 0 net for the runtime, map still balances). Only
+        # the tiled func_out psum drain is affected (the edge the inode dropped).
+        if (drop_psum_send() and drop_psum_keep_every() > 0
+            and block.block.tiling_info
+            and _is_func_out_psum_edge(edge)):
+          _k = drop_psum_keep_every()
+          if recv_count % _k == 0:
+            recv_count = recv_count // _k
         add_to_map(self.recv_map, edge, recv_count)
 
   def add_send_block(self, edge, phase: CodePhase, db=None):

@@ -127,19 +127,33 @@ def drop_psum_send() -> bool:
   LOAD_LB / OUTPUT_HS can issue earlier. Only legal when conv correctness is
   irrelevant (garbage output). Default OFF -> byte-identical to stock.
 
-  RTL caveat (BUGFIX_STEP build, imcu_ctrl.sv:73
-  `core_rx.ready = core_ready && !core_tx.valid`): the next feed is gated on the
-  post_imcu output being consumed. Dropping ALL SENDs leaves core_tx.valid stuck
-  high once the depth-32 out_fifo fills -> feed wedges. Bounded via
-  drop_psum_keep_every()."""
+  RTL caveat (CHIP / BUGFIX-off build, imcu_ctrl.sv:69
+  `core_rx.ready = core_ready && core_tx.ready`): on the TAPED-OUT chip the
+  BUGFIX_STEP macro is NOT defined, so the crossbar input fetch is gated on the
+  post_imcu OUTPUT side being ready. The out_fifo is drained by the psum NoC
+  SEND being consumed (an inode RECV), NOT by OP_STEP. Dropping ALL psum SENDs
+  therefore leaves the depth-32 out_fifo undrained; once it fills (~a handful of
+  STEPs) core_tx.ready deasserts, the feed stalls, the array stops converting,
+  and DDA/ADC current goes flat. RTL-proven (2026-08-15, one_1x1_quant bugfix-off,
+  SRAM_BACKDOOR=0): DROP_PSUM=1 keep=0 X-fatals on imce_intf_tx after 4 STEP;
+  no-drop completes 64/64 STEP+ADC. So on chip a bounded keep (drop_psum_keep_every,
+  K <= 32 fifo depth) is REQUIRED, not optional. The earlier "OP_STEP drains the
+  out_fifo" reasoning holds ONLY under the BUGFIX_STEP build
+  (`core_rx.ready = core_ready && !core_tx.valid`), which the chip lacks."""
   return os.environ.get("IMCFLOW_DROP_PSUM", "").strip().lower() in ("1", "on", "true", "yes")
 
 
 def drop_psum_keep_every() -> int:
-  """When IMCFLOW_DROP_PSUM is on, still emit ONE psum SEND every N pixels to
-  drain the depth-32 post_imcu out_fifo and keep core_tx.valid from sticking
-  (see drop_psum_send). N=0 (default) -> drop every SEND (may wedge; use only if
-  the STEP count is bounded < fifo depth). N>=1 -> keep 1 SEND per N pixels."""
+  """When IMCFLOW_DROP_PSUM is on, still emit ONE psum drain (GET_CREG + IMCE_SEND
+  on imce, and the matching INODE_RECV) every K pixels so the depth-32 post_imcu
+  out_fifo is drained at least every K STEPs and core_tx.ready never sticks low
+  (see drop_psum_send). REQUIRED on the taped-out chip (BUGFIX-off), where the
+  out_fifo is NOT drained by OP_STEP. K MUST be <= 32 (out_fifo depth; the safe
+  bound is fifo_depth minus in-flight packets, so K<=8..16 has margin). K=0
+  (default) -> drop every SEND: only safe when the whole kernel's STEP count is
+  bounded < fifo depth (it is NOT for a normal conv / free-run) -> will wedge on
+  chip. K>=1 -> keep 1 drain per K pixels. Both imce (keep_psum_pixel) and inode
+  (matching RECV keep) use the SAME K so producer/consumer stay balanced."""
   raw = os.environ.get("IMCFLOW_DROP_PSUM_KEEP", "").strip()
   if not raw:
     return 0
@@ -147,6 +161,13 @@ def drop_psum_keep_every() -> int:
     return max(0, int(raw))
   except ValueError:
     return 0
+
+
+# NOTE: K-keep is implemented STRUCTURALLY (nested counted loops that split the pixel
+# loop into keep/skip tiers -- imce_codeblock ConvBlock._build_structure and inode
+# RecvBlock._build_tiled), NOT with a runtime `if (ctr % K)`: the IMCE and INODE LLVM
+# targets only support counted hardware loops (-force-hardware-loops), so a
+# data-dependent branch (`br_cc`) or `/K` (`sra`) is un-selectable ("Cannot select").
 
 
 def serialize_imcu_load() -> bool:

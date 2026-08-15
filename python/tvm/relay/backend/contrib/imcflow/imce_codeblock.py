@@ -1460,7 +1460,7 @@ class ConvBlock(ImceCallCodeBlock):
 
   def _build_loop_body(self, recv_count: int, skip_presend: bool = False,
                        reorder_final_load: bool = False,
-                       pad_drain: bool = False) -> CodeBlock:
+                       pad_drain: bool = False, drop_send: bool = False) -> CodeBlock:
     load_info = []
     for edge in self.in_edges:
       te_infos = DevConfig().get_tensor_edge_info_with_id_dir(edge.dst_id, "in")
@@ -1699,7 +1699,7 @@ class ConvBlock(ImceCallCodeBlock):
       num_blocks = self.num_blocks
       num_out_blocks = self.num_out_blocks
       return RecvSendWrapper(comp, num_blocks, num_out_blocks, send_block, recv_edges, send_edges,
-                             builder=self.builder, skip_presend=skip_presend)
+                             builder=self.builder, skip_presend=skip_presend, drop_send=drop_send)
 
   def _get_boundary_step_barrier(self, load_edge):
     """Fix G: return the one-way STANDBY line that gates the boundary STEP on the
@@ -1981,6 +1981,53 @@ class ConvBlock(ImceCallCodeBlock):
                self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
                                      reorder_final_load=True),
                f"{tag}_col_group{inner_idx}_boundary"))
+           continue
+         # K-keep psum drain (IMCFLOW_DROP_PSUM + IMCFLOW_DROP_PSUM_KEEP=K): the
+         # IMCE only supports counted loops, so split this pixel loop STRUCTURALLY
+         # into keep/skip tiers instead of a runtime `if`. keep-tier drains (1 psum
+         # SEND per group); skip-tier does STEP+GET_CREG only (SEND omitted) to keep
+         # the array fed. Emits exactly ceil(count/K) drains, matching the inode's
+         # (i1/BLK)%K RECV keep. Only for the plain-conv psum drain (no post_ops, no
+         # boundary/pad special-casing) -- the max-throughput target. Default OFF /
+         # keep<=0 -> single loop (drop-all legacy) or byte-identical.
+         _kk = drop_psum_keep_every() if (drop_psum_send() and not self.post_ops
+                                          and not skip_row_presend and not pad_drain_row) else 0
+         if _kk and _kk > 1 and pat["count"] > 1:
+           _cnt = pat["count"]
+           # K must DIVIDE and not exceed the col_group pixel count: the imce keeps
+           # (count // K) pixels per col_group while the inode keeps (total // K)
+           # packets; these match only when K | count (so per-col-group floor ==
+           # global floor). K > count -> 0 keeps here -> send 0 vs inode recv >0.
+           # Assert with a clear message instead of a downstream fifo-count mismatch.
+           assert _cnt % _kk == 0, (
+             f"[DROP_PSUM keep] IMCFLOW_DROP_PSUM_KEEP={_kk} must divide the "
+             f"col_group pixel count {_cnt} (and be <= it): choose K | {_cnt} "
+             f"(e.g. a divisor of the conv's inner pixel-loop trip) so the imce "
+             f"kept-SEND count matches the inode kept-RECV count. K<=32 (out_fifo "
+             f"depth).")
+           _n_groups = _cnt // _kk          # full keep-groups (>=1 given K|count)
+           _rem = _cnt % _kk                # 0 given the assert above
+           group_body = SequentialBlock()
+           # pixel 0 of the group: STEP + GET_CREG + SEND (drains out_fifo)
+           group_body.add(SimpleFor(1,
+               self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
+                                     pad_drain=pad_drain_row, drop_send=False),
+               f"{tag}_cg{inner_idx}_keep"))
+           # pixels 1..K-1: STEP + GET_CREG, SEND omitted
+           if _kk - 1 > 0:
+             group_body.add(SimpleFor(_kk - 1,
+                 self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
+                                       pad_drain=pad_drain_row, drop_send=True),
+                 f"{tag}_cg{inner_idx}_skip"))
+           if _n_groups > 0:
+             outer_body.add(SimpleFor(_n_groups, group_body, f"{tag}_col_group{inner_idx}_kkeep"))
+           if _rem > 0:
+             # remainder pixels: STEP only, no drain (fewer than K left; the last
+             # keep-group already drained within fifo depth, so no SEND needed).
+             outer_body.add(SimpleFor(_rem,
+                 self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
+                                       pad_drain=pad_drain_row, drop_send=True),
+                 f"{tag}_col_group{inner_idx}_kkeep_rem"))
            continue
          inner_loop = SimpleFor(pat["count"],
                                 self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
@@ -2652,7 +2699,7 @@ class RecvSendWrapper(ImceCodeBlock):
   def __init__(self, body: CodeBlock, num_blocks: int, num_out_blocks: int, send_block: ImceCodeBlock,
                in_edges: List[TensorEdge], out_edges: List[TensorEdge], annotation: str = "", builder=None,
                skip_presend: bool = False, suppress_presend_only: bool = False,
-               post_send_setflag_uuid: int = None):
+               post_send_setflag_uuid: int = None, drop_send: bool = False):
     """Wrap a computation block with RECV/SEND operations.
 
     Args:
@@ -2680,6 +2727,11 @@ class RecvSendWrapper(ImceCodeBlock):
     self.builder = builder
     self.skip_presend = skip_presend
     self.suppress_presend_only = suppress_presend_only
+    # K-keep structural drop: when True this pixel is a "skip" pixel (STEP+GET_CREG
+    # emitted, psum SEND omitted). Set by ConvBlock._build_structure's keep/skip
+    # loop-tier split. Static send count is recorded only on kept pixels (so
+    # add_to_map == runtime kept-SEND count == inode kept-RECV count).
+    self.drop_send = drop_send
     # Fix G producer side: SETFLAG(uuid) emitted AFTER the SEND loop, notifying the
     # sibling consumer (imce_3_2) that this node's psum for the boundary iteration
     # has been sent, so the consumer's boundary STEP may proceed. None -> no notify.
@@ -2944,26 +2996,40 @@ class RecvSendWrapper(ImceCodeBlock):
           if pre_send:
             code += "\n".join(pre_send)
 
-      for i in range(self.num_out_blocks):
-        for te_out_info in [te_out_info]: #TODO: current version doesn't need it
-          if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
-            continue # this edge's src and dst hw node is equal
+      # Max-throughput lever (IMCFLOW_DROP_PSUM + IMCFLOW_DROP_PSUM_KEEP=K): a plain
+      # ConvBlock psum drain to an inode (func_out collector). On the taped-out chip
+      # (BUGFIX-off imcu_ctrl.sv:69 core_rx.ready = core_ready && core_tx.ready) the
+      # depth-32 out_fifo is drained by this SEND being consumed, NOT by OP_STEP, so
+      # dropping ALL sends wedges the feed after ~fifo-depth STEPs (RTL-proven).
+      # K-keep is done STRUCTURALLY (the IMCE target only supports COUNTED hardware
+      # loops -- a data-dependent `if (ctr % K) br_cc` is un-selectable, "Cannot
+      # select br_cc"): the caller (ConvBlock._build_structure) splits the pixel
+      # SimpleFor into a keep-tier (drains) + skip-tiers (STEP only, self.drop_send
+      # True -> this SEND omitted). So here we only honor self.drop_send: when set,
+      # omit the SEND (STEP+GET_CREG already emitted upstream keep the array fed).
+      if getattr(self, "drop_send", False):
+        code += f"// [DROP_PSUM] omitted IMCE_SEND ({self.num_out_blocks} blk, K-keep skip pixel)\n"
+      else:
+        for i in range(self.num_out_blocks):
+          for te_out_info in [te_out_info]: #TODO: current version doesn't need it
+            if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+              continue # this edge's src and dst hw node is equal
 
-          # Burst-pad drains (i >= real_blocks) send a dummy 0, not an undefined
-          # compute var. Keeps SEND count == producer burst (4:1 lock-step) so
-          # imce_3_1 -> inode_3_0 matches handcraft (1 real + 3 dummy).
-          # skip_presend (pure-padding flush row feeding a fused consumer) emits
-          # ALL dummy SENDs (no compute happened) -- handcraft imce_1_2 last row.
-          _real = getattr(actual_send_block, "real_blocks", None)
-          if self.skip_presend or (_real is not None and i >= _real):
-            var_o = "0"
-          else:
-            var_o = UniqueVar((actual_send_block, i))
-          if te_out_info:
-            annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
-            code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
-            for out_edge in output_edges:
-              add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
+            # Burst-pad drains (i >= real_blocks) send a dummy 0, not an undefined
+            # compute var. Keeps SEND count == producer burst (4:1 lock-step) so
+            # imce_3_1 -> inode_3_0 matches handcraft (1 real + 3 dummy).
+            # skip_presend (pure-padding flush row feeding a fused consumer) emits
+            # ALL dummy SENDs (no compute happened) -- handcraft imce_1_2 last row.
+            _real = getattr(actual_send_block, "real_blocks", None)
+            if self.skip_presend or (_real is not None and i >= _real):
+              var_o = "0"
+            else:
+              var_o = UniqueVar((actual_send_block, i))
+            if te_out_info:
+              annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
+              code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
+              for out_edge in output_edges:
+                add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
       # Fix G producer side: notify the sibling boundary-STEP consumer that this
       # node's psum SEND for the iteration is complete (paired with the consumer's
