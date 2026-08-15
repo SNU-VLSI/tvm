@@ -63,6 +63,15 @@ IMCFlow repository의 RTL이나 runner source를 변경하는 것은 현재 범�
   exit 0으로 끝났고 22개 phase/kernel/stage/tile tag가 순서대로 저장됐다.
   이 run의 default config `voltage_V=1.0`과 `measured_power` 값은 placeholder이므로
   current path/tag 검증용이며, 물리 rail power 결과로 인용하면 안 된다.
+- clean-tree gate를 포함한 TVM revision
+  `2ebe92f7baa557b12b29102c7cdb58df8fc57e88`에서 codegen과 ARM binary를 다시
+  만들고 `short_run.json`으로 최종 hardware run
+  `20260815T113000Z_one_conv_short_2ebe92f_manual`을 수행했다. workload와 측정은
+  모두 성공했고, 0.0001 s 실제 interval에서 3,079 samples와 22 tag events를
+  수집했다. 13개 sampled tag state에 `process_setup`, `input_setup`,
+  `graph_execute`, kernel stage, tile 0, `output`, `cleanup`이 모두 나타났다.
+  이 run 역시 1.0 V와 rail 이름이 placeholder이므로 전류 및 tag 시간 정렬
+  검증 결과로만 사용한다.
 - power-disabled one-conv도 정상 종료했다. enabled/disabled raw output은 exact
   match하지 않았지만 disabled 반복끼리도 906/1024 element가 달라졌고 평균 절대
   차이가 각각 약 60.93, 60.82로 같아, 이번 한 샘플에서는 power tag 유무보다
