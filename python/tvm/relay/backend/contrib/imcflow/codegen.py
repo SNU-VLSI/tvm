@@ -1130,6 +1130,19 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           _k = drop_psum_keep_every()
           if recv_count % _k == 0:
             recv_count = recv_count // _k
+          # STEP_FREERUN composes multiplicatively: the imce repeats the whole conv
+          # (1+N)x, so it emits (1+N)x as many KEPT psum SENDs, and the inode RECVs
+          # kept//K * (1+N). The imce func_out send in the map is already scaled by
+          # the loop stack (row loop x(1+N)); scale this recorded RECV by the SAME
+          # factor product so validate_recv_send_consistency matches (else N=100,K=8
+          # gives 3232 send vs 32 recv). keep-tier (spatial /K) and freerun
+          # (temporal x(1+N)) are orthogonal and both apply.
+          _fr = step_freerun_n()
+          if _fr > 0:
+            _prod = 1
+            for _f in step_freerun_factors(1 + _fr):
+              _prod *= _f
+            recv_count *= _prod
         add_to_map(self.recv_map, edge, recv_count)
 
   def add_send_block(self, edge, phase: CodePhase, db=None):

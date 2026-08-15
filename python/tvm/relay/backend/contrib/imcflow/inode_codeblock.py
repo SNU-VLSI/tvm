@@ -201,15 +201,38 @@ class RecvBlock(InodeCodeBlock):
          f"{_total_pkts} (choose K | packets so imce kept-SEND == inode kept-RECV; "
          f"else fifo deadlock)")
       _kept_pkts = _total_pkts // int(_keep_k)
+      # STEP_FREERUN composes MULTIPLICATIVELY with K-keep: the producing imce
+      # repeats its whole conv body (1+N) times (row loop x(1+N) in
+      # ConvBlock._build_structure), so it emits (1+N)x as many KEPT psum SENDs.
+      # The inode RECV count must match = kept_per_pass * (1+N), else imce sends
+      # (1+N)x more than inode receives -> fifo deadlock (observed: 3232 vs 32 at
+      # N=100,K=8). keep-tier drain (spatial, per K pixels) and freerun (temporal,
+      # x(1+N) passes) are orthogonal and both scale the RECV count.
+      _fr = step_freerun_n()
+      _reps = (1 + _fr) if _fr > 0 else 1
+      _kept_total = _kept_pkts * _reps
       self.body.add(TextBlock(
-        f"// [DROP_PSUM] keep {_kept_pkts}/{_total_pkts} psum RECVs (1 per {int(_keep_k)} pixels)"))
+        f"// [DROP_PSUM] keep {_kept_pkts}/{_total_pkts} psum RECVs per pass (1 per "
+        f"{int(_keep_k)} pixels) x {_reps} freerun passes = {_kept_total} total"))
       def recv_body_kept(iter, base_addr_var=base_var, fid=fifo_id):
         code = f"__builtin_INODE_RECV({base_addr_var} + {iter}*32, 0, 0, {fid});\n"
         sync_code = self._get_recv_sync_code_str()
         if sync_code:
           code += sync_code
         return code
-      self.body.add(SimpleFor(_kept_pkts, recv_body_kept))
+      # Nest into counted hardware-loop factors <= 16384 (IMCE/INODE 14-bit limit)
+      # when the total exceeds it; a single SimpleFor(>16384) makes clang crash.
+      if _kept_total > 16384:
+        _wrapped = None
+        for _lvl, _f in enumerate(reversed(step_freerun_factors(_kept_total))):
+          if _wrapped is None:
+            _wrapped = SimpleFor(_f, recv_body_kept)
+          else:
+            _inner = _wrapped
+            _wrapped = SimpleFor(_f, _inner)
+        self.body.add(_wrapped)
+      else:
+        self.body.add(SimpleFor(_kept_total, recv_body_kept))
       return
 
     # Per-packet sync: Receive one packet, then sync immediately
