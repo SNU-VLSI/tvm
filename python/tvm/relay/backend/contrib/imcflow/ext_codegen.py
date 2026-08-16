@@ -1193,9 +1193,23 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
     # fires AFTER generateToNpuTransferCode(input_blocks). So power measurement must
     # bracket the TILE invoke, not this one.
     power_measure_active = self.os == "linux" and MEASURE_POWER
+    # WHICH invoke fires the crossbar depends on STEP_FREERUN:
+    #  - Normal kernel: the pre-input SET_RUN (below) just runs the config/setup
+    #    P1 segment to a HALT (array idle, STATE=0x0); the REAL compute is the
+    #    per-tile invoke AFTER input transfer -> bracket the tile invoke.
+    #  - STEP_FREERUN: each freerun pass re-issues RECV_CFG (per-pass linebuffer
+    #    reset), so the (1+N)-pass free-run executes ENTIRELY in the FIRST
+    #    (pre-input) SET_RUN and holds STATE=0x1 for the whole burst
+    #    (chip-observed: first invoke STATE=0x1, tile invoke STATE=0x0). Input is
+    #    DON'T-CARE for a power sweep, so bracket the FIRST invoke here.
+    _freerun_measure = power_measure_active and step_freerun_n() > 0
 
     code += _hb("before invoke")
+    if _freerun_measure:
+      code += self.generatePowerMeasureStart()   # freerun runs in THIS pre-input invoke
     code += self.generateInvokeCode() # proceed up to halt (pre-input SET_RUN)
+    if _freerun_measure:
+      code += self.generatePowerMeasureEnd()
     code += _hb("after invoke / before poll")
 
     code += self.generateRetryCheck("invoke")
@@ -1208,15 +1222,13 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
       code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
-      # Power measurement (IMCFLOW_MEASURE_POWER, default OFF -> byte-identical):
-      # bracket the ACTUAL array-active compute -- this per-tile invoke fires with
-      # input present so the crossbar really runs. dmm_start non-blocking right
-      # before SET_RUN; dmm_get/close blocking right after the compute wait returns
-      # -> the DMM window == the real compute window.
-      if power_measure_active:
+      # Power measurement for the NORMAL (non-freerun) kernel: bracket the per-tile
+      # invoke (fires with input present so the crossbar really runs). Skipped when
+      # _freerun_measure (the freerun already ran in the pre-input invoke above).
+      if power_measure_active and not _freerun_measure:
         code += self.generatePowerMeasureStart(t_idx)
       code += self.generateInvokeCode() # end of exec (SET_RUN compute, array active)
-      if power_measure_active:
+      if power_measure_active and not _freerun_measure:
         code += self.generatePowerMeasureEnd(t_idx)
       code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output

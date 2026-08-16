@@ -1084,6 +1084,14 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
             for _f in step_freerun_factors(1 + _fr):
               _prod *= _f
             send_count *= _prod
+          elif (_fr > 0
+                and getattr(edge.dst_id, "tensor_type", None) == "config"
+                and dst_node.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv")):
+            # STEP_FREERUN root cause #2: the config write repeats (1+N)x (per-pass
+            # linebuffer reset). The imce records (1+N) config RECVs = 1 (INIT
+            # RecvConstBlock, count_stack=1) + N (per-pass _ConfigRecvLine inside
+            # SimpleFor(N)). Scale this inode config SEND by (1+N) to match exactly.
+            send_count *= (1 + _fr)
           add_to_map(send_map, edge, send_count)
 
 
@@ -1143,6 +1151,18 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
             for _f in step_freerun_factors(1 + _fr):
               _prod *= _f
             recv_count *= _prod
+        elif (step_freerun_n() > 0 and block.block.tiling_info
+              and _is_func_out_psum_edge(edge)):
+          # STEP_FREERUN, DROP_PSUM OFF (plain func_out RECV): the imce repeats its
+          # whole conv (1+N)x -> emits (1+N)x psum SENDs on this func_out edge, and
+          # RecvBlock._build_tiled scales the RECV loop by (1+N). Scale the recorded
+          # recv count by the SAME factor product so consistency matches the imce
+          # send (else 768 send vs 256 recv at N=2). Mirrors the DROP_PSUM keep branch
+          # above and the inode-feed send scaling. Non-func_out RECVs untouched.
+          _prod = 1
+          for _f in step_freerun_factors(1 + step_freerun_n()):
+            _prod *= _f
+          recv_count *= _prod
         add_to_map(self.recv_map, edge, recv_count)
 
   def add_send_block(self, edge, phase: CodePhase, db=None):

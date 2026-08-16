@@ -14,6 +14,22 @@ import pdb
 NOP_LOOP_CNTS = 10
 
 
+def _wrap_freerun_passes(body, reps):
+  """STEP_FREERUN root cause #2: wrap `body` (one per-pass feed/config) in a `reps`-trip
+  outer loop, nested into <=16384 hardware-loop factors (INODE 14-bit limit) via
+  step_freerun_factors(reps) -- the SAME factorization the imce uses so the (1+N) pass
+  count is byte-identical on both sides. reps<=1 -> body unchanged (no freerun)."""
+  if reps <= 1:
+    return body
+  if reps <= 16384:
+    return SimpleFor(reps, body, "freerun_pass")
+  factors = step_freerun_factors(reps)
+  wrapped = SimpleFor(factors[-1], body, "freerun_pass")
+  for f in reversed(factors[:-1]):
+    wrapped = SimpleFor(f, wrapped, "freerun_pass")
+  return wrapped
+
+
 class InodeCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
     super().__init__(annotation)
@@ -128,6 +144,17 @@ class RecvBlock(InodeCodeBlock):
     else:
       self._build()
 
+  def _is_func_out_psum_recv(self) -> bool:
+    """True iff this tiled RECV collects a conv psum output (dst tensor_type starts
+    with 'func_out'), i.e. it consumes the imce ConvBlock's psum SEND. Only this edge
+    is freerun-scaled (the imce repeats its psum SEND (1+N)x); input/weight RECVs are
+    separate blocks and must NOT be scaled."""
+    e = self.block.id[0] if isinstance(self.block.id, list) else self.block.id
+    if not isinstance(e, TensorEdge):
+      return False
+    dst_tt = getattr(e.dst_id, "tensor_type", "")
+    return isinstance(dst_tt, str) and dst_tt.startswith("func_out")
+
   def _build(self):
     recv_count = math.ceil(self.block.size / 32)
     var = UniqueVar("recv_data_base_address", dtype="int")
@@ -162,7 +189,29 @@ class RecvBlock(InodeCodeBlock):
     base_var = UniqueVar("recv_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
 
-    self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+    # Power-measurement lever (IMCFLOW_STEP_FREERUN): the producing imce repeats its
+    # whole conv body (1+N)x (row loop x(1+N) in ConvBlock._build_structure), so it
+    # emits (1+N)x as many psum SENDs on this func_out edge. Scale this func_out RECV
+    # count by (1+N) too, else imce sends (1+N)x more than the inode receives -> the
+    # func_out fifo deadlocks / consistency fails (observed: 768 send vs 256 recv at
+    # N=2, STEP_FREERUN-alone). Only the func_out (imce->inode psum collector) tiled
+    # RECV -- input/weight RECVs are separate blocks and are NOT freerun-scaled. The
+    # DROP_PSUM keep path below applies its OWN (1+N) scaling on the kept count, so
+    # this multiply is for the plain (non-drop) path only. N=0 -> unchanged (x1).
+    _fr_recv_mult = (1 + step_freerun_n()) if (step_freerun_n() > 0
+                                               and self._is_func_out_psum_recv()) else 1
+    if _fr_recv_mult != 1 and not drop_psum_send():
+      # LOAD-USE HAZARD (see SendBlock._build_tiled): `cnt[0] * M` compiles LOAD then
+      # INODE_MULI back-to-back with no bubble -> MULI reads a stale register ->
+      # garbage loop count -> deadlock. Split: LOAD into temp, hazard nop, then MULI.
+      _raw_recv_var = UniqueVar(f"{target_edge.simple_name()}_tile_loop_count_raw", dtype="int")
+      self.body.add(TextBlock(f"{_raw_recv_var} = {cnt_addr_var}[0];"))
+      # Register-barrier nop (see SendBlock): "+r" operand forces a bubble between
+      # INODE_LOAD and INODE_MULI (a plain volatile nop is scheduled away).
+      self.body.add(TextBlock(f"__asm__ volatile(\"nop\" : \"+r\"({_raw_recv_var}));")) # LOAD-USE HAZARD
+      self.body.add(TextBlock(f"{loop_cnt_var} = {_raw_recv_var} * {_fr_recv_mult};"))
+    else:
+      self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
 
     # Max-throughput lever (IMCFLOW_DROP_PSUM): the producing imce drops its psum
@@ -483,6 +532,25 @@ class SendBlock(InodeCodeBlock):
       # fall back to that if the node lookup is unavailable.
       return True
 
+  def _is_conv_config_send(self) -> bool:
+    """True iff this SEND is the conv/dwconv CONFIG write (dst tensor_type 'config'
+    feeding a qconv/qdwconv). Under STEP_FREERUN root cause #2 the imce re-issues
+    RECV_CFG once per pass to reset the linebuffer (imce_codeblock ConvBlock
+    ._build_structure), so this config SEND must ALSO repeat (1+N)x in lockstep. All
+    OTHER config/const/weight sends stay single (this predicate is config-only)."""
+    e = self.block.id if isinstance(self.block.id, TensorEdge) else None
+    if e is None:
+      return False
+    if getattr(e.dst_id, "tensor_type", None) != "config":
+      return False
+    try:
+      dst = CustomIDToNode()[getInnerNodeID(e.dst_id.graph_node_id)]
+      return dst.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv")
+    except Exception:
+      # dst "config" uniquely identifies a config write; if the node lookup fails,
+      # still treat it as the conv config (the only config edge in a single-qconv).
+      return True
+
   def _build(self):
     recv_count = math.ceil(self.block.size / 32)
     # Power-measurement lever (IMCFLOW_STEP_FREERUN): LENGTHEN the activation feed's
@@ -499,6 +567,41 @@ class SendBlock(InodeCodeBlock):
     fifo_id = self.edge_info.fifo_id
     assert fifo_id >= 0, "fifo id should be assigned to a positive id"
     next_policy_addr = self.edge_info.policy_info[0].address
+
+    # STEP_FREERUN root cause #2: the imce re-issues RECV_CFG once per pass (1+N total:
+    # 1 INIT + N freerun) to RESET the linebuffer (all_recived) so it accepts a fresh
+    # H*W each pass. This config SEND must repeat (1+N)x in lockstep. Each repeat sends
+    # the SAME single 32B config packet (offset 0), NOT distinct packets -- the config
+    # is one packet; a distinct-address loop (var+iter*32) would read OOB garbage. So
+    # emit the whole (bare) config SEND wrapped in SimpleFor(1+N) at fixed offset 0.
+    # Only the conv config edge; consistency (codegen.py) scales this edge's send by
+    # (1+N) to match the imce config RECV. Handled here (early return) to bypass the
+    # distinct-packet loops below.
+    if step_freerun_n() > 0 and self._is_conv_config_send():
+      _reps = 1 + step_freerun_n()
+      var = UniqueVar("send_data_base_address", dtype="int")
+      self.body.add(TextBlock(f"{var} = {self.block.offset};"))
+      _nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+      def _cfg_send(iter, var=var, pa=next_policy_addr, fid=fifo_id, nop=_nop_delay, rc=recv_count):
+        # each pass re-sends all `rc` config packets at fixed base (offset 0), so the
+        # imce's per-pass RECV_CFG pops a valid config. rc is 1 for a single-qconv.
+        body = ""
+        for p in range(rc):
+          body += f"__builtin_INODE_SEND({var} + {p}*32, 0, {pa}, {fid});\n"
+          body += nop
+        return body
+      # Nest into <=16384 factors for the INODE 14-bit hardware-loop limit (a single
+      # SimpleFor(1+N) with 1+N=65536 crashes clang). Same factorization the imce uses
+      # (step_freerun_factors(1+N)) so the (1+N) pass count is identical on both sides.
+      if _reps > 16384:
+        _factors = step_freerun_factors(_reps)
+        _w = SimpleFor(_factors[-1], _cfg_send, "config_freerun_reload")
+        for _f in reversed(_factors[:-1]):
+          _w = SimpleFor(_f, _w, "config_freerun_reload")
+        self.body.add(_w)
+      else:
+        self.body.add(SimpleFor(_reps, _cfg_send, f"config_freerun_reload"))
+      return
 
     var = UniqueVar("send_data_base_address", dtype="int")
     self.body.add(TextBlock(f"{var} = {self.block.offset};"))
@@ -647,12 +750,18 @@ class SendBlock(InodeCodeBlock):
     # continuous rendezvous stream (no new outer loop -> no scalar-flag toggle-phase
     # deadlock at a rep seam; chip-proven the outer wrap stalls). Only the conv
     # activation feed; N=0 -> unchanged.
-    _fr_mult = (1 + step_freerun_n()) if (step_freerun_n() > 0 and self._is_conv_activation_feed()) else 1
-    if _fr_mult != 1:
-      self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0] * {_fr_mult};"))
-    else:
-      self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+    # STEP_FREERUN root cause #2: the feed is NOT scaled by (1+N) here. Instead the
+    # WHOLE per-pass feed (reading the SAME cnt[0] input packets at offset 0..cnt-1) is
+    # wrapped in an OUTER (1+N)x freerun loop below (`_freerun_passes`), so each pass
+    # RE-READS the same input buffer (the imce re-configs the linebuffer per pass to
+    # accept it again). A flat `cnt[0]*(1+N)` feed would instead read addresses past the
+    # input buffer (OOB garbage -> X-fatal on the send path, RTL-confirmed at pass 1).
+    # Using the natural cnt[0] here ALSO removes the earlier load-use hazard (no MULI on
+    # the loaded count). N=0 -> single pass, byte-identical.
+    self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
+    _freerun_passes = (1 + step_freerun_n()) if (step_freerun_n() > 0
+                                                 and self._is_conv_activation_feed()) else 1
 
     # Max-throughput feed-spread (IMCFLOW_FEED_SPREAD): the tiled data-input SEND
     # must rotate a LITERAL fifo_id per packet (int_INODE_SEND fifo_id is an
@@ -766,9 +875,15 @@ class SendBlock(InodeCodeBlock):
                   f"{next_policy_addr}, {fid});\n")
         if nop_delay:
           inner += indent(nop_delay.rstrip("\n"), "  ") + "\n"
-      self.body.add(TextBlock(_spread_loop(inner)))
+      # STEP_FREERUN: wrap the per-pass spread feed (reads offset 0..cnt-1) in a
+      # (1+N)x outer loop so each pass RE-READS the same input buffer (matching the
+      # imce's per-pass linebuffer reset). spread_iv resets per pass -> no OOB read.
+      # Nest the (1+N) outer loop into <=16384 factors (INODE 14-bit hw-loop limit),
+      # same step_freerun_factors(1+N) the imce uses -> identical pass count both sides.
+      self.body.add(_wrap_freerun_passes(TextBlock(_spread_loop(inner)), _freerun_passes))
       return
-    self.body.add(SimpleFor(loop_cnt_var, send_body_with_sync))
+    self.body.add(_wrap_freerun_passes(SimpleFor(loop_cnt_var, send_body_with_sync),
+                                        _freerun_passes))
 
   def is_safe_fusedadd_send(self):
     """SAFE lever: return (consumer_value, num_blocks) if THIS SendBlock's data

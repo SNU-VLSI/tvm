@@ -518,6 +518,18 @@ class RecvConstBlock(ImceCodeBlock):
 
   def _render(self) -> str:
     owner_edge = self.te_info.owner
+    # STEP_FREERUN root cause #2 (Option B, symmetric passes): when freerun is active,
+    # the conv CONFIG RECV_CFG is issued INSIDE the freerun loop (1+N)x every pass by
+    # ConvBlock._build_structure (each pass resets the linebuffer). This INIT-phase
+    # config RECV must then emit NOTHING and record 0 -- otherwise the config edge is
+    # counted 1 (INIT) + (1+N) (loop) = 2+N on the imce vs (1+N) on the inode (the
+    # off-by-one-pass bug at large N). Edge bookkeeping (append_const_edge_info, done
+    # in the handler, not here) is unaffected so the inode still knows to SEND config.
+    # Only the conv config edge; all other consts/INIT RECVs unchanged. N=0 -> normal.
+    if (self.type == RecvConstBlock.ConstType.CONFIG
+        and step_freerun_n() > 0
+        and getattr(self.in_edge.dst_id, "tensor_type", None) == "config"):
+      return "// [STEP_FREERUN] INIT config RECV_CFG moved into the freerun pass loop"
     add_to_map(owner_edge, RecvSendNum("recv",  self.recv_count), is_send=False)
     # Packed-postop const pacing: wrap each RECV in a flag-1 window that
     # rendezvouses with the inode's per-word pre-send handshake so the inode
@@ -564,6 +576,29 @@ class IMCERecvBlock(ImceCodeBlock):
     # Call add_to_map at render time when count_stack is properly populated
     add_to_map(self.owner_edge, RecvSendNum("recv", 1), is_send=False)
     return f"{self.var_name} = __builtin_IMCE_RECV({self.fifo_id}); // {self.annotation}"
+
+
+class _ConfigRecvLine(ImceCodeBlock):
+  """STEP_FREERUN per-pass RECV_CFG (root cause #2 linebuffer reset). Emits a literal
+  RECV_CFG line AND records the config edge RECV in add_to_map at render time, so the
+  enclosing freerun SimpleFor(1+N) scales the recorded config-RECV count by (1+N) to
+  match the inode's per-pass config SEND (consistency stays balanced). The pass-0 config
+  RECV already emitted by the INIT-phase RecvConstBlock is NOT double-counted: this block
+  replaces the per-pass config reload; see _build_structure. It records the config edge's
+  owner (from its TensorEdgeInfo) once per render (= once per freerun pass)."""
+  def __init__(self, conv_block: 'ConvBlock', recv_cfg_line: str, annotation: str = ""):
+    super().__init__(annotation)
+    self._conv = conv_block
+    self._line = recv_cfg_line
+
+  def _render(self) -> str:
+    try:
+      cfg_edge = self._conv.call.get_tensor_edge_from_tag("config")
+      owner = DevConfig().get_tensor_edge_info(cfg_edge).owner
+      add_to_map(owner, RecvSendNum("recv", 1), is_send=False)
+    except Exception as _e:
+      print(f"[STEP_FREERUN] WARNING: config RECV add_to_map skipped: {_e}")
+    return self._line.rstrip("\n")
 
 class IMCESendBlock(ImceCodeBlock):
   """
@@ -1991,16 +2026,34 @@ class ConvBlock(ImceCallCodeBlock):
           if post_lines:
             comp.add("\n".join(post_lines))
 
+  def _freerun_recv_cfg_line(self) -> str:
+    """Power-measurement lever (IMCFLOW_STEP_FREERUN, root cause #2): the linebuffer
+    caps input at H*W pixels (addr_shfl_gen.sv:236 all_recived) and rejects LOAD_LBs
+    past it. To feed >H*W (the (1+N)x freerun), the linebuffer must be RESET each pass
+    via RECV_CFG -> layer_update (ctrl_pipeline.sv:101 fifo2rf to IMCE_CFG_REG_OFFSET;
+    resets all_recived + S0_row/S0_col + pipeline valids -> accepts a fresh H*W). This
+    returns the RECV_CFG C line for THIS conv's config edge (the same one the INIT-phase
+    RecvConstBlock emits once). Emitted at the START of each freerun pass so each pass
+    re-configs. Returns "" if the config edge/fifo can't be resolved (freerun then
+    keeps the old single-config behavior -> would stall at H*W, but no crash)."""
+    try:
+      cfg_edge = self.call.get_tensor_edge_from_tag("config")
+      te_info = DevConfig().get_tensor_edge_info(cfg_edge)
+      return f"__builtin_IMCE_RECV_CFG({te_info.fifo_id}); // [STEP_FREERUN] per-pass linebuffer reset ({cfg_edge})\n"
+    except Exception as _e:
+      print(f"[STEP_FREERUN] WARNING: could not resolve config edge for per-pass RECV_CFG: {_e}")
+      return ""
+
   def _build_structure(self) -> CodeBlock:
     """
     row pattern example:
     [
       {'count': 1, 'pattern': [
         {'count': 1, 'pattern': 6}, {'count': 2, 'pattern': 1}, {'count': 1, 'pattern': 0}]
-      }, 
+      },
       {'count': 2, 'pattern': [
         {'count': 1, 'pattern': 2}, {'count': 2, 'pattern': 1}, {'count': 1, 'pattern': 0}
-      ]}, 
+      ]},
       {'count': 1, 'pattern': [
         {'count': 4, 'pattern': 0}
       ]}
@@ -2147,24 +2200,17 @@ class ConvBlock(ImceCallCodeBlock):
          outer_body.add(inner_loop)
 
       # Power-measurement lever (IMCFLOW_STEP_FREERUN): LENGTHEN the already-
-      # rendezvous-balanced row loop by (1+N) instead of wrapping the whole conv in
-      # a NEW outer loop. The per-LOAD_LB SETFLAG/STANDBY toggle stream (paired 1:1
-      # with the inode feed by pair_manager) must stay MONOTONIC -- a hand-added
-      # outer back-edge that the sync bookkeeping doesn't know about slips the
-      # single scalar flag reg's toggle phase by one at the rep seam -> lost-wakeup
-      # STANDBY deadlock (chip-confirmed: N=1 stalls same as N=huge). Multiplying
-      # the native row trip keeps ONE continuous toggle stream (same structure the
-      # freerun-OFF multi-pixel loop proves clean), just longer. Nest into <=16384
-      # factors for the IMCE 14-bit hardware-loop limit. N=0 -> unchanged.
-      _fr = step_freerun_n()
-      _rows = row_pat["count"] * (1 + _fr) if _fr > 0 else row_pat["count"]
-      if _fr > 0 and _rows > 16384:
-        _wrapped = outer_body
-        for _lvl, _f in enumerate(reversed(step_freerun_factors(_rows))):
-          _wrapped = SimpleFor(_f, _wrapped, f"{tag}_outer_loop_fr{_lvl}")
-        outer_loop = _wrapped
-      else:
-        outer_loop = SimpleFor(_rows, outer_body, f"{tag}_outer_loop(iterate row offset)")
+      # STEP_FREERUN (root cause #2 fix): use the NATURAL row trip here. The freerun
+      # (1+N)x repeat is applied by an OUTER loop that wraps the WHOLE conv AND a
+      # per-pass RECV_CFG (below), NOT by lengthening this row loop. Lengthening the
+      # row loop feeds >H*W pixels into a linebuffer that caps at H*W (all_recived)
+      # -> stalls at pixel H*W (RTL-confirmed). Each freerun pass must re-config the
+      # linebuffer (RECV_CFG -> layer_update reset) so it accepts a fresh H*W. The
+      # per-pass RECV_CFG<->inode-config-SEND handshake also re-aligns the scalar-flag
+      # toggle at the pass seam, so the outer wrap does NOT slip the per-LOAD_LB
+      # rendezvous (the C2 hazard the old lengthen-approach avoided but which the
+      # config re-sync now handles cleanly). N=0 -> natural single pass, unchanged.
+      outer_loop = SimpleFor(row_pat["count"], outer_body, f"{tag}_outer_loop(iterate row offset)")
       root.add(outer_loop)
 
     # read remaining pixels if any
@@ -2197,9 +2243,44 @@ class ConvBlock(ImceCallCodeBlock):
       add_to_map(self.load_edge_info.owner, RecvSendNum("recv", self.remain*4), is_send=False)
       root.add(tail_loop)
 
-    # STEP_FREERUN is applied by LENGTHENING the rendezvous-balanced row loop above
-    # (search "IMCFLOW_STEP_FREERUN"), NOT by wrapping the whole conv here -- a new
-    # outer back-edge slips the scalar-flag toggle phase and deadlocks (chip-proven).
+    # STEP_FREERUN (root cause #2 fix): wrap the WHOLE natural conv in a (1+N)x outer
+    # freerun loop, each pass PREFIXED by RECV_CFG to reset the linebuffer (all_recived
+    # + pixel counters) so it accepts a fresh H*W input per pass. Without the reset the
+    # linebuffer rejects LOAD_LBs past pixel H*W and the array stalls there. The per-pass
+    # RECV_CFG re-syncs with the inode's per-pass config SEND (a matched handshake), which
+    # re-aligns the scalar-flag toggle at the pass seam -> no rendezvous slip. The
+    # config RECV is recorded (1+N)x via add_to_map (inside the SimpleFor count_stack),
+    # matching the inode config SEND scaling. Only for a plain conv psum path (the
+    # max-throughput target); N=0 -> the natural single pass, byte-identical. Nest into
+    # <=16384 factors for the IMCE 14-bit hardware-loop limit.
+    _fr = step_freerun_n()
+    if _fr > 0:
+      # STEP_FREERUN root cause #2 (Option B: fully symmetric passes, no special INIT
+      # pass). ALL (1+N) passes are identical -- each does { RECV_CFG (linebuffer reset);
+      # natural conv } -- wrapped in ONE SimpleFor(1+N). The INIT-phase config RECV_CFG
+      # is suppressed (RecvConstBlock._render returns a comment under freerun), so the
+      # imce config RECV = (1+N) [all from this loop], exactly matching the inode's
+      # (1+N) config SENDs and (1+N)x feed. This removes the INIT-vs-loop double count
+      # (the off-by-one-pass bug at large N: 1 INIT + 65536 loop = 65537 vs 65536) AND
+      # factors (1+N) -- which the caller chooses to be a clean value (e.g. 65536 =
+      # [4,16384] exact) -- instead of _fr=N which step_freerun_factors ceil-overshoots
+      # (65535 -> [4,16384] = 65536, +1). Pass 0 is identical to freerun passes: the
+      # INIT RECV_CFG did nothing the loop's per-pass RECV_CFG doesn't (both just
+      # layer_update-reset the linebuffer). N=0 -> single natural pass, byte-identical.
+      _cfg_line = self._freerun_recv_cfg_line()
+      if not _cfg_line:
+        print("[STEP_FREERUN] per-pass RECV_CFG unavailable -> single pass (no freerun)")
+        return root
+      pass_body = SequentialBlock()
+      pass_body.add(_ConfigRecvLine(self, _cfg_line))  # linebuffer reset, every pass
+      pass_body.add(root)                              # the natural conv
+      _reps = 1 + _fr
+      if _reps > 16384:
+        _wrapped = pass_body
+        for _lvl, _f in enumerate(reversed(step_freerun_factors(_reps))):
+          _wrapped = SimpleFor(_f, _wrapped, f"{self.annotation}_freerun_pass_fr{_lvl}")
+        return _wrapped
+      return SimpleFor(_reps, pass_body, f"{self.annotation}_freerun_pass")
     return root
 
   def _render(self) -> str:
