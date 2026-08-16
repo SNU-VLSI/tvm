@@ -10,6 +10,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every, step_freerun_n, step_freerun_factors
+from tvm.contrib.imcflow import step_freerun_pass_drain_nops
 from tvm.contrib.imcflow import multiblock_fusedadd_bare, multiblock_fusedadd_safe, SAFE_TOKEN_BASE
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
@@ -2273,6 +2274,19 @@ class ConvBlock(ImceCallCodeBlock):
         return root
       pass_body = SequentialBlock()
       pass_body.add(_ConfigRecvLine(self, _cfg_line))  # linebuffer reset, every pass
+      # STEP_FREERUN root cause #3 (linebuffer layer_update settle): the per-pass
+      # RECV_CFG asserts layer_update to reset the linebuffer (all_recived, S0_row/col,
+      # pipeline valids -- addr_shfl_gen.sv:235/269/147). If the FIRST LOAD_LB of the
+      # pass arrives before layer_update has settled the reset, the pixel counters /
+      # S3_valid_o gate (`S3_bitpos != last_out_bitpos`, :134) start from stale state and
+      # compute_if.valid never asserts -> OP_STEP stalls after ~2 pixels (fsim: N>=2
+      # stalls in pass 1; N=0 single-INIT-config completes 64 px). Insert IMCE_NOPs
+      # BETWEEN the RECV_CFG and the conv's first LOAD_LB so the reset settles first.
+      # Env-gated (IMCFLOW_STEP_FREERUN_PASS_DRAIN, default 0 -> byte-identical).
+      _drain = step_freerun_pass_drain_nops()
+      if _drain > 0:
+        pass_body.add(SimpleFor(_drain, TextBlock("__builtin_IMCE_NOP();"),
+                                f"{self.annotation}_freerun_cfg_settle"))
       pass_body.add(root)                              # the natural conv
       _reps = 1 + _fr
       if _reps > 16384:

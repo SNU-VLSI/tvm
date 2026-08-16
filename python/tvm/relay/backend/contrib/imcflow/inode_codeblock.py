@@ -551,6 +551,50 @@ class SendBlock(InodeCodeBlock):
       # still treat it as the conv config (the only config edge in a single-qconv).
       return True
 
+  def _conv_config_interleave_lines(self):
+    """STEP_FREERUN config-interleave (RTL/chip wedge fix): return the C line(s) that
+    re-SEND this conv's CONFIG packet, to be emitted at the START of EACH freerun data
+    pass (inside the data feed's per-pass loop). This mirrors the imce, which issues
+    RECV_CFG at the head of every freerun pass (imce_codeblock ConvBlock: _ConfigRecvLine
+    inside the (1+N) SimpleFor). The OLD design batched all (1+N) config SENDs in the INIT
+    segment before the imce drains them; with the depth-2 config RECV FIFO (params.svh)
+    and INODE_SEND blocking on a full FIFO, that overflows and mutually deadlocks (imce
+    stalls at OP_RECV, inode stalls in its feed loop -- fsim-confirmed at N=3). Emitting
+    ONE config SEND per data pass keeps config-FIFO pending <=1, in lockstep with the
+    imce's per-pass RECV_CFG.
+
+    Returns "" when this is NOT a conv activation feed under freerun, or when the sibling
+    config edge cannot be resolved (caller then leaves the INIT batch in place)."""
+    if not (step_freerun_n() > 0 and self._is_conv_activation_feed()):
+      return ""
+    e = self.block.id[0] if isinstance(self.block.id, list) else self.block.id
+    if not isinstance(e, TensorEdge):
+      return ""
+    # the config edge shares this data edge's dst conv node (dst tensor_type "config").
+    dst_inner = getInnerNodeID(e.dst_id.graph_node_id)
+    cfg_edge = None
+    for te in DevConfig().TensorEdgetoInfo.keys():
+      if (getattr(te.dst_id, "tensor_type", None) == "config"
+          and getInnerNodeID(te.dst_id.graph_node_id) == dst_inner):
+        cfg_edge = te
+        break
+    if cfg_edge is None:
+      return ""
+    cfg_info = DevConfig().get_tensor_edge_info(cfg_edge)
+    cfg_db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(cfg_edge)
+    if cfg_info is None or cfg_db is None:
+      return ""
+    cfg_fid = cfg_info.fifo_id
+    cfg_pa = cfg_info.policy_info[0].address
+    cfg_off = cfg_db.offset
+    cfg_pkts = math.ceil(cfg_db.size / 32)  # 1 for a single-qconv
+    nop = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+    lines = "// [STEP_FREERUN] per-pass config reload (interleaved, config-FIFO safe)\n"
+    for p in range(cfg_pkts):
+      lines += f"__builtin_INODE_SEND({cfg_off} + {p}*32, 0, {cfg_pa}, {cfg_fid});\n"
+      lines += nop
+    return lines
+
   def _build(self):
     recv_count = math.ceil(self.block.size / 32)
     # Power-measurement lever (IMCFLOW_STEP_FREERUN): LENGTHEN the activation feed's
@@ -578,29 +622,19 @@ class SendBlock(InodeCodeBlock):
     # (1+N) to match the imce config RECV. Handled here (early return) to bypass the
     # distinct-packet loops below.
     if step_freerun_n() > 0 and self._is_conv_config_send():
-      _reps = 1 + step_freerun_n()
-      var = UniqueVar("send_data_base_address", dtype="int")
-      self.body.add(TextBlock(f"{var} = {self.block.offset};"))
-      _nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
-      def _cfg_send(iter, var=var, pa=next_policy_addr, fid=fifo_id, nop=_nop_delay, rc=recv_count):
-        # each pass re-sends all `rc` config packets at fixed base (offset 0), so the
-        # imce's per-pass RECV_CFG pops a valid config. rc is 1 for a single-qconv.
-        body = ""
-        for p in range(rc):
-          body += f"__builtin_INODE_SEND({var} + {p}*32, 0, {pa}, {fid});\n"
-          body += nop
-        return body
-      # Nest into <=16384 factors for the INODE 14-bit hardware-loop limit (a single
-      # SimpleFor(1+N) with 1+N=65536 crashes clang). Same factorization the imce uses
-      # (step_freerun_factors(1+N)) so the (1+N) pass count is identical on both sides.
-      if _reps > 16384:
-        _factors = step_freerun_factors(_reps)
-        _w = SimpleFor(_factors[-1], _cfg_send, "config_freerun_reload")
-        for _f in reversed(_factors[:-1]):
-          _w = SimpleFor(_f, _w, "config_freerun_reload")
-        self.body.add(_w)
-      else:
-        self.body.add(SimpleFor(_reps, _cfg_send, f"config_freerun_reload"))
+      # STEP_FREERUN config-interleave (RTL/chip wedge fix): the (1+N) config reloads are
+      # NO LONGER batched here in the INIT segment. Batching them ahead of the imce's
+      # consumption overflows the depth-2 config RECV FIFO (INODE_SEND blocks on a full
+      # FIFO) and mutually deadlocks with the imce's OP_RECV wait (fsim-confirmed at N=3).
+      # Instead, ONE config SEND is emitted at the head of EACH freerun DATA pass by the
+      # activation feed's _build_tiled (_conv_config_interleave_lines), in lockstep with
+      # the imce's per-pass RECV_CFG -> config-FIFO pending stays <=1. Mirrors the imce,
+      # which likewise suppresses its INIT-phase RECV_CFG and does all (1+N) inside the
+      # freerun loop (RecvConstBlock._render + ConvBlock Option-B symmetric passes). So
+      # emit NOTHING in INIT for the conv config under freerun. N=0 -> normal path below.
+      self.body.add(TextBlock(
+          "// [STEP_FREERUN] conv config reload moved to per-pass data feed (INIT batch "
+          "suppressed for config-FIFO safety)"))
       return
 
     var = UniqueVar("send_data_base_address", dtype="int")
@@ -763,6 +797,19 @@ class SendBlock(InodeCodeBlock):
     _freerun_passes = (1 + step_freerun_n()) if (step_freerun_n() > 0
                                                  and self._is_conv_activation_feed()) else 1
 
+    # STEP_FREERUN config-interleave (RTL/chip wedge fix): the conv config reload is
+    # emitted at the HEAD of each freerun pass (SequentialBlock[config_send, data_feed]),
+    # in lockstep with the imce's per-pass RECV_CFG, so the depth-2 config RECV FIFO never
+    # holds >1 pending packet. The INIT-phase config batch is suppressed (_build). When
+    # freerun is off / this isn't the activation feed, the config line is "" and this is a
+    # no-op wrapper (byte-identical). See _conv_config_interleave_lines for the rationale.
+    _cfg_reload_lines = self._conv_config_interleave_lines()
+    def _wrap_freerun_with_config(per_pass_body):
+      if _freerun_passes <= 1 or not _cfg_reload_lines:
+        return _wrap_freerun_passes(per_pass_body, _freerun_passes)
+      one_pass = SequentialBlock([TextBlock(_cfg_reload_lines.rstrip("\n")), per_pass_body])
+      return _wrap_freerun_passes(one_pass, _freerun_passes)
+
     # Max-throughput feed-spread (IMCFLOW_FEED_SPREAD): the tiled data-input SEND
     # must rotate a LITERAL fifo_id per packet (int_INODE_SEND fifo_id is an
     # ImmArg). The INODE ISA cannot lower arithmetic on the loop index for the
@@ -880,10 +927,9 @@ class SendBlock(InodeCodeBlock):
       # imce's per-pass linebuffer reset). spread_iv resets per pass -> no OOB read.
       # Nest the (1+N) outer loop into <=16384 factors (INODE 14-bit hw-loop limit),
       # same step_freerun_factors(1+N) the imce uses -> identical pass count both sides.
-      self.body.add(_wrap_freerun_passes(TextBlock(_spread_loop(inner)), _freerun_passes))
+      self.body.add(_wrap_freerun_with_config(TextBlock(_spread_loop(inner))))
       return
-    self.body.add(_wrap_freerun_passes(SimpleFor(loop_cnt_var, send_body_with_sync),
-                                        _freerun_passes))
+    self.body.add(_wrap_freerun_with_config(SimpleFor(loop_cnt_var, send_body_with_sync)))
 
   def is_safe_fusedadd_send(self):
     """SAFE lever: return (consumer_value, num_blocks) if THIS SendBlock's data

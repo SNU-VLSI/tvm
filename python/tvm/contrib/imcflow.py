@@ -226,6 +226,33 @@ def step_freerun_hold_sec() -> int:
     return 0
 
 
+def step_freerun_pass_drain_nops() -> int:
+  """IMCFLOW_STEP_FREERUN_PASS_DRAIN (integer IMCE-nop count, default 0=OFF).
+
+  STEP_FREERUN root cause #3 (RTL/chip wedge): the per-pass RECV_CFG (layer_update)
+  is meant to reset the linebuffer for a fresh H*W each pass, but the linebuffer
+  PIPELINE (addr_shfl_gen S1->S2->S3 + the S3_valid_o `S3_bitpos != last_out_bitpos`
+  gate, addr_shfl_gen.sv:134/301) is NOT guaranteed to have DRAINED when the next
+  pass's RECV_CFG fires. If a pass's tail output is still in flight at layer_update,
+  the reset leaves residual pipeline/bitpos state and the next pass's compute_if.valid
+  never re-asserts -> OP_STEP stalls after ~2 pixels (fsim-confirmed at N=2 and N=3;
+  N=0 single-pass completes 64 pixels cleanly, so the hazard is specific to the
+  back-to-back re-config).
+
+  When >0, ConvBlock._build_structure appends this many IMCE_NOP at the END of each
+  freerun pass body (after the conv, before the loop re-issues RECV_CFG), giving the
+  linebuffer pipeline time to fully drain (~4 stages) before the reset. Purely local
+  to the imce (no NoC handshake) -> cannot deadlock a rendezvous. 0 (default) ->
+  byte-identical to stock. Suggested starting value 8-16 (a few pipeline depths)."""
+  raw = os.environ.get("IMCFLOW_STEP_FREERUN_PASS_DRAIN", "").strip()
+  if not raw:
+    return 0
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 0
+
+
 def drop_output_readback() -> bool:
   """Design A host-side half of IMCFLOW_DROP_PSUM (DON'T-CARE output). When the
   psum SEND (imce) and INODE_RECV collector loop (inode) are dropped, the func_out0
