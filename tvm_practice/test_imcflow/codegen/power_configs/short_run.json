@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "enabled": true,
+  "scope": "continuous",
   "mode": "now",
   "duration_budget_s": 5,
   "defaults": {

@@ -52,7 +52,7 @@ show_help() {
     echo "  -l, --log-level LVL   Console log level: DEBUG (verbose, default) or INFO (progress bar)"
     echo "  -q, --quiet           Quiet mode: suppress remote stdout during evaluation"
     echo "  -o, --output DIR      Local directory to save result file (default: eval_results)"
-    echo "  --power-config FILE   Enable tagged whole-run power measurement"
+    echo "  --power-config FILE   Enable tagged continuous/region power measurement"
     echo "  -h, --help            Show this help message"
     echo ""
     echo "Arguments:"

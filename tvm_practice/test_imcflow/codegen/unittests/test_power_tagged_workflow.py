@@ -41,6 +41,7 @@ def test_default_config_prepares_now_request(tmp_path):
     assert result.returncode == 0
     value = json.loads(request.read_text(encoding="utf-8"))
     assert value["session_id"] == "unit_power_request"
+    assert value["scope"] == "continuous"
     assert value["mode"] == "now"
     assert value["rails"][0]["name"] == "DMM_GPIB3"
     assert value["metadata"]["model"] == "resnet8"
@@ -52,6 +53,15 @@ def test_default_config_prepares_now_request(tmp_path):
     )
     assert short_config["mode"] == "now"
     assert short_config["duration_budget_s"] == 5
+
+    region_config = json.loads(
+        (CODEGEN_DIR / "power_configs" / "region.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert region_config["scope"] == "region"
+    scope = run_tool("config-scope", CODEGEN_DIR / "power_configs" / "region.json")
+    assert scope.stdout.strip() == "region"
 
 
 def test_disabled_config_does_not_prepare_session(tmp_path):
@@ -284,6 +294,7 @@ def test_codegen_helpers_are_linux_only(monkeypatch):
         'dmm_tag_set("kernel", "quoted\\\"name");\n'
     )
     assert "dmm_measure.h" in generator.generateHeader()
+    assert "power_measure_runtime.h" in generator.generateHeader()
 
     generator.os = "baremetal"
     assert generator.emit_power_tag_set("kernel", "x") == ""
@@ -330,12 +341,18 @@ def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
     assert 'dmm_tag_set("tile", "0")' in linux
     assert 'dmm_tag_set("tile", "1")' in linux
     assert 'dmm_tag_event("retry")' in linux
+    assert 'power_measure_runtime_region_begin("kernel_with_\\"quote")' in linux
+    assert "power_measure_runtime_region_end()" in linux
     assert linux.index('dmm_tag_set("kernel_stage", "input_transfer")') < linux.index(
         'dmm_tag_set("kernel_stage", "output_transfer")'
+    )
+    assert linux.index("power_measure_runtime_region_begin") < linux.index(
+        'dmm_tag_set("kernel_stage", "compiled_transfer")'
     )
 
     baremetal = str(make_generator("baremetal").makeKernelDef())
     assert "dmm_tag_" not in baremetal
+    assert "power_measure_runtime_region_" not in baremetal
     assert "dmm_measure.h" not in baremetal
 
 
@@ -375,6 +392,8 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert "binary_tvm_git_rev" in runner
     assert "validate-build-identity" in runner
     assert "codegen_tvm_git_rev" in runner
+    assert "HELLO 4" in runner
+    assert "IMCFLOW_POWER_SCOPE" in runner
     assert "tracked repository changes must be committed" in runner
     assert "$DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH" not in runner
     assert "/home/root/.venv/bin/activate" not in runner

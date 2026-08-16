@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Shared tagged whole-run power measurement steps for chip runners.
+# Shared tagged continuous/region power measurement steps for chip runners.
 # This file is sourced after scan_steps.sh, so scan_ssh/scan_scp and .env are
 # already available.  It deliberately does nothing unless a power config is
 # selected by --power-config or IMCFLOW_POWER_CONFIG.
@@ -10,6 +10,7 @@ POWER_SESSION_ID=""
 POWER_LOCAL_REQUEST=""
 POWER_REMOTE_REQUEST=""
 POWER_LOCAL_RESULT_DIR=""
+POWER_SCOPE="continuous"
 POWER_STATUS=0
 
 
@@ -124,7 +125,7 @@ power_revision_preflight() {
 power_probe_server() {
     local result_ssh="${POWER_RESULT_SSH_HOST:-meas-2}"
     local meas_python="${POWER_MEASUREMENT_PYTHON:-/home/jaeyongjang/anaconda3/envs/imcflow/bin/python}"
-    ssh "$result_ssh" "$meas_python -c 'import socket; s=socket.create_connection((\"127.0.0.1\", int(\"$POWER_MEASUREMENT_PORT\")), 2); s.sendall(b\"HELLO 3\\n\"); print(s.makefile(\"rb\").readline().decode().strip()); s.close()'" 2>/dev/null
+    ssh "$result_ssh" "$meas_python -c 'import socket; s=socket.create_connection((\"127.0.0.1\", int(\"$POWER_MEASUREMENT_PORT\")), 2); s.sendall(b\"HELLO 4\\n\"); print(s.makefile(\"rb\").readline().decode().strip()); s.close()'" 2>/dev/null
 }
 
 
@@ -149,7 +150,7 @@ power_ensure_server() {
             sleep 0.25
         done
     fi
-    if [[ "$probe" != "HELLO_OK 3 $POWER_MASTER_MEASUREMENT_REV" ]]; then
+    if [[ "$probe" != "HELLO_OK 4 $POWER_MASTER_MEASUREMENT_REV" ]]; then
         echo "Error: tagged measurement server revision/protocol mismatch: ${probe:-unreachable}" >&2
         return 1
     fi
@@ -183,6 +184,7 @@ power_prepare() {
         echo "Error: power config not found: $config" >&2
         return 1
     fi
+    POWER_SCOPE="$(python "$SCRIPT_DIR/scripts/power_request.py" config-scope "$config")" || return 1
     python -c 'import json, numpy, sys; assert sys.version_info >= (3, 8)' || {
         echo "Error: run 'activate' on the master before using power measurement" >&2
         return 1
@@ -258,6 +260,7 @@ power_remote_environment() {
     fi
     printf 'IMCFLOW_POWER_REQUEST=%s POWER_MEASUREMENT_HOST=%s POWER_MEASUREMENT_PORT=%s ' \
         "$POWER_REMOTE_REQUEST" "$POWER_MEASUREMENT_HOST" "$POWER_MEASUREMENT_PORT"
+    printf 'IMCFLOW_POWER_SCOPE=%s ' "$POWER_SCOPE"
 }
 
 
@@ -270,7 +273,11 @@ power_fetch_result() {
         return 0
     fi
     for attempt in $(seq 1 20); do
-        if ssh "$result_ssh" "test -f $result_root/$POWER_SESSION_ID/summary.json"; then
+        if [[ "$POWER_SCOPE" == "region" ]]; then
+            if ssh "$result_ssh" "test -d $result_root/$POWER_SESSION_ID/regions"; then
+                break
+            fi
+        elif ssh "$result_ssh" "test -f $result_root/$POWER_SESSION_ID/summary.json"; then
             break
         fi
         sleep 0.25
@@ -282,7 +289,22 @@ power_fetch_result() {
         echo "Retry: scp -r $result_ssh:$result_root/$POWER_SESSION_ID $local_parent/" >&2
         return 1
     fi
-    python "$SCRIPT_DIR/scripts/power_request.py" validate-result "$POWER_LOCAL_RESULT_DIR"
+    if [[ "$POWER_SCOPE" == "region" ]]; then
+        local region_dir
+        local region_count=0
+        for region_dir in "$POWER_LOCAL_RESULT_DIR"/regions/*; do
+            [[ -d "$region_dir" ]] || continue
+            python "$SCRIPT_DIR/scripts/power_request.py" validate-result "$region_dir" || return 1
+            region_count=$((region_count + 1))
+        done
+        if (( region_count == 0 )); then
+            echo "Error: no region power artifacts found for $POWER_SESSION_ID" >&2
+            return 1
+        fi
+        echo "[POWER] validated $region_count region artifacts"
+    else
+        python "$SCRIPT_DIR/scripts/power_request.py" validate-result "$POWER_LOCAL_RESULT_DIR"
+    fi
 }
 
 

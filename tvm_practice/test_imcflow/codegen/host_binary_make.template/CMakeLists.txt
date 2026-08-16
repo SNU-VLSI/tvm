@@ -328,6 +328,7 @@ if(TVM_BUILD_HOST_RUNNER)
   )
   target_include_directories(tvm_model PRIVATE
     "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
+    "${IMCFLOW_POWER_RUNTIME_DIR}"
   )
 
   # If DEBUG_EXE is set (env or cmake var), use debug_execute_graph.c

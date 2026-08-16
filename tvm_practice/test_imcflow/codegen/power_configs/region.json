@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "enabled": true,
-  "scope": "continuous",
+  "scope": "region",
   "mode": "now",
-  "duration_budget_s": 300,
+  "duration_budget_s": 5,
   "defaults": {
     "nplc": 0.001,
     "sample_interval_s": "auto",
@@ -19,6 +19,7 @@
     }
   ],
   "metadata": {
-    "measured_power": "set_to_the_physically_connected_rail"
+    "measured_power": "set_to_the_physically_connected_rail",
+    "profile": "region_level_high_time_resolution"
   }
 }

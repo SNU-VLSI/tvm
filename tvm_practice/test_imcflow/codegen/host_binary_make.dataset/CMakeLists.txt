@@ -241,6 +241,7 @@ target_compile_definitions(imcflow_power_runtime PRIVATE
 )
 target_include_directories(tvm_model PRIVATE
   "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
+  "${IMCFLOW_POWER_RUNTIME_DIR}"
 )
 
 # If DEBUG_EXE is set (env or cmake var), use debug_execute_graph_for_dataset.c

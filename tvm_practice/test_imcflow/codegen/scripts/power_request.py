@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and validate tagged whole-run power measurement artifacts."""
+"""Prepare and validate tagged continuous/region power artifacts."""
 
 from __future__ import annotations
 
@@ -63,6 +63,10 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if not enabled:
         return normalized
 
+    scope = str(normalized.get("scope", "continuous")).lower()
+    if scope not in ("continuous", "region"):
+        raise ConfigError("scope must be 'continuous' or 'region'")
+    normalized["scope"] = scope
     mode = str(normalized.get("mode", "now")).lower()
     if mode not in ("now", "wait"):
         raise ConfigError("mode must be 'now' or 'wait'")
@@ -157,6 +161,12 @@ def config_status(args: argparse.Namespace) -> int:
     config = validate_config(load_object(Path(args.config)))
     print("enabled" if config["enabled"] else "disabled")
     return 0 if config["enabled"] else 10
+
+
+def config_scope(args: argparse.Namespace) -> int:
+    config = validate_config(load_object(Path(args.config)))
+    print(config.get("scope", "continuous"))
+    return 0
 
 
 def validate_build_identity(args: argparse.Namespace) -> int:
@@ -419,6 +429,10 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("config-status")
     status_parser.add_argument("config")
     status_parser.set_defaults(handler=config_status)
+
+    scope_parser = subparsers.add_parser("config-scope")
+    scope_parser.add_argument("config")
+    scope_parser.set_defaults(handler=config_scope)
 
     build_parser = subparsers.add_parser("validate-build-identity")
     build_parser.add_argument("--metadata", required=True)

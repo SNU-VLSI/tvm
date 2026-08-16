@@ -9,12 +9,20 @@ extern "C" {
 #endif
 
 /*
- * Start the optional whole-process measurement session selected by
- * IMCFLOW_POWER_REQUEST.  A missing/empty variable means power is disabled and
- * all helpers below are no-ops.  A configured session that cannot start is an
- * error and the workload must not run.
+ * Initialize the optional measurement runtime selected by
+ * IMCFLOW_POWER_REQUEST.  IMCFLOW_POWER_SCOPE selects ``continuous`` (one
+ * whole-process session) or ``region`` (sessions opened by generated kernels).
+ * A missing/empty request means power is disabled and all helpers are no-ops.
  */
 int power_measure_runtime_start(void);
+
+/*
+ * Open/close one non-nestable region session.  In continuous scope these are
+ * no-ops, so generated kernels work with both acquisition scopes.  Region
+ * begin returns only after GET; region end freezes and finalizes the artifact.
+ */
+int power_measure_runtime_region_begin(const char *region_name);
+int power_measure_runtime_region_end(void);
 
 /* General active-map and event helpers used by host executables. */
 void power_measure_runtime_phase(const char *phase);

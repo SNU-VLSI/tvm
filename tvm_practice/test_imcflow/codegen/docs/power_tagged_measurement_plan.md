@@ -25,11 +25,44 @@
     Board tag와 DMM sample은 measurement server 시간축으로 변환하고 변환
     불확실성도 결과에 함께 저장한다.
 
+### Region scope 확장 (2026-08-16)
+
+후속 실험에서는 위 1~2번의 whole-run-only 원칙을 기본 호환 mode로 유지하면서,
+기존 `power` branch의 region acquisition을 일반화한 두 번째 scope를 추가한다.
+
+| 축 | 값 | 의미 |
+|---|---|---|
+| acquisition `scope` | `continuous` | host process 전체에서 DMM session 한 번 |
+| acquisition `scope` | `region` | generated IMCFLOW kernel마다 독립 DMM session |
+| stop `mode` | `now` / `wait` | scope와 독립적인 DMM 종료 정책, 기본 `now` |
+| annotation | async tag set/clear/event | 활성 session 안에서 DMM 재시작 없이 상태 기록 |
+
+`scope=region`의 실행 순서는 다음과 같다.
+
+```text
+kernel device setup/reset/warmup
+  → power_region_begin(kernel): configure/INIT/GET/STARTED (blocking)
+  → compiled/const transfer, policy update, invoke, tile 실행과 async tag
+  → power_region_end(): STOP_BEGIN/ABOR/finalize (blocking)
+  → device cleanup
+```
+
+Region은 중첩하지 않는다. 각 region은 parent run 아래
+`<parent_session_id>/regions/rNNNN_<kernel>/`에 독립 raw CSV/NPZ/summary를 만든다.
+기존 `continuous` config와 artifact layout은 그대로 유지한다. Protocol v4의
+`START_REGION`만 server가 parent request의 session ID를 안전한 child ID로 바꾸며,
+board C client는 JSON을 해석하지 않는다.
+
+기존 `power` branch의 `MODEL`/`REGION`/`TILE` 전역 enum과 달리, 새 구조에서
+model/region/tile은 begin/end를 어디에 삽입할지 결정하는 instrumentation policy다.
+region 내부의 transfer/invoke/tile 구분은 모두 비동기 tag로 처리하므로 tile마다
+DMM을 다시 시작할 필요가 없다.
+
 현재 변경 대상 repository는 다음 두 개다.
 
 | Repository | 담당 기능 |
 |---|---|
-| `SNU-VLSI/measurement_utils` | direct PyVISA server, current protocol v2와 planned v3, C API, standalone smoke test, artifact writer/loader |
+| `SNU-VLSI/measurement_utils` | direct PyVISA server, protocol v4, C API, standalone smoke test, artifact writer/loader |
 | `SNU-VLSI/tvm` | measurement_utils submodule pin, DMM/runner config, CMake, host wrapper, codegen tag, runner, 문서 |
 
 IMCFlow repository의 RTL이나 runner source를 변경하는 것은 현재 범위에 없다.
