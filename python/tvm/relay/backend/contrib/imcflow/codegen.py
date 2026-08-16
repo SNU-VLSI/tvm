@@ -934,12 +934,24 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     param_edges = []
     const_edges = []
     output_edges = []
+    from tvm.relay.op.contrib.imcflow import residual_in_region_mode
     for x in fn.params:
       # self.visit(x)
       param_id = getNodeID(x)
-      # The input variable will go to the same router entry => only need one send block
-      param_edge = self.get_output_edges_from_id(param_id)[0]
-      param_edges.append(param_edge)
+      # The input variable normally goes to a single router entry (or a same-entry
+      # multicast the router fans out), so one send block suffices -> take [0].
+      # BUT under IMCFLOW_RESIDUAL_IN_REGION a merged region can consume one model
+      # input at TWO distinct receivers on DIFFERENT fifos (e.g. b1 entry minmax on
+      # fifo2 AND the residual add's skip on fifo3). Those are separate router
+      # entries -> each needs its own send block, else the un-sent receiver's RECV
+      # blocks forever. Emit every output edge in that case; the downstream
+      # param_edges_by_hid grouping then interleaves them. OFF / single-consumer
+      # params keep the [0]-only behavior -> byte-identical.
+      out_edges = self.get_output_edges_from_id(param_id)
+      if residual_in_region_mode() and len(out_edges) > 1:
+        param_edges.extend(out_edges)
+      else:
+        param_edges.append(out_edges[0])
       # self.add_send_block(param_edge)
     #self.visit(fn.body)
     # traverse constant nodes
@@ -988,8 +1000,28 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # send param edge interleaved
     # Group param edges by source HID (inode)
+    # Under IMCFLOW_RESIDUAL_IN_REGION a single model-input param can fan out to
+    # TWO DISTINCT receivers (different graph nodes / fifos) from the same inode.
+    # add_send_block_interleaved is for a split/same-data multicast stream and would
+    # bill each edge the full size (2x -> send 8192 vs recv 4096). Those distinct
+    # unicast fan-outs must instead be emitted as SEPARATE per-edge send blocks
+    # (each 4096, matching its receiver). Pull them out before the HID grouping.
+    residual_fanout_edges = []
+    grouped_param_edges = param_edges
+    if residual_in_region_mode():
+      # a param source id feeding >1 distinct dst -> emit each edge on its own
+      from collections import defaultdict as _dd
+      _by_src = _dd(list)
+      for e in param_edges:
+        _by_src[e.src_id].append(e)
+      residual_fanout_edges = [e for es in _by_src.values() if len(es) > 1 for e in es]
+      grouped_param_edges = [e for e in param_edges if e not in residual_fanout_edges]
+
+    for edge in residual_fanout_edges:
+      self.add_send_block(edge, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
+
     param_edges_by_hid = {}
-    for edge in param_edges:
+    for edge in grouped_param_edges:
       hid = self.get_hid(edge.src_id)
       if hid not in param_edges_by_hid:
         param_edges_by_hid[hid] = []

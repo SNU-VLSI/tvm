@@ -822,6 +822,17 @@ class SendBlock(InodeCodeBlock):
     for e in edges:
       if not pm.is_inode_data_input_recv(e):
         continue
+      # IMCFLOW_RESIDUAL_IN_REGION: skip the plain-int-dst consumer of a model-
+      # input multicast that is ALSO fed to an in-region residual add (imce_0_1:
+      # standalone min_max_quantize, co-fed with imce_0_2's skip). Mirroring the
+      # proven OFF baseline, the inode STANDBYs ONLY the windowed residual-add
+      # consumer (imce_0_2, added below) and this fanout consumer stays a BARE
+      # receiver (its RECV window is likewise bared in send_recv_sync). If the
+      # inode kept STANDBY(imce_0_1,1) here, imce_0_1 (now bare, no SETFLAG)
+      # would never raise flag 1 -> inode wedges. Lever OFF -> predicate False
+      # -> byte-identical (imce_0_1 stays a rendezvous target as before).
+      if pm.is_residual_multicast_conv_input_recv(e):
+        continue
       rnode = pm._get_hw_node(e.dst_id)
       if isinstance(rnode, tuple):
         rnode = rnode[0]

@@ -537,6 +537,53 @@ class SendRecvPairManager:
         producers.sort(key=lambda x: x.value)
         return producers
 
+    def is_residual_multicast_conv_input_recv(self, edge: TensorEdge) -> bool:
+        """IMCFLOW_RESIDUAL_IN_REGION: True if this RECV is the PLAIN-int-dst
+        consumer (a standalone min_max_quantize / conv head, e.g. imce_0_1) of a
+        model-input MULTICAST whose SAME source TensorID ALSO fans out to an
+        in-region residual ADD composite (tuple dst, e.g. imce_0_2's skip input)
+        in the same func.
+
+        Under residual_in_region the model input TensorID(-11,odata) is one
+        physical INODE multicast reaching BOTH:
+          * this plain-int-dst consumer   -- is_inode_data_input_recv True
+          * a composite tuple-dst residual add -- is_residual_data_input_recv True
+        The residual-add consumer keeps its per-word SETFLAG(1);STANDBY(inode,1);
+        SETFLAG(0) window and paces the ONE inode SEND per word. To exactly mirror
+        the proven cross-region baseline (IMCFLOW_RESIDUAL_IN_REGION OFF), where
+        the inode STANDBYs ONLY the windowed residual consumer and THIS consumer
+        is a BARE fanout receiver (drains via fifo backpressure), we:
+          * (inode side) drop this consumer from the pre-send rendezvous target
+            set, leaving the inode to STANDBY only the residual-add consumer.
+          * (imce side)  emit this consumer's data RECV window BARE (None, None).
+
+        Detection (lever-gated so OFF stays byte-identical):
+          * residual_in_region_mode() ON
+          * `edge` is an inode->imce data input with a PLAIN-int dst
+            (is_inode_data_input_recv True)
+          * SOME OTHER edge sharing THIS edge's source TensorID is an in-region
+            residual-add operand (is_residual_data_input_recv True).
+        The residual-add co-fanout requirement structurally excludes every
+        ordinary inode data input (no residual sibling), so this only ever
+        matches the residual-in-region model-input multicast head.
+        """
+        if not residual_in_region_mode():
+            return False
+        if not self.is_inode_data_input_recv(edge):
+            return False
+        src_id = edge.src_id
+        # A sibling edge shares this multicast's source TensorID and lands on an
+        # in-region residual add (composite tuple dst). Scan all paired edges.
+        for p in self.pairs.values():
+            for e in p.edges:
+                if e is edge:
+                    continue
+                if e.src_id is not src_id:
+                    continue
+                if self.is_residual_data_input_recv(e):
+                    return True
+        return False
+
     def is_packed_postop_const_edge(self, edge: TensorEdge) -> bool:
         """IMCFLOW_PACK_BN_MINMAX capacity-deadlock guard (BUGFIX-off RTL).
 
@@ -821,6 +868,18 @@ class SendRecvPairManager:
             # inode -> imce. Only the main-pipeline data input gets a window
             # (STANDBY on the sending inode); everything else (weights already
             # excluded as const; fused/composite receivers) is bare.
+            #
+            # IMCFLOW_RESIDUAL_IN_REGION: the plain-int-dst consumer of a model-
+            # input multicast that is ALSO fed to an in-region residual add
+            # (imce_0_1: standalone min_max_quantize co-fed with imce_0_2's skip)
+            # must be BARE, mirroring the proven OFF baseline where this fanout
+            # receiver drains via fifo backpressure while the residual-add
+            # consumer's per-word window paces the single inode SEND. Its RECV
+            # window (num_blocks==4 wrapped as one window = per-4-word) otherwise
+            # desyncs the inode's per-word SEND -> region1 tiled-launch deadlock.
+            # Lever OFF -> predicate False -> the normal window below (unchanged).
+            if self.is_residual_multicast_conv_input_recv(edge):
+                return None, None
             if self.is_inode_data_input_recv(edge):
                 pre = [
                     "__builtin_IMCE_SETFLAG(1);",
