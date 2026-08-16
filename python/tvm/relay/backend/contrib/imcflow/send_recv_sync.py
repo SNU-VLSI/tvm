@@ -18,6 +18,19 @@ from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
 import logging
 
 
+# IMCFLOW_PACK_BN_MINMAX: dedicated node-flag value for the packed-postop const
+# pacing rendezvous (inode SendBlock <-> imce RecvConstBlock). It MUST differ
+# from the value-1 data/residual input rendezvous: the packed const pacing runs
+# during the CONFIG phase on the inode's (scalar) flag register, and a residual-
+# add consumer that begins computing early (e.g. region2 imce_1_2 doing
+# STANDBY(inode, 1)) would otherwise alias this config-phase SET_FLAG(1) pulse
+# and race ahead of the actual per-tile data SEND -> hard deadlock. 253 is
+# reserved (pair UUIDs cap at 252 under packing; 254/255 are the barrier senses;
+# emitted flag values are otherwise <= 4), so it can never collide. Lever OFF ->
+# the pacing windows are not emitted -> byte-identical.
+PACK_CONST_SYNC_FLAG = 253
+
+
 class SendRecvPair:
     """Represents a send-recv pair with multicast support"""
 
@@ -193,9 +206,16 @@ class SendRecvPairManager:
         # Assign UUIDs to each group
         uuid = 1  # Start from 1 (0 is reserved for flag clear)
         # 255 is reserved for the all-inode barrier (SyncAllINodes). Under the
-        # BN/minmax packing lever the barrier is sense-reversing over {254,255},
-        # so BOTH 254 and 255 are reserved and pair UUIDs must stay <= 253.
-        _uuid_max = 253 if (pack_bn_minmax_mode() or residual_in_region_mode()) else 255
+        # BN/minmax packing lever the barrier is sense-reversing over {254,255}
+        # (both reserved) AND 253 is reserved for the packed-postop const pacing
+        # rendezvous (PACK_CONST_SYNC_FLAG), so pair UUIDs must stay <= 252.
+        # residual_in_region keeps its prior <= 253 cap (no pack-const pacing).
+        if pack_bn_minmax_mode():
+            _uuid_max = 252
+        elif residual_in_region_mode():
+            _uuid_max = 253
+        else:
+            _uuid_max = 255
         for src_gid_key, group_edges in sorted(edge_groups.items(), key=lambda x: str(x[0])):
             if uuid > _uuid_max:
                 raise RuntimeError(f"UUID overflow: more than {_uuid_max} send-recv pairs in function")
@@ -648,7 +668,7 @@ class SendRecvPairManager:
 
         Used by the inode SendBlock (pre-send STANDBY on the imce) and the imce
         RecvConstBlock (SETFLAG window + STANDBY on the inode) to build the
-        per-word flag-1 rendezvous WITHOUT a pair (const edges are unpaired).
+        per-word flag rendezvous WITHOUT a pair (const edges are unpaired).
         """
         if not self.is_packed_postop_const_edge(edge):
             return None
@@ -659,6 +679,46 @@ class SendRecvPairManager:
         if isinstance(src_hw, tuple):
             return None
         return (src_hw, dst_hw)
+
+    def pack_const_sync_flag(self) -> int:
+        """Node-flag value presented by the inode during packed-postop const
+        pacing (SendBlock SET_FLAG / RecvConstBlock STANDBY-on-inode).
+
+        Returns 1 by default (byte-identical to the pack-const introduction),
+        and PACK_CONST_SYNC_FLAG (253) ONLY when this function contains a
+        receiver fed by >=2 inode data inputs (the 2-inode residual-add pattern,
+        e.g. region2 imce_1_2). That consumer does STANDBY(inode, 1) in the DATA
+        phase and would otherwise alias the inode's CONFIG-phase pack-const
+        SET_FLAG(1) pulse -> it races ahead of the real per-tile SEND and the
+        whole region wedges (region2 TILE0/1 hard deadlock). Regions with no such
+        consumer (region1) keep flag 1 -> byte-identical to the passing form.
+
+        Cached (function-scoped): the pair set is fixed after construction.
+        """
+        if not pack_bn_minmax_mode():
+            return 1
+        cached = getattr(self, "_pack_const_flag_cache", None)
+        if cached is not None:
+            return cached
+        # Count inode data-input senders per receiver hw node across all pairs.
+        recv_inode_senders: Dict[int, Set[int]] = {}
+        for pair in self.pairs.values():
+            if not pair.sender_node.is_inode():
+                continue
+            for edge in pair.edges:
+                if not self.is_inode_data_input_recv(edge):
+                    continue
+                rnode = self._get_hw_node(edge.dst_id)
+                if isinstance(rnode, tuple):
+                    rnode = rnode[0]
+                if rnode is None or not rnode.is_imce():
+                    continue
+                recv_inode_senders.setdefault(rnode.value, set()).add(
+                    pair.sender_node.value)
+        has_two_inode_add = any(len(s) >= 2 for s in recv_inode_senders.values())
+        flag = PACK_CONST_SYNC_FLAG if has_two_inode_add else 1
+        self._pack_const_flag_cache = flag
+        return flag
 
     def _receiver_is_output_node(self, recv_hw_node) -> bool:
         """True iff every inter-node edge sent BY recv_hw_node goes to an inode

@@ -807,9 +807,17 @@ class SendBlock(InodeCodeBlock):
       eps = pm.packed_postop_const_endpoints(e)
       if eps is not None:
         _inode_hw, imce_hw = eps
+        # The inode-side SET_FLAG value comes from pm.pack_const_sync_flag():
+        # 1 by default (byte-identical), but 253 in a function that also has a
+        # 2-inode residual-add consumer whose DATA-phase STANDBY(inode, 1) would
+        # otherwise alias this CONFIG-phase pulse (region2 imce_1_2 stale-flag
+        # race -> deadlock). The imce still raises its OWN flag=1 and the inode
+        # waits for it; only the inode's presented value moves off 1. Lockstep
+        # with RecvConstBlock's window (both read pack_const_sync_flag()).
+        pc_flag = pm.pack_const_sync_flag()
         return (
           f"__builtin_INODE_STANDBY({imce_hw.value}, 1); // pack-const sync with {imce_hw.name}\n"
-          f"__builtin_INODE_SET_FLAG(1);\n"
+          f"__builtin_INODE_SET_FLAG({pc_flag});\n"
           f"__builtin_INODE_STANDBY({imce_hw.value}, 0);\n"
           f"__builtin_INODE_SET_FLAG(0);\n"
         )

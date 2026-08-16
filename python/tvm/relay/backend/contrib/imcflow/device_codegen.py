@@ -236,9 +236,46 @@ class DeviceCodegen:
       print(f"Error parsing llvm-size output: {stdout}")
       return None
 
+  # IMCE instruction memory depth (words) from imcflow RTL parameters.yaml
+  # (IMCE_IMEM_DEPTH: 256). The PC is clog2(256)=8 bits, so it WRAPS at 256:
+  # a program whose .text exceeds 256 words silently overwrites its own entry
+  # (word 256 lands on addr 0), corrupting recv_cfg/prolog -> the core resumes
+  # mid-body reading un-latched CREG -> X-propagation fatal on BUGFIX-off RTL.
+  # We detect that here (the ONLY place the true compiled program size is known)
+  # and fail loudly instead of emitting a silently-corrupt image. This check is
+  # inert for every program that fits (all lever-OFF / stock builds), so codegen
+  # output is byte-identical unless a program would actually overflow.
+  IMCE_IMEM_DEPTH_WORDS = 256
+  # The imem host object embeds one instruction per fixed-width slot; the emitted
+  # binary blob (queried below via key="data") is words * IMEM_SLOT_BYTES.
+  IMCE_IMEM_SLOT_BYTES = 32
+
+  def _check_imem_capacity(self, node, obj_file, data_bytes):
+    """Hard-fail if an imce program overflows the wrap-around IMEM.
+
+    data_bytes is the imem host-object blob size (words * IMCE_IMEM_SLOT_BYTES),
+    already read by the caller; we reuse it so we do not shell out to llvm-size
+    a second time.
+    """
+    if self.target != "imce" or data_bytes is None:
+      return
+    cap_bytes = self.IMCE_IMEM_DEPTH_WORDS * self.IMCE_IMEM_SLOT_BYTES
+    if data_bytes > cap_bytes:
+      words = data_bytes // self.IMCE_IMEM_SLOT_BYTES
+      raise RuntimeError(
+        f"IMCE IMEM overflow: node {node.name} program is {words} words "
+        f"> IMEM depth {self.IMCE_IMEM_DEPTH_WORDS} words. The "
+        f"{self.IMCE_IMEM_DEPTH_WORDS}-word PC wraps, overwriting the program "
+        f"entry and producing X-propagation at runtime. This is typically an "
+        f"over-fused node (e.g. IMCFLOW_PACK_BN_MINMAX folding BN/minmax onto a "
+        f"large spatial conv): exclude this conv from packing so its BN/minmax "
+        f"render on a separate IMCE. obj={obj_file}"
+      )
+
   def update_device_config_with_obj_info(self, func_name, obj_map: dict[NodeID, str]):
     for node, obj_file in obj_map.items():
       size = self.get_object_size(obj_file, key="data")
+      self._check_imem_capacity(node, obj_file, size)
       if size is not None:
         db = DataBlock(f"{node.name}_imem", size)
         if self.target == "inode":

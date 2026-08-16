@@ -530,8 +530,16 @@ class RecvConstBlock(ImceCodeBlock):
       var = UniqueVar((self.in_edge, i))
       var.set_static()
       if pace_inode is not None:
+        # Wait for the inode's pacing pulse on pack_const_sync_flag() (1 by
+        # default, 253 only in a function with a 2-inode residual add). When it
+        # is 253 the inode moved its presented value off 1 so a residual-add
+        # consumer's STANDBY(inode, 1) cannot alias this config-phase handshake
+        # (region2 stale-flag deadlock). This imce always raises its OWN flag=1
+        # for the inode's STANDBY(imce, 1) (no aliasing on this conv's flag).
+        pm = getattr(self.builder, "pair_manager", None) if self.builder is not None else None
+        pc_flag = pm.pack_const_sync_flag() if pm is not None else 1
         code += "__builtin_IMCE_SETFLAG(1);"
-        code += f"__builtin_IMCE_STANDBY({pace_inode.value}, 1);"
+        code += f"__builtin_IMCE_STANDBY({pace_inode.value}, {pc_flag});"
         code += "__builtin_IMCE_SETFLAG(0);"
       if self.type == RecvConstBlock.ConstType.MIN:
         code += f"__builtin_IMCE_RECV_MIN({self.te_info.fifo_id});"
