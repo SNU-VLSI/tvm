@@ -992,8 +992,6 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
 
   def generateFromNpuTransferCode(self, blocks, tile_idx=None):
     """Generate code to transfer data from NPU memory."""
-    # MMIO read-back pacing knob (same env as the TO-NPU write barrier). -1 == OFF.
-    _mmio_barrier = mmio_block_barrier_usec()
     code = CodeWriter()
     code += "// Transfer data from NPU memory\n"
     for block in blocks:
@@ -1027,31 +1025,9 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
         continue
 
       # Generate loop code
-      # MMIO read-back pacing (IMCFLOW_MMIO_BARRIER, mirrors the TO-NPU write barrier
-      # above). The un-paced 2048-word FROM-NPU read burst starves the SoC bus and
-      # HANGS the chip at "Transferring output block to out0" (region3-class wedge,
-      # READ direction; func_out edge balanced so not a dangling-RECV deadlock, pure
-      # host MMIO-read overrun). A periodic __sync_synchronize() (+optional usleep)
-      # every _mmio_read_stride words drains the CPU load/store buffer so the reads
-      # don't back up on the accelerator port. -1 (default) == OFF -> byte-identical
-      # (bare loop). Host-side only; accelerator blobs untouched. DROP_PSUM skips this
-      # read entirely (above), so this paces only the non-drop validation path.
-      _mmio_read_stride = 256
-      _n_words = loop_end - loop_start
-      if _mmio_barrier >= 0 and _n_words > 0:
-        code += f"for(int i=0; i<{_n_words}; i++){{\n"
-        code += f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = npu_pointer[({base_address_name} / 4) + i];\n"
-        code += f"  if((i % {_mmio_read_stride}) == {_mmio_read_stride-1}){{\n"
-        code += f"    __sync_synchronize();\n"
-        if _mmio_barrier > 0:
-          code += f"    usleep({_mmio_barrier});\n"
-        code += f"  }}\n"
-        code += f"}}\n"
-        code += f"__sync_synchronize();\n"
-      else:
-        code += f"for(int i=0; i<{_n_words}; i++){{\n"
-        code += f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = npu_pointer[({base_address_name} / 4) + i];\n"
-        code += f"}}\n"
+      code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
+      code += f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = npu_pointer[({base_address_name} / 4) + i];\n"
+      code += f"}}\n"
     return code
 
   def generateBaseAddrMacros(self):
