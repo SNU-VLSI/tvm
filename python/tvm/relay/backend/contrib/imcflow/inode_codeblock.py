@@ -5,6 +5,7 @@ from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
 from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import feed_sync_per_pixel
+from tvm.contrib.imcflow import qconv_nop_delay_cnt
 from tvm.contrib.imcflow import imcu_intra_drain_nops
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
@@ -589,7 +590,7 @@ class SendBlock(InodeCodeBlock):
     cfg_pa = cfg_info.policy_info[0].address
     cfg_off = cfg_db.offset
     cfg_pkts = math.ceil(cfg_db.size / 32)  # 1 for a single-qconv
-    nop = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+    nop = (NopLoopBlock(qconv_nop_delay_cnt()).render() + "\n" if (DevConfig().single_qconv and qconv_nop_delay_cnt() > 0) else "")
     lines = "// [STEP_FREERUN] per-pass config reload (interleaved, config-FIFO safe)\n"
     for p in range(cfg_pkts):
       lines += f"__builtin_INODE_SEND({cfg_off} + {p}*32, 0, {cfg_pa}, {cfg_fid});\n"
@@ -698,7 +699,7 @@ class SendBlock(InodeCodeBlock):
       return
 
     send_per_sync = getattr(self.edge_info, "producer_send_per_sync", None) or 1
-    nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+    nop_delay = (NopLoopBlock(qconv_nop_delay_cnt()).render() + "\n" if (DevConfig().single_qconv and qconv_nop_delay_cnt() > 0) else "")
     def send_body_with_sync(iter, var=var, next_policy_addr=next_policy_addr,
                             fifo_id=fifo_id, send_per_sync=send_per_sync, nop_delay=nop_delay):
       code = ""
@@ -877,7 +878,7 @@ class SendBlock(InodeCodeBlock):
     # rendezvous with the receiving imce. weight/const SEND is bare.
     # chip_acc_measure reconcile (DESIGN §3.5): pre-send rendezvous BEFORE the
     # SEND, single_qconv nop_delay AFTER (== "" when single_qconv off).
-    nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+    nop_delay = (NopLoopBlock(qconv_nop_delay_cnt()).render() + "\n" if (DevConfig().single_qconv and qconv_nop_delay_cnt() > 0) else "")
     def send_body_with_sync(iter, base_addr_var=base_var, policy_addr=next_policy_addr, fid=fifo_id, nop_delay=nop_delay):
       code = ""
       pre = self._get_presend_sync_code_str(iter_var=iter)
@@ -1217,7 +1218,7 @@ class SendBlockInterleaved(InodeCodeBlock):
       # (bugfix_off_mode()==False) reproduces a8af's bare SEND line (no trailing
       # newline / nop_delay).
       if bugfix_off_mode():
-        nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+        nop_delay = (NopLoopBlock(qconv_nop_delay_cnt()).render() + "\n" if (DevConfig().single_qconv and qconv_nop_delay_cnt() > 0) else "")
         _suffix = "\n"
       else:
         nop_delay = ""

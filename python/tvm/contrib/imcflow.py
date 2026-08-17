@@ -226,6 +226,32 @@ def step_freerun_hold_sec() -> int:
     return 0
 
 
+def qconv_nop_delay_cnt() -> int:
+  """Max-throughput lever (IMCFLOW_QCONV_NOP_DELAY, integer nop count, default 10).
+
+  In single_qconv mode the inode SendBlock emits a NopLoopBlock(NOP_LOOP_CNTS=10)
+  AFTER every activation-feed SEND packet (inode_codeblock.py:592/701/880) as a
+  v2/atomic-conv TIMING pad (comment :655-657). It is NOT a NoC-correctness
+  requirement -- with single_qconv OFF (ResNet8 / v1 multi-core) nop_delay == "" and
+  the output is byte-identical to 934ec1001. fsim A/B (after FEED_SYNC_PER_PIXEL
+  collapses the rendezvous to 1/pixel) shows this per-SEND nop loop is the remaining
+  dominant inter-pixel cost (~10 cyc/SEND x 4 bitplanes = ~40 cyc/pixel of the 113).
+
+  This lever overrides the nop count (default 10 = byte-identical to stock). Lower it
+  (e.g. 0/2/4) for DON'T-CARE power / max-throughput measurement to shrink the feed
+  tail. CAUTION: it is a timing pad, so RTL-completing at a low value does NOT prove
+  chip-safe -- validate the minimum safe value on the actual chip (RTL OK != chip OK).
+  Applies ONLY to the single_qconv activation-feed nop_delay; ResNet8/v1 (single_qconv
+  off) never emits it, so this is a no-op there. Default 10 -> byte-identical."""
+  raw = os.environ.get("IMCFLOW_QCONV_NOP_DELAY", "").strip()
+  if not raw:
+    return 10  # NOP_LOOP_CNTS default (byte-identical to stock)
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 10
+
+
 def feed_sync_per_pixel() -> bool:
   """Max-throughput lever (IMCFLOW_FEED_SYNC_PER_PIXEL, default OFF).
 
