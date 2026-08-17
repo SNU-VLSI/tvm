@@ -303,6 +303,7 @@ def test_codegen_helpers_are_linux_only(monkeypatch):
 
 
 def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
+    monkeypatch.delenv("IMCFLOW_NO_PERKERNEL_WARMUP", raising=False)
     module = _load_ext_codegen(monkeypatch)
     monkeypatch.setattr(module, "makeConstArrayDecl", lambda *_args: "")
 
