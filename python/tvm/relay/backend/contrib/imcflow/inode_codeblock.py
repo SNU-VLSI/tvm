@@ -4,6 +4,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
 from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
+from tvm.contrib.imcflow import feed_sync_per_pixel
 from tvm.contrib.imcflow import imcu_intra_drain_nops
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
@@ -913,11 +914,23 @@ class SendBlock(InodeCodeBlock):
 
     if eff > 1:
       inner = ""
-      for j in range(eff):
-        fid = self.edge_info.spread_fifo_id(j, 4)
-        pre = self._get_presend_sync_code_str(iter_var=f"({spread_iv} + {j})")
+      # Max-throughput lever (IMCFLOW_FEED_SYNC_PER_PIXEL): emit ONE pre-send
+      # rendezvous before the whole `eff`-packet group (per pixel) instead of one
+      # per packet, matching the imce's single per-pixel LOAD_LB window (both 1:1).
+      # DON'T-CARE output; safe when FEED_SPREAD>=eff (each packet in its own
+      # depth-2 fifo, so all eff fit in flight before the single drain). Default
+      # OFF -> per-packet rendezvous unchanged.
+      _sync_per_pixel = feed_sync_per_pixel()
+      if _sync_per_pixel:
+        pre = self._get_presend_sync_code_str(iter_var=f"({spread_iv})")
         if pre:
           inner += indent(pre.rstrip("\n"), "  ") + "\n"
+      for j in range(eff):
+        fid = self.edge_info.spread_fifo_id(j, 4)
+        if not _sync_per_pixel:
+          pre = self._get_presend_sync_code_str(iter_var=f"({spread_iv} + {j})")
+          if pre:
+            inner += indent(pre.rstrip("\n"), "  ") + "\n"
         inner += (f"  __builtin_INODE_SEND({base_var} + ({spread_iv} + {j})*32, 0, "
                   f"{next_policy_addr}, {fid});\n")
         if nop_delay:

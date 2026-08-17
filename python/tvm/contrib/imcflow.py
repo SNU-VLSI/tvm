@@ -226,6 +226,30 @@ def step_freerun_hold_sec() -> int:
     return 0
 
 
+def feed_sync_per_pixel() -> bool:
+  """Max-throughput lever (IMCFLOW_FEED_SYNC_PER_PIXEL, default OFF).
+
+  bugfix-off (tapeout form) inserts a producer<->consumer flag rendezvous
+  (SETFLAG/STANDBY) PER BITPLANE on the conv activation feed: the inode SendBlock
+  emits one pre-send handshake per SEND packet, and the imce LoadLBBlock emits one
+  SETFLAG(1);STANDBY;SETFLAG(0) window per LOAD_LB (per_load_lb_window). For a
+  repeat=4 (4-bitplane) pixel that is 4 rendezvous/pixel, and fsim A/B shows this
+  dominates the bugfix-off inter-pixel gap (124 cyc/pixel vs 7 cyc bugfix-on; the
+  array floor itself is only 10 cyc). See memory maxtops-bugfixoff-sync-tax.
+
+  When ON, the feed rendezvous is emitted ONCE PER PIXEL (per group of `repeat`
+  bitplanes) instead of per bitplane, SYMMETRICALLY on both sides (inode: one
+  pre-send handshake before the `eff` unrolled SENDs; imce: one window around the
+  `repeat` LOAD_LBs). Both stay 1:1 so no repeat:1 rendezvous-frequency mismatch
+  (the wedge the per-LOAD_LB window was added to avoid). Safe only when the feed
+  fifos can hold the whole pixel's `repeat` packets in flight before the single
+  drain -- true under FEED_SPREAD>=repeat (each bitplane in its own depth-2 fifo).
+  DON'T-CARE output (power / max-throughput measurement) so exact per-bitplane
+  ordering is not required. Pair with IMCFLOW_FEED_SPREAD>=4. Default OFF ->
+  byte-identical (per-bitplane rendezvous unchanged)."""
+  return os.environ.get("IMCFLOW_FEED_SYNC_PER_PIXEL", "").strip().lower() in ("1", "on", "true", "yes")
+
+
 def step_freerun_pass_drain_nops() -> int:
   """IMCFLOW_STEP_FREERUN_PASS_DRAIN (integer IMCE-nop count, default 0=OFF).
 

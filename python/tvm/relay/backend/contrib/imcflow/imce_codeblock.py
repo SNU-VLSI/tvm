@@ -11,6 +11,7 @@ from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every, step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import step_freerun_pass_drain_nops
+from tvm.contrib.imcflow import feed_sync_per_pixel
 from tvm.contrib.imcflow import multiblock_fusedadd_bare, multiblock_fusedadd_safe, SAFE_TOKEN_BASE
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
@@ -328,6 +329,13 @@ class LoadLBBlock(ImceCodeBlock):
         and self.repeat > 1
         and is_inode_input_flag1_window
     )
+    # Max-throughput lever (IMCFLOW_FEED_SYNC_PER_PIXEL): collapse the per-bitplane
+    # rendezvous to ONE window around the whole `repeat`-bitplane burst (per pixel).
+    # The inode SendBlock relaxes symmetrically (one pre-send handshake per `eff`
+    # SENDs) so both stay 1:1 -> no repeat:1 mismatch. Only for the inode flag-1
+    # feed window; DON'T-CARE output. Default OFF -> per_load_lb_window unchanged.
+    if per_load_lb_window and feed_sync_per_pixel():
+      per_load_lb_window = False  # fall through to the single-window burst_body path
 
     def windowed_load_lb_line(iter, fid=load_fifo_id, annot=annotation):
       body = ""
