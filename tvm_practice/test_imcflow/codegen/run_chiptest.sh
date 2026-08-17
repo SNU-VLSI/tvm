@@ -17,6 +17,8 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  -s, --skip LIST  Comma-separated step numbers to skip (e.g., 1,3)"
+    echo "  --power-config FILE  Enable tagged continuous/region power measurement"
+    echo "  --no-patch     Generate with standard codegen instead of --with-patch"
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Arguments:"
@@ -41,6 +43,8 @@ SKIP_STEP4=false
 SKIP_STEP5=false
 SKIP_STEP6=false
 SKIP_LIST=""
+POWER_CONFIG="${IMCFLOW_POWER_CONFIG:-}"
+USE_PATCH=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -54,6 +58,18 @@ while [[ $# -gt 0 ]]; do
             fi
             SKIP_LIST="$2"
             shift 2
+            ;;
+        --power-config)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            POWER_CONFIG="$2"
+            shift 2
+            ;;
+        --no-patch)
+            USE_PATCH=false
+            shift
             ;;
         --skip1|--skip-1)
             SKIP_STEP1=true
@@ -122,9 +138,13 @@ fi
 TEST_FOLDER="$1"
 INPUT_SETTING="$2"
 
-# Validate test folder name format: must be *_evl.linux
-if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
-    echo "Error: Test folder must end with '_evl.linux' (got: $TEST_FOLDER)"
+# Validate and recover the registry model name for BUGFIX on/off outputs.
+if [[ "$TEST_FOLDER" == *_evl.linux.bugfixoff ]]; then
+    TEST_NAME="${TEST_FOLDER%_evl.linux.bugfixoff}"
+elif [[ "$TEST_FOLDER" == *_evl.linux ]]; then
+    TEST_NAME="${TEST_FOLDER%_evl.linux}"
+else
+    echo "Error: Test folder must end with '_evl.linux' or '_evl.linux.bugfixoff' (got: $TEST_FOLDER)"
     echo ""
     echo "Example:"
     echo "  $0 resnet8_subset31_pretrained_orig_evl.linux random"
@@ -132,9 +152,6 @@ if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
     echo "This is required because chip test runs on ARM Linux platform."
     exit 1
 fi
-
-# Extract model name from test folder (remove _evl.linux suffix)
-TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"
 
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
@@ -149,8 +166,10 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/imcflow-linux.sh"
 source "$SCRIPT_DIR/scan_steps.sh"
 load_env
+source "$SCRIPT_DIR/power_steps.sh"
 
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"
@@ -166,7 +185,10 @@ if [[ "$SKIP_STEP1" == true ]]; then
 else
     echo "Step 1: Running main.py to generate $TEST_FOLDER..."
     echo ""
-    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME" --with-patch)
+    CMD=(python main.py -p "$INPUT_SETTING" -m "$TEST_NAME")
+    if [[ "$USE_PATCH" == true ]]; then
+        CMD+=(--with-patch)
+    fi
     "${CMD[@]}"
     if [ $? -ne 0 ]; then
         echo "Error: Failed to generate test folder"
@@ -205,15 +227,26 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
+    POWER_REMOTE_BINARY="$REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build/$EXEC_NAME"
+    POWER_BUILD_METADATA="eval_dir/$TEST_FOLDER/build_metadata.json"
+    power_prepare "$POWER_CONFIG" "$TEST_NAME" "eval_dir/$TEST_FOLDER" \
+        "runner=run_chiptest" \
+        "model=$TEST_NAME" \
+        "board=${BOARD:-unknown}" \
+        "chip=${IMCFLOW_CHIP:-unknown}" \
+        "checkpoint=${CKPT:-}" || exit 1
+    POWER_REMOTE_ENV="$(power_remote_environment)"
     echo "Step 6: Executing on remote chip (timeout: 300s)..."
     echo ""
-    scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./$EXEC_NAME \
-                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
-                cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
-                tvm_status=\$?; exit \$tvm_status"
+    scan_ssh "cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && ${POWER_REMOTE_ENV}timeout 300 ./$EXEC_NAME \
+                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME; \
+                tvm_status=\$?; cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1; \
+                exit \$tvm_status"
+    EVAL_STATUS=$?
+    power_finalize_run "$EVAL_STATUS"
+    FINAL_STATUS=$?
 
-    if [ $? -eq 0 ]; then
+    if [ $FINAL_STATUS -eq 0 ]; then
         echo ""
         echo "=========================================="
         echo "Chip test completed successfully!"

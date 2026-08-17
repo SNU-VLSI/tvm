@@ -433,6 +433,27 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
     "build_timestamp": datetime.now().isoformat(),
   }
 
+  tvm_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+  measurement_root = os.path.join(tvm_root, "3rdparty", "measurement_utils")
+  try:
+    metadata["tvm_git_rev"] = subprocess.check_output(
+      ["git", "-C", tvm_root, "rev-parse", "HEAD"], text=True
+    ).strip()
+    metadata["measurement_utils_git_rev"] = subprocess.check_output(
+      ["git", "-C", measurement_root, "rev-parse", "HEAD"], text=True
+    ).strip()
+    tvm_status = subprocess.check_output(
+      ["git", "-C", tvm_root, "status", "--porcelain", "--untracked-files=no"],
+      text=True,
+    ).strip()
+    measurement_status = subprocess.check_output(
+      ["git", "-C", measurement_root, "status", "--porcelain", "--untracked-files=no"],
+      text=True,
+    ).strip()
+    metadata["build_tree_dirty"] = bool(tvm_status or measurement_status)
+  except (OSError, subprocess.CalledProcessError) as exc:
+    raise RuntimeError("failed to record codegen repository identity") from exc
+
   if test_name is not None:
     metadata["model_name"] = test_name
 

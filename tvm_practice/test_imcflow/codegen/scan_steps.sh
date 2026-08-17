@@ -184,8 +184,7 @@ scan_program_registers() {
     fi
     echo "Step $STEP_NUM: Executing scan program on remote chip (timeout: 0.5s)..."
     echo ""
-    scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
+    scan_ssh "cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
                 $REMOTE_BASE_PATH/scan_gen/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"

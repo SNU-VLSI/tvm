@@ -38,6 +38,7 @@
 // Shared test utilities
 #include "test_input_loader.h"
 #include "test_output_writer.h"
+#include "power_measure_runtime.h"
 
 // Global failure flag: set by IMCFlow kernel on timeout, checked by host loop
 volatile int g_imcflow_kernel_failed = 0;
@@ -225,6 +226,9 @@ static void print_tensor_info(const char* name, const DLTensor* tensor) {
 // ============================================================================
 
 int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "--power-build-info") == 0)
+    return power_measure_runtime_print_build_info(stdout) == 0 ? 0 : 1;
+
   // Parse command line arguments
   const char* test_name = argc > 1 ? argv[1] : "default_test";
   // test_name already includes "eval_dir/" prefix (e.g., "eval_dir/xxx_evl")
@@ -236,6 +240,9 @@ int main(int argc, char** argv) {
   // debug_execute_graph.c for the layout convention).
   const char* sample_idx = argc > 6 ? argv[6] : "";
   int has_sample = (sample_idx && strlen(sample_idx) > 0);
+
+  if (power_measure_runtime_start() != 0)
+    return 3;
 
   // Construct input and output directories based on test name (and sample idx).
   char input_dir[256];
@@ -348,6 +355,7 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Input Loading
   // ============================================================================
+  power_measure_runtime_phase("input_setup");
   fprintf(stderr, "\n--- Loading Inputs ---\n");
 
   int inputs_loaded = 0;
@@ -395,6 +403,7 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Execute Graph
   // ============================================================================
+  power_measure_runtime_phase("graph_execute");
   fprintf(stderr, "\n--- Executing Graph ---\n");
   TVMGraphExecutor_Run(exec);
   fprintf(stderr, "✅ Graph execution completed\n");
@@ -402,6 +411,7 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Output Retrieval and Saving
   // ============================================================================
+  power_measure_runtime_phase("output");
   fprintf(stderr, "\n--- Saving Outputs ---\n");
 
   // Get number of outputs
@@ -491,6 +501,7 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Cleanup
   // ============================================================================
+  power_measure_runtime_phase("cleanup");
   fprintf(stderr, "\n--- Cleaning Up ---\n");
 
   // Free loaded inputs
@@ -511,5 +522,7 @@ int main(int argc, char** argv) {
   printf("✅ Execution completed successfully\n");
   printf("========================================\n\n");
 
+  if (power_measure_runtime_finish() != 0)
+    return 3;
   return 0;
 }

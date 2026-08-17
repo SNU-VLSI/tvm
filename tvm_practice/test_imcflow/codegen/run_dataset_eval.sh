@@ -8,6 +8,7 @@ NPZ_FILE_PATH="scan_reg_files"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/scan_steps.sh"
 load_env
+source "$SCRIPT_DIR/power_steps.sh"
 
 # Paths (BINARY_DIR may be overridden by --binary-dir option)
 BINARY_DIR="host_binary_make.dataset"
@@ -51,6 +52,7 @@ show_help() {
     echo "  -l, --log-level LVL   Console log level: DEBUG (verbose, default) or INFO (progress bar)"
     echo "  -q, --quiet           Quiet mode: suppress remote stdout during evaluation"
     echo "  -o, --output DIR      Local directory to save result file (default: eval_results)"
+    echo "  --power-config FILE   Enable tagged continuous/region power measurement"
     echo "  -h, --help            Show this help message"
     echo ""
     echo "Arguments:"
@@ -90,6 +92,7 @@ SAMPLE_INDICES=""
 CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-DEBUG}"
 MODEL_EVL_DIR="resnet8_subset31_pretrained_orig_evl.linux"
 CKPT="${CKPT:-}"
+POWER_CONFIG="${IMCFLOW_POWER_CONFIG:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -160,6 +163,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             LOCAL_RESULT_DIR="$2"
+            shift 2
+            ;;
+        --power-config)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            POWER_CONFIG="$2"
             shift 2
             ;;
         --)
@@ -339,6 +350,17 @@ if [[ "$SKIP_STEP6" == true ]]; then
     echo "Step 6: Skipped."
     echo ""
 else
+    POWER_REMOTE_BINARY="$REMOTE_BASE_PATH/$BINARY_DIR/build/$DATASET_EXEC_NAME"
+    POWER_BUILD_METADATA="eval_dir/$MODEL_EVL_DIR/build_metadata.json"
+    power_prepare "$POWER_CONFIG" "$MODEL_EVL_DIR" "eval_dir/$MODEL_EVL_DIR" \
+        "runner=run_dataset_eval" \
+        "model=$MODEL_EVL_DIR" \
+        "dataset=$DATASET_NAME" \
+        "sample_selection=$SAMPLES_DISPLAY" \
+        "board=${BOARD:-unknown}" \
+        "chip=${IMCFLOW_CHIP:-unknown}" \
+        "checkpoint=${CKPT:-}" || exit 1
+    POWER_REMOTE_ENV="$(power_remote_environment)"
     echo "Step 6: Executing on remote chip..."
     echo ""
     # Write per-node debug dumps + heartbeat to tmpfs (RAM), NOT the SD card.
@@ -364,14 +386,15 @@ else
     if [ -n "${IMCFLOW_TIMING:-}" ]; then
         TIMING_ENV="IMCFLOW_TIMING=$IMCFLOW_TIMING "
     fi
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${POWER_REMOTE_ENV}${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
 $LABELS_PATH \
 $SAMPLES_ARG \
 $REMOTE_RESULT_PATH; \
-cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1"
+tvm_status=\$?; cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1; \
+exit \$tvm_status"
     echo "[CMD] $(scan_ssh_display) \"$REMOTE_CMD\""
 
     if [[ "$QUIET_MODE" == true ]]; then
@@ -386,7 +409,9 @@ cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > 
         scan_ssh "$REMOTE_CMD; tvm_status=\$?; exit \$tvm_status"
         EVAL_STATUS=$?
     fi
-    if [ $EVAL_STATUS -eq 0 ]; then
+    power_finalize_run "$EVAL_STATUS"
+    FINAL_STATUS=$?
+    if [ $FINAL_STATUS -eq 0 ]; then
         echo ""
         echo "=========================================="
         echo "Dataset evaluation completed successfully!"

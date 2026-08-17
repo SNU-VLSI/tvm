@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "scope": "continuous",
+  "mode": "now",
+  "duration_budget_s": 5,
+  "defaults": {
+    "nplc": 0.001,
+    "sample_interval_s": "auto",
+    "sample_count": 50000,
+    "current_range_A": 0.1,
+    "reset": false,
+    "autozero": false
+  },
+  "rails": [
+    {
+      "name": "DMM_GPIB3",
+      "voltage_V": 1.0
+    }
+  ],
+  "metadata": {
+    "measured_power": "set_to_the_physically_connected_rail",
+    "profile": "short_run_high_time_resolution"
+  }
+}

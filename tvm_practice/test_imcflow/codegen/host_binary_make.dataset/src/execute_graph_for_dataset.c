@@ -50,6 +50,7 @@
 #include <tvm/runtime/crt/module.h>
 #include <dlpack/dlpack.h>
 #include <tvm/runtime/crt/internal/graph_executor/graph_executor.h>
+#include "power_measure_runtime.h"
 
 // ============================================================================
 // Timing instrumentation (opt-in via IMCFLOW_TIMING=1)
@@ -284,6 +285,9 @@ static void print_class_scores(const DLTensor* tensor, int num_classes,
 // ============================================================================
 
 int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "--power-build-info") == 0)
+    return power_measure_runtime_print_build_info(stdout) == 0 ? 0 : 1;
+
   if (argc < 5) {
     fprintf(stderr, "Usage: %s <graph.json> <params.params> <images.npy> <labels.npy> [num_samples_or_indices] [output_path]\n", argv[0]);
     fprintf(stderr, "\nExample:\n");
@@ -299,6 +303,9 @@ int main(int argc, char** argv) {
   const char* images_path = argv[3];
   const char* labels_path = argv[4];
   const char* result_path = argc > 6 ? argv[6] : DEFAULT_RESULT_PATH;
+
+  if (power_measure_runtime_start() != 0)
+    return 3;
 
   // Timing instrumentation toggle
   {
@@ -492,6 +499,7 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Prepare Input Tensor (reusable)
   // ============================================================================
+  power_measure_runtime_phase("input_setup");
   fprintf(stderr, "\n--- Preparing Input Tensor ---\n");
 
   // Create input tensor with shape (1, C, H, W) from dataset shape (N, C, H, W)
@@ -597,6 +605,8 @@ int main(int argc, char** argv) {
   for (size_t iter = 0; iter < num_samples; iter++) {
     // Determine actual sample index
     size_t sample_idx = (num_indices > 0) ? (size_t)sample_indices[iter] : iter;
+    power_measure_runtime_sample(sample_idx);
+    power_measure_runtime_phase("input_setup");
 
     // Reset failure flag before each inference
     g_imcflow_kernel_failed = 0;
@@ -607,6 +617,7 @@ int main(int argc, char** argv) {
     void* sample_data = get_sample(&images, sample_idx);
     if (!sample_data) {
       fprintf(stderr, "Failed to get sample %zu\n", sample_idx);
+      power_measure_runtime_clear_sample();
       continue;
     }
     memcpy(input_tensor.data, sample_data, images.sample_size);
@@ -617,6 +628,7 @@ int main(int argc, char** argv) {
     uint64_t t_setin1 = g_timing_enabled ? now_ns() : 0;
 
     // Run inference
+    power_measure_runtime_phase("graph_execute");
     if (!g_timing_enabled) {
       TVMGraphExecutor_Run(exec);
     } else {
@@ -638,6 +650,7 @@ int main(int argc, char** argv) {
 
     // Check if kernel failed (timeout)
     if (g_imcflow_kernel_failed) {
+      power_measure_runtime_event("sample_timeout");
       fprintf(stderr, "[SKIP] Sample %zu failed (timeout)\n", sample_idx);
       if (g_result_file) {
         fprintf(g_result_file, "\n[Sample %zu] FAILED (timeout)\n", sample_idx);
@@ -649,13 +662,16 @@ int main(int argc, char** argv) {
       printf("Progress: %zu/%zu, Correct: %d/%d, Failed: %d, Accuracy: %.2f%%\n",
              iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
       fflush(stdout);
+      power_measure_runtime_clear_sample();
       continue;
     }
 
     // Get output
+    power_measure_runtime_phase("output");
     rc = TVMGraphExecutor_GetOutput(exec, 0, &output_tensor);
     if (rc != 0) {
       fprintf(stderr, "GetOutput failed for sample %zu: %d\n", sample_idx, rc);
+      power_measure_runtime_clear_sample();
       continue;
     }
 
@@ -701,6 +717,7 @@ int main(int argc, char** argv) {
               iter + 1, num_samples, correct, evaluated, failed_count, accuracy);
       fflush(g_result_file);
     }
+    power_measure_runtime_clear_sample();
   }
 
   // ============================================================================
@@ -759,6 +776,7 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Cleanup
   // ============================================================================
+  power_measure_runtime_phase("cleanup");
   fprintf(stderr, "--- Cleaning Up ---\n");
 
   if (g_result_file) {
@@ -778,5 +796,7 @@ int main(int argc, char** argv) {
   TVMGraphExecutor_Release(&exec);
 
   fprintf(stderr, "Cleanup completed\n");
+  if (power_measure_runtime_finish() != 0)
+    return 3;
   return 0;
 }

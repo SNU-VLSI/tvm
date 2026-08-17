@@ -271,6 +271,66 @@ target_compile_definitions(${TARGET_LIB_NAME} PUBLIC DMLC_LOG_STACK_TRACE=0)
 option(TVM_BUILD_HOST_RUNNER "Build a host runner executable" OFF)
 
 if(TVM_BUILD_HOST_RUNNER)
+  # One process-global tagged power runtime.  Acquisition settings stay in the
+  # runtime JSON, so changing rail/NPLC/interval never rebuilds the model.
+  set(IMCFLOW_POWER_RUNTIME_DIR
+      "${TVM_ROOT}/tvm_practice/test_imcflow/codegen/power_runtime")
+  set(IMCFLOW_MEASUREMENT_CAPI_DIR
+      "${TVM_ROOT}/3rdparty/measurement_utils/capi")
+  if(NOT EXISTS "${IMCFLOW_POWER_RUNTIME_DIR}/power_measure_runtime.c" OR
+     NOT EXISTS "${IMCFLOW_MEASUREMENT_CAPI_DIR}/dmm_measure.c")
+    message(FATAL_ERROR "Tagged power runtime sources are missing")
+  endif()
+  execute_process(
+    COMMAND git -C "${TVM_ROOT}" rev-parse HEAD
+    OUTPUT_VARIABLE IMCFLOW_BUILD_TVM_GIT_REV
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE IMCFLOW_TVM_GIT_RESULT
+  )
+  execute_process(
+    COMMAND git -C "${IMCFLOW_MEASUREMENT_CAPI_DIR}/.." rev-parse HEAD
+    OUTPUT_VARIABLE IMCFLOW_BUILD_MEASUREMENT_GIT_REV
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE IMCFLOW_MEASUREMENT_GIT_RESULT
+  )
+  if(NOT IMCFLOW_TVM_GIT_RESULT EQUAL 0 OR
+     NOT IMCFLOW_MEASUREMENT_GIT_RESULT EQUAL 0)
+    message(FATAL_ERROR "Cannot resolve tagged power build revisions")
+  endif()
+  execute_process(
+    COMMAND git -C "${TVM_ROOT}" status --porcelain --untracked-files=no
+    OUTPUT_VARIABLE IMCFLOW_TVM_TRACKED_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND git -C "${IMCFLOW_MEASUREMENT_CAPI_DIR}/.." status --porcelain
+            --untracked-files=no
+    OUTPUT_VARIABLE IMCFLOW_MEASUREMENT_TRACKED_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  set(IMCFLOW_BUILD_TREE_DIRTY 0)
+  if(NOT IMCFLOW_TVM_TRACKED_STATUS STREQUAL "" OR
+     NOT IMCFLOW_MEASUREMENT_TRACKED_STATUS STREQUAL "")
+    set(IMCFLOW_BUILD_TREE_DIRTY 1)
+  endif()
+  add_library(imcflow_power_runtime STATIC
+    "${IMCFLOW_POWER_RUNTIME_DIR}/power_measure_runtime.c"
+    "${IMCFLOW_MEASUREMENT_CAPI_DIR}/dmm_measure.c"
+  )
+  target_include_directories(imcflow_power_runtime PUBLIC
+    "${IMCFLOW_POWER_RUNTIME_DIR}"
+    "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
+  )
+  target_compile_definitions(imcflow_power_runtime PRIVATE
+    IMCFLOW_BUILD_TVM_GIT_REV="${IMCFLOW_BUILD_TVM_GIT_REV}"
+    IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV="${IMCFLOW_BUILD_MEASUREMENT_GIT_REV}"
+    IMCFLOW_BUILD_TREE_DIRTY=${IMCFLOW_BUILD_TREE_DIRTY}
+  )
+  target_include_directories(tvm_model PRIVATE
+    "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
+    "${IMCFLOW_POWER_RUNTIME_DIR}"
+  )
+
   # If DEBUG_EXE is set (env or cmake var), use debug_execute_graph.c
   if(NOT DEFINED DEBUG_EXE AND DEFINED ENV{DEBUG_EXE})
     set(DEBUG_EXE "$ENV{DEBUG_EXE}")
@@ -318,7 +378,7 @@ if(TVM_BUILD_HOST_RUNNER)
   endif()
 
   # Common settings
-  target_link_libraries(${HOST_RUNNER_NAME} PRIVATE ${TARGET_LIB_NAME} tvm_model ${CRT_LIBS} m stdc++ cnpy)
+  target_link_libraries(${HOST_RUNNER_NAME} PRIVATE ${TARGET_LIB_NAME} tvm_model ${CRT_LIBS} m stdc++ cnpy imcflow_power_runtime)
   target_include_directories(${HOST_RUNNER_NAME} PRIVATE
     "${CRT_LIB_BASE}/include"
     "${TVM_ROOT}/include"

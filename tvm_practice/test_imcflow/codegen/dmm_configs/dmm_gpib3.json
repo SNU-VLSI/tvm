@@ -1,0 +1,24 @@
+{
+  "DEVICE": {
+    "dmm_gpib3": {
+      "VISA_ADDR": "GPIB1::3::INSTR"
+    }
+  },
+  "POWER": {
+    "DMM_GPIB3": {
+      "DEVICE": "dmm_gpib3",
+      "READING_METADATA": true,
+      "CLOCK": {
+        "TIMEZONE": "UTC",
+        "POLICY": "verify_and_set_if_needed",
+        "MAX_OFFSET_MS": 100,
+        "CALIBRATION_ROUNDS": 8
+      }
+    }
+  },
+  "PRESET": {
+    "DEFAULT": {
+      "DMM_GPIB3": {}
+    }
+  }
+}

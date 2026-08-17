@@ -139,8 +139,34 @@ CONSOLE_LOG_LEVEL=INFO ./run_dataset_eval.sh 200
 #     --dataset cifar10 --sample $s --noise-mode greedy \                                                                                                                                                 
 #     --start-at simulate --stop-at simulate                                                                                                                                                              
 # done
-
 # --------------------------------------------------------------------------------------------------------------------
+
+IMCFLOW_RUNNER=rtl \
+IMCFLOW_DIR=/root/project/imcflow \
+SNPSLMD_LICENSE_FILE=1727@147.46.168.128 \
+CKPT=n32_signed_sample \
+IMCFLOW_BUGFIX=on \
+python -u main.py \
+  --model resnet8_subset31_pretrained_orig \
+  --stop-at simulate
+
+IMCFLOW_RUNNER=rtl \
+IMCFLOW_DIR=/root/project/imcflow \
+SNPSLMD_LICENSE_FILE=1727@147.46.168.128 \
+CKPT=kws_dscnn_base \
+IMCFLOW_BUGFIX=on \
+python -u main.py \
+  --model ds_cnn_full_pretrained \
+  --stop-at simulate
+
+IMCFLOW_RUNNER=rtl \
+IMCFLOW_DIR=/root/project/imcflow \
+SNPSLMD_LICENSE_FILE=1727@147.46.168.128 \
+CKPT=vww_mobilenet_base \
+IMCFLOW_BUGFIX=on \
+python -u main.py \
+  --model vww_full_pretrained \
+  --stop-at simulate
 
 python3 tvm_practice/test_imcflow/codegen/scripts/measure_weight3_0_synthetic_noise.py \
     --candidates tvm_practice/test_imcflow/codegen/debugging/noise_lowlevel/weight3_0/weight3_0_candidate_tuples.json \
