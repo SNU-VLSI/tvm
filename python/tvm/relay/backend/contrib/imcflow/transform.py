@@ -1583,6 +1583,117 @@ def merge_composite_ops(mod):
     return mod
 
 
+def stamp_pack_atomic_keys(mod):
+    """Stamp the stable atomic key onto BN-packed conv composites (pass 1 side).
+
+    Part of the size-aware BN/minmax packing 2-pass de-fuse
+    (IMCFLOW_PACK_BN_MINMAX, see python/tvm/relay/op/contrib/imcflow.py). Runs
+    AFTER merge_composite_ops and BEFORE legalizeImcflowLayout, i.e. while conv
+    weights are still ATOMIC (post split_conv_to_atomic, pre layout repack) so
+    DevConfig().AtomicSplitInfo bytes-hash lookups still resolve.
+
+    For every packed conv composite whose body actually contains a BN
+    (imcflow.fused_batch_norm / nn.batch_norm), we recover the atomic key
+    (orig_conv_name, oc_id, ic_id) from the qconv weight and attach it onto the
+    COMPOSITE FUNCTION as attr ``imcflow_atomic_key`` (a "name|oc|ic" string).
+    The attr rides alongside "Composite" and survives layout legalization
+    (verified: the Composite attr survives into 13_after_legalize_layout.txt, and
+    every ExprMutator-based pass that rebuilds the composite Function preserves
+    its full attr dict). Pass 1 device-codegen then reads this attr off the
+    overflowing IMCE node's composite Call to collect the exclusion key.
+
+    Fully gated: when pack_bn_minmax_mode() is False this is a no-op and returns
+    ``mod`` unchanged. When ON, only BN-containing packed conv composites are
+    touched, so the module text differs ONLY by the added attr on those nodes;
+    everything else is byte-identical.
+    """
+    from tvm.relay.op.contrib.imcflow import (
+        pack_bn_minmax_mode,
+        _atomic_key_for_qconv_weight,
+    )
+
+    if not pack_bn_minmax_mode():
+        return mod
+
+    _PACKED_COMPOSITES = (
+        "imcflow.qconv2d-with-postop",
+        "imcflow.qdwconv2d-with-postop",
+        "imcflow.conv2d-with-postop",
+    )
+    _BN_OPS = ("imcflow.fused_batch_norm", "nn.batch_norm")
+    _QCONV_OPS = ("nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.conv2d")
+
+    def _is_packed_conv_func(op):
+        if not isinstance(op, relay.Function):
+            return False
+        if op.attrs is None or "Composite" not in op.attrs:
+            return False
+        return str(op.attrs["Composite"]) in _PACKED_COMPOSITES
+
+    def _body_has_bn(func):
+        found = [False]
+
+        class _F(relay.ExprVisitor):
+            def visit_call(self, call):
+                if isinstance(call.op, tvm.ir.Op) and call.op.name in _BN_OPS:
+                    found[0] = True
+                super().visit_call(call)
+
+        _F().visit(func.body)
+        return found[0]
+
+    def _find_qconv(func):
+        found = [None]
+
+        class _F(relay.ExprVisitor):
+            def visit_call(self, call):
+                if found[0] is None and isinstance(call.op, tvm.ir.Op) \
+                        and call.op.name in _QCONV_OPS:
+                    found[0] = call
+                super().visit_call(call)
+
+        _F().visit(func.body)
+        return found[0]
+
+    class _Stamper(ExprMutator):
+        def __init__(self):
+            super().__init__()
+            self.did_stamp = False
+
+        def visit_call(self, call):
+            new_call = super().visit_call(call)
+            op = new_call.op
+            if not _is_packed_conv_func(op):
+                return new_call
+            # Already stamped (idempotent) -> leave byte-identical.
+            if op.attrs is not None and "imcflow_atomic_key" in op.attrs:
+                return new_call
+            if not _body_has_bn(op):
+                return new_call
+            qconv = _find_qconv(op)
+            if qconv is None:
+                return new_call
+            key = _atomic_key_for_qconv_weight(qconv.args[1])
+            if key is None:
+                return new_call
+            key_str = f"{key[0]}|{int(key[1])}|{int(key[2])}"
+            stamped_op = op.with_attr("imcflow_atomic_key", key_str)
+            self.did_stamp = True
+            return relay.Call(stamped_op, new_call.args, new_call.attrs,
+                              new_call.type_args, new_call.span)
+
+    for global_var, func in mod.functions.items():
+        if not isinstance(func, relay.Function):
+            continue
+        if "global_symbol" not in func.attrs or "imcflow" not in func.attrs["global_symbol"]:
+            continue
+        stamper = _Stamper()
+        new_func = stamper.visit(func)
+        if stamper.did_stamp:
+            mod[global_var] = new_func
+    return mod
+
+
 class ConsumerMapBuilder(ExprVisitor):
     """Build a map from expr -> list of consumers (exprs that use it)."""
 

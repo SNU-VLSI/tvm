@@ -140,6 +140,13 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     mod = imcflow_transform.merge_composite_ops(mod)
     _print("8_after_final_merge")
 
+    # Step 7b: (IMCFLOW_PACK_BN_MINMAX 2-pass de-fuse) stamp the stable atomic
+    # key onto BN-packed conv composites BEFORE layout legalization, while conv
+    # weights are still atomic (so AtomicSplitInfo hashes resolve). No-op unless
+    # the packing lever is ON; only BN-containing packed conv composites get the
+    # extra attr. Pass-1 device codegen reads this to collect overflow keys.
+    mod = imcflow_transform.stamp_pack_atomic_keys(mod)
+
     # Step 8: Concat distributor
     mod = imcflow_transform.ConcatDistributor(max_inputs=4).run(mod)
     _print("9_after_concat_distributor")
@@ -408,18 +415,98 @@ def compile_for_imcflow(mod, param_dict, output_dir, skip_codegen=False):
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Step 1: Transform the model
-    print("\n--- Transforming Model ---")
-    mod, param_dict = transform_model_for_imcflow(mod, param_dict, output_dir)
+    # ------------------------------------------------------------------
+    # Size-aware BN/minmax packing 2-pass de-fuse (IMCFLOW_PACK_BN_MINMAX).
+    #
+    # A full-IC 3x3 spatial conv (region3 imce_1_1) that packs BN overflows the
+    # 256-word IMEM (297 words) -> RTL X-fatal. We cannot know a node's compiled
+    # word count until AFTER device codegen, and MergeComposite (where packing is
+    # decided) runs long before. So run TWO passes: pass 1 packs everything and
+    # COLLECTS the atomic keys of nodes that overflow IMEM; pass 2 re-runs with
+    # those convs EXCLUDED from packing (their BN renders standalone). The
+    # exclusion is applied by the MergeComposite `check` in
+    # relay/op/contrib/imcflow.py, keyed on the stable (orig_conv_name, oc_id,
+    # ic_id) atomic key. When the lever is OFF, or ON with no overflow, this
+    # collapses to a single ordinary pass -> byte-identical to before.
+    from tvm.relay.op.contrib.imcflow import (
+        pack_bn_minmax_mode,
+        clear_pack_bn_minmax_exclude,
+        add_pack_bn_minmax_exclude,
+        pack_bn_minmax_exclude_set,
+    )
+    from tvm.relay.backend.contrib.imcflow.device_codegen import (
+        set_imem_overflow_collect,
+    )
 
-    if skip_codegen:
-        return mod, param_dict, None
+    two_pass = pack_bn_minmax_mode() and not skip_codegen
 
-    # Step 2: Run codegen
-    print("\n--- Running IMCFlow Codegen ---")
-    run_imcflow_codegen(mod, output_dir, save_intermediate=True, stop_at_codegen=False)
+    if not two_pass:
+        # ---- Original single-pass path (byte-identical when lever OFF) ----
+        print("\n--- Transforming Model ---")
+        mod, param_dict = transform_model_for_imcflow(mod, param_dict, output_dir)
 
-    # Step 3: Generate graph executor
+        if skip_codegen:
+            return mod, param_dict, None
+
+        print("\n--- Running IMCFlow Codegen ---")
+        run_imcflow_codegen(mod, output_dir, save_intermediate=True, stop_at_codegen=False)
+
+        print("\n--- Generating Graph Executor ---")
+        _, tar_path = generate_graph_executor(mod, param_dict, output_dir)
+        return mod, param_dict, tar_path
+
+    # ---- 2-pass packing de-fuse ----
+    orig_mod, orig_param_dict = mod, param_dict
+    clear_pack_bn_minmax_exclude()
+
+    max_passes = 4  # pass 1 + up to 3 exclusion refinements (guards runaway loop)
+    for attempt in range(1, max_passes + 1):
+        # Each transform_model_for_imcflow clears DevConfig, so passes are
+        # independent (fresh AtomicSplitInfo, HWNodeMap, HashToCustomID, etc.).
+        # transform_model_for_imcflow mutates its mod (mod["main"] = bind_params
+        # ...), so hand each pass a FRESH deep copy of the original module and
+        # params (bind_params_by_name would otherwise double-bind on re-run).
+        pass_mod = copy.deepcopy(orig_mod)
+        pass_param = dict(orig_param_dict)
+        print(f"\n--- Transforming Model (pack-defuse pass {attempt}, "
+              f"{len(pack_bn_minmax_exclude_set())} conv(s) excluded) ---")
+        pass_mod, pass_param = transform_model_for_imcflow(pass_mod, pass_param, output_dir)
+
+        # Collect IMEM overflows during codegen instead of hard-failing.
+        overflow_sink = []
+        prev_sink = set_imem_overflow_collect(overflow_sink)
+        try:
+            print(f"\n--- Running IMCFlow Codegen (pack-defuse pass {attempt}) ---")
+            run_imcflow_codegen(pass_mod, output_dir, save_intermediate=True,
+                                stop_at_codegen=False)
+        finally:
+            set_imem_overflow_collect(prev_sink)
+
+        new_keys = [k for k in overflow_sink if k not in pack_bn_minmax_exclude_set()]
+        if not new_keys:
+            # Converged: this pass produced NO (new) overflow. Its codegen is the
+            # final, valid image.
+            mod, param_dict = pass_mod, pass_param
+            print(f"[pack-defuse] converged after pass {attempt}: "
+                  f"{len(pack_bn_minmax_exclude_set())} conv(s) de-fused, no IMEM overflow.")
+            break
+
+        for k in new_keys:
+            add_pack_bn_minmax_exclude(k)
+        print(f"[pack-defuse] pass {attempt} overflowed on {len(new_keys)} new conv(s): "
+              f"{new_keys}. Re-compiling with them excluded from BN packing.")
+    else:
+        # Ran out of passes still overflowing -> fail loudly (do NOT emit a
+        # silently-corrupt image). Restore hard-raise so the message is clear.
+        set_imem_overflow_collect(None)
+        raise RuntimeError(
+            f"IMCFLOW_PACK_BN_MINMAX de-fuse did not converge after {max_passes} "
+            f"passes; still-overflowing convs: {overflow_sink}. Excluded so far: "
+            f"{sorted(pack_bn_minmax_exclude_set())}. This suggests an atomic conv "
+            f"whose BARE (de-fused) program alone exceeds IMEM, which packing "
+            f"exclusion cannot fix."
+        )
+
     print("\n--- Generating Graph Executor ---")
     _, tar_path = generate_graph_executor(mod, param_dict, output_dir)
 

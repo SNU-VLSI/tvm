@@ -8,6 +8,105 @@ from tvm.relay.backend.contrib.imcflow.codeblock import *
 import pdb
 
 
+# --------------------------------------------------------------------------
+# Size-aware BN/minmax packing 2-pass de-fuse -- pass-1 IMEM overflow COLLECT
+# mode (see python/tvm/relay/op/contrib/imcflow.py and
+# transform.stamp_pack_atomic_keys).
+#
+# _check_imem_capacity normally HARD-RAISES on an IMCE program that overflows
+# the wrap-around IMEM. During pass 1 of the 2-pass compile the driver wants
+# codegen to COMPLETE (collecting EVERY overflowing node's stable atomic key in
+# one shot) instead of aborting on the first overflow. The driver installs a
+# fresh list via set_imem_overflow_collect([]) before pass-1 codegen; while that
+# list is not None the guard APPENDS the overflowing node's atomic key to it and
+# returns (no raise). When it is None (default) the guard raises exactly as
+# before -> stock/lever-OFF codegen is byte-identical.
+_IMEM_OVERFLOW_COLLECT = None  # None => raise (default); a list => collect+continue
+
+
+def set_imem_overflow_collect(list_or_None):
+  """Install (or clear) the pass-1 IMEM-overflow collect sink.
+
+  Pass a fresh ``list`` to enter collect mode: subsequent IMEM overflows append
+  their atomic key ``(orig_conv_name, oc_id, ic_id)`` to it and codegen keeps
+  going. Pass ``None`` to restore the default hard-raise behavior. Returns the
+  previously installed sink so callers can restore it.
+  """
+  global _IMEM_OVERFLOW_COLLECT
+  prev = _IMEM_OVERFLOW_COLLECT
+  _IMEM_OVERFLOW_COLLECT = list_or_None
+  return prev
+
+
+def get_imem_overflow_collect():
+  """Return the current collect sink (a list) or None if collect mode is off."""
+  return _IMEM_OVERFLOW_COLLECT
+
+
+def _resolve_overflow_atomic_key(func_name, node):
+  """Recover the stable atomic key of the IMCE node that overflowed IMEM.
+
+  ``node`` is a PHYSICAL imce NodeID (from NodeID.imces()); ``func_name`` scopes
+  it to one imcflow function. Recipe (confirmed against
+  transform.constructActiveIMCEDict / constructNoCPathDict, which do the same
+  gid->HWNodeMap->NodeID lookup):
+
+    1. CustomIDInFunc()[func_name] -> the list of graph gids in this function.
+    2. HWNodeMap maps gid -> physical NodeID. Invert it, restricted to this
+       function's gids, to find the candidate composite gid(s) placed on `node`.
+    3. CustomIDToNode()[gid] -> the composite Call. Its op is the composite
+       Function stamped by stamp_pack_atomic_keys; read
+       op.attrs["imcflow_atomic_key"] and parse "name|oc|ic" back to
+       (orig_conv_name, oc_id, ic_id).
+
+  Returns the key tuple, or None if it cannot be resolved (unstamped node,
+  missing mapping, etc.) -- the caller then collects nothing for that node.
+  """
+  from tvm.relay.op.contrib.imcflow import CustomIDInFunc, CustomIDToNode
+
+  cfg = DevConfig()
+  hw_map = cfg.HWNodeMap
+  id_in_func = CustomIDInFunc()
+  id_to_node = CustomIDToNode()
+
+  func_gids = id_in_func.get(func_name)
+  if not func_gids:
+    return None
+
+  # Candidate gids in THIS function that HWNodeMap places on the physical `node`.
+  candidates = []
+  for gid in func_gids:
+    mapped = hw_map.get(gid) if gid in hw_map else None
+    if isinstance(mapped, NodeID) and mapped == node:
+      candidates.append(gid)
+
+  for gid in candidates:
+    try:
+      call = id_to_node[gid]
+    except (KeyError, TypeError):
+      continue
+    op = getattr(call, "op", None)
+    attrs = getattr(op, "attrs", None)
+    if attrs is None:
+      continue
+    key_str = None
+    try:
+      if "imcflow_atomic_key" in attrs:
+        key_str = attrs["imcflow_atomic_key"]
+    except (TypeError, KeyError):
+      key_str = None
+    if not key_str:
+      continue
+    parts = str(key_str).split("|")
+    if len(parts) != 3:
+      continue
+    try:
+      return (parts[0], int(parts[1]), int(parts[2]))
+    except ValueError:
+      continue
+  return None
+
+
 class DeviceCodegen:
   def __init__(self, target, build_dir="/tmp", host_isa="arm"):
     assert target in ["inode", "imce"], f"Unknown target: {target}"
@@ -245,23 +344,47 @@ class DeviceCodegen:
   # and fail loudly instead of emitting a silently-corrupt image. This check is
   # inert for every program that fits (all lever-OFF / stock builds), so codegen
   # output is byte-identical unless a program would actually overflow.
-  IMCE_IMEM_DEPTH_WORDS = 256
+  # Default 256 matches the stock RTL (parameters.yaml IMCE_IMEM_DEPTH: 256).
+  # For the IMEM-enlargement diagnostic experiment, the RTL is rebuilt with a
+  # bumped depth (e.g. 512) and IMCFLOW_IMCE_IMEM_DEPTH is set to the SAME value
+  # so this compile-time guard stays honest against the actual built IMEM depth
+  # (otherwise it would falsely fire at 297>256 and block the build). Default is
+  # 256 -> byte-identical to stock behavior.
+  IMCE_IMEM_DEPTH_WORDS = int(os.environ.get("IMCFLOW_IMCE_IMEM_DEPTH", "256"))
   # The imem host object embeds one instruction per fixed-width slot; the emitted
   # binary blob (queried below via key="data") is words * IMEM_SLOT_BYTES.
   IMCE_IMEM_SLOT_BYTES = 32
 
-  def _check_imem_capacity(self, node, obj_file, data_bytes):
+  def _check_imem_capacity(self, node, obj_file, data_bytes, func_name=None):
     """Hard-fail if an imce program overflows the wrap-around IMEM.
 
     data_bytes is the imem host-object blob size (words * IMCE_IMEM_SLOT_BYTES),
     already read by the caller; we reuse it so we do not shell out to llvm-size
     a second time.
+
+    In pass-1 COLLECT mode (set_imem_overflow_collect installed a list), an
+    overflow does NOT raise: instead the overflowing node's stable atomic key is
+    appended to the collect list and codegen CONTINUES, so pass 1 records EVERY
+    overflowing node in one shot. In the default mode (collect sink is None) the
+    original hard-raise is preserved, so lever-OFF codegen is byte-identical.
     """
     if self.target != "imce" or data_bytes is None:
       return
     cap_bytes = self.IMCE_IMEM_DEPTH_WORDS * self.IMCE_IMEM_SLOT_BYTES
     if data_bytes > cap_bytes:
       words = data_bytes // self.IMCE_IMEM_SLOT_BYTES
+      collect = get_imem_overflow_collect()
+      if collect is not None:
+        key = _resolve_overflow_atomic_key(func_name, node)
+        logging.warning(
+          f"[pack-bn-minmax pass1] IMCE IMEM overflow on node {node.name} "
+          f"({words} words > {self.IMCE_IMEM_DEPTH_WORDS}); collecting atomic "
+          f"key {key} for pass-2 exclusion (obj={obj_file})."
+        )
+        if key is not None and key not in collect:
+          collect.append(key)
+        # Continue codegen so all overflowing nodes are collected in one pass.
+        return
       raise RuntimeError(
         f"IMCE IMEM overflow: node {node.name} program is {words} words "
         f"> IMEM depth {self.IMCE_IMEM_DEPTH_WORDS} words. The "
@@ -275,7 +398,7 @@ class DeviceCodegen:
   def update_device_config_with_obj_info(self, func_name, obj_map: dict[NodeID, str]):
     for node, obj_file in obj_map.items():
       size = self.get_object_size(obj_file, key="data")
-      self._check_imem_capacity(node, obj_file, size)
+      self._check_imem_capacity(node, obj_file, size, func_name=func_name)
       if size is not None:
         db = DataBlock(f"{node.name}_imem", size)
         if self.target == "inode":

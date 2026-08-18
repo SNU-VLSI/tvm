@@ -435,6 +435,145 @@ def pack_bn_minmax_mode() -> bool:
     "1", "on", "true", "yes")
 
 
+# --------------------------------------------------------------------------
+# Size-aware BN/minmax packing exclusion ("lever b" / 2-pass de-fuse).
+#
+# IMCFLOW_PACK_BN_MINMAX folds a conv's BN/minmax into the conv's IMCE program.
+# For a full-IC 3x3 spatial conv (region3 imce_1_1) that unrolls the BN body
+# per STEP col-group site and pushes the program past the 256-word IMEM ceiling
+# (297 words) -> RTL X-fatal. There is NO way to know a node's compiled word
+# count at MergeComposite time (it is only known after device codegen). So the
+# driver runs a TWO-PASS compile: pass 1 packs everything and records which
+# atomic convs overflow; pass 2 re-runs with those convs EXCLUDED from packing,
+# so their BN/minmax render standalone (exactly like a passing standalone-BN
+# node, e.g. region3 imce_3_1).
+#
+# The exclusion is keyed on the STABLE atomic identity (orig_conv_name, oc_id,
+# ic_id) recovered from DevConfig().AtomicSplitInfo via the atomic weight's
+# bytes hash. This key is computed IDENTICALLY on both sides:
+#   * pass-1 collection side (device_codegen -> driver): the overflowing IMCE
+#     node -> its atomic key (recorded during codegen, see below), and
+#   * pass-2 decision side (this module's MergeComposite `check` callback):
+#     the matched packed composite's conv weight -> the same atomic key.
+# Both derive the key from AtomicSplitInfo, so they agree regardless of how
+# custom_ids are reshuffled by layout legalization between passes.
+#
+# The whole mechanism is gated behind pack_bn_minmax_mode(): when the lever is
+# OFF the packed alternative is never built and the check is never installed, so
+# codegen is byte-identical to stock. When the lever is ON but the exclusion set
+# is empty (pass 1, or a model with no overflow), the check always returns True,
+# so the packed build is byte-identical to the pre-de-fuse packon build.
+_PACK_BN_MINMAX_EXCLUDE = set()  # set of (orig_conv_name:str, oc_id:int, ic_id:int)
+
+
+def pack_bn_minmax_exclude_set() -> set:
+  """Live exclusion set of atomic conv keys whose BN/minmax must NOT pack.
+
+  Mutated by the 2-pass driver between passes; consulted by the MergeComposite
+  `check` callback at pass time (NOT import time), so the cached pattern table
+  need not be rebuilt -- only this set changes.
+  """
+  return _PACK_BN_MINMAX_EXCLUDE
+
+
+def clear_pack_bn_minmax_exclude():
+  """Reset the exclusion set (call at the start of pass 1)."""
+  _PACK_BN_MINMAX_EXCLUDE.clear()
+
+
+def add_pack_bn_minmax_exclude(key):
+  """Add one atomic key (orig_conv_name, oc_id, ic_id) to the exclusion set."""
+  _PACK_BN_MINMAX_EXCLUDE.add(tuple(key))
+
+
+def _atomic_key_for_qconv_weight(weight_const):
+  """Recover the stable atomic key (orig_conv_name, oc_id, ic_id) for a conv.
+
+  ``weight_const`` is the ATOMIC (post-split, pre-legalize) conv weight Constant
+  as it appears inside a packed composite at merge_composite_ops time. Its bytes
+  hash keys DevConfig().AtomicSplitInfo (populated by split_conv_to_atomic).
+  Returns None if the weight is not an atomic Constant or has no recorded entry
+  (e.g. a byte-hash collision with no entry -- treated as "not excludable").
+  """
+  from tvm.contrib.imcflow import ImcflowDeviceConfig
+  from tvm.relay.backend.contrib.imcflow.transform import _weight_bytes_hash
+  if not isinstance(weight_const, relay.Constant):
+    return None
+  wkey = _weight_bytes_hash(weight_const.data)
+  entries = ImcflowDeviceConfig().AtomicSplitInfo.get(wkey)
+  if not entries:
+    return None
+  # All entries colliding on one hash are byte-identical dead slices; they share
+  # the same (orig_conv_name) but may differ in (oc_id, ic_id). A dead slice
+  # never overflows, so which colliding entry we pick is immaterial for the
+  # exclusion decision. Use the first.
+  e = entries[0]
+  return (e["orig_conv_name"], e["oc_id"], e["ic_id"])
+
+
+def _find_qconv_call(expr):
+  """Walk a matched composite subgraph root down to its qconv Call.
+
+  The MergeComposite `check` receives the root (outermost) op of the matched
+  group (src/relay/ir/dataflow_matcher.cc: check_(pre) with pre==root_node).
+  For our conv->[linear]*->bn(->minmax) packed pattern the root is the bn /
+  minmax; the qconv sits below it. Return the first nn.imcflow_qconv /
+  nn.imcflow_qdwconv / nn.conv2d Call found, or None.
+  """
+  found = [None]
+
+  class _F(relay.ExprVisitor):
+    def visit_call(self, call):
+      if found[0] is None and isinstance(call.op, tvm.ir.Op) \
+          and call.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv", "nn.conv2d"):
+        found[0] = call
+      super().visit_call(call)
+
+  _F().visit(expr)
+  return found[0]
+
+
+def _packed_extract_has_bn(expr):
+  """True if the matched subgraph actually contains a BN (i.e. it is the packed
+  'full' alternative, not the plain 'base' chain). Used so the check only vetoes
+  when BN would in fact be folded onto the conv.
+  """
+  has_bn = [False]
+
+  class _F(relay.ExprVisitor):
+    def visit_call(self, call):
+      if isinstance(call.op, tvm.ir.Op) and call.op.name in (
+          "imcflow.fused_batch_norm", "nn.batch_norm"):
+        has_bn[0] = True
+      super().visit_call(call)
+
+  _F().visit(expr)
+  return has_bn[0]
+
+
+def _pack_bn_minmax_check(extract):
+  """MergeComposite check for the packed qconv->postop pattern.
+
+  Returns False (veto the composite) when the matched subgraph would fold BN
+  onto an EXCLUDED atomic conv, so MergeComposite falls through to the plain
+  (base, BN-less) pattern that follows it and the BN renders standalone.
+  Returns True in every other case -> byte-identical to the un-excluded packon
+  build when the exclusion set is empty.
+  """
+  excl = _PACK_BN_MINMAX_EXCLUDE
+  if not excl:
+    return True
+  if not _packed_extract_has_bn(extract):
+    return True  # plain base chain reached this pattern; never veto it
+  conv = _find_qconv_call(extract)
+  if conv is None:
+    return True
+  key = _atomic_key_for_qconv_weight(conv.args[1])
+  if key is None:
+    return True
+  return key not in excl
+
+
 def residual_in_region_mode() -> bool:
   """Residual-in-region lever (IMCFLOW_RESIDUAL_IN_REGION): keep a residual
   (skip-connection) converge ADD in the SAME region as its producer convs
@@ -716,6 +855,39 @@ def pattern_table():
 
       return out
 
+    def _make_postop_packed_full(conv_type, preop=None):
+      """Build ONLY the packed 'full' alternative (conv -> [linear]* -> bn ->
+      minmax?, plus the minmax-only chain). Emitted as a SEPARATE, higher-
+      priority pattern entry (with the exclusion check) so that when a conv is
+      excluded, MergeComposite falls through to the base entry below and the BN
+      renders standalone. Returns None when packing is OFF.
+      """
+      if not pack_bn_minmax_mode():
+        return None
+      if preop is None:
+        data1, weight = wildcard(), is_constant()
+      else:
+        data1, weight = preop, is_constant()
+      if conv_type == "nn.imcflow_qconv" or conv_type == "nn.imcflow_qdwconv":
+        cfg = is_constant()
+        data = is_op(conv_type)(data1, weight, cfg)
+      else:
+        data = is_op(conv_type)(data1, weight)
+      # Packed BN/minmax fusion is LINEAR-only: conv -> [linear unary]* -> bn
+      # -> minmax?. We deliberately do NOT let the packed tail continue into
+      # add/multiply (converging residual add would drag a 2-input NoC RECV into
+      # the conv per-STEP rhythm -> X on BUGFIX-off; handoff direction 4). This
+      # is byte-identical to the pre-de-fuse packon 'full' sub-chain -- it was
+      # simply split out of the combined `full | base` alternation so an
+      # exclusion `check` can veto it without also vetoing the base fallback.
+      lin = makeBiasAddPattern(data) | makeReluPattern(data) | makeDivPattern(data)
+      packed_pre = data | lin
+      for _ in range(1, 5):
+        packed_pre = packed_pre | makeBiasAddPattern(packed_pre) | makeReluPattern(packed_pre) | makeDivPattern(packed_pre)
+      bn = makeBNPattern(packed_pre)
+      full = bn | makeMinMaxQauntPattern(bn) | makeMinMaxQauntPattern(packed_pre)
+      return full
+
     def make_postop_pattern_start_with(conv_type, preop=None):
       if preop is None:
         data1, weight = wildcard(), is_constant()
@@ -733,36 +905,24 @@ def pattern_table():
       #   out = out | makeBiasAddPattern(out) | makeAddPattern(out) | makeReluPattern(out) | makeMinMaxQauntPattern(out) | makeNUQauntPattern(out) | makeDivPattern(out) | makeBNPattern(out) | makeMulPattern(out)
       # BN is separated from Conv composite and integrated with min_max_quant as imcflow.bn-minmax
       # -- unless IMCFLOW_PACK_BN_MINMAX is on: then BN/minmax rejoin the conv
-      # postop chain so they render as same-IMCE post_ops (IMCE packing).
+      # postop chain so they render as same-IMCE post_ops (IMCE packing). When
+      # packing is ON, the packed 'full' chain is emitted as a SEPARATE, higher-
+      # priority pattern entry (see _make_postop_packed_full + the extend block
+      # below); this function returns ONLY the base chain. That lets the size-
+      # aware exclusion `check` veto packing for one conv while this base entry
+      # still matches it (BN standalone). With packing OFF and no packed entry,
+      # this is byte-identical to stock.
       # merge_composite_ops runs AFTER split_conv_to_atomic, so OC-split BN
       # (which sits after concat, a pattern terminal) is never absorbed.
-      _pack_bn_minmax = pack_bn_minmax_mode()
       # base = stock 5-op chain; the split/concat terminals stay attached to
       # base ONLY. Packed chains (containing bn/minmax) must NOT absorb a
       # trailing split: a tuple-returning composite breaks layout legalize
       # (TupleGetItem input must be a tuple or split CALL, not a composite).
       base = makeBiasAddPattern(data) | makeAddPattern(data) | makeReluPattern(data) | makeDivPattern(data) | makeMulPattern(data)
-      if _pack_bn_minmax:
-        # Packed BN/minmax fusion is LINEAR-only: conv -> [linear unary]* -> bn
-        # -> minmax?. We deliberately do NOT let the packed tail continue into
-        # add/multiply. A residual block is conv -> bn -> multiply(skip,scale)
-        # -> add(skip): absorbing bn here would drag the converging multiply+add
-        # into the conv IMCE (composite qconv_bn_multiply_add). That fuses a
-        # 2-input (skip-path NoC RECV) converging op into the conv's per-STEP
-        # output rhythm, which produces X on the packed SEND under BUGFIX-off
-        # (imce_1_1 region2). Converging-add fusion is a separate, harder change
-        # (handoff direction 4); keep it out. bias_add/relu/divide ARE linear
-        # unary and safe to precede bn.
-        lin = makeBiasAddPattern(data) | makeReluPattern(data) | makeDivPattern(data)
-        packed_pre = data | lin
-        for _ in range(1, 5):
-          packed_pre = packed_pre | makeBiasAddPattern(packed_pre) | makeReluPattern(packed_pre) | makeDivPattern(packed_pre)
-        bn = makeBNPattern(packed_pre)
-        full = bn | makeMinMaxQauntPattern(bn) | makeMinMaxQauntPattern(packed_pre)
       for i in range(1, 10):
         base = base | makeBiasAddPattern(base) | makeAddPattern(base) | makeReluPattern(base) | makeDivPattern(base) | makeMulPattern(base)
 
-      out = (full | base if _pack_bn_minmax else base) | makeSplitPatern(base) | imcflow_concat(base)
+      out = base | makeSplitPatern(base) | imcflow_concat(base)
 
       return out
 
@@ -779,6 +939,26 @@ def pattern_table():
       [
         ("imcflow.qconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qconv")),
         ("imcflow.qdwconv2d-split-concat", imcflow_conv_split_concat("nn.imcflow_qdwconv")),
+      ]
+    )
+
+    # When packing is ON, emit the packed 'full' chains FIRST (same composite
+    # name as the base entry, so accepted matches are byte-identical to the
+    # combined-alternation packon build) WITH the size-aware exclusion check.
+    # A vetoed (excluded) conv falls through to the base entry below -> BN
+    # standalone. When packing is OFF, _make_postop_packed_full returns None and
+    # no packed entry is added -> byte-identical to stock.
+    for _cname, _ctype in (
+        ("imcflow.qconv2d-with-postop", "nn.imcflow_qconv"),
+        ("imcflow.qdwconv2d-with-postop", "nn.imcflow_qdwconv"),
+        ("imcflow.conv2d-with-postop", "nn.conv2d"),
+    ):
+      _packed = _make_postop_packed_full(_ctype)
+      if _packed is not None:
+        imcflow_patterns.append((_cname, _packed, _pack_bn_minmax_check))
+
+    imcflow_patterns.extend(
+      [
         ("imcflow.qconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qconv")),
         ("imcflow.qdwconv2d-with-postop", make_postop_pattern_start_with("nn.imcflow_qdwconv")),
         ("imcflow.conv2d-with-postop", make_postop_pattern_start_with("nn.conv2d")),
