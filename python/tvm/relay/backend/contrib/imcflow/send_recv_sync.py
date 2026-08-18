@@ -25,10 +25,25 @@ import logging
 # add consumer that begins computing early (e.g. region2 imce_1_2 doing
 # STANDBY(inode, 1)) would otherwise alias this config-phase SET_FLAG(1) pulse
 # and race ahead of the actual per-tile data SEND -> hard deadlock. 253 is
-# reserved (pair UUIDs cap at 252 under packing; 254/255 are the barrier senses;
-# emitted flag values are otherwise <= 4), so it can never collide. Lever OFF ->
+# reserved (pair UUIDs cap at 251 under packing; 252 is PACK_BN_DATA_SYNC_FLAG;
+# 254/255 are the barrier senses; emitted flag values are otherwise <= 4), so it
+# can never collide. Lever OFF ->
 # the pacing windows are not emitted -> byte-identical.
 PACK_CONST_SYNC_FLAG = 253
+
+# IMCFLOW_PACK_BN_MINMAX: dedicated node-flag value for the de-fused standalone-BN
+# DATA-input rendezvous (producer conv pre-send STANDBY <-> standalone-BN receiver
+# SETFLAG window; see is_defused_standalone_bn_data_edge). It MUST differ from the
+# value-1 pipeline rendezvous: the de-fused BN's receiver node (region3 imce_2_1)
+# ALSO presents flag 1 during the CONFIG phase for the packed-postop const pacing
+# (inode STANDBY(imce_2_1, 1)). A flag-1 data window on that SAME node aliases the
+# config-phase flag-1 rendezvous -> on the 2nd kernel launch the inode's
+# STANDBY(imce_2_1,1) sees the wrong sense (expected 1, actual 0) and wedges the
+# inter-inode func_out-drain barrier (fsim: inode_2_0 EX_STALL_START STANDBY
+# expected=0x1 actual=0x0). 252 is below the pack UUID cap (lowered to 251 under
+# packing so no pair aliases it) and distinct from 253/254/255, so it never
+# collides. Lever OFF -> the window is not emitted -> byte-identical.
+PACK_BN_DATA_SYNC_FLAG = 252
 
 
 class SendRecvPair:
@@ -207,11 +222,13 @@ class SendRecvPairManager:
         uuid = 1  # Start from 1 (0 is reserved for flag clear)
         # 255 is reserved for the all-inode barrier (SyncAllINodes). Under the
         # BN/minmax packing lever the barrier is sense-reversing over {254,255}
-        # (both reserved) AND 253 is reserved for the packed-postop const pacing
-        # rendezvous (PACK_CONST_SYNC_FLAG), so pair UUIDs must stay <= 252.
-        # residual_in_region keeps its prior <= 253 cap (no pack-const pacing).
+        # (both reserved), 253 is reserved for the packed-postop const pacing
+        # rendezvous (PACK_CONST_SYNC_FLAG), and 252 is reserved for the de-fused
+        # standalone-BN data rendezvous (PACK_BN_DATA_SYNC_FLAG), so pair UUIDs
+        # must stay <= 251. residual_in_region keeps its prior <= 253 cap (no
+        # pack-const pacing).
         if pack_bn_minmax_mode():
-            _uuid_max = 252
+            _uuid_max = 251
         elif residual_in_region_mode():
             _uuid_max = 253
         else:
@@ -732,6 +749,80 @@ class SendRecvPairManager:
             return True  # no onward NoC send -> terminal
         return all(r.is_inode() for p in sends for r in p.receiver_nodes)
 
+    def _node_is_standalone_bn(self, inner_gid) -> bool:
+        """True iff the relay node at custom-id `inner_gid` is a STANDALONE
+        batch_norm (the body of a de-fused BN's RecvSendWrapper, annotation
+        "bn_standalone" in imce_operation_handlers.BatchNormHandler), i.e. a
+        batch_norm op / imcflow.*batch_norm composite. Used ONLY under
+        pack_bn_minmax_mode() to detect the 2-pass de-fused BN receiver."""
+        try:
+            node = CustomIDToNode()[inner_gid]
+        except Exception:
+            return False
+        if not isinstance(node, relay.Call):
+            return False
+        opn = node.op
+        # plain op form (nn.batch_norm / imcflow.fused_batch_norm)
+        if isinstance(opn, tvm.ir.Op) and opn.name in (
+                "nn.batch_norm", "imcflow.fused_batch_norm"):
+            return True
+        # composite Function form: Composite name mentions batch_norm
+        if isinstance(opn, relay.Function) and opn.attrs and "Composite" in opn.attrs:
+            cname = str(opn.attrs["Composite"])
+            return "batch_norm" in cname
+        return False
+
+    def is_defused_standalone_bn_data_edge(self, edge: TensorEdge) -> bool:
+        """IMCFLOW_PACK_BN_MINMAX 2-pass de-fuse launch-boundary sync guard.
+
+        The size-aware de-fuse (transform.stamp_pack_atomic_keys +
+        pack_bn_minmax_exclude_set) drops an overflowing spatial conv's BN into a
+        STANDALONE BN IMCE (region3 imce_2_1, gid (111,105)), fed by the now
+        BN-less bare conv (imce_1_1, gid 110). That conv->BN `data` edge is
+        classified BARE on both sides by _is_conv_data_into_terminal_or_fanout /
+        _is_composite_boundary_edge (imce_2_1 is a pipeline terminal). Bare/bare
+        is fine for a genuinely FUSED terminal wrapper, but the de-fused
+        standalone BN's flat num_blocks*64 data-RECV loop has no launch-boundary
+        rendezvous, so on the 2nd kernel launch the producer conv (no pre-send
+        STANDBY) and the starved standalone BN cannot re-sync -> the inter-inode
+        func_out-drain barrier wedges (fsim-confirmed region3 launch-2 deadlock:
+        imce_1_1 pc4 RECV_CFG <- inode_1_0 barrier <- inode_0_0 <- inode_2_0
+        func_out1 drain <- imce_2_1 data-starved <- imce_1_1).
+
+        Fires ONLY when ALL hold (so OFF and every non-de-fused edge -- incl. the
+        fan-out standalone BN imce_2_2 which is mid-chain and re-synced downstream
+        -- are untouched, byte-identical):
+          * pack_bn_minmax_mode() is ON,
+          * the exclusion set is non-empty (a de-fuse actually happened),
+          * dst is a composite (tuple gid) `data` operand,
+          * the receiver hw-node's inner relay node is a STANDALONE batch_norm,
+          * the receiver is a pipeline TERMINAL (_receiver_is_output_node),
+          * the sender is an imce (inter-node imce->imce).
+        """
+        if not pack_bn_minmax_mode():
+            return False
+        from tvm.relay.op.contrib.imcflow import pack_bn_minmax_exclude_set
+        if not pack_bn_minmax_exclude_set():
+            return False
+        dst_gid = edge.dst_id.graph_node_id
+        if not isinstance(dst_gid, tuple):
+            return False
+        if getattr(edge.dst_id, "tensor_type", None) != "data":
+            return False
+        if not self._node_is_standalone_bn(dst_gid[-1]):
+            return False
+        pair = self.get_pair(edge)
+        if pair is None:
+            return False
+        if pair.sender_node.is_inode():
+            return False
+        recv_hw = self._get_hw_node(edge.dst_id)
+        if isinstance(recv_hw, tuple):
+            recv_hw = recv_hw[0]
+        if recv_hw is None or not recv_hw.is_imce():
+            return False
+        return self._receiver_is_output_node(recv_hw)
+
     def _is_composite_boundary_edge(self, edge: TensorEdge) -> bool:
         """Bare (no pre-send STANDBY, no RECV window) iff the SENDER is a fused/
         composite op (src graph_node_id is a tuple) AND the RECEIVER is an output
@@ -915,6 +1006,26 @@ class SendRecvPairManager:
         if (not pair.sender_node.is_inode()
                 and self._is_composite_boundary_edge(edge)):
             return None, None
+
+        # IMCFLOW_PACK_BN_MINMAX de-fuse fix (takes precedence over the Fix C bare
+        # return below): re-arm the receiver-side SETFLAG window around the de-
+        # fused standalone BN's per-iteration data RECV burst so it rendezvouses
+        # with the producer conv's pre-send STANDBY (get_pre_send_sync). Emitted as
+        # pre=SETFLAG(f) / post=SETFLAG(0) wrapping the RECV burst -- the
+        # RecvSendWrapper's create_loop re-enters this window every outer-loop
+        # iteration, matching the producer's per-STEP SEND-burst so neither side
+        # can outrun the other across a kernel-launch boundary. Both sides key on
+        # is_defused_standalone_bn_data_edge + pack_const_sync_flag(); OFF /
+        # non-de-fused edges never reach here -> byte-identical.
+        if (not pair.sender_node.is_inode()
+                and self.is_defused_standalone_bn_data_edge(edge)):
+            # PACK_BN_DATA_SYNC_FLAG (252), NOT 1: this node ALSO presents flag 1
+            # in the CONFIG phase for the inode's packed-postop const pacing
+            # (INODE_STANDBY(this_node, 1)). A flag-1 EXEC-loop data window
+            # aliases it and wedges the launch-2 inode barrier. The producer
+            # pre-send STANDBY (get_pre_send_sync) waits on this same value 252.
+            return ([f"__builtin_IMCE_SETFLAG({PACK_BN_DATA_SYNC_FLAG});"],
+                    ["__builtin_IMCE_SETFLAG(0);"])
 
         # Fix C receiver side: the composite `data` RECV of a terminal/fan-out
         # wrapper fed by a plain conv is bare too (handcraft imce_0_1 / imce_2_1
@@ -1248,6 +1359,26 @@ class SendRecvPairManager:
                 lines.append(f"__builtin_IMCE_STANDBY({rnode.value}, 0);")
             lines.append("__builtin_IMCE_SETFLAG(0);")
             return lines
+
+        # IMCFLOW_PACK_BN_MINMAX de-fuse fix (takes precedence over the two bare
+        # predicates below): the de-fused standalone-BN's `data` edge (region3
+        # imce_1_1->imce_2_1) would otherwise be bared as a conv->terminal edge,
+        # leaving the standalone BN with no launch-boundary rendezvous -> 2nd-
+        # launch deadlock. Re-arm a per-block pre-send STANDBY on the receiving
+        # standalone BN so the producer conv cannot outrun it across the launch
+        # boundary; matched by get_recv_window_sync's block-outer receiver window
+        # (both keyed on is_defused_standalone_bn_data_edge). Gated on
+        # pack_bn_minmax_mode()+exclusion set -> OFF / non-de-fused edges untouched.
+        if self.is_defused_standalone_bn_data_edge(edge):
+            # PACK_BN_DATA_SYNC_FLAG (252), NOT 1: the receiver standalone-BN node
+            # (imce_2_1) presents flag 1 during the CONFIG phase for the inode's
+            # packed-postop const pacing (INODE_STANDBY(imce_2_1, 1)). A flag-1
+            # data window aliases it and wedges the launch-2 inode barrier (fsim:
+            # inode_2_0 STANDBY expected=0x1 actual=0x0). 252 is reserved (pair
+            # UUID cap lowered to 251) so it never collides.
+            return [f"__builtin_IMCE_STANDBY({r.value}, {PACK_BN_DATA_SYNC_FLAG});"
+                    for r in sorted(pair.receiver_nodes, key=lambda x: x.value)
+                    if r.is_imce()]
 
         # Fused-sender -> output-node edge is bare (no pre-send STANDBY). Removes
         # the spurious STANDBY(16,1) on region2 imce_3_2->imce_3_1. region1
