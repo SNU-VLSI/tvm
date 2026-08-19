@@ -503,7 +503,7 @@ static inline void generate_ack(uint32_t* int_ack_gen)
     return ("""
 // Poll until ImcFlow returns to IDLE state
 #define POLL_LOG_INTERVAL 1000
-#define MAX_POLL_COUNT 20000
+#define MAX_POLL_COUNT """ + str(int(os.getenv("IMCFLOW_MAX_POLL_COUNT", "20000"))) + """
 static int wait_for_idle(volatile uint32_t* npu_pointer) {
   uint32_t poll_count = 0;
   uint32_t state;

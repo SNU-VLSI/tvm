@@ -226,6 +226,30 @@ def step_freerun_hold_sec() -> int:
     return 0
 
 
+def input_reuse() -> bool:
+  """Max-throughput / power-measurement lever (IMCFLOW_INPUT_REUSE, default OFF).
+
+  DON'T-CARE output: to run the IMCE array for a LONG continuous window (many STEPs)
+  WITHOUT the per-tile host MMIO transfer that wedges the chip, store only ONE ROW of
+  input (W*C) and have the inode RE-SEND that same small buffer H times to produce the
+  full H*W LOAD_LBs. Config H*W (reg46, drives the array STEP count via all_recived at
+  addr_shfl_gen.sv:236) stays large; only the host-stored/transferred DataBlock shrinks
+  to 1 row -> no tiling (the full H*W*C input no longer exceeds inode memory), so no
+  per-tile host loop, no wedge.
+
+  When ON: (1) transform.py forces tiling_factor=1 and shrinks the conv activation input
+  DataBlock to 1 row (W*C); (2) inode_codeblock.py emits the data feed as a NESTED loop
+  SimpleFor(H){ SimpleFor(row_pkts){ SEND base + p*32 } } so each of the H rows re-reads
+  the SAME 1-row buffer (offset resets per row) -- this WRAPS the address WITHOUT a
+  runtime modulo (INODE cannot lower `iter % N`), keeping every SEND in-bounds (no OOB).
+  SEND/RECV/STEP counts stay at full H*W (pkt_cnts unchanged). DON'T-CARE so repeated
+  data is fine (linebuffer is address-order agnostic). Default OFF -> byte-identical.
+
+  Pair with a large config H*W (H<=127, W<=127 per reg46 7-bit fields) for a long array
+  window. Requires --single-qconv. See memory maxtops-bugfixoff-sync-tax."""
+  return os.environ.get("IMCFLOW_INPUT_REUSE", "").strip().lower() in ("1", "on", "true", "yes")
+
+
 def qconv_nop_delay_cnt() -> int:
   """Max-throughput lever (IMCFLOW_QCONV_NOP_DELAY, integer nop count, default 10).
 

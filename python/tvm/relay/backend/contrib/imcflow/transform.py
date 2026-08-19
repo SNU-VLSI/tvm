@@ -10,6 +10,7 @@ from tvm.relay import expr as _expr
 from tvm.relay.expr import RefCreate, RefRead, RefWrite
 from tvm.relay.adt import Constructor, Match, Clause
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID, TensorEdgeInfo, InstEdgeInfo, RouterEntry, DataBlock, MemoryLayout, MemoryRegion, BlockTileInfo
+from tvm.contrib.imcflow import input_reuse
 from tvm.ir import Op
 from tvm.relay.op.contrib.imcflow import HashToCustomID, CustomIDToName, CustomIDInFunc, CustomIDToNode
 
@@ -5765,6 +5766,16 @@ class MemoryAllocator:
           max_tiling_factor = min(height for (_, height, _, _, _, _, _) in output_tensor_info)
           tiling_factor = 1
 
+          # INPUT_REUSE (IMCFLOW_INPUT_REUSE, DON'T-CARE power kernel): keep tiling_factor=1
+          # so there is NO per-tile host MMIO transfer (the wedge). The full H*W*C input
+          # would normally exceed inode memory and force tiling; instead we shrink the
+          # stored input DataBlock to 1 row below (mem_block.set_size) and have the inode
+          # re-SEND that row H times. So skip the memory-fit search entirely and pin
+          # tiling_factor=1. Default OFF -> normal tiling search below.
+          _input_reuse = input_reuse()
+          if _input_reuse:
+            debug_print(f"  [{self.func_name}] INPUT_REUSE: forcing tiling_factor=1 (no tiling; 1-row buffer re-sent H times)")
+
           # Find tiling factor by incrementing until memory fits
           debug_print(f"\n  [{self.func_name}] ===== TILING FACTOR SEARCH =====")
           debug_print(f"  [{self.func_name}] INODE_MAX_TILING_SIZE = {ImcflowDeviceConfig.INODE_MAX_TILING_SIZE} bytes")
@@ -5904,6 +5915,13 @@ class MemoryAllocator:
               inode_cnt_sizes[inode_name] = cnt_size
               inode_max_tile_memory[inode_name] += cnt_size
 
+            # INPUT_REUSE: never tile. Break at factor=1 regardless of memory fit -- the
+            # input DataBlock is shrunk to 1 row below so it always fits; the "too large"
+            # here reflects the (unshrunk) full-input estimate and must be ignored.
+            if _input_reuse:
+              debug_print(f"  [{self.func_name}] INPUT_REUSE: pinning tiling_factor=1, skipping memory-fit tiling")
+              break
+
             # Check if this tiling configuration works FOR ALL INODES
             all_inodes_fit = True
             for inode_name, max_mem in inode_max_tile_memory.items():
@@ -5931,7 +5949,7 @@ class MemoryAllocator:
             mem > ImcflowDeviceConfig.INODE_MAX_TILING_SIZE
             for mem in inode_max_tile_memory.values()
           )
-          if at_max_tiling() and any_inode_exceeds:
+          if at_max_tiling() and any_inode_exceeds and not _input_reuse:
             need_input_sub_tiling = True
             debug_print(f"  [{self.func_name}] Full output tiling reached, applying input sub-tiling")
 
@@ -6091,6 +6109,23 @@ class MemoryAllocator:
               pkt_cnt_per_height = height_offset//32
               pkt_cnts = [pkt_cnt_per_height * h for h in input_height_sizes]
 
+              # INPUT_REUSE: shrink the STORED input buffer to 1 ROW (height_offset bytes)
+              # while keeping pkt_cnts at the FULL H*row_pkts (SEND/STEP count unchanged).
+              # The inode re-SENDs this 1-row buffer H times (nested loop in
+              # inode_codeblock.py wraps the address per row -> in-bounds, no OOB). Host
+              # thus transfers only 1 row (no per-tile loop -> no wedge); the array still
+              # does the full H*W STEPs (config H*W from reg46). Only the conv activation
+              # feed (var_name != const/weight); the config/const blocks are untouched.
+              # Assert the 1-row buffer fits inode memory (it always should).
+              if _input_reuse:
+                _orig = mem_block.size
+                mem_block.set_size(height_offset)  # exactly one row (W*C bytes)
+                assert height_offset <= ImcflowDeviceConfig.INODE_MAX_TILING_SIZE, \
+                  (f"[INPUT_REUSE] 1-row buffer {height_offset}B exceeds inode memory "
+                   f"{ImcflowDeviceConfig.INODE_MAX_TILING_SIZE}B (reduce W or C)")
+                debug_print(f"    [INPUT_REUSE] input {var_name}: buffer {_orig} -> {height_offset} bytes (1 row); "
+                            f"pkt_cnts stay full = {pkt_cnts} (inode re-sends row {input_height_sizes} times)")
+
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               # base address = origin_base + height_base * height_offset
               # cnt = height_size * height_offset / sizeof(int)
@@ -6157,6 +6192,17 @@ class MemoryAllocator:
               pkt_cnt_per_height = height_offset//32
               # total_pkt_cnt = getInodePktCntForEdge(mod, edge)
               pkt_cnts = [pkt_cnt_per_height * h for h in output_tile_sizes]
+
+              # INPUT_REUSE: the output (func_out0) is DON'T-CARE (host read-back is memset
+              # under DROP_PSUM). With tiling forced off (factor 1) the full-H output block
+              # would overflow inode_3_0 memory (alloc fail). Shrink the stored output
+              # buffer to 1 ROW too; the imce psum drain wraps into it (kept psums per
+              # DROP_PSUM_KEEP; garbage output is fine). pkt_cnts stay full so RECV/consistency
+              # counts match the full H*W. Mirrors the input shrink above.
+              if _input_reuse:
+                _oorig = mem_block.size
+                mem_block.set_size(height_offset)  # 1 output row
+                debug_print(f"    [INPUT_REUSE] output buffer {_oorig} -> {height_offset} bytes (1 row; DON'T-CARE)")
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               c_output_var_offsets = [base * height_offset for base in output_tile_bases]

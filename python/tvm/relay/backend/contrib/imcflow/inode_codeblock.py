@@ -6,6 +6,7 @@ from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
 from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import feed_sync_per_pixel
 from tvm.contrib.imcflow import qconv_nop_delay_cnt
+from tvm.contrib.imcflow import input_reuse
 from tvm.contrib.imcflow import imcu_intra_drain_nops
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
@@ -794,6 +795,33 @@ class SendBlock(InodeCodeBlock):
     # input buffer (OOB garbage -> X-fatal on the send path, RTL-confirmed at pass 1).
     # Using the natural cnt[0] here ALSO removes the earlier load-use hazard (no MULI on
     # the loaded count). N=0 -> single pass, byte-identical.
+    # INPUT_REUSE (IMCFLOW_INPUT_REUSE, DON'T-CARE power kernel): the host stored only
+    # ONE ROW of input (transform.py shrank block.size to height_offset), but the config
+    # H*W (and pkt_cnts) still expect the FULL H*row_pkts SENDs so the array does H*W
+    # STEPs. Emit the feed as a COMPILE-TIME NESTED loop: for H rows { for row_pkts
+    # packets { SEND base + p*32 } }. The inner offset uses ONLY the inner index
+    # (0..row_pkts-1), so every SEND reads within the 1-row buffer (NO OOB, NO runtime
+    # modulo which INODE can't lower). Each row re-reads the SAME buffer -> DON'T-CARE OK.
+    # H and row_pkts are compile-time: row_pkts = block.size/32 (1 row), total from
+    # pkt_cnts, H = total/row_pkts. Only the conv activation feed; else fall through.
+    if input_reuse() and self._is_conv_activation_feed() and self.block.tiling_info is not None:
+      _row_pkts = math.ceil(self.block.size / 32)          # 1-row buffer packets (W*C/32)
+      _total_pkts = int(self.block.tiling_info.pkt_cnts[0]) # full H*row_pkts
+      assert _row_pkts > 0 and _total_pkts % _row_pkts == 0, \
+        f"[INPUT_REUSE] total pkts {_total_pkts} not a multiple of row pkts {_row_pkts}"
+      _h_rows = _total_pkts // _row_pkts                    # config H
+      _nop = NopLoopBlock(qconv_nop_delay_cnt()).render() + "\n" if (DevConfig().single_qconv and qconv_nop_delay_cnt() > 0) else ""
+      self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
+      def _inner_pkt(p, base=base_var, pa=next_policy_addr, fid=fifo_id, nop=_nop):
+        # inner index p in [0, row_pkts) -> offset p*32 stays inside the 1-row buffer.
+        pre = self._get_presend_sync_code_str(iter_var=p)
+        body = (pre or "") + f"__builtin_INODE_SEND({base} + {p}*32, 0, {pa}, {fid});\n" + nop
+        return body
+      # H rows, each re-sends the full row (row_pkts packets, offset reset to 0).
+      _inner_loop = SimpleFor(_row_pkts, _inner_pkt, f"{target_edge.simple_name()}_reuse_row_pkts")
+      self.body.add(SimpleFor(_h_rows, _inner_loop, f"{target_edge.simple_name()}_reuse_rows"))
+      return
+
     self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
     self.body.add(TextBlock(f"__asm__ volatile(\"nop\");")) # BUGFIX_LOAD_USE_HAZARD
     _freerun_passes = (1 + step_freerun_n()) if (step_freerun_n() > 0

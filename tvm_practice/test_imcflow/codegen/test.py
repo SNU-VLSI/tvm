@@ -98,6 +98,20 @@ MODEL_REGISTRY = {
     "one_conv_quant": (models_for_test.getOneConvQuantModel, "ones"),
     "one_1x1_quant": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256), "ones"),
     "one_1x1_quant_big": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=32, iW=32, IC=256), "ones"),
+    "one_1x1_quant_128": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=128, iW=128, IC=256), "ones"),
+    "one_1x1_quant_midH": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=127, iW=64, IC=256), "ones"),
+    "one_1x1_quant_16sq": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=16, iW=16, IC=256), "ones"),
+    "one_1x1_quant_max127": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=127, iW=127, IC=256), "ones"),
+    "one_1x1_quant_96sq": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=96, iW=96, IC=256), "ones"),
+    "one_1x1_quant_64sq": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=64, iW=64, IC=256), "ones"),
+    "one_1x1_quant_tallH": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8192, iW=8, IC=256), "ones"),
+    # Multi-IMCE max-array-utilization for DMM power measurement (DON'T-CARE output):
+    # OC=64*N => N out_blocks => N atomic qconvs => V1 ILP spreads to N distinct IMCEs
+    # (joint_pnr_ilp.py:1183 P2 "each IMCE <= 1 real call"). K=1 keeps the QUADRU
+    # zero-feed-STEP wedge away. Step the imce count up: 4 -> 16.
+    "one_1x1_quant_4imce": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=256), "ones"),
+    "one_1x1_quant_8imce": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=512), "ones"),
+    "one_1x1_quant_16imce": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=1024), "ones"),
     "one_fused_bn" : (models_for_test.getOneFusedBNModel, "random"),
     "one_conv_bn": (models_for_test.getOneConvBnModel, "ones"),
     "big_conv": (lambda: models_for_test.getBigConvModel(False), "random"),
