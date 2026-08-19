@@ -300,6 +300,11 @@ power_fetch_result() {
     for region_dir in "$POWER_LOCAL_RESULT_DIR"/regions/*; do
         [[ -d "$region_dir" ]] || continue
         python "$SCRIPT_DIR/scripts/power_request.py" validate-result "$region_dir" || return 1
+        # A truncated result still contains a checksum-validated NPZ artifact.
+        # Plot every captured sample instead of dropping the trace merely because
+        # the workload outlasted the configured DMM reading-memory coverage.
+        python "$SCRIPT_DIR/scripts/power_request.py" plot "$region_dir" \
+            --output "$region_dir/power_trace.png" || return 1
         region_count=$((region_count + 1))
     done
     if (( region_count == 0 )); then
@@ -311,7 +316,7 @@ power_fetch_result() {
         --region-loop "$(printf '{\"loop_enable\":%s,\"min_samples\":%s,\"min_seconds\":%s}' \
             "$([[ "$POWER_LOOP_ENABLE" == 1 ]] && printf true || printf false)" \
             "$POWER_MIN_SAMPLES" "$POWER_MIN_SECONDS")" || return 1
-    echo "[POWER] validated $region_count $POWER_SCOPE artifacts"
+    echo "[POWER] validated and plotted $region_count $POWER_SCOPE artifacts"
 }
 
 

@@ -125,6 +125,7 @@ DMM 한 대만 등록되어 있다.
 | `rails/DMM_GPIB3.npz` | plot에 사용하는 sample별 전류, power, timestamp, tag state와 ambiguity 여부 |
 | `raw/DMM_GPIB3.csv` | DMM에서 받은 reading metadata 포함 원본 CSV |
 | `raw/checksums.json` | raw file의 SHA-256과 parsing 검증 정보 |
+| `power_trace.png` | runner가 NPZ에 저장된 전체 sample로 자동 생성한 전류/power/tag-state plot |
 | `tags.jsonl` | tag/event 수신 timestamp와 tag state 정의 |
 | `time_alignment.json` | board/server/DMM clock 정렬 및 sample timestamp uncertainty |
 | `request.json`, `resolved_config.json`, `session.json` | 요청, 실제 적용 설정, commit 및 session metadata |
@@ -144,6 +145,12 @@ python scripts/power_request.py plot <result-dir> \
 tag 경계와 timestamp uncertainty가 겹치는 sample은
 `tag_boundary_ambiguous=true`로 저장된다. 정확한 구간 통계가 필요하면
 `--exclude-ambiguous`를 사용한다.
+
+workload가 DMM reading-memory coverage보다 길면 결과 상태는 `truncated`가 된다.
+runner는 이를 warning으로 표시하되 실행을 실패시키지 않는다. raw checksum과 NPZ
+array 정합성 검증을 마친 뒤, 확보된 sample 전체(현재 장비에서는 최대 50,000개)를
+사용해 `power_trace.png`를 생성한다. `partial`이나 artifact 무결성 오류는 계속
+실패로 처리한다.
 
 ## 2. 핵심 구현 방식
 

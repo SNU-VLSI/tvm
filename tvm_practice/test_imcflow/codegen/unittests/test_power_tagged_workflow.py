@@ -221,6 +221,25 @@ def test_result_validation_and_tag_filter(tmp_path):
     filtered = run_tool("summarize", result_dir, "--tag", "phase=graph_execute")
     assert '"phase": "graph_execute"' in filtered.stdout
 
+    summary["status"] = "truncated"
+    for name in ("summary.json", "session.json"):
+        (result_dir / name).write_text(json.dumps(summary), encoding="utf-8")
+    truncated = run_tool("validate-result", result_dir)
+    assert truncated.returncode == 0
+    assert '"status": "truncated"' in truncated.stdout
+    assert "captured artifact is valid" in truncated.stderr
+
+    plot_path = result_dir / "power_trace.png"
+    run_tool("plot", result_dir, "--output", plot_path)
+    assert plot_path.is_file()
+    assert plot_path.stat().st_size > 0
+
+    summary["status"] = "partial"
+    for name in ("summary.json", "session.json"):
+        (result_dir / name).write_text(json.dumps(summary), encoding="utf-8")
+    partial = run_tool("validate-result", result_dir, check=False)
+    assert partial.returncode != 0
+
 
 def test_schema_v2_raw_checksum_and_ambiguity_validation(tmp_path):
     result_dir = tmp_path / "metadata_result"
@@ -312,6 +331,10 @@ def test_shell_scripts_parse_and_power_runtime_compiles(tmp_path):
         ],
         check=True,
     )
+    power_steps = (CODEGEN_DIR / "power_steps.sh").read_text(encoding="utf-8")
+    assert 'validate-result "$region_dir"' in power_steps
+    assert 'plot "$region_dir"' in power_steps
+    assert '"$region_dir/power_trace.png"' in power_steps
     subprocess.run(
         [
             "cc",

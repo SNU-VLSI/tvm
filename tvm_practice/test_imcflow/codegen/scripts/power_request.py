@@ -347,7 +347,20 @@ def validate_result(args: argparse.Namespace) -> int:
             sort_keys=True,
         )
     )
-    return 0 if status == "complete" else 2
+    if status == "complete":
+        return 0
+    if status == "truncated":
+        sample_counts = ", ".join(
+            f"{name}={value.get('sample_count')}"
+            for name, value in sorted(rails.items())
+        )
+        print(
+            "Warning: power result is truncated; the captured artifact is valid "
+            f"and remains usable ({sample_counts})",
+            file=sys.stderr,
+        )
+        return 0
+    return 2
 
 
 def summarize(args: argparse.Namespace) -> int:
