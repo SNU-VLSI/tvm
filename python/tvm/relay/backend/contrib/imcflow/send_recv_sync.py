@@ -97,6 +97,10 @@ class SendRecvPairManager:
         # set of data-producer hwnode.value that drive a flag-3 window on the
         # receiver side (the LOAD_LB/RECV from this producer gets SETFLAG(3)).
         self._flag3_producers: Set[int] = set()
+        # Full raw edge list (incl. const edges excluded from self.pairs). Needed
+        # by pack-const per-consumer pacing to discover all inode->imce const
+        # endpoints. Only consumed under pack_bn_minmax_mode() -> OFF unaffected.
+        self._all_edges_for_pacing = list(edges)
         self._assign_uuids(edges)
         self._build_sibling_standby_map(edges)
         if self.filter_contention:
@@ -736,6 +740,76 @@ class SendRecvPairManager:
         flag = PACK_CONST_SYNC_FLAG if has_two_inode_add else 1
         self._pack_const_flag_cache = flag
         return flag
+
+    def _pack_const_multi_consumer_inodes(self) -> Dict[int, List[int]]:
+        """{inode_value: sorted[imce_value,...]} for inodes that pace >=2 DISTINCT
+        imce consumers via packed-postop const pacing.
+
+        The pack-const go-pulse (inode SET_FLAG(pack_const_sync_flag)) is a SHARED
+        scalar flag on the inode; every consumer of that inode does
+        STANDBY(inode, flag). When ONE inode paces two consumers (e.g. region3
+        inode_2_0 -> the de-fused standalone BN imce_2_1 AND the fused conv
+        imce_2_2), the pulse meant for consumer A is also visible to consumer B,
+        which steals it -> A's inode-side STANDBY(A, 0) never clears -> wedge.
+        Only arises once a de-fused standalone BN adds a SECOND pack-const
+        consumer to an inode. Cached (pair set fixed post-construction).
+        """
+        cached = getattr(self, "_pack_const_multi_cache", None)
+        if cached is not None:
+            return cached
+        inode_consumers: Dict[int, Set[int]] = {}
+        if pack_bn_minmax_mode():
+            for e in self._iter_all_edges():
+                eps = self.packed_postop_const_endpoints(e)
+                if eps is None:
+                    continue
+                inode_hw, imce_hw = eps
+                inode_consumers.setdefault(inode_hw.value, set()).add(imce_hw.value)
+        result = {k: sorted(v) for k, v in inode_consumers.items() if len(v) >= 2}
+        self._pack_const_multi_cache = result
+        return result
+
+    def pack_const_go_flag(self, inode_hw, imce_hw) -> int:
+        """Per-consumer go-pulse value for packed-postop const pacing.
+
+        Default = pack_const_sync_flag() (1 or 253), byte-identical to the
+        single-consumer form. When `inode_hw` paces >=2 distinct consumers, each
+        consumer gets a DISTINCT value drawn from a safe band (>=4 below the
+        reserved 251..255 and above the <=4 emitted data/barrier values), so a
+        SET_FLAG for one consumer cannot be sampled by another. Both the inode
+        SendBlock and the imce RecvConstBlock call this with the SAME
+        (inode, imce) pair, so they agree on the value.
+        """
+        base = self.pack_const_sync_flag()
+        multi = self._pack_const_multi_consumer_inodes()
+        consumers = multi.get(inode_hw.value)
+        if not consumers:
+            return base
+        # Distinct value per consumer within a safe band [200, 250]. The band
+        # avoids emitted data/barrier values (<=4), the pair-UUID cap (251), and
+        # 252/253/254/255. Index by position in the sorted consumer list so the
+        # inode and imce sides derive the same value deterministically.
+        idx = consumers.index(imce_hw.value)
+        return 200 + idx
+
+    def _iter_all_edges(self):
+        """Yield every TensorEdge seen during construction (paired + const).
+
+        Const edges are unpaired (excluded from self.pairs), so pack-const
+        endpoints must be discovered from the full edge list stashed at build.
+        """
+        edges = getattr(self, "_all_edges_for_pacing", None)
+        if edges is not None:
+            for e in edges:
+                yield e
+            return
+        seen = set()
+        for pair in self.pairs.values():
+            for e in pair.edges:
+                key = id(e)
+                if key not in seen:
+                    seen.add(key)
+                    yield e
 
     def _receiver_is_output_node(self, recv_hw_node) -> bool:
         """True iff every inter-node edge sent BY recv_hw_node goes to an inode

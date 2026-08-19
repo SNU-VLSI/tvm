@@ -507,14 +507,17 @@ class RecvConstBlock(ImceCodeBlock):
     """Return the sending inode hw node if this const RECV must be paced for
     the IMCFLOW_PACK_BN_MINMAX capacity fix, else None (bare -> byte-identical).
     Mirrors the inode SendBlock's packed_postop_const_endpoints gate."""
+    eps = self._packed_postop_endpoints()
+    return eps[0] if eps is not None else None
+
+  def _packed_postop_endpoints(self):
+    """(inode_hw, imce_hw) for this const RECV under the pack-const capacity fix,
+    or None. Both are needed so the imce side can derive the SAME per-consumer
+    go-pulse value as the inode side (pack_const_go_flag)."""
     pm = getattr(self.builder, "pair_manager", None) if self.builder is not None else None
     if pm is None:
       return None
-    eps = pm.packed_postop_const_endpoints(self.in_edge)
-    if eps is None:
-      return None
-    inode_hw, _imce_hw = eps
-    return inode_hw
+    return pm.packed_postop_const_endpoints(self.in_edge)
 
   def _render(self) -> str:
     owner_edge = self.te_info.owner
@@ -524,20 +527,26 @@ class RecvConstBlock(ImceCodeBlock):
     # cannot outrun this imce's drain (prevents NoC send-FIFO overflow ->
     # region2 deadlock). Only fires under IMCFLOW_PACK_BN_MINMAX for the folded
     # BN/mult/add const operands; None otherwise -> no window (OFF unchanged).
-    pace_inode = self._packed_postop_inode()
+    pace_eps = self._packed_postop_endpoints()
+    pace_inode = pace_eps[0] if pace_eps is not None else None
     code = TextBlock("")
     for i in range(self.recv_count):
       var = UniqueVar((self.in_edge, i))
       var.set_static()
       if pace_inode is not None:
-        # Wait for the inode's pacing pulse on pack_const_sync_flag() (1 by
-        # default, 253 only in a function with a 2-inode residual add). When it
-        # is 253 the inode moved its presented value off 1 so a residual-add
-        # consumer's STANDBY(inode, 1) cannot alias this config-phase handshake
-        # (region2 stale-flag deadlock). This imce always raises its OWN flag=1
-        # for the inode's STANDBY(imce, 1) (no aliasing on this conv's flag).
+        # Wait for the inode's pacing pulse on pack_const_go_flag(inode, imce):
+        # pack_const_sync_flag() (1 default, 253 with a 2-inode residual add) for
+        # a single-consumer inode, but a DISTINCT per-consumer value when the
+        # inode paces >=2 pack-const consumers -- otherwise this imce and a
+        # sibling consumer both STANDBY(inode, <same>) and one steals the other's
+        # go-pulse (region3 imce_2_1/imce_2_2 shared-flag wedge). This imce always
+        # raises its OWN flag=1 for the inode's STANDBY(imce, 1). Lockstep with
+        # the inode SendBlock (both read pack_const_go_flag()).
         pm = getattr(self.builder, "pair_manager", None) if self.builder is not None else None
-        pc_flag = pm.pack_const_sync_flag() if pm is not None else 1
+        if pm is not None:
+          pc_flag = pm.pack_const_go_flag(pace_eps[0], pace_eps[1])
+        else:
+          pc_flag = 1
         code += "__builtin_IMCE_SETFLAG(1);"
         code += f"__builtin_IMCE_STANDBY({pace_inode.value}, {pc_flag});"
         code += "__builtin_IMCE_SETFLAG(0);"

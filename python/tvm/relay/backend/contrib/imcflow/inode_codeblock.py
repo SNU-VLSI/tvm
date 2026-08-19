@@ -806,15 +806,19 @@ class SendBlock(InodeCodeBlock):
     for e in edges:
       eps = pm.packed_postop_const_endpoints(e)
       if eps is not None:
-        _inode_hw, imce_hw = eps
-        # The inode-side SET_FLAG value comes from pm.pack_const_sync_flag():
-        # 1 by default (byte-identical), but 253 in a function that also has a
-        # 2-inode residual-add consumer whose DATA-phase STANDBY(inode, 1) would
-        # otherwise alias this CONFIG-phase pulse (region2 imce_1_2 stale-flag
-        # race -> deadlock). The imce still raises its OWN flag=1 and the inode
-        # waits for it; only the inode's presented value moves off 1. Lockstep
-        # with RecvConstBlock's window (both read pack_const_sync_flag()).
-        pc_flag = pm.pack_const_sync_flag()
+        inode_hw, imce_hw = eps
+        # The inode-side SET_FLAG value comes from pm.pack_const_go_flag(inode,
+        # imce): pack_const_sync_flag() (1 default, 253 with a 2-inode residual
+        # add) for a single-consumer inode -- byte-identical -- but a DISTINCT
+        # per-consumer value when this inode paces >=2 pack-const consumers. The
+        # go-pulse is a SHARED scalar flag on the inode; if two consumers both
+        # STANDBY(inode, <same value>) the pulse for one is stolen by the other
+        # (region3: de-fused standalone BN imce_2_1 AND fused conv imce_2_2 both
+        # STANDBY(inode_2_0, 253) -> theft -> STANDBY(consumer,0) never clears ->
+        # wedge). A distinct value per consumer makes the pulse unambiguous. The
+        # imce still raises its OWN flag=1 and the inode waits for it. Lockstep
+        # with RecvConstBlock's window (both read pack_const_go_flag()).
+        pc_flag = pm.pack_const_go_flag(inode_hw, imce_hw)
         return (
           f"__builtin_INODE_STANDBY({imce_hw.value}, 1); // pack-const sync with {imce_hw.name}\n"
           f"__builtin_INODE_SET_FLAG({pc_flag});\n"
