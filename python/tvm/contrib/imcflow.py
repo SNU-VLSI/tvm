@@ -250,6 +250,85 @@ def input_reuse() -> bool:
   return os.environ.get("IMCFLOW_INPUT_REUSE", "").strip().lower() in ("1", "on", "true", "yes")
 
 
+def input_reuse_drain_nops() -> int:
+  """INPUT_REUSE NoC-drain (IMCFLOW_INPUT_REUSE_DRAIN, integer IMCE-nop count, default 16).
+
+  Under INPUT_REUSE the conv runs the WHOLE H*W in ONE invoke (no tiling). RTL packet
+  trace showed the LAST psum SEND reaches the inode_3_0 router (RX=full) but the imce
+  issues OP_STOP -> S_IDLE only ~80ns later, before that last packet is pushed from the
+  router into the inode's depth-2 RECV FIFO; the inode's bare func_out RECV loop then
+  stalls one packet short (RECV=full-1) forever -> host POLLING ERROR. The normal TILED
+  path avoids this because the next tile's traffic keeps the NoC moving and flushes the
+  tail. With no tiling there is no follow-on traffic, so the imce must hold a few cycles
+  after the last psum SEND for the NoC to drain before STOP.
+
+  When >0 (default 16), codegen inserts this many IMCE_NOP right BEFORE the kernel-end
+  IMCE_STOP, but ONLY when INPUT_REUSE is active (so tiled/normal kernels are
+  byte-identical). Purely local (no NoC handshake) -> cannot deadlock. 0 disables."""
+  if not input_reuse():
+    return 0
+  raw = os.environ.get("IMCFLOW_INPUT_REUSE_DRAIN", "").strip()
+  if not raw:
+    return 16
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 16
+
+
+def input_reuse_feed_flagfree() -> bool:
+  """INPUT_REUSE feed FLAG-FREE mode (IMCFLOW_INPUT_REUSE_FEED_FLAGFREE, default ON
+  under INPUT_REUSE).
+
+  ROOT CAUSE (RTL-diagnosed): the per-packet DATA-feed pre-send handshake
+  (STANDBY(imce,1); SET_FLAG(1); STANDBY(imce,0); SET_FLAG(0)) writes the feeding
+  inode's OWN sync register (syn_reg[inode]) with 1/0 on EVERY packet. That is the
+  SAME single per-node register the END-phase SyncAllINodes barrier uses (SET_FLAG
+  254/255). node has exactly ONE sync slot (controller.sv: sync_reg[i], one per
+  writer node), so with the huge INPUT_REUSE feed (H*row_pkts SENDs, ~4096) the
+  feed inode's barrier flag is overwritten to 0/1 while a SLOW peer is still in
+  STANDBY(feed_inode, 254/255) at that barrier -> the straggler samples 0/1, never
+  sees the barrier value -> lost-wakeup deadlock. Neither the stock (255+clear) nor
+  the sense-reversing (254<->255, no clear) barrier can survive this: the pollution
+  comes from the DATA presend, not the barrier itself. Normal ResNet8/KWS convs
+  don't hit it because their feed is far shorter (less presend churn) and the
+  inter-inode skew is small.
+
+  Fix: for the INPUT_REUSE DATA feed ONLY, drop the flag-1 rendezvous and pace the
+  feed with a purely-local IMCE/INODE NOP delay instead (output is DON'T-CARE, so
+  no per-packet correctness sync is needed). The CONFIG/const presends are
+  untouched (they are a different edge and are needed for imce config ordering).
+  Default ON whenever INPUT_REUSE is active; set =0/off to restore the flag
+  handshake (for A/B). Non-INPUT_REUSE paths are unaffected."""
+  if not input_reuse():
+    return False
+  # DEPRECATED-BY-DEFAULT (was default ON): dropping the flag-1 rendezvous removes
+  # the feed<->imce pacing that the PROVEN baseline relies on; keep as an opt-in
+  # A/B lever only. Default OFF restores the stock per-packet presend handshake.
+  raw = os.environ.get("IMCFLOW_INPUT_REUSE_FEED_FLAGFREE", "").strip().lower()
+  return raw in ("1", "on", "true", "yes")
+
+
+def input_reuse_feed_pace_nops() -> int:
+  """INPUT_REUSE flag-free feed pacing (IMCFLOW_INPUT_REUSE_FEED_PACE, default 10).
+
+  When input_reuse_feed_flagfree() is on, the per-packet flag rendezvous is replaced
+  by this many local INODE nops BEFORE each SEND, so the feed does not outrun the
+  imce's LOAD_LB/STEP consumption and overflow the depth-2 data RECV fifo (the
+  reason a bare no-sync feed wedged imce config in an earlier experiment). Purely
+  local -> cannot deadlock. Tune up if the data RECV fifo backpressures; down for
+  speed. Default 10 mirrors qconv_nop_delay_cnt."""
+  if not input_reuse_feed_flagfree():
+    return 0
+  raw = os.environ.get("IMCFLOW_INPUT_REUSE_FEED_PACE", "").strip()
+  if not raw:
+    return 10
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 10
+
+
 def qconv_nop_delay_cnt() -> int:
   """Max-throughput lever (IMCFLOW_QCONV_NOP_DELAY, integer nop count, default 10).
 

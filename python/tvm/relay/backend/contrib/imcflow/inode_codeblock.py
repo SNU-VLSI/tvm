@@ -7,6 +7,7 @@ from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import feed_sync_per_pixel
 from tvm.contrib.imcflow import qconv_nop_delay_cnt
 from tvm.contrib.imcflow import input_reuse
+from tvm.contrib.imcflow import input_reuse_feed_flagfree, input_reuse_feed_pace_nops
 from tvm.contrib.imcflow import imcu_intra_drain_nops
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
@@ -811,9 +812,24 @@ class SendBlock(InodeCodeBlock):
         f"[INPUT_REUSE] total pkts {_total_pkts} not a multiple of row pkts {_row_pkts}"
       _h_rows = _total_pkts // _row_pkts                    # config H
       _nop = NopLoopBlock(qconv_nop_delay_cnt()).render() + "\n" if (DevConfig().single_qconv and qconv_nop_delay_cnt() > 0) else ""
+      # FLAG-FREE feed (input_reuse_feed_flagfree, default ON): the per-packet
+      # flag-1 rendezvous writes syn_reg[this_inode] on every packet and thereby
+      # clobbers the END-phase barrier flag (SET_FLAG 254/255) this same inode set
+      # -- a slow peer still in STANDBY(this_inode, 254/255) then lost-wakes. Since
+      # the output is DON'T-CARE we drop the handshake and PACE the feed with a
+      # purely-local INODE nop delay instead (imce free-runs its LOAD_LB/STEP; the
+      # nop keeps the feed from overrunning the depth-2 data RECV fifo). The barrier
+      # flag is never touched by the feed -> no lost-wakeup, stock barrier is fine.
+      _flagfree = input_reuse_feed_flagfree()
+      _pace = (NopLoopBlock(input_reuse_feed_pace_nops()).render() + "\n"
+               if (_flagfree and input_reuse_feed_pace_nops() > 0) else "")
       self.body.add(TextBlock(f"{base_var} = {self.block.offset};"))
-      def _inner_pkt(p, base=base_var, pa=next_policy_addr, fid=fifo_id, nop=_nop):
+      def _inner_pkt(p, base=base_var, pa=next_policy_addr, fid=fifo_id, nop=_nop,
+                     flagfree=_flagfree, pace=_pace):
         # inner index p in [0, row_pkts) -> offset p*32 stays inside the 1-row buffer.
+        if flagfree:
+          # flag-free: local pacing nop, then SEND (no syn_reg write).
+          return pace + f"__builtin_INODE_SEND({base} + {p}*32, 0, {pa}, {fid});\n" + nop
         pre = self._get_presend_sync_code_str(iter_var=p)
         body = (pre or "") + f"__builtin_INODE_SEND({base} + {p}*32, 0, {pa}, {fid});\n" + nop
         return body
@@ -1354,10 +1370,58 @@ class SyncAllINodes(InodeCodeBlock):
   # per-logical-barrier index passed by the caller, defaulting to the counter.
   _sense_counter = 0
 
+  # Barrier flag window. The 2-value (254/255) alternation is only lost-wakeup-safe
+  # when the module-order counter increments EXACTLY once per logical barrier and in
+  # PROGRAM order. In practice the counter is advanced from several codegen sites
+  # (sync_inrt_clear called both inside initialize() and again after finalize(), the
+  # conditional serialize_imcu gate, ...) whose call order does NOT always match the
+  # final CodePhase emission order -> two ADJACENT barriers can get the SAME value
+  # (observed: 254,255,254,254,255 -> the 4th barrier repeats 254, so a straggler in
+  # STANDBY(x,254) at barrier 3 cannot tell barrier 4 apart -> lost-wakeup, exactly
+  # the INPUT_REUSE END-barrier hang). Widening the window to N distinct values makes
+  # a same-value COLLISION impossible unless two barriers are >=N apart -- and a
+  # straggler is at most ONE barrier behind, so any N>=2 that never repeats
+  # consecutively suffices. We use a 6-value window (250..255) under INPUT_REUSE so
+  # even a counter that is a few steps out of program-order never yields an adjacent
+  # duplicate. pair UUIDs are lowered to <=249 in SendRecvPairManager to match.
+  # INPUT_REUSE uses a 2-phase (arrive, ack) barrier drawn from a WIDE window so
+  # that no two barriers within the worst-case straggler distance ever reuse a
+  # flag pair. The feed inode runs ~6x longer than an idle inode (4096-packet
+  # feed), so a straggler can be several barriers behind; with only 3 pairs
+  # (250/251, 252/253, 254/255) barrier N and N+3 collided -> lost-wakeup. Because
+  # the INPUT_REUSE feed is FLAG-FREE, pair UUIDs 1..199 are entirely unused here,
+  # so we take a large barrier window 200..249 = 25 disjoint (arrive, ack) pairs.
+  # 25 pairs >> the ~10 barriers per inode, so NO barrier ever reuses a pair within
+  # one region program -> the 2-phase barrier is collision-free regardless of skew.
+  _SENSE_LO_WIDE = 200   # 200..249 -> 25 (arrive,ack) pairs (INPUT_REUSE)
+  _SENSE_WIDE_PAIRS = 25
+  _SENSE_LO_NARROW = 254  # 254..255 -> 2 (pack_bn_minmax legacy)
+
+  @classmethod
+  def _sense_span(cls):
+    from tvm.contrib.imcflow import input_reuse as _ir
+    return (cls._SENSE_LO_WIDE, 6) if _ir() else (cls._SENSE_LO_NARROW, 2)
+
   @classmethod
   def next_sense(cls):
-    """Advance and return the next alternating sense value (254/255)."""
-    v = 254 + (cls._sense_counter % 2)
+    """Advance and return the next barrier sense token.
+
+    Legacy (pack_bn_minmax): a single alternating value 254/255 (1-phase barrier).
+
+    INPUT_REUSE: a (arrive, ack) PAIR drawn from the 250..255 window, cycling
+    through 3 disjoint pairs (250,251)/(252,253)/(254,255). The 2-phase barrier
+    (SyncAllINodes._build tuple branch) needs two distinct flags per barrier, and
+    cycling 3 pairs means an adjacent barrier never reuses either value -- so even
+    with an out-of-program-order counter no two neighbouring barriers collide.
+    Returns a tuple under INPUT_REUSE, a scalar otherwise."""
+    from tvm.contrib.imcflow import input_reuse as _ir
+    if _ir():
+      pair = cls._sense_counter % cls._SENSE_WIDE_PAIRS  # 25 disjoint pairs
+      cls._sense_counter += 1
+      lo = cls._SENSE_LO_WIDE + 2 * pair     # 200, 202, ..., 248
+      return (lo, lo + 1)                    # (arrive, ack)
+    lo, span = cls._sense_span()
+    v = lo + (cls._sense_counter % span)
     cls._sense_counter += 1
     return v
 
@@ -1365,35 +1429,74 @@ class SyncAllINodes(InodeCodeBlock):
   def reset_sense(cls):
     cls._sense_counter = 0
 
-  def __init__(self, node_id : NodeID, annotation: str = "", sense: int = None):
+  def __init__(self, node_id : NodeID, annotation: str = "", sense: int = None,
+               participants=None):
     super().__init__(annotation)
     self.node_id = node_id
     # sense=None -> stock behavior (255 + clear-to-0), byte-identical to before.
     # sense=254/255 -> sense-reversing barrier (no clear), used under packing.
     self.sense = sense
+    # participants: the inodes that join THIS barrier. Default = all inodes (legacy
+    # all-inode rendezvous). Under INPUT_REUSE the caller passes only the
+    # participating (feed/collect) inodes so idle spectator inodes neither wait on
+    # nor are waited on -> removes the skew that lost-wakes the barrier. If this
+    # node is not itself a participant, emit nothing (it will HALT on its own).
+    self.participants = list(participants) if participants is not None else list(NodeID.inodes())
     self._build()
 
   def _build(self):
+    # Non-participant inode: skip this barrier entirely (it neither raises nor
+    # waits on any flag for this rendezvous). Used under INPUT_REUSE for idle
+    # spectator inodes so they don't inject skew.
+    if self.node_id not in self.participants:
+      return
     if self.sense is None:
       # Stock barrier: reused UUID=255 + clear-to-0. Byte-identical to the
       # pre-fix codegen (lever OFF / non-packing path).
       INODE_SYNC_UUID = 255
       self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({INODE_SYNC_UUID});"))
-      for node in NodeID.inodes():
+      for node in self.participants:
         if node != self.node_id:
           self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {INODE_SYNC_UUID});"))
-      nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
+      nops = " ".join([f"\"nop\\n\"" for _ in range(len(self.participants))])
       self.body.add(TextBlock(f"__asm__ volatile({nops});"))
       self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG(0);"))
+    elif isinstance(self.sense, tuple):
+      # TWO-PHASE (arrive + ack) barrier: needed when the inter-inode SKEW can
+      # exceed the spacing between consecutive barriers (INPUT_REUSE: the feed
+      # inode races through several END barriers in ~350ns while an idle inode is
+      # still entering the first STANDBY -> the fast inode overwrites its own flag
+      # to the NEXT barrier's value before the straggler samples the current one,
+      # so a single-phase sense-reversing barrier ALSO lost-wakes). A 1-phase
+      # barrier only guarantees "everyone ARRIVED"; the fast inode is then free to
+      # run ahead. The 2-phase barrier additionally guarantees "everyone SAW that
+      # everyone arrived" before ANY inode leaves, so no inode can advance (and
+      # clobber its flag) until every peer has latched this barrier's arrive value.
+      #   Phase 1 (arrive): SET_FLAG(a); STANDBY(peer,a) for all  -> all arrived
+      #   Phase 2 (ack):    SET_FLAG(k); STANDBY(peer,k) for all  -> all saw arrive
+      # Distinct a/k per barrier (from the widened sense window) so neither phase
+      # value collides with an adjacent barrier's. This is the only variant that
+      # survives unbounded skew; used under INPUT_REUSE.
+      s_arrive, s_ack = self.sense
+      self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({s_arrive});"))
+      for node in self.participants:
+        if node != self.node_id:
+          self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {s_arrive});"))
+      self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({s_ack});"))
+      for node in self.participants:
+        if node != self.node_id:
+          self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {s_ack});"))
+      nops = " ".join([f"\"nop\\n\"" for _ in range(2 * len(self.participants))])
+      self.body.add(TextBlock(f"__asm__ volatile({nops});"))
     else:
       # Sense-reversing barrier: write this barrier's sense, wait for all peers
       # to present it, and DO NOT clear it (persistence protects stragglers).
       sense = self.sense
       self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({sense});"))
-      for node in NodeID.inodes():
+      for node in self.participants:
         if node != self.node_id:
           self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {sense});"))
-      nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
+      nops = " ".join([f"\"nop\\n\"" for _ in range(len(self.participants))])
       self.body.add(TextBlock(f"__asm__ volatile({nops});"))
 
 class Standby(InodeCodeBlock):

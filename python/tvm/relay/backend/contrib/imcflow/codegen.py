@@ -12,6 +12,8 @@ from tvm.relay.backend.contrib.imcflow import transform
 from tvm.relay.backend.contrib.imcflow.transform import getNodeID
 from tvm.relay.backend.contrib.imcflow.transform_utils import getNodeDebugID
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+from tvm.contrib.imcflow import input_reuse_drain_nops
+from tvm.contrib.imcflow import input_reuse
 from tvm.contrib.imcflow import CodegenContext
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import pack_bn_minmax_mode
@@ -327,7 +329,18 @@ class CodegenSuite:
     imce_builder.visit(func)
 
     # add stop block for active imces
+    # INPUT_REUSE NoC-drain: the no-tile kernel has no follow-on traffic to flush the
+    # NoC, so the LAST psum SEND can be stuck between the router and the inode's depth-2
+    # RECV FIFO when the imce hits STOP -> S_IDLE (~80ns after the send). Hold a few
+    # IMCE_NOPs BEFORE the STOP so the tail psum drains into the inode RECV FIFO (RTL
+    # packet-trace root cause: inode RECV stalls one packet short forever otherwise).
+    # Default 0 (not INPUT_REUSE) -> byte-identical; only fires under INPUT_REUSE.
+    _reuse_drain = input_reuse_drain_nops()
     for hid in DevConfig().ActiveIMCEPerFunc[func_name]:
+      if _reuse_drain > 0:
+        imce_builder.codeblocks.append(
+            hid, SimpleFor(_reuse_drain, TextBlock("__builtin_IMCE_NOP();"),
+                           "input_reuse_noc_drain"), CodePhase.END)
       block = CtrlBlock("STOP")
       imce_builder.codeblocks.append(hid, block, CodePhase.END)
     
@@ -768,6 +781,36 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.recv_map = {}
     self.curr_composite_id = None
   
+  def _participating_inodes(self):
+    """INPUT_REUSE barrier-scope reduction: the inter-inode END barrier only needs
+    the inodes that actually DO work for this kernel -- the feed/collect inodes.
+    An idle inode (one that merely sets up a spectator imce column that never
+    computes) has no data dependency on the compute, yet joining the 4-inode
+    barrier makes it race ahead (~6x faster than the feed inode) and clobber its
+    own sync_reg before the slow inode samples it -> lost-wakeup (RTL-confirmed for
+    INPUT_REUSE; a single feed inode runs 4096 SENDs while idle inodes finish in
+    ~1/6 the time). So under INPUT_REUSE we scope the barrier to the PARTICIPATING
+    inodes = {master inode of every active imce} U {inode that collects func_out
+    psum}. Non-participating inodes finish their (spectator) setup and HALT without
+    joining the barrier. Returns the full inode list when the lever is off (the
+    legacy all-inode barrier), so non-INPUT_REUSE kernels are byte-identical.
+    """
+    if not input_reuse():
+      return list(NodeID.inodes())
+    if os.getenv("IMCFLOW_PARTICIPATING_BARRIER", "0") != "1":  # DEPRECATED-BY-DEFAULT: broke launch/HALT pc on idle inodes; keep for A/B
+      return list(NodeID.inodes())  # A/B: participating OFF -> all-inode barrier
+    func_name = self.codeblocks.func_name
+    parts = set()
+    # feed / setup side: the master inode (column) of each ACTIVE (computing) imce.
+    for imce in DevConfig().ActiveIMCEPerFunc.get(func_name, []):
+      parts.add(imce.master())
+    # collect side: the inode that owns a func_out psum RECV. inode_3_0 is the
+    # canonical func_out collector (sync_inrt_clear's inode_master); include any
+    # inode that has a func_out edge to be safe.
+    parts.add(NodeID.inode_3_0)
+    # Deterministic order (matches NodeID.inodes() ordering).
+    return [n for n in NodeID.inodes() if n in parts]
+
   def sync_inrt_clear(self, codephase: CodePhase):
     inode_master = NodeID.inode_3_0
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
@@ -776,11 +819,22 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # Under packing, use a sense-reversing barrier (alternating 254/255, no
     # clear) so inode arrival skew can't cause a lost-wakeup (see SyncAllINodes).
     # One sense per logical barrier -> all 4 per-inode instances share it.
+    # Participating-inode reduction (INPUT_REUSE) applies ONLY to the END-phase
+    # rendezvous. The INIT-phase sync_inrt_clear is a SETUP barrier bound to the
+    # region-launch / HALT boundary (host relaunches per region, HALT parks the
+    # inode until then), and every inode -- even one that only sets up a spectator
+    # imce column -- must join it or its launch-pc lands in unwritten imem and spins
+    # (RTL-confirmed: dropping the idle inode from the INIT barrier made pc jump
+    # 47->64 into blank imem). The END barrier is a pure terminal rendezvous whose
+    # only job is "all done"; that is where idle inodes inject skew, so scope THAT
+    # one to the feed/collect inodes and let idle inodes HALT straight away.
+    _end_phase = codephase in (CodePhase.END, CodePhase.EXEC_TILE)
     _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
+    _parts = self._participating_inodes() if _end_phase else list(NodeID.inodes())
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync all inodes", sense=_sense)
+      block = SyncAllINodes(inode, "sync all inodes", sense=_sense, participants=_parts)
       self.codeblocks.append(inode, block, codephase)
-    
+
     # halt for slave inodes
     for inode_slv in inode_slaves:
       block = HaltBlock("halt for slave inodes")
@@ -855,8 +909,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         # proceeds to WR_IMCU while the others wait at the NEXT gate / the
         # step-6 "sync before compute enable" barrier).
         _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
+        _parts = list(NodeID.inodes())  # SETUP barrier: all inodes (launch/HALT boundary)
         for inode in NodeID.inodes():
-          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}", sense=_sense)
+          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}", sense=_sense, participants=_parts)
           self.codeblocks.append(inode, bar, CodePhase.INIT)
         block = WriteIMCUBlock(node, "imcu write")
         self.codeblocks.append(node, block, CodePhase.INIT)
@@ -867,8 +922,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # # sync before imce compute
     _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
+    _parts = list(NodeID.inodes())  # SETUP barrier: all inodes (launch/HALT boundary)
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync before compute enable", sense=_sense)
+      block = SyncAllINodes(inode, "sync before compute enable", sense=_sense, participants=_parts)
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # imce compute
@@ -881,8 +937,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     
     # wait all enable of imce
     _sense = SyncAllINodes.next_sense() if pack_bn_minmax_mode() else None
+    _parts = list(NodeID.inodes())  # SETUP barrier: all inodes (launch/HALT boundary)
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "wait all imce compute enable", sense=_sense)
+      block = SyncAllINodes(inode, "wait all imce compute enable", sense=_sense, participants=_parts)
       self.codeblocks.append(inode, block, CodePhase.INIT)
       # block = SetFlag()
       # self.codeblocks.append(inode, block, CodePhase.INIT)

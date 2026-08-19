@@ -6131,6 +6131,23 @@ class MemoryAllocator:
               # cnt = height_size * height_offset / sizeof(int)
               c_var_offsets = [base * height_offset for base in input_height_bases]
               c_var_sizes = [h_size * height_offset // 4 for h_size in input_height_sizes]  # div by sizeof(int)=4
+              # INPUT_REUSE ROOT-CAUSE FIX (fsdb-diagnosed): the HOST transfer size must
+              # shrink to 1 row along with the device buffer. c_var_sizes drives the
+              # host-side "Transferring input block to NPU" MMIO copy; leaving it at the
+              # full H*row size makes the host write the WHOLE input tensor into the
+              # 1-row device buffer -> massive overrun past the inode_0_0 data region.
+              # RTL-measured on 32x32 (input 131072B @0x480): the overrun sweeps to
+              # 0x20480, clobbering inode_1_0's IMEM (0x10480) AFTER its phase-1/2 ran
+              # -> the phase-3 relaunch fetches inst=0x00000000 from pc=85 on and the
+              # inode spins in blank imem (the "inode_1_0 blank-spin" hang). 16x16
+              # passed only by luck (0x480+32768 = 0x8480 stops short of any imem).
+              # With the 1-row transfer the host writes exactly the bytes the device
+              # buffer holds; the resent rows reuse that single row (DON'T-CARE data).
+              if _input_reuse:
+                c_var_offsets = [0]                      # single tile, row 0
+                c_var_sizes = [height_offset // 4]       # exactly one row
+                debug_print(f"    [INPUT_REUSE] host transfer shrunk to 1 row: "
+                            f"{height_offset}B (was {[s*4 for s in [h_size * height_offset // 4 for h_size in input_height_sizes]]}B)")
 
               block_tiling_info = BlockTileInfo()
               block_tiling_info.set_info(
@@ -6207,6 +6224,16 @@ class MemoryAllocator:
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               c_output_var_offsets = [base * height_offset for base in output_tile_bases]
               c_output_var_sizes = [h_size * height_offset // 4 for h_size in output_tile_sizes]  # div by sizeof(int)=4
+              # INPUT_REUSE ROOT-CAUSE FIX (output mirror of the input-side fix): the
+              # host OUTPUT read-back must also shrink to the 1-row device buffer.
+              # With the full-H read size the host reads past the mapped NPU window
+              # (gem5: "Unable to find destination for [0x800410a0]" = base + 266400
+              # = exactly one byte past the window) right after the kernel completes.
+              # Output is DON'T-CARE for this power kernel; read just the 1 row.
+              if _input_reuse:
+                c_output_var_offsets = [0]
+                c_output_var_sizes = [height_offset // 4]
+                debug_print(f"    [INPUT_REUSE] host output read-back shrunk to 1 row: {height_offset}B")
 
               block_tiling_info = BlockTileInfo()
               block_tiling_info.set_info(

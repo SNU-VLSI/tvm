@@ -12,6 +12,7 @@ from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every, step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import step_freerun_pass_drain_nops
 from tvm.contrib.imcflow import feed_sync_per_pixel
+from tvm.contrib.imcflow import input_reuse, input_reuse_feed_flagfree
 from tvm.contrib.imcflow import multiblock_fusedadd_bare, multiblock_fusedadd_safe, SAFE_TOKEN_BASE
 from tvm.relay.op.op_attrs import Conv2DAttrs
 from tvm.relay.backend.contrib.imcflow.conv_util import ConvUtil
@@ -278,6 +279,18 @@ class LoadLBBlock(ImceCodeBlock):
         pre_lines, post_lines = forced
     else:
       pre_lines, post_lines = self._get_window_sync()
+
+    # INPUT_REUSE flag-free feed (input_reuse_feed_flagfree): the inode SendBlock
+    # drops its per-packet flag-1 rendezvous (it clobbers the shared syn_reg barrier
+    # flag -> lost-wakeup). The imce data-input LOAD_LB window is the matching half
+    # (SETFLAG(1); STANDBY(inode,1); SETFLAG(0)); if the inode no longer raises flag
+    # 1, this STANDBY(inode,1) would hang forever. So strip the window here too and
+    # let the imce free-run its LOAD_LB (output DON'T-CARE; the inode paces the feed
+    # with local nops). Only the inode flag-1 data window is affected (STANDBY ",1)"),
+    # so producer-gated flag-2/flag-3 windows and const/config windows are untouched.
+    if (input_reuse_feed_flagfree() and pre_lines
+        and any("STANDBY" in ln and ", 1)" in ln for ln in pre_lines)):
+      pre_lines, post_lines = (None, None)
 
     # invariant II bookkeeping (see handshake_num_map): count this LOAD_LB window
     # ONLY when it is a flag-2 producer-gated rendezvous (the dwconv-output

@@ -12,6 +12,7 @@ from typing import List, Dict, Set, Tuple
 from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import input_reuse
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
@@ -195,6 +196,12 @@ class SendRecvPairManager:
         # 255 is reserved for the all-inode barrier (SyncAllINodes). Under the
         # BN/minmax packing lever the barrier is sense-reversing over {254,255},
         # so BOTH 254 and 255 are reserved and pair UUIDs must stay <= 253.
+        # Under INPUT_REUSE the barrier uses a 2-phase (arrive,ack) sense drawn from
+        # the wide window {200..249} (25 pairs, so no barrier reuses a pair within
+        # the worst-case straggler distance -- see SyncAllINodes), so pair UUIDs
+        # must stay <= 199. The INPUT_REUSE feed is flag-free, so pair UUIDs 1..199
+        # are more than enough (this power kernel barely uses paired sync).
+        # (wide 200..249 barrier window is deprecated-by-default; cap only under pack_bn)
         _uuid_max = 253 if pack_bn_minmax_mode() else 255
         for src_gid_key, group_edges in sorted(edge_groups.items(), key=lambda x: str(x[0])):
             if uuid > _uuid_max:
