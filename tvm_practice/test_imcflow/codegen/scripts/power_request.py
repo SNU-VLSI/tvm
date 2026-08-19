@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and validate tagged continuous/region power artifacts."""
+"""Prepare TVM power policy and scope-free measurement requests."""
 
 from __future__ import annotations
 
@@ -63,13 +63,13 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if not enabled:
         return normalized
 
-    scope = str(normalized.get("scope", "continuous")).lower()
-    if scope not in ("continuous", "region"):
-        raise ConfigError("scope must be 'continuous' or 'region'")
+    scope = str(normalized.get("scope", "REGION")).upper()
+    if scope not in ("MODEL", "REGION", "TILE"):
+        raise ConfigError("scope must be MODEL, REGION, or TILE")
     normalized["scope"] = scope
     mode = str(normalized.get("mode", "now")).lower()
-    if mode not in ("now", "wait"):
-        raise ConfigError("mode must be 'now' or 'wait'")
+    if mode != "now":
+        raise ConfigError("power-region measurement supports only mode=now")
     normalized["mode"] = mode
     normalized["duration_budget_s"] = finite_number(
         normalized.get("duration_budget_s", 300),
@@ -116,6 +116,30 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     metadata = normalized.get("metadata", {})
     if not isinstance(metadata, dict):
         raise ConfigError("metadata must be an object")
+    loop = normalized.get("region_loop", {})
+    if not isinstance(loop, dict):
+        raise ConfigError("region_loop must be an object")
+    loop_enable = loop.get("loop_enable", False)
+    if not isinstance(loop_enable, bool):
+        raise ConfigError("region_loop.loop_enable must be boolean")
+    if loop_enable and scope != "MODEL":
+        raise ConfigError("region_loop.loop_enable is supported only for scope=MODEL")
+    min_samples = loop.get("min_samples", 0)
+    if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 0:
+        raise ConfigError("region_loop.min_samples must be a non-negative integer")
+    if min_samples > min(
+        int(dict(defaults, **rail).get("sample_count", MAX_SAMPLES))
+        for rail in rails
+    ):
+        raise ConfigError("region_loop.min_samples exceeds a rail sample_count")
+    min_seconds = finite_number(
+        loop.get("min_seconds", 0.0), "region_loop.min_seconds", 0.0
+    )
+    normalized["region_loop"] = {
+        "loop_enable": loop_enable,
+        "min_samples": min_samples,
+        "min_seconds": min_seconds,
+    }
     return normalized
 
 
@@ -148,11 +172,16 @@ def prepare(args: argparse.Namespace) -> int:
         return 10
     if not SESSION_RE.fullmatch(args.session_id):
         raise ConfigError("unsafe session_id")
-    config["session_id"] = args.session_id
-    metadata = dict(config.get("metadata", {}))
+    measurement_request = {
+        key: value
+        for key, value in config.items()
+        if key not in ("enabled", "scope", "mode", "region_loop")
+    }
+    measurement_request["session_id"] = args.session_id
+    metadata = dict(measurement_request.get("metadata", {}))
     metadata.update(parse_metadata(args.metadata))
-    config["metadata"] = metadata
-    atomic_write_json(Path(args.output), config)
+    measurement_request["metadata"] = metadata
+    atomic_write_json(Path(args.output), measurement_request)
     print(Path(args.output).resolve())
     return 0
 
@@ -165,7 +194,37 @@ def config_status(args: argparse.Namespace) -> int:
 
 def config_scope(args: argparse.Namespace) -> int:
     config = validate_config(load_object(Path(args.config)))
-    print(config.get("scope", "continuous"))
+    print(config.get("scope", "REGION"))
+    return 0
+
+
+def config_loop(args: argparse.Namespace) -> int:
+    config = validate_config(load_object(Path(args.config)))
+    print(json.dumps(config["region_loop"], separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+def write_tvm_manifest(args: argparse.Namespace) -> int:
+    result_dir = Path(args.result_dir)
+    regions_dir = result_dir / "regions"
+    region_ids = sorted(
+        path.name for path in regions_dir.iterdir() if path.is_dir()
+    ) if regions_dir.is_dir() else []
+    if not region_ids:
+        raise ConfigError("cannot write TVM manifest without power regions")
+    policy = json.loads(args.region_loop)
+    if not isinstance(policy, dict):
+        raise ConfigError("region loop policy must be an object")
+    manifest = {
+        "schema_version": 1,
+        "session_id": result_dir.name,
+        "scope": str(args.scope).upper(),
+        "mode": "now",
+        "region_loop": policy,
+        "region_ids": region_ids,
+    }
+    atomic_write_json(result_dir / "tvm_power_manifest.json", manifest)
+    print((result_dir / "tvm_power_manifest.json").resolve())
     return 0
 
 
@@ -356,6 +415,44 @@ def summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _shorten_tag_value(value: Any, max_length: int = 56) -> str:
+    text = str(value)
+    if len(text) <= max_length:
+        return text
+    side = (max_length - 1) // 2
+    return f"{text[:side]}…{text[-side:]}"
+
+
+def _format_tag_state_label(state: Any) -> str:
+    if not isinstance(state, dict) or not state:
+        return "(untagged)"
+
+    priority = {
+        "kernel_stage": 0,
+        "tile": 1,
+        "phase": 2,
+        "event": 3,
+        "region": 4,
+        "kernel": 5,
+    }
+    items = sorted(state.items(), key=lambda item: (priority.get(item[0], 10), item[0]))
+    labels = []
+    consumed = set()
+    for key, value in items:
+        if key in consumed:
+            continue
+        duplicate_keys = [
+            other_key
+            for other_key, other_value in items
+            if other_key != key and other_value == value and other_key not in consumed
+        ]
+        consumed.add(key)
+        consumed.update(duplicate_keys)
+        keys = "/".join([key, *duplicate_keys])
+        labels.append(f"{keys}={_shorten_tag_value(value)}")
+    return " | ".join(labels)
+
+
 def plot_timeline(args: argparse.Namespace) -> int:
     import matplotlib
 
@@ -387,7 +484,18 @@ def plot_timeline(args: argparse.Namespace) -> int:
             else np.zeros(len(time_s), dtype=np.bool_)
         )
 
-    figure, axes = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
+    rail_summary = summary.get("rails", {}).get(rail_name, {})
+    state_labels = {
+        int(item["tag_state_id"]): _format_tag_state_label(item.get("state"))
+        for item in rail_summary.get("tag_states", [])
+        if "tag_state_id" in item
+    }
+    state_ticks = sorted(int(value) for value in np.unique(state))
+    state_tick_labels = [
+        state_labels.get(state_id, "(unknown tag state)") for state_id in state_ticks
+    ]
+    figure_height = min(12.0, max(6.0, 2.5 + 0.32 * len(state_ticks)))
+    figure, axes = plt.subplots(2, 1, sharex=True, figsize=(15, figure_height))
     axes[0].plot(time_s, current, linewidth=0.7, label="current_A")
     axes[0].plot(time_s, power, linewidth=0.7, label="power_W", alpha=0.8)
     if ambiguous.any():
@@ -402,7 +510,9 @@ def plot_timeline(args: argparse.Namespace) -> int:
     axes[0].legend(loc="best")
     axes[0].grid(alpha=0.25)
     axes[1].step(time_s, state, where="post", linewidth=0.8)
-    axes[1].set_ylabel("tag_state_id")
+    axes[1].set_yticks(state_ticks)
+    axes[1].set_yticklabels(state_tick_labels, fontsize=8)
+    axes[1].set_ylabel("tag state")
     axes[1].set_xlabel(time_label)
     axes[1].grid(alpha=0.25)
     figure.suptitle(f"{summary.get('session_id')} / {rail_name}")
@@ -433,6 +543,16 @@ def build_parser() -> argparse.ArgumentParser:
     scope_parser = subparsers.add_parser("config-scope")
     scope_parser.add_argument("config")
     scope_parser.set_defaults(handler=config_scope)
+
+    loop_parser = subparsers.add_parser("config-loop")
+    loop_parser.add_argument("config")
+    loop_parser.set_defaults(handler=config_loop)
+
+    manifest_parser = subparsers.add_parser("write-tvm-manifest")
+    manifest_parser.add_argument("result_dir")
+    manifest_parser.add_argument("--scope", required=True)
+    manifest_parser.add_argument("--region-loop", required=True)
+    manifest_parser.set_defaults(handler=write_tvm_manifest)
 
     build_parser = subparsers.add_parser("validate-build-identity")
     build_parser.add_argument("--metadata", required=True)

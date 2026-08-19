@@ -17,7 +17,7 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  -s, --skip LIST  Comma-separated step numbers to skip (e.g., 1,3)"
-    echo "  --power-config FILE  Enable tagged continuous/region power measurement"
+    echo "  --power-config FILE  Enable tagged MODEL/REGION/TILE power measurement"
     echo "  --no-patch     Generate with standard codegen instead of --with-patch"
     echo "  -h, --help       Show this help message"
     echo ""

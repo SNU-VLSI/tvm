@@ -24,6 +24,31 @@ def run_tool(*arguments, check=True):
     )
 
 
+def _load_power_request_module():
+    spec = importlib.util.spec_from_file_location("power_request_for_test", REQUEST_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_tag_state_plot_labels_are_human_readable():
+    module = _load_power_request_module()
+    assert module._format_tag_state_label({}) == "(untagged)"
+    label = module._format_tag_state_label(
+        {
+            "region": "same-region-name",
+            "kernel": "same-region-name",
+            "kernel_stage": "invoke",
+            "tile": "3",
+        }
+    )
+    assert label == (
+        "kernel_stage=invoke | tile=3 | "
+        "region/kernel=same-region-name"
+    )
+    assert len(module._shorten_tag_value("x" * 100)) == 55
+
+
 def test_default_config_prepares_now_request(tmp_path):
     config = CODEGEN_DIR / "power_configs" / "default.json"
     request = tmp_path / "request.json"
@@ -41,8 +66,9 @@ def test_default_config_prepares_now_request(tmp_path):
     assert result.returncode == 0
     value = json.loads(request.read_text(encoding="utf-8"))
     assert value["session_id"] == "unit_power_request"
-    assert value["scope"] == "continuous"
-    assert value["mode"] == "now"
+    assert "scope" not in value
+    assert "mode" not in value
+    assert "region_loop" not in value
     assert value["rails"][0]["name"] == "DMM_GPIB3"
     assert value["metadata"]["model"] == "resnet8"
 
@@ -59,9 +85,13 @@ def test_default_config_prepares_now_request(tmp_path):
             encoding="utf-8"
         )
     )
-    assert region_config["scope"] == "region"
+    assert region_config["scope"] == "REGION"
     scope = run_tool("config-scope", CODEGEN_DIR / "power_configs" / "region.json")
-    assert scope.stdout.strip() == "region"
+    assert scope.stdout.strip() == "REGION"
+    loop = json.loads(
+        run_tool("config-loop", CODEGEN_DIR / "power_configs" / "region.json").stdout
+    )
+    assert loop == {"loop_enable": False, "min_samples": 0, "min_seconds": 0.0}
 
 
 def test_disabled_config_does_not_prepare_session(tmp_path):
@@ -72,6 +102,66 @@ def test_disabled_config_does_not_prepare_session(tmp_path):
     result = run_tool("config-status", config, check=False)
     assert result.returncode == 10
     assert result.stdout.strip() == "disabled"
+
+
+def test_power_policy_rejects_legacy_scope_wait_and_impossible_minimum(tmp_path):
+    base = json.loads(
+        (CODEGEN_DIR / "power_configs/region.json").read_text(encoding="utf-8")
+    )
+    cases = [
+        ("legacy_scope", {**base, "scope": "continuous"}),
+        ("wait_mode", {**base, "mode": "wait"}),
+        (
+            "region_scope_loop",
+            {
+                **base,
+                "scope": "REGION",
+                "region_loop": {
+                    "loop_enable": True,
+                    "min_samples": 100,
+                    "min_seconds": 0.0,
+                },
+            },
+        ),
+        (
+            "too_many_samples",
+            {
+                **base,
+                "scope": "MODEL",
+                "region_loop": {
+                    "loop_enable": True,
+                    "min_samples": 50_001,
+                    "min_seconds": 0.0,
+                },
+            },
+        ),
+    ]
+    for name, value in cases:
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        result = run_tool("config-status", path, check=False)
+        assert result.returncode != 0
+
+
+def test_tvm_manifest_groups_scope_free_region_artifacts(tmp_path):
+    result_dir = tmp_path / "session_a"
+    (result_dir / "regions" / "r0002_tile_1").mkdir(parents=True)
+    (result_dir / "regions" / "r0001_tile_0").mkdir()
+    policy = {"loop_enable": True, "min_samples": 100, "min_seconds": 0.1}
+    run_tool(
+        "write-tvm-manifest",
+        result_dir,
+        "--scope",
+        "TILE",
+        "--region-loop",
+        json.dumps(policy),
+    )
+    manifest = json.loads(
+        (result_dir / "tvm_power_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["scope"] == "TILE"
+    assert manifest["region_ids"] == ["r0001_tile_0", "r0002_tile_1"]
+    assert manifest["region_loop"] == policy
 
 
 def test_codegen_build_identity_requires_matching_clean_revisions(tmp_path):
@@ -342,18 +432,30 @@ def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
     assert 'dmm_tag_set("tile", "0")' in linux
     assert 'dmm_tag_set("tile", "1")' in linux
     assert 'dmm_tag_event("retry")' in linux
-    assert 'power_measure_runtime_region_begin("kernel_with_\\"quote")' in linux
-    assert "power_measure_runtime_region_end()" in linux
+    assert (
+        'TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION, '
+        '"kernel_with_\\"quote")' in linux
+    )
+    assert "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE" in linux
+    assert "TVM_POWER_REGION_END()" in linux
+    assert linux.count("TVM_POWER_REGION_BEGIN(") == linux.count(
+        "TVM_POWER_REGION_END()"
+    )
+    assert "_power_retry_requested = 1" in linux
+    assert "power_measure_runtime_model_start_after_first_warmup()" in linux
+    assert linux.index("warmup_device();") < linux.index(
+        "power_measure_runtime_model_start_after_first_warmup()"
+    )
     assert linux.index('dmm_tag_set("kernel_stage", "input_transfer")') < linux.index(
         'dmm_tag_set("kernel_stage", "output_transfer")'
     )
-    assert linux.index("power_measure_runtime_region_begin") < linux.index(
+    assert linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION") < linux.index(
         'dmm_tag_set("kernel_stage", "compiled_transfer")'
     )
 
     baremetal = str(make_generator("baremetal").makeKernelDef())
     assert "dmm_tag_" not in baremetal
-    assert "power_measure_runtime_region_" not in baremetal
+    assert "TVM_POWER_REGION_" not in baremetal
     assert "dmm_measure.h" not in baremetal
 
 
@@ -369,12 +471,54 @@ def test_host_templates_cover_single_and_dataset_phases():
         assert "power_measure_runtime_start()" in text
         assert 'power_measure_runtime_phase("graph_execute")' in text
         assert "power_measure_runtime_finish()" in text
+        assert "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL" in text
         assert '"--power-build-info"' in text
         assert "power_measure_runtime_print_build_info(stdout)" in text
     for source in sources[2:]:
         text = source.read_text(encoding="utf-8")
         assert "power_measure_runtime_sample(sample_idx)" in text
         assert 'power_measure_runtime_event("sample_timeout")' in text
+
+
+def test_nested_scope_macro_retry_shape_is_valid_c():
+    subprocess.run(
+        [
+            "cc",
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-fsyntax-only",
+            f"-I{CODEGEN_DIR / 'power_runtime'}",
+            f"-I{TVM_ROOT / '3rdparty/measurement_utils/capi'}",
+            str(CODEGEN_DIR / "unittests/power_scope_macro_syntax.c"),
+        ],
+        check=True,
+    )
+
+
+def test_model_scope_begins_after_generated_warmup(tmp_path):
+    executable = tmp_path / "power_measure_runtime_unit"
+    subprocess.run(
+        [
+            "cc",
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            f"-I{CODEGEN_DIR / 'power_runtime'}",
+            f"-I{TVM_ROOT / '3rdparty/measurement_utils/capi'}",
+            str(CODEGEN_DIR / "unittests/power_measure_runtime_unit.c"),
+            str(CODEGEN_DIR / "power_runtime/power_measure_runtime.c"),
+            "-o",
+            str(executable),
+        ],
+        check=True,
+    )
+    result = subprocess.run(
+        [str(executable)], check=True, capture_output=True, text=True
+    )
+    assert "MODEL-only loop policy: OK" in result.stdout
 
 
 def test_build_and_runner_gate_embed_deployed_revisions():
@@ -393,8 +537,9 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert "binary_tvm_git_rev" in runner
     assert "validate-build-identity" in runner
     assert "codegen_tvm_git_rev" in runner
-    assert "HELLO 4" in runner
+    assert "HELLO 5" in runner
     assert "IMCFLOW_POWER_SCOPE" in runner
+    assert "IMCFLOW_POWER_MIN_SAMPLES" in runner
     assert "tracked repository changes must be committed" in runner
     assert "$DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH" not in runner
     assert "/home/root/.venv/bin/activate" not in runner

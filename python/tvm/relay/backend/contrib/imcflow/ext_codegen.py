@@ -324,19 +324,10 @@ class KernelCodeGenerator:
   def emit_power_region_begin(self, name):
     if self.os != "linux":
       return ""
-    code = CodeWriter()
-    code += (
-        "if (power_measure_runtime_region_begin("
-        f"{self._power_c_string(name)}) != 0) {{\n"
+    return (
+        "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION, "
+        f"{self._power_c_string(name)});\n"
     )
-    code.nextIndent()
-    code += 'fprintf(stderr, "[POWER] failed to start kernel region\\n");\n'
-    code += self.generateDevicePointerCleanup()
-    code += "g_imcflow_kernel_failed = 1;\n"
-    code += "return;\n"
-    code.prevIndent()
-    code += "}\n"
-    return code
 
   def generateRetryCheck(self, location_label):
     """Generate retry check code after a wait call.
@@ -355,24 +346,10 @@ class KernelCodeGenerator:
       code += self.emit_power_tag_clear("tile")
       code += self.emit_power_tag_set("kernel_stage", "retry_cleanup")
     if self.os == "linux":
-      # Drain + ack any pending interrupt BEFORE tearing down / re-arming. On the
-      # timeout path the success-path acks (generate_ack + INTR_DONE) were skipped,
-      # so a genuinely-fired-but-late edge would otherwise leave the UIO count and
-      # the IP interrupt asserted; the next attempt's enable_imcflow_interrupt
-      # would then stack on stale pending state and desync across kernels. Clear
-      # the IP-level interrupt (int_ack_gen + INTR_DONE reg) while the mmaps are
-      # still valid, i.e. before generateDevicePointerCleanup() munmaps them.
       code += "generate_ack(int_ack_gen_pointer);\n"
       code += "npu_pointer[INTR_DONE_REG_IDX] = 1;\n"
-      code += "int _power_region_end_rc = power_measure_runtime_region_end();\n"
-    code += self.generateDevicePointerCleanup()
-    if self.os == "linux":
-      code += "if (_power_region_end_rc != 0) {\n"
-      code += "  g_imcflow_kernel_failed = 1;\n"
-      code += "  return;\n"
-      code += "}\n"
-    code += f"_retry_count++;\n"
-    code += f"continue;\n"
+    code += "_power_retry_requested = 1;\n"
+    code += "break;\n"
     code.prevIndent()
     code += f"}}\n"
     code += f"#else\n"
@@ -383,11 +360,8 @@ class KernelCodeGenerator:
     code += self.emit_power_tag_clear("tile")
     code += self.emit_power_tag_clear("kernel_stage")
     code += self.emit_power_tag_clear("kernel")
-    if self.os == "linux":
-      code += "(void)power_measure_runtime_region_end();\n"
-    code += self.generateDevicePointerCleanup()
-    code += f"  g_imcflow_kernel_failed = 1;\n"
-    code += f"  return;\n"
+    code += "  _power_retry_requested = 2;\n"
+    code += "  break;\n"
     code += f"}}\n"
     code += f"#endif\n"
     return code
@@ -914,10 +888,12 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.emit_power_tag_set("kernel", self.func_name)
 
     # Retry loop start
+    code += "int _power_retry_requested = 0;\n"
     code += "#ifndef RETRY_DISABLE\n"
     code += "int _retry_count = 0;\n"
     code += "do {\n"
     code.nextIndent()
+    code += "_power_retry_requested = 0;\n"
     code += "if (_retry_count > 0) {\n"
     code += f"  fprintf(stderr, \"[RETRY] {self.func_name}_kernel retry attempt %d/%d\\n\", _retry_count, MAX_RETRY_COUNT);\n"
     code += "}\n"
@@ -951,6 +927,12 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         code += self.emit_power_tag_set("kernel_stage", "warmup")
         code += self.emitWarmup()
         code += _hb("after warmup")
+    if self.os == "linux":
+      code += "if (power_measure_runtime_model_start_after_first_warmup() != 0) {\n"
+      code += self.generateDevicePointerCleanup()
+      code += "  g_imcflow_kernel_failed = 1;\n"
+      code += "  return;\n"
+      code += "}\n"
     code += self.emit_power_region_begin(self.func_name)
     code += self.emit_power_tag_set("kernel", self.func_name)
     code += _hb("before compiled_blocks transfer")
@@ -982,8 +964,18 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.emit_power_tag_set("kernel_stage", "input_transfer")
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
       code += self.emit_power_tag_set("kernel_stage", "invoke")
+      if self.os == "linux":
+        code += (
+            "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE, "
+            f"{self._power_c_string(f'{self.func_name}_tile_{t_idx}')});\n"
+        )
+        code += self.emit_power_tag_set("tile", t_idx)
+        code += self.emit_power_tag_set("kernel_stage", "invoke")
       code += self.generateInvokeCode() # end of exec
       code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
+      if self.os == "linux":
+        code += "TVM_POWER_REGION_END();\n"
+      code += "if (_power_retry_requested) break;\n"
       code += self.emit_power_tag_set("kernel_stage", "output_transfer")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
       code += self.emit_power_tag_clear("tile")
@@ -994,14 +986,18 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.emit_power_tag_clear("kernel_stage")
     code += self.emit_power_tag_clear("kernel")
     if self.os == "linux":
-      code += "int _power_region_end_rc = power_measure_runtime_region_end();\n"
+      code += "TVM_POWER_REGION_END();\n"
     code += self.generateDevicePointerCleanup()
     if self.os == "linux":
-      code += "if (_power_region_end_rc != 0) {\n"
+      code += "if (power_measure_runtime_is_degraded()) {\n"
       code += "  g_imcflow_kernel_failed = 1;\n"
       code += "  return;\n"
       code += "}\n"
     code += "#ifndef RETRY_DISABLE\n"
+    code += "if (_power_retry_requested == 1) {\n"
+    code += "  _retry_count++;\n"
+    code += "  continue;\n"
+    code += "}\n"
     code += "break; // success\n"
     code.prevIndent()
     code += "} while (_retry_count <= MAX_RETRY_COUNT);\n"
@@ -1011,6 +1007,12 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.emit_power_tag_clear("tile")
     code += self.emit_power_tag_clear("kernel_stage")
     code += self.emit_power_tag_clear("kernel")
+    code += "  g_imcflow_kernel_failed = 1;\n"
+    code += "  return;\n"
+    code += "}\n"
+    code += "#else\n"
+    code += "if (_power_retry_requested == 2) {\n"
+    code += self.generateDevicePointerCleanup()
     code += "  g_imcflow_kernel_failed = 1;\n"
     code += "  return;\n"
     code += "}\n"

@@ -405,7 +405,9 @@ int main(int argc, char** argv) {
   // ============================================================================
   power_measure_runtime_phase("graph_execute");
   fprintf(stderr, "\n--- Executing Graph ---\n");
+  TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL, "model");
   TVMGraphExecutor_Run(exec);
+  TVM_POWER_REGION_END();
   fprintf(stderr, "✅ Graph execution completed\n");
 
   // ============================================================================

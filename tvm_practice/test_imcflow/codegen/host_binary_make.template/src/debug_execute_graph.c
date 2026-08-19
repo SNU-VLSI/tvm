@@ -410,6 +410,7 @@ int main(int argc, char** argv) {
   fprintf(stderr, "\n--- Executing Graph (Debug: per-node output) ---\n");
 
   // Execute nodes one by one and save each node's output
+  TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL, "model_debug");
   for (uint32_t nid = 0; nid < exec->op_execs_count; nid++) {
     const char* node_name = exec->nodes[nid].name;
     const char* op_type = exec->nodes[nid].op_type;
@@ -442,6 +443,7 @@ int main(int argc, char** argv) {
       fprintf(stderr, "  [%u] Skip (no op): %s\n", nid, node_name);
     }
   }
+  TVM_POWER_REGION_END();
 
   fprintf(stderr, "✅ Debug execution completed — node outputs saved to %s/\n", output_dir);
 

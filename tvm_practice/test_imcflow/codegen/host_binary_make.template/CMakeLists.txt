@@ -316,6 +316,7 @@ if(TVM_BUILD_HOST_RUNNER)
   add_library(imcflow_power_runtime STATIC
     "${IMCFLOW_POWER_RUNTIME_DIR}/power_measure_runtime.c"
     "${IMCFLOW_MEASUREMENT_CAPI_DIR}/dmm_measure.c"
+    "${IMCFLOW_MEASUREMENT_CAPI_DIR}/power_region.c"
   )
   target_include_directories(imcflow_power_runtime PUBLIC
     "${IMCFLOW_POWER_RUNTIME_DIR}"
@@ -326,6 +327,8 @@ if(TVM_BUILD_HOST_RUNNER)
     IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV="${IMCFLOW_BUILD_MEASUREMENT_GIT_REV}"
     IMCFLOW_BUILD_TREE_DIRTY=${IMCFLOW_BUILD_TREE_DIRTY}
   )
+  find_package(Threads REQUIRED)
+  target_link_libraries(imcflow_power_runtime PUBLIC Threads::Threads)
   target_include_directories(tvm_model PRIVATE
     "${IMCFLOW_MEASUREMENT_CAPI_DIR}"
     "${IMCFLOW_POWER_RUNTIME_DIR}"
