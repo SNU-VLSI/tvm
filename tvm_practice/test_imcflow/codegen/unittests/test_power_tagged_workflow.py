@@ -24,31 +24,6 @@ def run_tool(*arguments, check=True):
     )
 
 
-def _load_power_request_module():
-    spec = importlib.util.spec_from_file_location("power_request_for_test", REQUEST_TOOL)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_tag_state_plot_labels_are_human_readable():
-    module = _load_power_request_module()
-    assert module._format_tag_state_label({}) == "(untagged)"
-    label = module._format_tag_state_label(
-        {
-            "region": "same-region-name",
-            "kernel": "same-region-name",
-            "kernel_stage": "invoke",
-            "tile": "3",
-        }
-    )
-    assert label == (
-        "kernel_stage=invoke | tile=3 | "
-        "region/kernel=same-region-name"
-    )
-    assert len(module._shorten_tag_value("x" * 100)) == 55
-
-
 def test_default_config_prepares_now_request(tmp_path):
     config = CODEGEN_DIR / "power_configs" / "default.json"
     request = tmp_path / "request.json"
@@ -112,10 +87,10 @@ def test_power_policy_rejects_legacy_scope_wait_and_impossible_minimum(tmp_path)
         ("legacy_scope", {**base, "scope": "continuous"}),
         ("wait_mode", {**base, "mode": "wait"}),
         (
-            "region_scope_loop",
+            "tile_scope_loop",
             {
                 **base,
-                "scope": "REGION",
+                "scope": "TILE",
                 "region_loop": {
                     "loop_enable": True,
                     "min_samples": 100,
@@ -518,7 +493,7 @@ def test_model_scope_begins_after_generated_warmup(tmp_path):
     result = subprocess.run(
         [str(executable)], check=True, capture_output=True, text=True
     )
-    assert "MODEL-only loop policy: OK" in result.stdout
+    assert "MODEL/REGION loop policy: OK" in result.stdout
 
 
 def test_build_and_runner_gate_embed_deployed_revisions():

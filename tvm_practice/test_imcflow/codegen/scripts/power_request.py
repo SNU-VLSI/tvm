@@ -122,8 +122,10 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     loop_enable = loop.get("loop_enable", False)
     if not isinstance(loop_enable, bool):
         raise ConfigError("region_loop.loop_enable must be boolean")
-    if loop_enable and scope != "MODEL":
-        raise ConfigError("region_loop.loop_enable is supported only for scope=MODEL")
+    if loop_enable and scope == "TILE":
+        raise ConfigError(
+            "region_loop.loop_enable is supported only for scope=MODEL or REGION"
+        )
     min_samples = loop.get("min_samples", 0)
     if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 0:
         raise ConfigError("region_loop.min_samples must be a non-negative integer")
@@ -415,44 +417,6 @@ def summarize(args: argparse.Namespace) -> int:
     return 0
 
 
-def _shorten_tag_value(value: Any, max_length: int = 56) -> str:
-    text = str(value)
-    if len(text) <= max_length:
-        return text
-    side = (max_length - 1) // 2
-    return f"{text[:side]}…{text[-side:]}"
-
-
-def _format_tag_state_label(state: Any) -> str:
-    if not isinstance(state, dict) or not state:
-        return "(untagged)"
-
-    priority = {
-        "kernel_stage": 0,
-        "tile": 1,
-        "phase": 2,
-        "event": 3,
-        "region": 4,
-        "kernel": 5,
-    }
-    items = sorted(state.items(), key=lambda item: (priority.get(item[0], 10), item[0]))
-    labels = []
-    consumed = set()
-    for key, value in items:
-        if key in consumed:
-            continue
-        duplicate_keys = [
-            other_key
-            for other_key, other_value in items
-            if other_key != key and other_value == value and other_key not in consumed
-        ]
-        consumed.add(key)
-        consumed.update(duplicate_keys)
-        keys = "/".join([key, *duplicate_keys])
-        labels.append(f"{keys}={_shorten_tag_value(value)}")
-    return " | ".join(labels)
-
-
 def plot_timeline(args: argparse.Namespace) -> int:
     import matplotlib
 
@@ -484,18 +448,7 @@ def plot_timeline(args: argparse.Namespace) -> int:
             else np.zeros(len(time_s), dtype=np.bool_)
         )
 
-    rail_summary = summary.get("rails", {}).get(rail_name, {})
-    state_labels = {
-        int(item["tag_state_id"]): _format_tag_state_label(item.get("state"))
-        for item in rail_summary.get("tag_states", [])
-        if "tag_state_id" in item
-    }
-    state_ticks = sorted(int(value) for value in np.unique(state))
-    state_tick_labels = [
-        state_labels.get(state_id, "(unknown tag state)") for state_id in state_ticks
-    ]
-    figure_height = min(12.0, max(6.0, 2.5 + 0.32 * len(state_ticks)))
-    figure, axes = plt.subplots(2, 1, sharex=True, figsize=(15, figure_height))
+    figure, axes = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
     axes[0].plot(time_s, current, linewidth=0.7, label="current_A")
     axes[0].plot(time_s, power, linewidth=0.7, label="power_W", alpha=0.8)
     if ambiguous.any():
@@ -510,9 +463,7 @@ def plot_timeline(args: argparse.Namespace) -> int:
     axes[0].legend(loc="best")
     axes[0].grid(alpha=0.25)
     axes[1].step(time_s, state, where="post", linewidth=0.8)
-    axes[1].set_yticks(state_ticks)
-    axes[1].set_yticklabels(state_tick_labels, fontsize=8)
-    axes[1].set_ylabel("tag state")
+    axes[1].set_ylabel("tag_state_id")
     axes[1].set_xlabel(time_label)
     axes[1].grid(alpha=0.25)
     figure.suptitle(f"{summary.get('session_id')} / {rail_name}")

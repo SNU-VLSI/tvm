@@ -91,10 +91,10 @@ int power_measure_runtime_start(void)
   g_power_policy.loop_enable = loop ? atoi(loop) : 0;
   g_power_policy.min_samples = parsed_samples;
   g_power_policy.min_seconds = parsed_seconds;
-  if (g_power_scope != IMCFLOW_POWER_SCOPE_MODEL) {
+  if (g_power_scope == IMCFLOW_POWER_SCOPE_TILE) {
     if (g_power_policy.loop_enable)
       fprintf(stderr,
-              "[POWER] loop ignored: loop is supported only for MODEL scope\n");
+              "[POWER] loop ignored: loop is not supported for TILE scope\n");
     g_power_policy.loop_enable = 0;
     g_power_policy.min_samples = 0;
     g_power_policy.min_seconds = 0.0;

@@ -100,7 +100,7 @@ int main(void)
     if (power_measure_scope_begin(
             &ctx, IMCFLOW_POWER_SCOPE_REGION, "region") != 0)
         return 11;
-    if (last_policy.loop_enable || last_policy.min_samples != 0 ||
+    if (!last_policy.loop_enable || last_policy.min_samples != 30000 ||
         last_policy.min_seconds != 0.0)
         return 12;
     if (!power_measure_scope_next(&ctx) || power_measure_scope_next(&ctx) != 0)
@@ -109,6 +109,6 @@ int main(void)
         return 14;
     if (power_measure_runtime_finish() != 0)
         return 15;
-    puts("MODEL-only loop policy: OK");
+    puts("MODEL/REGION loop policy: OK");
     return 0;
 }
