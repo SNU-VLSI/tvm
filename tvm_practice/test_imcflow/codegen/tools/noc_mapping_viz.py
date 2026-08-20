@@ -366,7 +366,15 @@ def _classify(dtt, src_is_inode, is_dist):
         return "weight"
     if "func_out" in t:
         return "output"
-    if t in ("data", "lhs", "rhs"):
+    # Residual converge: lhs/rhs are the two operands of a residual-add. The
+    # SKIP operand arrives from an inode (the residual tensor was buffered in
+    # inode memory across the diverge, then re-sent to the add) -> a distinct
+    # "residual" channel so the skip-path movement is visible instead of being
+    # lumped with ordinary conv input feeds. The MAIN operand arrives from the
+    # upstream conv's imce -> psum (same as a normal on-chip producer->consumer).
+    if t in ("lhs", "rhs"):
+        return "residual" if src_is_inode else "psum"
+    if t == "data":
         return "input" if src_is_inode else "psum"
     return "data"
 
@@ -422,7 +430,8 @@ def plot_region_layer_map(model, minfo, out_dir):
         "input":  dict(color="#1f77b4", lw=2.2, ls="-",  z=6),
         "weight": dict(color="#7f7f7f", lw=1.2, ls="--", z=4),
         "psum":   dict(color="#d62728", lw=1.6, ls="-",  z=5),
-        "output": dict(color="#2ca02c", lw=2.6, ls="-",  z=7)}
+        "output": dict(color="#2ca02c", lw=2.6, ls="-",  z=7),
+        "residual": dict(color="#e377c2", lw=2.8, ls="-", z=8)}
     def nc(name):
         p = name.split("_"); row, col = int(p[1]), int(p[2])
         return (-1.0, (3 - row) + 0.46) if name.startswith("inode") else (col - 1 + 0.46, (3 - row) + 0.46)
@@ -488,7 +497,8 @@ def plot_noc_mesh(model, minfo, links, out_dir):
             "weight": dict(color="#8a8a8a", base=0.9, scale=0.35),
             "input": dict(color="#1f77b4", base=1.2, scale=0.5),
             "psum": dict(color="#d62728", base=1.2, scale=0.5),
-            "output": dict(color="#2ca02c", base=1.4, scale=0.5)}
+            "output": dict(color="#2ca02c", base=1.4, scale=0.5),
+            "residual": dict(color="#e377c2", base=1.5, scale=0.6)}
     P, NB, ROFF = 1.5, 1.02, 0.14
     def rxy(r, c): return c * P, (3 - r) * P
     color, lo = _colors(minfo); counts = minfo.get("layer_imce_counts", {})
@@ -504,6 +514,15 @@ def plot_noc_mesh(model, minfo, links, out_dir):
                 x, y = rxy(r, c)
                 if c < 4: ax.plot([x, x + P], [y, y], color="#ddd6cc", lw=7, solid_capstyle="round", zorder=1)
                 if r < 3: ax.plot([x, x], [y, y - P], color="#ddd6cc", lw=7, solid_capstyle="round", zorder=1)
+        # Nodes that participate in a residual-add: the imce that HOSTS the add
+        # (residual-edge dst) and the inode that BUFFERS+re-sends the skip
+        # (residual-edge src). Marked with a magenta ring + "RES" so the add and
+        # its skip-source inode are explicit.
+        res_imce, res_inode = set(), set()
+        for e in links.get(rn, {}).get("edges", []):
+            if e["kind"] == "residual":
+                if e["dst"].startswith("imce"): res_imce.add(e["dst"])
+                if e["src"].startswith("inode"): res_inode.add(e["src"])
         lk = links.get(rn, {}).get("links", {})
         for key, kinds in lk.items():
             m = re.match(r"R(\d)_(\d)->R(\d)_(\d)", key)
@@ -514,25 +533,38 @@ def plot_noc_mesh(model, minfo, links, out_dir):
                 cnt = kinds.get(kind, 0)
                 if not cnt: continue
                 off = side * (0.10 + 0.055 * idx); idx += 1; lw = st["base"] + st["scale"] * min(cnt, 8)
+                # channels drawn ABOVE node blocks (z=5/6) so arrows are never
+                # hidden by the tiles; residual channel sits on top of all others.
+                zc = 12 if kind == "residual" else 10
+                za = zc + 1
                 if horiz:
-                    ax.plot([x0 + 0.16, x1 - 0.16], [y0 + off, y1 + off], color=st["color"], lw=lw, alpha=0.95, zorder=3, solid_capstyle="butt")
-                    ax.add_patch(FancyArrow((x0 + x1) / 2, y0 + off, 0.14 * (1 if c1 > c0 else -1), 0, width=0, head_width=0.085, head_length=0.085, color=st["color"], zorder=4, length_includes_head=True))
+                    ax.plot([x0 + 0.16, x1 - 0.16], [y0 + off, y1 + off], color=st["color"], lw=lw, alpha=0.9, zorder=zc, solid_capstyle="butt")
+                    ax.add_patch(FancyArrow((x0 + x1) / 2, y0 + off, 0.14 * (1 if c1 > c0 else -1), 0, width=0, head_width=0.085, head_length=0.085, color=st["color"], zorder=za, length_includes_head=True))
                 else:
-                    ax.plot([x0 + off, x1 + off], [y0 - 0.16, y1 + 0.16], color=st["color"], lw=lw, alpha=0.95, zorder=3, solid_capstyle="butt")
-                    ax.add_patch(FancyArrow(x0 + off, (y0 + y1) / 2, 0, 0.14 * (1 if y1 > y0 else -1), width=0, head_width=0.085, head_length=0.085, color=st["color"], zorder=4, length_includes_head=True))
+                    ax.plot([x0 + off, x1 + off], [y0 - 0.16, y1 + 0.16], color=st["color"], lw=lw, alpha=0.9, zorder=zc, solid_capstyle="butt")
+                    ax.add_patch(FancyArrow(x0 + off, (y0 + y1) / 2, 0, 0.14 * (1 if y1 > y0 else -1), width=0, head_width=0.085, head_length=0.085, color=st["color"], zorder=za, length_includes_head=True))
         for r in range(4):
             for c in range(5):
                 x, y = rxy(r, c); bx, by = x + ROFF, y + ROFF
+                is_res_inode = (c == 0 and f"inode_{r}_0" in res_inode)
+                is_res_imce = (c != 0 and f"imce_{r}_{c}" in res_imce)
+                # residual participants get a thick magenta ring + a "RES" tag
+                ec = "#e377c2" if (is_res_inode or is_res_imce) else None
+                elw = 2.6
                 if c == 0:
-                    ax.add_patch(Rectangle((bx, by), NB, NB, facecolor="#cfe3dd", edgecolor="#333", lw=1.2, zorder=5))
+                    ax.add_patch(Rectangle((bx, by), NB, NB, facecolor="#cfe3dd", edgecolor=ec or "#333", lw=elw if ec else 1.2, zorder=5))
                     ax.text(bx + NB / 2, by + NB / 2, f"INODE\n#{r}", ha="center", va="center", fontsize=9, fontweight="bold", zorder=6)
+                    if is_res_inode:
+                        ax.text(bx + NB * 0.5, by + NB * 0.15, "RES skip", ha="center", va="center", fontsize=6.2, fontweight="bold", color="#c2185b", zorder=14)
                 else:
                     cell = imces.get(f"imce_{r}_{c}")
                     if cell:
                         sp = (cell.get("split_part") or "").replace("/of-", "/"); lab = cell["layer"] + (f" {sp}" if sp else "")
-                        ax.add_patch(Rectangle((bx, by), NB, NB, facecolor=color[cell["layer"]], edgecolor="black", lw=1.3, alpha=0.92, zorder=5))
+                        ax.add_patch(Rectangle((bx, by), NB, NB, facecolor=color[cell["layer"]], edgecolor=ec or "black", lw=elw if ec else 1.3, alpha=0.92, zorder=5))
                         ax.text(bx + NB / 2, by + NB * 0.62, lab, ha="center", va="center", fontsize=8.2, fontweight="bold", color="white", zorder=6)
                         ax.text(bx + NB / 2, by + NB * 0.32, ",".join(cell["ops"]), ha="center", va="center", fontsize=6.4, color="white", zorder=6)
+                        if is_res_imce:
+                            ax.text(bx + NB * 0.5, by + NB * 0.08, "RES add", ha="center", va="center", fontsize=6.2, fontweight="bold", color="#ffe0f0", zorder=14)
                     else:
                         ax.add_patch(Rectangle((bx, by), NB, NB, facecolor="#f4f4f4", edgecolor="#bbb", lw=0.9, zorder=5))
                         ax.text(bx + NB / 2, by + NB / 2, f"IMCE\n#{(r*4)+(c-1)}", ha="center", va="center", fontsize=7, color="#aaa", zorder=6)
