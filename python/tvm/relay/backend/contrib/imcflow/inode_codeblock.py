@@ -834,6 +834,28 @@ class SendBlock(InodeCodeBlock):
         pre = self._get_presend_sync_code_str(iter_var=p)
         body = (pre or "") + f"__builtin_INODE_SEND({base} + {p}*32, 0, {pa}, {fid});\n" + nop
         return body
+      # Step-2 partial unroll (IMCFLOW_INPUT_REUSE_FEED_UNROLL=U, flagfree only):
+      # amortize the ~4.7cyc/pkt loop bookkeeping over U SENDs per iteration:
+      #   for (g < row_pkts/U) { SEND(base + g*(U*32) + k*32), k=0..U-1 }
+      # Offsets are iter*literal + literal (ADDI+shift, INODE-selectable), same
+      # fifo. U=1 (default) -> byte-identical single-packet loop.
+      from tvm.contrib.imcflow import input_reuse_feed_unroll
+      _u = input_reuse_feed_unroll()
+      if _flagfree and _u > 1:
+        assert _row_pkts % _u == 0, (
+          f"[INPUT_REUSE unroll] IMCFLOW_INPUT_REUSE_FEED_UNROLL={_u} must divide "
+          f"row_pkts={_row_pkts} (row_pkts=4*W; U=4 == one pixel/iter is the "
+          f"practical max for prime W)")
+        def _inner_grp(g, base=base_var, pa=next_policy_addr, fid=fifo_id, nop=_nop,
+                       pace=_pace, u=_u):
+          lines = ""
+          for k in range(u):
+            lines += pace + f"__builtin_INODE_SEND({base} + {g}*{u*32} + {k*32}, 0, {pa}, {fid});\n" + nop
+          return lines
+        _inner_loop = SimpleFor(_row_pkts // _u, _inner_grp,
+                                f"{target_edge.simple_name()}_reuse_row_grps")
+        self.body.add(SimpleFor(_h_rows, _inner_loop, f"{target_edge.simple_name()}_reuse_rows"))
+        return
       # H rows, each re-sends the full row (row_pkts packets, offset reset to 0).
       _inner_loop = SimpleFor(_row_pkts, _inner_pkt, f"{target_edge.simple_name()}_reuse_row_pkts")
       self.body.add(SimpleFor(_h_rows, _inner_loop, f"{target_edge.simple_name()}_reuse_rows"))

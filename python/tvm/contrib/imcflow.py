@@ -331,6 +331,29 @@ def input_reuse_feed_pace_nops() -> int:
     return 10
 
 
+def input_reuse_feed_unroll() -> int:
+  """INPUT_REUSE feed partial unroll (IMCFLOW_INPUT_REUSE_FEED_UNROLL, default 1).
+
+  Step-2 of the per-pixel tax peel: the feed inner loop's per-packet
+  bookkeeping (cmp/branch/addr, ~4.7cyc/pkt measured) dominates once the
+  handshake (step 1, flagfree) and the psum drain (drop-all) are gone. Unroll
+  the compile-time inner row loop by U: for(g < row_pkts/U) { U SENDs at
+  literal offsets (g*U + k)*32 } -- ADDI+shift only, INODE-selectable, same
+  fifo. U must DIVIDE row_pkts (asserted; row_pkts = 4*W so U=4 == exactly one
+  pixel per iteration is the practical max for W prime). Only active under
+  flagfree (per-packet handshake makes unroll pointless). 1/unset ->
+  byte-identical."""
+  if not input_reuse_feed_flagfree():
+    return 1
+  raw = os.environ.get("IMCFLOW_INPUT_REUSE_FEED_UNROLL", "").strip()
+  if not raw:
+    return 1
+  try:
+    return max(1, int(raw))
+  except ValueError:
+    return 1
+
+
 def qconv_nop_delay_cnt() -> int:
   """Max-throughput lever (IMCFLOW_QCONV_NOP_DELAY, integer nop count, default 10).
 
