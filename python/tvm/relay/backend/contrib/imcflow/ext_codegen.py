@@ -86,7 +86,12 @@ if POWER_MEASURE_PHASE in (PowerMeasurePhase.REGION, PowerMeasurePhase.TILE,
   DMM_NAMES       = ["VDD", "DDA", "DDC"]
   NPLCs           = [0.001, 0.001, 0.001]
   INTERVALs       = [-1, -1, -1]
-  SAMPLE_COUNTs   = [50000, 50000, 50000]
+  # Env-tunable sample count (IMCFLOW_DMM_SAMPLES): size so sample_count x
+  # per-sample-time ~= the bracketed compute window. The 50000 default was sized
+  # for ~1s STEP_FREERUN bursts; the INPUT_REUSE 127x127 nop0 kernel is ~12.5ms
+  # -> ~600 samples at ~21us/sample (34465A nplc=0.001).
+  _dmm_n = int(os.getenv("IMCFLOW_DMM_SAMPLES", "50000"))
+  SAMPLE_COUNTs   = [_dmm_n, _dmm_n, _dmm_n]
   CURR_RANGEs     = [0.1, 0.1, 0.1]
   RESETs          = [1, 1, 1]
   OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
