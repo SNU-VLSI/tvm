@@ -122,8 +122,9 @@ fi
 TEST_FOLDER="$1"
 INPUT_SETTING="$2"
 
-# Validate test folder name format: must be *_evl.linux
-if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
+# Validate test folder name format: must be *_evl.linux (or *_evl.linux.bugfixoff,
+# the BUGFIX-off codegen flavor -- same ARM Linux chip target, distinct eval dir)
+if [[ "$TEST_FOLDER" != *_evl.linux && "$TEST_FOLDER" != *_evl.linux.bugfixoff ]]; then
     echo "Error: Test folder must end with '_evl.linux' (got: $TEST_FOLDER)"
     echo ""
     echo "Example:"
@@ -134,7 +135,8 @@ if [[ "$TEST_FOLDER" != *_evl.linux ]]; then
 fi
 
 # Extract model name from test folder (remove _evl.linux suffix)
-TEST_NAME="${TEST_FOLDER%_evl.linux}.linux"
+TEST_NAME="${TEST_FOLDER%_evl.linux.bugfixoff}"
+TEST_NAME="${TEST_NAME%_evl.linux}.linux"
 
 DEFAULT_GRAPH_PATH="mlf/executor-config/graph/default.graph"
 DEFAULT_PARAMS_PATH="mlf/parameters/default.params"
@@ -207,11 +209,17 @@ if [[ "$SKIP_STEP6" == true ]]; then
 else
     echo "Step 6: Executing on remote chip (timeout: 300s)..."
     echo ""
+    # The runner takes exactly 5 args; argv[6] is an OPTIONAL sample_idx suffix.
+    # Passing the NPZ path there (old bug) made input_dir "test_inputs/sample_<path>"
+    # -> input load failed with exit(2), which the trailing `make warmup` (exit 0)
+    # then masked into a fake "completed successfully" (kernel never ran). Capture
+    # the runner's status BEFORE the warmup make and propagate that.
     scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
                 cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./$EXEC_NAME \
-                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
-                cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
-                tvm_status=\$?; exit \$tvm_status"
+                eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME; \
+                tvm_status=\$?; \
+                cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1; \
+                exit \$tvm_status"
 
     if [ $? -eq 0 ]; then
         echo ""
