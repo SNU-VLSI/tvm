@@ -811,7 +811,15 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     return code
 
   def generateInvokeCode(self):
-    """Generate NPU invoke code."""
+    """Generate one complete NPU invoke outside a TILE power boundary."""
+    code = CodeWriter()
+    code += self.generateInvokePrepareCode()
+    code += self.generateInvokeStartWaitCode()
+    code += self.generateInvokeFinalizeCode()
+    return code
+
+  def generateInvokePrepareCode(self):
+    """Generate the setup that must complete before the RUN doorbell."""
     code = CodeWriter()
     code += self.emitDebugPrint(f"{self.func_name}: invoke begin")
     code += "for(int i=0; i<INODE_NUM; i++) {\n"
@@ -827,17 +835,26 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.emitDebugPrint(f"{self.func_name}: invoke after interrupt arm")
       code += self.emitMmioBarrier("invoke interrupt arm completes before RUN doorbell")
     code += self.emitDebugPrint(f"{self.func_name}: invoke before RUN doorbell")
-    code += self.emitMmioWrite32("npu_pointer", "STATE_REG_IDX", "SET_RUN_CODE")
-    code += self.emitDebugPrint(f"{self.func_name}: invoke after RUN doorbell")
-    code += self.emitMmioBarrier("RUN doorbell visible before completion wait")
+    return code
+
+  def generateInvokeStartWaitCode(self):
+    """Generate only RUN and completion wait, with no post-RUN barrier."""
+    code = CodeWriter()
+    code += "/* IMCFLOW-INVOKE: RUN doorbell intentionally has no post barrier. */\n"
+    code += "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;\n"
     if self.os == "linux":
-      code += self.emitDebugPrint(f"{self.func_name}: invoke before completion wait")
       code += "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);\n"
-      code += 'IMCFLOW_DEBUG_PRINT("invoke completion wait returned rc=%d", _wait_rc);\n'
     elif USE_POLLING:
       code += "_wait_rc = wait_for_idle(npu_pointer);\n"
     else:
       code += "_wait_rc = 0;\n"
+    return code
+
+  def generateInvokeFinalizeCode(self):
+    """Generate completion handling after a RUN wait has returned."""
+    code = CodeWriter()
+    code += self.emitDebugPrint(f"{self.func_name}: invoke after RUN wait")
+    code += 'IMCFLOW_DEBUG_PRINT("invoke completion wait returned rc=%d", _wait_rc);\n'
     code += self.emitMmioBarrier("invoke completion observed before interrupt ACK")
     if self.os == "linux":
       code += "generate_ack(int_ack_gen_pointer);\n"
@@ -1227,18 +1244,17 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.generateToNpuTransferCode(
           self.input_blocks, t_idx, "input") # input
       code += self.emit_power_tag_set("kernel_stage", "invoke")
+      code += self.generateInvokePrepareCode()
       if self.os == "linux":
         code += (
             "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE, "
             f"{self._power_c_string(f'{self.func_name}_tile_{t_idx}')});\n"
         )
-        code += self.emit_power_tag_set("tile", t_idx)
-        code += self.emit_power_tag_set("kernel_stage", "invoke")
-      code += self.generateInvokeCode() # end of exec
-      code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
+      code += self.generateInvokeStartWaitCode()
       if self.os == "linux":
-        code += self.emitMmioBarrier("tile invocation completes before tile region boundary")
         code += "TVM_POWER_REGION_END();\n"
+      code += self.generateInvokeFinalizeCode()
+      code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
       code += "if (_power_retry_requested) break;\n"
       code += self.emit_power_tag_set("kernel_stage", "output_transfer")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output

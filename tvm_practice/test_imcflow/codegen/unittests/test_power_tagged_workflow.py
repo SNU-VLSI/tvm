@@ -68,6 +68,16 @@ def test_default_config_prepares_now_request(tmp_path):
     )
     assert loop == {"loop_enable": False, "min_samples": 0, "min_seconds": 0.0}
 
+    tile_config = json.loads(
+        (CODEGEN_DIR / "power_configs" / "tile.json").read_text(encoding="utf-8")
+    )
+    assert tile_config["scope"] == "TILE"
+    assert tile_config["region_loop"] == {
+        "loop_enable": False,
+        "min_samples": 0,
+        "min_seconds": 0.0,
+    }
+
 
 def test_disabled_config_does_not_prepare_session(tmp_path):
     config = tmp_path / "disabled.json"
@@ -434,8 +444,41 @@ def test_debug_print_instruments_tensor_block_and_word_progress(monkeypatch):
     assert generated.index("before word=%d/%zu") < generated.index("block end")
 
 
+def test_invoke_run_wait_has_no_post_run_barrier_or_instrumentation(monkeypatch):
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
+    module = _load_ext_codegen(monkeypatch)
+    generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
+    generator.os = "linux"
+    generator.func_name = "tight_tile_kernel"
+
+    prepare = str(generator.generateInvokePrepareCode())
+    run_wait = str(generator.generateInvokeStartWaitCode())
+    finalize = str(generator.generateInvokeFinalizeCode())
+    complete = str(generator.generateInvokeCode())
+
+    assert "enable_imcflow_interrupt(npu_fd)" in prepare
+    assert "invoke interrupt arm completes before RUN doorbell" in prepare
+    assert run_wait == (
+        "/* IMCFLOW-INVOKE: RUN doorbell intentionally has no post barrier. */\n"
+        "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;\n"
+        "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);"
+    )
+    assert "imcflow_mmio_barrier(" not in run_wait
+    assert "IMCFLOW_DEBUG_PRINT(" not in run_wait
+    assert "dmm_tag_" not in run_wait
+    assert "invoke completion observed before interrupt ACK" in finalize
+    assert "generate_ack(int_ack_gen_pointer)" in finalize
+    assert complete.index("enable_imcflow_interrupt") < complete.index(
+        "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE"
+    )
+    assert complete.index("wait_imcflow_interrupt") < complete.index(
+        "generate_ack(int_ack_gen_pointer)"
+    )
+
+
 def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
     monkeypatch.delenv("IMCFLOW_NO_PERKERNEL_WARMUP", raising=False)
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
     module = _load_ext_codegen(monkeypatch)
     monkeypatch.setattr(module, "makeConstArrayDecl", lambda *_args: "")
 
@@ -494,6 +537,17 @@ def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
     assert linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION") < linux.index(
         'dmm_tag_set("kernel_stage", "compiled_transfer")'
     )
+    tile_begin = linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE")
+    tile_start = linux.index("npu_pointer[STATE_REG_IDX] = SET_RUN_CODE", tile_begin)
+    tile_wait = linux.index("wait_imcflow_interrupt", tile_start)
+    tile_end = linux.index("TVM_POWER_REGION_END()", tile_wait)
+    tile_ack = linux.index("generate_ack(int_ack_gen_pointer)", tile_end)
+    tight_tile_body = linux[tile_begin:tile_end]
+    assert tile_begin < tile_start < tile_wait < tile_end < tile_ack
+    assert "imcflow_mmio_barrier(" not in linux[tile_start:tile_wait]
+    assert "IMCFLOW_DEBUG_PRINT(" not in linux[tile_start:tile_end]
+    assert "dmm_tag_" not in tight_tile_body
+    assert "invoke completion observed before interrupt ACK" in linux[tile_end:tile_ack]
 
     baremetal = str(make_generator("baremetal").makeKernelDef())
     assert "dmm_tag_" not in baremetal
@@ -560,7 +614,7 @@ def test_model_scope_begins_after_generated_warmup(tmp_path):
     result = subprocess.run(
         [str(executable)], check=True, capture_output=True, text=True
     )
-    assert "MODEL/REGION loop policy: OK" in result.stdout
+    assert "MODEL/REGION/TILE loop policy: OK" in result.stdout
 
 
 def test_build_and_runner_gate_embed_deployed_revisions():

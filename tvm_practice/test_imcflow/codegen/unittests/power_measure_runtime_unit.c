@@ -109,6 +109,22 @@ int main(void)
         return 14;
     if (power_measure_runtime_finish() != 0)
         return 15;
-    puts("MODEL/REGION loop policy: OK");
+
+    setenv("IMCFLOW_POWER_SCOPE", "TILE", 1);
+    if (power_measure_runtime_start() != 0)
+        return 16;
+    if (power_measure_scope_begin(
+            &ctx, IMCFLOW_POWER_SCOPE_TILE, "tile") != 0)
+        return 17;
+    if (last_policy.loop_enable || last_policy.min_samples != 0 ||
+        last_policy.min_seconds != 0.0)
+        return 18;
+    if (!power_measure_scope_next(&ctx) || power_measure_scope_next(&ctx) != 0)
+        return 19;
+    if (power_measure_scope_end(&ctx) != 0 || active)
+        return 20;
+    if (power_measure_runtime_finish() != 0)
+        return 21;
+    puts("MODEL/REGION/TILE loop policy: OK");
     return 0;
 }
