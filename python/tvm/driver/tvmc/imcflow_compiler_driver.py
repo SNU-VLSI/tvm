@@ -121,7 +121,15 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     _print("3_after_merge_for_partition")
 
     # Step 4: Partition into rounds (with merged composites)
-    mod = imcflow_transform.partitionRound(mod)
+    # IMCFLOW_MERGE_VAR_BRANCHES=1 (default OFF): treat branch-from-var converge
+    # points with the NORMAL selection policy instead of forcing a new region per
+    # branch. For the multi-imce power kernel (N independent convs sharing one
+    # input var, tuple output) the default force-split fragments the N branches
+    # into N sequential single-conv regions -- merging them into ONE region is
+    # what lets all N imces run concurrently.
+    _merge_var_branches = os.getenv("IMCFLOW_MERGE_VAR_BRANCHES", "0").lower() in ("1", "true", "on")
+    mod = imcflow_transform.partitionRound(
+        mod, handle_branch_from_var_converge=not _merge_var_branches)
     _print("4_after_partition_round")
 
     # Step 5: Flatten top-level functions

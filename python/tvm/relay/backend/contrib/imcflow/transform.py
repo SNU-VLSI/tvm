@@ -6202,7 +6202,13 @@ class MemoryAllocator:
               # Calculate CPU tile base addresses and sizes based on height boundaries
               r_ttype = transform_utils.getRTTypeForEdge(mod, edge)
               r_height_index = imcflow_layout.get_height_dim_index(layout_map[transform_utils.getNodeFromTensorID(edge.src_id)])
-              assert math.prod(r_ttype.shape[0:r_height_index]) == 1, "Upper of height dimension should be 1 in imcflow."
+              if math.prod(r_ttype.shape[0:r_height_index]) != 1:
+                # drop-all (IMCFLOW_DROP_PSUM=1, keep=0): a multi-C-block func_out
+                # (e.g. 16-imce concat, 1024ch = 4 C-blocks above H) is DON'T-CARE and
+                # its psum SEND / inode RECV / host read-back are ALL omitted, so the
+                # per-C-block row size below is only an inert placeholder.
+                from tvm.contrib.imcflow import drop_psum_send as _dps, drop_psum_keep_every as _dpk
+                assert _dps() and _dpk() <= 0, "Upper of height dimension should be 1 in imcflow."
               height_offset_elem_num = math.prod(r_ttype.shape[r_height_index + 1:]) if r_height_index + 1 < len(r_ttype.shape) else 1
               height_offset = height_offset_elem_num * np.dtype(r_ttype.dtype).itemsize
               assert height_offset % 32 == 0, "Height offset should be multiple of 32 bytes."

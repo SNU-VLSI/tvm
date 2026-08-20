@@ -189,6 +189,44 @@ def getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=64):
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
+def getParallel1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=64, n_par=16):
+  """Multi-imce power kernel: n_par INDEPENDENT K=1 quant convs sharing ONE
+  input var, tuple output. Avoids split_conv_to_atomic's concat entirely --
+  each conv is the RTL/chip-proven single-imce drop-all shape; the shared
+  input var becomes ONE activation multicast group in joint PnR; each conv
+  gets its own func_out (whose traffic drop-all omits)."""
+  N, H, W = 1, iH, iW
+  KH, KW = 1, 1
+  stride, padding = 1, 0
+  input = relay.var("conv_input", shape=(N, IC, H, W), dtype="uint8")
+
+  outs = []
+  param_dict = {}
+  for i in range(n_par):
+    y = imcflow_qconv2d(
+      input,
+      relay.var(f"conv_weight_{i}", shape=(OC, IC, KH, KW), dtype="int8"),
+      ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=padding, stride=stride).get_as_const_tensor(),
+      in_channels=IC,
+      channels=OC,
+      kernel_size=(KH, KW),
+      padding=(padding, padding),
+      out_dtype="int16"
+    )
+    # per-branch min/max vars: relay function args must have unique names
+    y = imcflow_min_max_quantize(
+      y,
+      relay.var(f"quant_min_{i}", shape=(), dtype="int16"),
+      relay.var(f"quant_max_{i}", shape=(), dtype="int16"),
+      axis=1, out_dtype="uint8", channel=16)
+    outs.append(y)
+    param_dict[f"conv_weight_{i}"] = np.random.randint(-8, 8, size=(OC, IC, KH, KW), dtype=np.int8)
+    param_dict[f"quant_min_{i}"] = np.array(-128, dtype="int16")
+    param_dict[f"quant_max_{i}"] = np.array(127, dtype="int16")
+
+  out = tvm.IRModule.from_expr(relay.Tuple(outs))
+  return out, param_dict
+
 def getOneConvModel(iH=4, iW=4, IC=28):
   N, IC, H, W = 1, IC, iH, iW
   OC = 64

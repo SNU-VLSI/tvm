@@ -24,6 +24,7 @@ from tvm.relay.backend.contrib.imcflow.kernel_codegen import KernelCodegen
 from tvm.relay.backend.contrib.imcflow.device_codegen import DeviceCodegen
 from tvm.relay.backend.contrib.imcflow.codeblock import *
 from tvm.relay.backend.contrib.imcflow.inode_codeblock import *
+from tvm.relay.backend.contrib.imcflow.inode_codeblock import _is_dropped_consumer_edge
 from tvm.relay.backend.contrib.imcflow.imce_codeblock import *
 from tvm.relay.backend.contrib.imcflow import imce_codeblock
 from tvm.relay.backend.contrib.imcflow.operation_handlers import get_handler_registry
@@ -1228,6 +1229,15 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     hid = self.get_hid(tid)
     # split op handling => pass down to inner edges from input var node
     gid = edge.dst_id.graph_node_id
+
+    # drop-all (IMCFLOW_DROP_PSUM=1, keep=0): if this SEND's consumer is a
+    # dropped standalone block (post-concat mm_quant / concat -- both skipped in
+    # imce codegen), never create/append the SendBlock. Suppressing at the
+    # source keeps emission AND recv/send accounting at 0 (no orphaned NoC
+    # packets). Gate off -> byte-identical. See inode_codeblock._is_dropped_consumer_edge.
+    if _is_dropped_consumer_edge(edge):
+      return
+
     if db is None:
       db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
       if db is None:
@@ -1259,6 +1269,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
   def add_send_block_interleaved(self, edge_list, phase: CodePhase):
     dbs = []
     edge_infos = []
+    # drop-all (IMCFLOW_DROP_PSUM=1, keep=0): exclude any edge whose consumer is
+    # a dropped standalone block (post-concat mm_quant / concat) so no SEND is
+    # emitted or counted for it. Gate off -> edge_list unchanged (byte-identical).
+    edge_list = [e for e in edge_list if not _is_dropped_consumer_edge(e)]
+    if not edge_list:
+      return
     # FIXME: change this if multiple inodes send params
     hids = [self.get_hid(edge.src_id) for edge in edge_list]
     assert all(hid == hids[0] for hid in hids), "all edges should have same starting inode for interleaved"

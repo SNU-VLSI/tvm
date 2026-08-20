@@ -476,6 +476,14 @@ class ConcatHandler(OperationHandler):
     return call.op == op.get("concatenate")
 
   def handle(self, call: 'BuilderContext') -> None:
+    # drop-all (IMCFLOW_DROP_PSUM=1, keep=0): the producing convs omit every
+    # psum SEND, so a concat here would RECV forever -> wedge. Skip the concat
+    # emission entirely (its output traffic to func_out is likewise dropped and
+    # its PnR commodities are C1-exempt 'dropped_psum'). DON'T-CARE output.
+    from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
+    if drop_psum_send() and drop_psum_keep_every() <= 0:
+      return
+
     block = ConcatBlock(call, "concat")
 
     # Priority: vec_op_stack > post_op_stack > standalone
@@ -545,6 +553,16 @@ class MinMaxQuantizeHandler(OperationHandler):
   def handle(self, call: 'BuilderContext') -> None:
     print(f"[IMCE CODE BUILDER] handle MinMaxQuantize: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
     hid = call.get_hid()
+
+    # drop-all (IMCFLOW_DROP_PSUM=1, keep=0): a STANDALONE mm_quant (post-concat
+    # region, not a composite post-op) consumes psum traffic that is never sent
+    # -> would RECV forever, and its orphaned MM.QUANT intrinsic fails IMCE ISel
+    # outside the composite context. Skip it entirely (DON'T-CARE output);
+    # composite post-op quants (inside a conv) are untouched.
+    from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
+    if (drop_psum_send() and drop_psum_keep_every() <= 0
+        and self.builder.vec_op_stack is None and call.curr_composite_id is None):
+      return
 
     # Generate RecvConst blocks for min/max parameters
     for tag in ("min", "max"):

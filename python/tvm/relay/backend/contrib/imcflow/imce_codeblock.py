@@ -3317,9 +3317,14 @@ class RecvSendWrapper(ImceCodeBlock):
       # handcraft pre-send sync: emit ONE STANDBY(receiver, 1) BEFORE the SEND
       # loop when the receiver is an imce (pipeline). Output to an inode is bare.
       # Suppressed for zero-load col_groups (skip_presend) whose SEND is padding.
-      # Also suppressed under DROP_PSUM (no SEND -> no pre-send handshake needed).
+      # Also suppressed under DROP_PSUM (no SEND -> no pre-send handshake needed),
+      # and when this wrapper's SEND is dropped (self.drop_send: K-keep skip pixel
+      # or drop-all conv->concat edge) -- an orphaned STANDBY(consumer,1) with a
+      # DROPPED consumer never gets its flag and hangs after the last pixel
+      # (2026-08-20 16imce parity check: 12/16 imces carried exactly this).
       if (te_out_info.fifo_id != TensorEdgeInfo.LOCAL_FIFO and not self.skip_presend
-          and not self.suppress_presend_only and not _drop_psum):
+          and not self.suppress_presend_only and not _drop_psum
+          and not getattr(self, "drop_send", False)):
         if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager and output_edges:
           pre_send = self.builder.pair_manager.get_pre_send_sync(output_edges[0])
           if pre_send:

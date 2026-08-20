@@ -17,6 +17,29 @@ import pdb
 
 NOP_LOOP_CNTS = 10
 
+# Consumer ops whose inode data SEND is dropped under drop-all
+# (IMCFLOW_DROP_PSUM=1, keep=0). These standalone blocks are skipped in imce
+# codegen (imce_operation_handlers.py ConcatHandler / MinMaxQuantizeHandler,
+# grep "drop-all (IMCFLOW_DROP_PSUM=1, keep=0)"), so any inode SEND feeding
+# them would orphan packets on the NoC (send N vs recv 0 -> flow_if X-fatal).
+_DROPPED_CONSUMER_OPS = ("qnn.imcflow_min_max_quantize", "concatenate")
+
+
+def _is_dropped_consumer_edge(edge) -> bool:
+  """True iff, under drop-all (IMCFLOW_DROP_PSUM=1 && keep<=0), `edge`'s
+  destination is one of the dropped standalone consumers (post-concat mm_quant
+  / concat). Used to suppress the inode data SEND at its creation site so no
+  block is ever appended (no emission, no recv/send accounting). Returns False
+  when the gate is off, so OFF is byte-identical."""
+  if not (drop_psum_send() and drop_psum_keep_every() <= 0):
+    return False
+  try:
+    dst = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
+    dst_op = getattr(getattr(dst, "op", None), "name", "")
+  except Exception:
+    dst_op = ""
+  return dst_op in _DROPPED_CONSUMER_OPS
+
 
 def _wrap_freerun_passes(body, reps):
   """STEP_FREERUN root cause #2: wrap `body` (one per-pass feed/config) in a `reps`-trip
@@ -523,6 +546,14 @@ class SendBlock(InodeCodeBlock):
     repeated under STEP_FREERUN. The activation edge is the one policy_table_builder
     (:499-513) gives dst tensor_type "data" + base fifo_id 0 feeding a qconv/qdwconv."""
     e = self.block.id if isinstance(self.block.id, TensorEdge) else None
+    if e is None and isinstance(self.block.id, (list, tuple)) and self.block.id:
+      # v1 multicast activation feed: block.id is a LIST of edges (one per
+      # consumer imce, shared input). Judge by the representative edge iff
+      # EVERY edge is a "data"-typed TensorEdge (weight/const lists stay False).
+      ids = self.block.id
+      if all(isinstance(x, TensorEdge)
+             and getattr(x.dst_id, "tensor_type", None) == "data" for x in ids):
+        e = ids[0]
     if e is None:
       return False
     if getattr(e.dst_id, "tensor_type", None) != "data":

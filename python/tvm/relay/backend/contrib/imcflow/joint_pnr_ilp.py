@@ -264,7 +264,25 @@ class Commodity:
 
         # Check for func_out (destination is function)
         if self.tensor_type and self.tensor_type.startswith('func_out'):
+            # drop-all (IMCFLOW_DROP_PSUM=1, keep=0): the psum drain traffic is
+            # never emitted (imce SEND + inode RECV both omitted), so exempting
+            # these commodities from the C1 data-capacity constraint is safe and
+            # REQUIRED for multi-imce fan-in (e.g. 16 func_outs onto 2 collector
+            # inodes with <=4 links each is otherwise structurally Infeasible).
+            # Routing/placement/policy are still produced (metadata stays intact).
+            from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
+            if drop_psum_send() and drop_psum_keep_every() <= 0:
+                return 'dropped_psum'
             return 'data'
+
+        # drop-all: conv->CONCAT psum edges likewise carry no real traffic (the
+        # producing imce omits every psum SEND and the concat emission is skipped
+        # in codegen), so exempt them from C1 too -- a 16-way concat fan-in onto
+        # one imce (split_conv_to_atomic multi-imce) is otherwise Infeasible.
+        if self.dest_type == NodeType.CONCAT:
+            from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every
+            if drop_psum_send() and drop_psum_keep_every() <= 0:
+                return 'dropped_psum'
 
         if self.tensor_type in CONST_TYPES:
             return 'const'
