@@ -147,37 +147,48 @@ def _family(model):
     if model.startswith(("vww", "mobilenet")): return "mobilenet"
     return "generic"
 
-# ResNet8 layer key: classify ALL convs in a region together.
-#   1x1               -> b?.down (residual/shortcut conv)
-#   3x3 split-fed/partial-ic (atoms) -> b?.c2 (second conv, fed by split of c1 out)
-#   3x3 full-ic       -> b?.c1 (first conv of the block)
-# block1 has no split (both 16->16 3x3): first-by-cid = c1, second = c2.
+# ResNet8 layer key: classify EACH conv by its OWN channel signature, NOT by the
+# region it landed in. This is residual-in-region-safe: when partitioning merges
+# multiple blocks (e.g. b1+b2) into one region, each conv still gets its true
+# block label instead of every conv collapsing to the region's block.
+#   block  <- out_channels: 16 -> b1, 32 -> b2, 64 -> b3
+#   role   <- 1x1 -> .down (shortcut) ; 3x3 full-ic -> .c1 ; 3x3 partial-ic -> .c2
+# "full-ic" is the max ic among the 3x3 convs producing the SAME oc (the block's
+# first conv uses the full prev-layer channels; atom-split c2 convs have a smaller
+# per-atom ic). Ties (block1's two equal 16->16 3x3 with no split) break by cid:
+# first = c1, rest = c2.
+_RESNET8_BLK_BY_OC = {16: "b1", 32: "b2", 64: "b3"}
+
 def _resnet8_region_layers(reg_short, convs):
-    blk = {"region1": "b1", "region2": "b2", "region3": "b3"}.get(reg_short)
-    if blk is None:
-        return None  # region4 etc -> caller falls back
+    if not convs:
+        return None  # no-conv region (e.g. a standalone residual add) -> caller falls back
     out = {}
-    convs_sorted = sorted(convs, key=lambda c: c["cid"])
-    threes = [c for c in convs_sorted if c["k"] != (1, 1)]
-    ones = [c for c in convs_sorted if c["k"] == (1, 1)]
-    for c in ones:
-        out[c["cid"]] = f"{blk}.down"
-    # split-fed / partial-ic atoms (ic < oc AND flagged split_fed, or ic not in {full})
-    if threes:
-        full_ic = max(c["ic"] for c in threes)  # the c1 uses the full prev-layer channels
+    # group 3x3 convs by their output-channel block so full-ic detection is per-block
+    threes_by_oc = {}
+    for c in sorted(convs, key=lambda c: c["cid"]):
+        blk = _RESNET8_BLK_BY_OC.get(c["oc"])
+        if blk is None:
+            continue  # unknown oc -> leave to caller's op-label fallback
+        if c["k"] == (1, 1):
+            out[c["cid"]] = f"{blk}.down"
+        else:
+            threes_by_oc.setdefault(c["oc"], []).append(c)
+    for oc, threes in threes_by_oc.items():
+        blk = _RESNET8_BLK_BY_OC[oc]
+        full_ic = max(c["ic"] for c in threes)
+        equal_io = all(t["ic"] == t["oc"] for t in threes) and not any(
+            t.get("split_fed") for t in threes)
         c1_done = False
-        for c in threes:
-            if not c1_done and c["ic"] == full_ic and not c.get("split_fed"):
+        for c in threes:  # already cid-sorted (dict preserves insertion order)
+            if equal_io:
+                # block1-style: no split, first cid = c1, rest = c2
+                out[c["cid"]] = f"{blk}.c1" if not c1_done else f"{blk}.c2"
+                c1_done = True
+            elif not c1_done and c["ic"] == full_ic and not c.get("split_fed"):
                 out[c["cid"]] = f"{blk}.c1"; c1_done = True
             else:
                 out[c["cid"]] = f"{blk}.c2"
-        # block1 fallback: no split, two equal 16->16 -> first cid c1, rest c2
-        if len(threes) >= 2 and all(t["ic"] == t["oc"] for t in threes)            and not any(t.get("split_fed") for t in threes):
-            out = {c["cid"]: f"{blk}.c2" for c in threes}
-            out[threes[0]["cid"]] = f"{blk}.c1"
-            for c in ones:
-                out[c["cid"]] = f"{blk}.down"
-    return out
+    return out or None
 
 # ------------------------- extraction -------------------------
 
