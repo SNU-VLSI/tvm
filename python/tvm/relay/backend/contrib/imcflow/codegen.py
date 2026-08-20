@@ -1144,32 +1144,44 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       hopB = info["hopB"]  # (RESBUF,resbuf_out) -> (add,data)      resend  SEND
       db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(hopA)
       assert db is not None, f"RESBUF DataBlock not found for {hopA}"
-      # collector: INODE_RECV hop A into the buffer (ALWAYS first, unchanged).
       recv_info = DevConfig().get_tensor_edge_info(hopA)
       recv_hid = self.get_hid(hopA.dst_id)
-      recv_block = RecvBlock(self, db, recv_info.fifo_id,
-                             f"resbuf collector recv: {hopA}")
-      self.codeblocks.append(recv_hid, recv_block, phase)
       # resend: INODE_SEND hop B out of the buffer.
       send_info = DevConfig().get_tensor_edge_info(hopB)
       send_hid = self.get_hid(hopB.src_id)
       fout_edge = interleave_by_gid.get(resbuf_gid)
+      # Task #8 iter3: fold the collector fill (hop A) into the per-group interleave
+      # only when it is co-located on the SAME inode as the resend (hop B) -- i.e.
+      # the resend/funcout interleave path fires. A standalone 256-word collector
+      # drain BEFORE the resend wedges (the skip producer only trickles words as the
+      # input streams; demanding all 256 up-front starves the fed add and
+      # backpressures the region -- iter2 stalled at collector word 64/256).
+      fold_fill = fout_edge is not None and recv_hid == send_hid
+      if not fold_fill:
+        # collector: standalone INODE_RECV hop A into the buffer (plain-resend path).
+        recv_block = RecvBlock(self, db, recv_info.fifo_id,
+                               f"resbuf collector recv: {hopA}")
+        self.codeblocks.append(recv_hid, recv_block, phase)
       if fout_edge is not None:
-        # Task #8: interleave the resend with the add's func_out collector.
+        # Task #8: interleave the resend with the add's func_out collector, and
+        # (iter3) fold the collector fill in per-group when co-located.
         fout_info = DevConfig().get_tensor_edge_info(fout_edge)
         fout_db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(fout_edge)
         assert fout_db is not None, f"func_out DataBlock not found for {fout_edge}"
         il_block = ResidResendFuncoutInterleavedBlock(
             self, db, send_info, fout_db, fout_info.fifo_id, group=4,
+            collector_fifo_id=(recv_info.fifo_id if fold_fill else None),
             annotation=f"resbuf resend/funcout interleave: {hopB} || {fout_edge}")
-        # stash for consistency counting (bill resend hopB + func_out edge).
+        # stash for consistency counting (bill resend hopB + func_out edge, and the
+        # collector hop A when folded in).
         il_block._resbuf_resend_edge = hopB
         il_block._funcout_edge = fout_edge
+        il_block._resbuf_collector_edge = hopA if fold_fill else None
         self.codeblocks.append(send_hid, il_block, phase)
         print(f"[resid-inode-buffer] codegen RESBUF {resbuf_gid}: "
-              f"collector RECV @ {recv_hid} (fifo {recv_info.fifo_id}) + "
+              f"{'fill+' if fold_fill else 'standalone-collector RECV @ %s + ' % recv_hid}"
               f"resend/funcout INTERLEAVE @ {send_hid} "
-              f"(funcout fifo {fout_info.fifo_id})")
+              f"(collector fifo {recv_info.fifo_id}, funcout fifo {fout_info.fifo_id})")
         continue
       # plain in-order resend (no co-located func_out collector on this inode).
       send_block = SendBlock(self, db, send_info,
@@ -1285,6 +1297,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         # class never constructed -> byte-identical.
         _resend_e = getattr(block, "_resbuf_resend_edge", None)
         _fout_e = getattr(block, "_funcout_edge", None)
+        _coll_e = getattr(block, "_resbuf_collector_edge", None)
         if _resend_e is not None:
           _add_send_map(self.send_map, block.resbuf_db, _resend_e)
         if _fout_e is not None:
@@ -1293,6 +1306,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           else:
             _rc = math.ceil(block.funcout_db.size / 32)
           add_to_map(self.recv_map, _fout_e, _rc)
+        # Task #8 iter3: when the collector fill (hop A) is folded into this block
+        # (co-located inode), bill its RECV here (the standalone RecvBlock that used
+        # to bill it is suppressed). Count = resbuf word count. When NOT folded, hop
+        # A is billed by the standalone RecvBlock as usual (byte-identical).
+        if _coll_e is not None:
+          _cc = math.ceil(block.resbuf_db.size / 32)
+          add_to_map(self.recv_map, _coll_e, _cc)
       elif isinstance(block, SendBlockResidualFanoutInterleaved):
         # IMCFLOW_RESIDUAL_IN_REGION: word-interleaved model-input fan-out. All
         # edges SHARE ONE DataBlock whose .id lists every fan-out edge, so counting

@@ -1166,7 +1166,7 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
 
   def __init__(self, builder, resbuf_db: DataBlock, resend_info: TensorEdgeInfo,
                funcout_db: DataBlock, funcout_fifo_id: int, group: int = 4,
-               annotation: str = ""):
+               collector_fifo_id: int = None, annotation: str = ""):
     super().__init__(annotation)
     self.builder = builder
     self.resbuf_db = resbuf_db
@@ -1174,6 +1174,15 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
     self.funcout_db = funcout_db
     self.funcout_fifo_id = funcout_fifo_id
     self.group = group
+    # Task #8 iter3: when set, the RESBUF collector (hop A, from the skip producer
+    # imce) fill is folded INTO this block's per-group interleave (3-way:
+    # fill G -> resend G -> funcout G) instead of a standalone leading 256-word
+    # drain. The standalone drain wedges: the skip producer (deep in the compute
+    # pipeline, e.g. imce_0_1->imce_1_1->imce_2_1) only trickles words as the input
+    # streams, so demanding all 256 up-front before ANY resend starves the add and
+    # backpressures the whole region (iter2: stalled at collector word 64/256).
+    # Interleaving the fill keeps the dataflow acyclic per group.
+    self.collector_fifo_id = collector_fifo_id
     # SendBlock helper: borrow ONLY its per-word resend presend rendezvous. Its
     # own body is discarded (never registered / rendered).
     self._resend_helper = SendBlock(builder, resbuf_db, resend_info, annotation="")
@@ -1198,11 +1207,22 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
     resend_policy = self.resend_info.policy_info[0].address
     resend_fifo = self.resend_info.fifo_id
     fout_fifo = self.funcout_fifo_id
+    coll_fifo = self.collector_fifo_id
 
     def group_body(iter, resend_base=resend_base, funcout_base=funcout_base,
                    resend_policy=resend_policy, resend_fifo=resend_fifo,
-                   fout_fifo=fout_fifo, g=g):
+                   fout_fifo=fout_fifo, coll_fifo=coll_fifo, g=g):
       code = ""
+      # Task #8 iter3: FILL `g` words from the skip producer into the RESBUF buffer
+      # FIRST (hop A collector RECV, same buffer base as the resend). Folding the
+      # fill per-group -- instead of one leading 256-word drain -- lets the skip
+      # producer keep pace with the streaming input while the add downstream makes
+      # progress, so no side of the region starves.
+      if coll_fifo is not None:
+        for j in range(g):
+          widx = f"(({iter})*{g} + {j})"
+          code += (f"__builtin_INODE_RECV({resend_base} + {widx}*32, 0, 0, "
+                   f"{coll_fifo});\n")
       # resend `g` resbuf_out words (feed the add), each per-word rendezvous.
       for j in range(g):
         widx = f"(({iter})*{g} + {j})"
@@ -1222,6 +1242,9 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
 
     # Defensive tail (ResNet8 group|total, so tail==0 -> emits nothing).
     for r in range(ngroups * g, ngroups * g + tail):
+      if coll_fifo is not None:
+        self.body.add(TextBlock(
+            f"__builtin_INODE_RECV({resend_base} + {r}*32, 0, 0, {coll_fifo});"))
       pre = self._resend_helper._get_presend_sync_code_str(iter_var=str(r))
       if pre:
         self.body.add(TextBlock(pre.rstrip("\n")))
