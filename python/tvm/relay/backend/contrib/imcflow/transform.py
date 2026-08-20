@@ -5036,6 +5036,204 @@ def constructTensorIDToTensorEdgeDict():
     _add(SrcID, tensor_edge)
     _add(DstID, tensor_edge)
 
+
+# ---------------------------------------------------------------------------
+# Task #5: residual-in-region SKIP -> inode dmem buffer (whole-tensor DataBlock)
+# ---------------------------------------------------------------------------
+def _find_residual_skip_edges(func_name):
+  """Return the list of (edge, add_hwnode) for the in-region residual-add SKIP
+  operands in `func_name`, gated on residual_inode_buffer_mode().
+
+  DISCRIMINATOR (skip vs main vs const):
+    An in-region residual ADD is a fused vecops composite whose IMCE receives
+    >= 2 `data` operands, each from a DISTINCT in-region IMCE producer. (This is
+    exactly is_residual_data_input_recv's >=2-producer signature.) For ResNet8
+    b3.res the add is composite gid 95 (imce_3_1), receiving:
+       MAIN : ((92,72),odata) -> ((95,65),data)   imce_3_2 -> imce_3_1   (b3.c2)
+       SKIP : (94,odata)       -> ((95,66),data)   imce_2_1 -> imce_3_1   (b3.down 1x1)
+    Both are composite `data` edges (tuple dst) with an IMCE source -- so the
+    task's hardcoded lhs/rhs edges (e.g. ((91,88),odata)->((92,72),lhs)) are the
+    WRONG target: those are IC-split psum-merge (main-path accumulation) adds,
+    not the residual skip.
+
+  Among the >=2 data producers of a residual add, the SKIP is discriminated as
+  the producer whose relay output is NOT the deepest branch of the diverge, i.e.
+  the branch that is a bare qconv (the 1x1 downsample) rather than a psum-merge
+  composite chain. Concretely: the MAIN operand's producer is the qconv2d-with
+  -postop composite that carries the block's main conv+add accumulation; the SKIP
+  operand's producer is the downsample conv (a plain qconv whose src gid is NOT a
+  composite that itself terminates the main add-chain). We pick the SKIP as the
+  data-operand whose producer graph node has the SHALLOWER path to the region's
+  divergence point (fewer intervening convs). We approximate this robustly by:
+  the SKIP producer's outer graph_node_id is a *plain* qconv Call (its src
+  TensorID is `(gid, odata)` with gid an int, i.e. NOT a composite tuple),
+  whereas the MAIN producer is a composite (src gid is `(outer, inner)`), OR when
+  both are plain, the one with the smaller producer topo id. const operands
+  (scale rhs) are excluded because they are Constant-sourced.
+  """
+  from tvm.relay.op.contrib.imcflow import residual_inode_buffer_mode
+  if not residual_inode_buffer_mode():
+    return []
+  edge_list = ImcflowDeviceConfig().TensorEdgeListDict.get(func_name, [])
+  id_to_node = CustomIDToNode()
+
+  def _src_is_imce_producer(src_id):
+    """Structural (placement-free) test: the producer is an on-chip IMCE op
+    (a qconv/composite Call producing `odata`), NOT a boundary func_in inode
+    (Var), a Constant (scale rhs), or the model input."""
+    if src_id.tensor_type != "odata":
+      return False
+    inner = getInnerNodeID(src_id.graph_node_id)
+    node = id_to_node.get(inner)
+    if node is None:
+      return False
+    if isinstance(node, (relay.Var, relay.Constant)):
+      return False
+    return isinstance(node, relay.Call)
+
+  # group data-operand edges by their receiver outer graph node (the vecops
+  # composite hosting the residual add). placement (HWNodeMap) is NOT available
+  # yet (PnR has not run) -> group structurally.
+  by_recv = collections.defaultdict(list)
+  for e in edge_list:
+    if e.dst_id.tensor_type != "data":
+      continue
+    if not isinstance(e.dst_id.graph_node_id, tuple):
+      continue  # residual add operands land as composite tuple `data`
+    if not _src_is_imce_producer(e.src_id):
+      continue  # exclude inode-src (boundary func_in) and const-src operands
+    recv_outer = getOuterNodeID(e.dst_id.graph_node_id)
+    by_recv[recv_outer].append(e)
+
+  debug_print(f"[resid-inode-buffer] {func_name}: candidate recv groups: "
+              f"{ {k: len(v) for k, v in by_recv.items()} }")
+  results = []
+  for recv_outer, edges in by_recv.items():
+    # distinct producers (by outer graph node)
+    distinct_src = {}
+    for e in edges:
+      distinct_src.setdefault(getOuterNodeID(e.src_id.graph_node_id), e)
+    if len(distinct_src) < 2:
+      continue  # not a converging residual add
+    # SKIP vs MAIN: the SKIP producer is a *plain* qconv (its src gid is an int,
+    # i.e. a bare downsample conv), whereas the MAIN producer is a composite
+    # (its src gid is a (outer,inner) tuple = the block's qconv+add psum-merge
+    # chain). If both are plain, pick the numerically smaller producer gid.
+    plain = [e for e in distinct_src.values()
+             if not isinstance(e.src_id.graph_node_id, tuple)]
+    if plain:
+      skip_edge = plain[0]
+    else:
+      skip_edge = min(distinct_src.values(),
+                      key=lambda e: getOuterNodeID(e.src_id.graph_node_id))
+    results.append((skip_edge, recv_outer))
+  return results
+
+
+def splitResidualSkipThroughInodeBuffer(mod):
+  """Insert an inode-dmem RESBUF waypoint on each in-region residual SKIP edge.
+
+  Called AFTER constructTensorEdgeList and BEFORE Joint PnR. Replaces the target
+  skip edge (producer,odata)->(add,data) with two hops:
+      (a) (producer,odata) -> (RESBUF, resbuf)       [producer imce -> inode]
+      (b) (RESBUF, resbuf_out) -> (add, data)         [inode -> add imce]
+  where RESBUF is a synthetic graph_node_id anchored (via HWNodeMap + a preassign
+  request) to the add imce's ROW inode. Records preassignment requests in
+  DevConfig().ResidBufferPreassign for the driver to feed into Joint PnR.
+
+  Gated on residual_inode_buffer_mode(); OFF -> no-op -> byte-identical.
+  """
+  from tvm.relay.op.contrib.imcflow import residual_inode_buffer_mode
+  if not residual_inode_buffer_mode():
+    return
+  debug_print("[resid-inode-buffer] splitResidualSkipThroughInodeBuffer called")
+  cfg = ImcflowDeviceConfig()
+  if not hasattr(cfg, "ResidBufferPreassign"):
+    cfg.ResidBufferPreassign = {}
+  if not hasattr(cfg, "ResidBufferInfo"):
+    cfg.ResidBufferInfo = {}
+  # synthetic RESBUF ids use a high negative band to avoid colliding with real
+  # custom_ids (which are >=0) and const ids (which are negative but small mag).
+  next_resbuf_id = [-100000]
+  for func_name in list(cfg.TensorEdgeListDict.keys()):
+    skip_edges = _find_residual_skip_edges(func_name)
+    if not skip_edges:
+      continue
+    edge_list = cfg.TensorEdgeListDict[func_name]
+    for skip_edge, recv_outer in skip_edges:
+      resbuf_gid = next_resbuf_id[0]
+      next_resbuf_id[0] -= 1
+      # The add-imce's row is decided by Joint PnR, which has NOT run yet, so we
+      # cannot anchor the RESBUF to "the add's row inode" here (circular). For
+      # the codegen-only bring-up we anchor to a fixed demonstration inode
+      # (inode_3_0); ILP-aware placement is task #6.
+      row = 3
+      row_inode = NodeID.from_inode_coord(row)
+      # hop A: producer -> RESBUF (inode collector)
+      hopA = TensorEdge(skip_edge.src_id, TensorID(resbuf_gid, "resbuf"),
+                        skip_edge.split_idx)
+      # hop B: RESBUF -> add (same data slot / split_idx)
+      hopB = TensorEdge(TensorID(resbuf_gid, "resbuf_out"), skip_edge.dst_id,
+                        skip_edge.split_idx)
+      # splice into the per-func edge list (replace skip_edge with hopA, hopB)
+      new_list = []
+      for e in edge_list:
+        if e is skip_edge:
+          new_list.append(hopA)
+          new_list.append(hopB)
+        else:
+          new_list.append(e)
+      cfg.TensorEdgeListDict[func_name] = new_list
+      edge_list = new_list
+      # anchor RESBUF to the row inode in HWNodeMap + record preassign request
+      cfg.HWNodeMap[resbuf_gid] = row_inode
+      cfg.ResidBufferPreassign.setdefault(func_name, {})[resbuf_gid] = row_inode
+      cfg.ResidBufferInfo[resbuf_gid] = dict(
+        func_name=func_name, hopA=hopA, hopB=hopB,
+        producer=skip_edge.src_id, add=skip_edge.dst_id,
+        recv_outer=recv_outer, inode=row_inode, orig_skip=skip_edge)
+      debug_print(f"[resid-inode-buffer] {func_name}: RESBUF {resbuf_gid} @ "
+                  f"{row_inode} splits {skip_edge} -> {hopA} + {hopB}")
+  # rebuild the flat TensorEdgeList to match the per-func lists
+  cfg.TensorEdgeList = []
+  for fn_name, lst in cfg.TensorEdgeListDict.items():
+    cfg.TensorEdgeList.extend(lst)
+
+  # ---------------------------------------------------------------------------
+  # STRUCTURAL WALL (task #5 stop condition), empirically confirmed:
+  # The discriminator + edge-split above WORK (they correctly find only the
+  # b3.res SKIP edge (94,odata)->((95,66),data) and reroute it through the
+  # synthetic RESBUF waypoint). BUT the entire post-edge-list pipeline is driven
+  # by walking the RELAY graph and assumes every TensorEdge endpoint is a real
+  # relay Call/Var/Constant with a CustomIDToNode entry:
+  #   1. Joint PnR GraphExtractor builds nodes from _visit(func); a synthetic
+  #      RESBUF gid has NO node, so BOTH hop commodities are SILENTLY DROPPED
+  #      (_extract_graph_commodities_from_tensor_edge_list: `continue` when a
+  #      node is not in self.nodes) -> no routing, no policy entry.
+  #   2. construct_noc_paths_from_pnr_results does CustomIDToNode()[dst_graph_id]
+  #      -> HARD KeyError on the RESBUF gid (joint_pnr_ilp.py ~2395).
+  #   3. MemoryAllocator.get_size / the codegen block builders would fail the
+  #      same way (relay-walk driven, no synthetic node).
+  # Making the RESBUF a first-class routable+allocatable in-region inode buffer
+  # requires a NEW ILP NodeType (INODE_BUFFER) + MemoryAllocator DataBlock
+  # support + noc-path/policy/codegen recognition -- the infrastructure the
+  # design memory scopes as tasks #6/#7 (ILP residual-awareness). There is also
+  # a hard ORDERING conflict: the SKIP-vs-MAIN discriminator needs the add-imce
+  # placement (HWNodeMap), which only exists AFTER PnR, yet the edge-split must
+  # run BEFORE PnR. See BN_MINMAX_PACKING_HANDOFF / bn-minmax-packing-lever memo.
+  if cfg.ResidBufferInfo:
+    raise RuntimeError(
+      "IMCFLOW_RESID_INODE_BUFFER (task #5): the residual-SKIP edge-split fired "
+      f"({len(cfg.ResidBufferInfo)} skip edge(s) rerouted through inode buffers) "
+      "but the synthetic RESBUF waypoint is NOT routable/allocatable by the "
+      "current relay-walk-driven PnR + MemoryAllocator + noc-path pipeline "
+      "(Joint PnR silently drops the RESBUF commodities; "
+      "construct_noc_paths_from_pnr_results raises KeyError on the RESBUF gid). "
+      "This needs a first-class INODE_BUFFER ILP NodeType + MemoryAllocator "
+      "DataBlock support (tasks #6/#7). Detection/edge-split is validated; keep "
+      "this sub-lever OFF until the buffer node type lands.")
+
+
 class MemoryAllocator:
     """
     Allocate memory block to var, constant, function output.

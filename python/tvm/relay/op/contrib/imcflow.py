@@ -595,6 +595,23 @@ def residual_in_region_mode() -> bool:
     "1", "on", "true", "yes")
 
 
+def residual_inode_buffer_mode() -> bool:
+  """Residual-in-region INODE-BUFFER sub-lever (IMCFLOW_RESID_INODE_BUFFER).
+
+  Task #5 of the residual-in-region plan: route the in-region residual SKIP
+  operand through an inode dmem buffer (whole-tensor DataBlock) instead of the
+  current direct imce->imce SEND. Only meaningful when residual_in_region_mode()
+  is ON. Default OFF -> the skip stays a direct imce->imce edge -> codegen
+  byte-identical to the residcap13 baseline (and, when the outer lever is also
+  OFF, byte-identical to stock).
+  """
+  import os
+  if not residual_in_region_mode():
+    return False
+  return os.environ.get("IMCFLOW_RESID_INODE_BUFFER", "").strip().lower() in (
+    "1", "on", "true", "yes")
+
+
 def makeBNPattern(data):
   gamma = is_constant()
   beta = is_constant()

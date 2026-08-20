@@ -514,6 +514,9 @@ def compile_for_imcflow_v2(
     # ------------------------------------------------------------------
     print("[v2] Constructing tensor edge list...")
     imcflow_transform.constructTensorEdgeList(mod)
+    # Task #5: reroute in-region residual SKIP through an inode dmem buffer
+    # (whole-tensor DataBlock). No-op unless IMCFLOW_RESID_INODE_BUFFER is on.
+    imcflow_transform.splitResidualSkipThroughInodeBuffer(mod)
     imcflow_transform.constructTensorIDToTensorEdgeDict()
 
     if save_intermediate:
@@ -522,6 +525,16 @@ def compile_for_imcflow_v2(
                 print(key, file=f)
                 for path in paths:
                     print(path, file=f)
+
+    # Task #5: feed RESBUF inode preassignments (row inode of the add imce) so
+    # Joint PnR anchors the residual buffer waypoint on that inode. No-op unless
+    # the residual inode-buffer sub-lever is on.
+    resid_preassign = getattr(config, "ResidBufferPreassign", {})
+    for _fn, _m in resid_preassign.items():
+        for _gid, _inode in _m.items():
+            _row = _inode.to_coord()[0]
+            preassigned.setdefault(_fn, {})[_gid] = Coord(_row, 0)  # col 0 = INODE
+            print(f"[v2] preassigned RESBUF func={_fn} gid={_gid} -> INODE row {_row}")
 
     print("[v2] Running Joint PnR with random preassigned placements...")
     pnr_results = run_joint_pnr_and_update_config(

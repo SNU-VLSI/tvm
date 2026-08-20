@@ -202,6 +202,9 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     # Note: TensorEdgeList is constructed from logical edges, does NOT require HWNodeMap
     print("[TensorEdgeList] Constructing tensor edge list...")
     imcflow_transform.constructTensorEdgeList(mod)
+    # Task #5: reroute in-region residual SKIP through an inode dmem buffer.
+    # No-op unless IMCFLOW_RESID_INODE_BUFFER is on -> byte-identical otherwise.
+    imcflow_transform.splitResidualSkipThroughInodeBuffer(mod)
     if save_intermediate:
         with open(f"{output_dir}/tensor_edge_list.txt", "w") as f:
             for key, paths in DevConfig().TensorEdgeListDict.items():
@@ -218,7 +221,15 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
 
     # Step 17: Joint PnR ILP (mapping + routing simultaneously)
     print("[Joint PnR] Running Joint Place & Route ILP...")
-    pnr_results = run_joint_pnr_and_update_config(mod, DevConfig().TensorEdgeListDict)
+    _resid_pre = getattr(DevConfig(), "ResidBufferPreassign", None)
+    if _resid_pre:
+        from tvm.relay.backend.contrib.imcflow.joint_pnr_ilp import Coord as _Coord
+        _pre = {fn: {g: _Coord(nid.to_coord()[0], 0) for g, nid in m.items()}
+                for fn, m in _resid_pre.items()}
+        pnr_results = run_joint_pnr_and_update_config(
+            mod, DevConfig().TensorEdgeListDict, preassigned_placements=_pre)
+    else:
+        pnr_results = run_joint_pnr_and_update_config(mod, DevConfig().TensorEdgeListDict)
     if save_intermediate:
         with open(f"{output_dir}/hw_node_map.txt", "w") as f:
             pprint.pprint(DevConfig().HWNodeMap, stream=f)
@@ -758,6 +769,9 @@ def transform_model_single_qconv(mod, param_dict, output_dir, placements, top_ou
     # ========================================================================
     print("[TensorEdgeList] Constructing tensor edge list...")
     imcflow_transform.constructTensorEdgeList(mod)
+    # Task #5: reroute in-region residual SKIP through an inode dmem buffer.
+    # No-op unless IMCFLOW_RESID_INODE_BUFFER is on -> byte-identical otherwise.
+    imcflow_transform.splitResidualSkipThroughInodeBuffer(mod)
     if save_intermediate:
         with open(f"{output_dir}/tensor_edge_list_p2.txt", "w") as f:
             for key, paths in DevConfig().TensorEdgeListDict.items():
@@ -766,6 +780,15 @@ def transform_model_single_qconv(mod, param_dict, output_dir, placements, top_ou
                     print(path, file=f)
 
     imcflow_transform.constructTensorIDToTensorEdgeDict()
+
+    # Task #5: feed RESBUF inode preassignments into PnR (no-op unless split fired)
+    _resid_pre = getattr(DevConfig(), "ResidBufferPreassign", None)
+    if _resid_pre:
+        from tvm.relay.backend.contrib.imcflow.joint_pnr_ilp import Coord as _Coord
+        for _fn, _m in _resid_pre.items():
+            for _g, _nid in _m.items():
+                preassigned.setdefault(_fn, {})[_g] = _Coord(_nid.to_coord()[0], 0)
+                print(f"[resid-inode-buffer] preassigned RESBUF {_fn} gid={_g} -> INODE row {_nid.to_coord()[0]}")
 
     print("[Joint PnR] Running Joint Place & Route ILP with pre-assigned placements...")
     pnr_results = run_joint_pnr_and_update_config(
