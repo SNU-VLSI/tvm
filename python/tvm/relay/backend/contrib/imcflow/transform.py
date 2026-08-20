@@ -6119,12 +6119,30 @@ class MemoryAllocator:
               # Assert the 1-row buffer fits inode memory (it always should).
               if _input_reuse:
                 _orig = mem_block.size
-                mem_block.set_size(height_offset)  # exactly one row (W*C bytes)
-                assert height_offset <= ImcflowDeviceConfig.INODE_MAX_TILING_SIZE, \
-                  (f"[INPUT_REUSE] 1-row buffer {height_offset}B exceeds inode memory "
-                   f"{ImcflowDeviceConfig.INODE_MAX_TILING_SIZE}B (reduce W or C)")
-                debug_print(f"    [INPUT_REUSE] input {var_name}: buffer {_orig} -> {height_offset} bytes (1 row); "
-                            f"pkt_cnts stay full = {pkt_cnts} (inode re-sends row {input_height_sizes} times)")
+                # drop-all: an input feeding a DROPPED standalone consumer (post-concat
+                # mm_quant / concat -- both skipped in codegen, and the matching inode
+                # SEND is suppressed) is dead traffic; even its "1 row" can exceed the
+                # inode mem at scale (16-imce 127x127 concat row = 260096B). Keep a 32B
+                # placeholder instead of asserting.
+                _dead_input = False
+                try:
+                  from tvm.contrib.imcflow import drop_psum_send as _dps3, drop_psum_keep_every as _dpk3
+                  if _dps3() and _dpk3() <= 0:
+                    _dst_n = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
+                    _dead_input = getattr(getattr(_dst_n, "op", None), "name", "") in (
+                        "qnn.imcflow_min_max_quantize", "concatenate")
+                except Exception:
+                  _dead_input = False
+                if _dead_input:
+                  mem_block.set_size(32)
+                  debug_print(f"    [DROP_PSUM] dead input {var_name}: buffer {_orig} -> 32B placeholder")
+                else:
+                  mem_block.set_size(height_offset)  # exactly one row (W*C bytes)
+                  assert height_offset <= ImcflowDeviceConfig.INODE_MAX_TILING_SIZE, \
+                    (f"[INPUT_REUSE] 1-row buffer {height_offset}B exceeds inode memory "
+                     f"{ImcflowDeviceConfig.INODE_MAX_TILING_SIZE}B (reduce W or C)")
+                  debug_print(f"    [INPUT_REUSE] input {var_name}: buffer {_orig} -> {height_offset} bytes (1 row); "
+                              f"pkt_cnts stay full = {pkt_cnts} (inode re-sends row {input_height_sizes} times)")
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               # base address = origin_base + height_base * height_offset
@@ -6145,9 +6163,13 @@ class MemoryAllocator:
               # buffer holds; the resent rows reuse that single row (DON'T-CARE data).
               if _input_reuse:
                 c_var_offsets = [0]                      # single tile, row 0
-                c_var_sizes = [height_offset // 4]       # exactly one row
-                debug_print(f"    [INPUT_REUSE] host transfer shrunk to 1 row: "
-                            f"{height_offset}B (was {[s*4 for s in [h_size * height_offset // 4 for h_size in input_height_sizes]]}B)")
+                if _dead_input:
+                  c_var_sizes = [32 // 4]                # match the 32B placeholder block
+                  debug_print(f"    [DROP_PSUM] host transfer for dead input shrunk to 32B")
+                else:
+                  c_var_sizes = [height_offset // 4]     # exactly one row
+                  debug_print(f"    [INPUT_REUSE] host transfer shrunk to 1 row: "
+                              f"{height_offset}B (was {[s*4 for s in [h_size * height_offset // 4 for h_size in input_height_sizes]]}B)")
 
               block_tiling_info = BlockTileInfo()
               block_tiling_info.set_info(
@@ -6224,8 +6246,18 @@ class MemoryAllocator:
               # counts match the full H*W. Mirrors the input shrink above.
               if _input_reuse:
                 _oorig = mem_block.size
-                mem_block.set_size(height_offset)  # 1 output row
-                debug_print(f"    [INPUT_REUSE] output buffer {_oorig} -> {height_offset} bytes (1 row; DON'T-CARE)")
+                from tvm.contrib.imcflow import drop_psum_send as _dps2, drop_psum_keep_every as _dpk2
+                if _dps2() and _dpk2() <= 0:
+                  # drop-all: NOTHING ever writes the func_out buffer (imce SEND,
+                  # inode RECV and host read-back are all omitted), so even one
+                  # row can overflow the inode data mem at scale (16-imce 127x127:
+                  # 1 row = 127*1024ch*2B = 260096B > 64KB). Keep a single
+                  # 32B-aligned packet as an inert placeholder.
+                  mem_block.set_size(32)
+                  debug_print(f"    [DROP_PSUM] output buffer {_oorig} -> 32 bytes (placeholder; DON'T-CARE)")
+                else:
+                  mem_block.set_size(height_offset)  # 1 output row
+                  debug_print(f"    [INPUT_REUSE] output buffer {_oorig} -> {height_offset} bytes (1 row; DON'T-CARE)")
 
               # Calculate CPU variable offsets (byte offset) and sizes (int32 count)
               c_output_var_offsets = [base * height_offset for base in output_tile_bases]
@@ -6238,8 +6270,12 @@ class MemoryAllocator:
               # Output is DON'T-CARE for this power kernel; read just the 1 row.
               if _input_reuse:
                 c_output_var_offsets = [0]
-                c_output_var_sizes = [height_offset // 4]
-                debug_print(f"    [INPUT_REUSE] host output read-back shrunk to 1 row: {height_offset}B")
+                if _dps2() and _dpk2() <= 0:
+                  c_output_var_sizes = [32 // 4]  # match the 32B placeholder block
+                  debug_print(f"    [DROP_PSUM] host output read-back shrunk to 32B placeholder")
+                else:
+                  c_output_var_sizes = [height_offset // 4]
+                  debug_print(f"    [INPUT_REUSE] host output read-back shrunk to 1 row: {height_offset}B")
 
               block_tiling_info = BlockTileInfo()
               block_tiling_info.set_info(

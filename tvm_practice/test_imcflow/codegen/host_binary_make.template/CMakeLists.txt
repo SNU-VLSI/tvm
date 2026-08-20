@@ -355,7 +355,7 @@ if(TVM_BUILD_HOST_RUNNER)
     # 64MB: 127x127x256 power kernels need input(4.1MB)+bitpack ws(2MB)+output+
     # transforms in one pool; 8MB overflowed (TVMBackendAllocWorkspace 2064512 -> 1283).
     # gem5-simulated host RAM is ample; this is .bss, not sim memory pressure.
-    TVM_WORKSPACE_SIZE_BYTES=67108864
+    TVM_WORKSPACE_SIZE_BYTES=268435456
     TVM_CRT_LOG_LEVEL=3
   )
 
@@ -414,7 +414,7 @@ if(ISA STREQUAL "ARM")
         # kernels overflow from 32x32 up (input alone is 256KB; the RTL x86 run
         # aborted the same way at 127x127 with an 8MB pool). .bss-only cost;
         # the petalinux board RAM is ample.
-        TVM_WORKSPACE_SIZE_BYTES=67108864
+        TVM_WORKSPACE_SIZE_BYTES=268435456
       )
       
       message(STATUS "ARM bare-metal runner will be built")

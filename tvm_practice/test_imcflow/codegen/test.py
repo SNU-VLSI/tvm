@@ -112,6 +112,8 @@ MODEL_REGISTRY = {
     "one_1x1_quant_4imce": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=256), "ones"),
     "one_1x1_quant_8imce": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=512), "ones"),
     "one_1x1_quant_16imce": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=8, iW=8, IC=256, OC=1024), "ones"),
+    # 16-imce concurrent power kernel at DMM scale (~3ms compute @18cyc/px)
+    "one_1x1_quant_16imce_max127": (lambda: models_for_test.getOne1x1ConvQuantModel(iH=127, iW=127, IC=256, OC=1024), "ones"),
     # Multi-imce power kernel: n_par independent convs, shared input (ONE activation
     # multicast group in PnR), tuple output (per-conv func_out, drop-all omits the
     # traffic) -- avoids split_conv_to_atomic's 16-way concat fan-in (C1 infeasible).
