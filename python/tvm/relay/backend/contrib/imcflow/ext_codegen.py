@@ -590,11 +590,56 @@ __UIO_READ_POST__
   return 0;
 }
 
+// Invoke-only wait path.  Keep the policy-update wait conservative, but do not
+// execute any experimental MMIO barriers between a TILE power-region BEGIN and
+// END.  UIO remains the completion signal and STATE is still the lost-edge
+// fallback; only the barrier-wrapped accessors are bypassed.
+static inline int wait_imcflow_interrupt_unfenced(int fd, volatile uint32_t* npu_pointer)
+{
+  uint32_t info;
+  fd_set readfds;
+  struct timeval timeout;
+
+  IMCFLOW_DEBUG_PRINT("unfenced interrupt wait: entry fd=%d", fd);
+  if (npu_pointer[STATE_REG_IDX] == SET_IDLE_CODE) {
+    IMCFLOW_DEBUG_PRINT("unfenced interrupt wait: STATE already IDLE");
+    return 0;
+  }
+
+  FD_ZERO(&readfds);
+  FD_SET(fd, &readfds);
+  timeout.tv_sec = 1;
+  timeout.tv_usec = 0;
+
+  int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
+  if (ret == 0) {
+    fprintf(stderr, "WARN: Interrupt timeout (1s) - falling back to unfenced STATE-register poll\\n");
+    return wait_for_idle_unfenced(npu_pointer);
+  } else if (ret < 0) {
+    perror("select failed");
+    return wait_for_idle_unfenced(npu_pointer);
+  }
+
+  ssize_t nb = read(fd, &info, sizeof(info));
+  if (nb != (ssize_t)sizeof(info)) {
+    perror("read interrupt failed");
+    return wait_for_idle_unfenced(npu_pointer);
+  }
+  return 0;
+}
+
 static inline void generate_ack(uint32_t* int_ack_gen)
 {
   IMCFLOW_DEBUG_PRINT("interrupt ACK: before write");
 __ACK_WRITE__
   IMCFLOW_DEBUG_PRINT("interrupt ACK: after write");
+}
+
+static inline void generate_ack_unfenced(uint32_t* int_ack_gen)
+{
+  IMCFLOW_DEBUG_PRINT("unfenced interrupt ACK: before write");
+  int_ack_gen[0] = 0b1;
+  IMCFLOW_DEBUG_PRINT("unfenced interrupt ACK: after write");
 }
 """
     return (code
@@ -653,6 +698,22 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
              __CTRL0_READ__,__CTRL1_READ__,__CTRL2_READ__,__CTRL3_READ__,
              __CTRL4_READ__,__CTRL5_READ__,__CTRL6_READ__,__CTRL7_READ__);
       fflush(stderr);
+    }
+  }
+}
+
+static int wait_for_idle_unfenced(volatile uint32_t* npu_pointer) {
+  uint32_t poll_count = 0;
+
+  while (1) {
+    uint32_t state = npu_pointer[STATE_REG_IDX];
+    if (state == SET_IDLE_CODE) {
+      return 0;
+    }
+    if (++poll_count >= MAX_POLL_COUNT) {
+      fprintf(stderr,"[POLLING ERROR] Unfenced timeout after %u polls (state: 0x%x)\\n",
+              poll_count, state);
+      return -1;
     }
   }
 }
@@ -838,12 +899,12 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     return code
 
   def generateInvokeStartWaitCode(self):
-    """Generate only RUN and completion wait, with no post-RUN barrier."""
+    """Generate barrierless RUN and completion wait for an NPU invoke."""
     code = CodeWriter()
     code += "/* IMCFLOW-INVOKE: RUN doorbell intentionally has no post barrier. */\n"
     code += "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;\n"
     if self.os == "linux":
-      code += "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);\n"
+      code += "_wait_rc = wait_imcflow_interrupt_unfenced(npu_fd, npu_pointer);\n"
     elif USE_POLLING:
       code += "_wait_rc = wait_for_idle(npu_pointer);\n"
     else:
@@ -851,16 +912,13 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     return code
 
   def generateInvokeFinalizeCode(self):
-    """Generate completion handling after a RUN wait has returned."""
+    """Generate barrierless ACK/INTR_DONE handling after an invoke wait."""
     code = CodeWriter()
     code += self.emitDebugPrint(f"{self.func_name}: invoke after RUN wait")
     code += 'IMCFLOW_DEBUG_PRINT("invoke completion wait returned rc=%d", _wait_rc);\n'
-    code += self.emitMmioBarrier("invoke completion observed before interrupt ACK")
     if self.os == "linux":
-      code += "generate_ack(int_ack_gen_pointer);\n"
-      code += self.emitMmioBarrier("invoke interrupt ACK visible before INTR_DONE")
-    code += self.emitMmioWrite32("npu_pointer", "INTR_DONE_REG_IDX", "1")
-    code += self.emitMmioBarrier("invoke INTR_DONE visible before following MMIO")
+      code += "generate_ack_unfenced(int_ack_gen_pointer);\n"
+    code += "npu_pointer[INTR_DONE_REG_IDX] = 1;\n"
     code += self.emitDebugPrint(f"{self.func_name}: invoke end")
     return code
 
@@ -1251,9 +1309,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
             f"{self._power_c_string(f'{self.func_name}_tile_{t_idx}')});\n"
         )
       code += self.generateInvokeStartWaitCode()
+      code += self.generateInvokeFinalizeCode()
       if self.os == "linux":
         code += "TVM_POWER_REGION_END();\n"
-      code += self.generateInvokeFinalizeCode()
       code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
       code += "if (_power_retry_requested) break;\n"
       code += self.emit_power_tag_set("kernel_stage", "output_transfer")

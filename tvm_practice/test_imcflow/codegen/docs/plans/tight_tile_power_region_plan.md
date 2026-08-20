@@ -1,5 +1,11 @@
 # Tight TILE power-region 구현 계획
 
+> 구현 후 경계 갱신(2026-08-20): 실제 trace에서 interrupt wait 뒤 ACK 전까지
+> IMCFlow의 높은 전력 상태가 유지되는 것이 확인되어, TILE 종료 경계를 ACK와
+> `INTR_DONE` 뒤로 옮겼다. 최종 순서는 `BEGIN -> RUN -> WAIT -> ACK -> INTR_DONE ->
+> END`이며 이 내부 invoke 경로에는 MMIO barrier나 별도의 비동기 tag를 넣지 않는다.
+> 아래의 ACK/`INTR_DONE`을 region 밖에 둔다는 기존 문장은 최초 계획의 기록이다.
+
 ## 1. 목표
 
 TVM power scope가 `TILE`일 때 각 tile의 bulk CPU↔IMCFlow transfer를 측정에서
