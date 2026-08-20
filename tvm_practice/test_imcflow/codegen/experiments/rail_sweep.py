@@ -105,6 +105,7 @@ def main():
     ap.add_argument("--settle", type=float, default=3.0)
     ap.add_argument("--out", default=None)
     ap.add_argument("--probe-collapse", action="store_true", help="continue past pulse-collapse points (marked invalid)")
+    ap.add_argument("--no-retry", action="store_true", help="hang-class safety: no 2nd attempt on run-fail")
     args = ap.parse_args()
 
     date = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -156,7 +157,7 @@ def main():
             time.sleep(args.settle)
             meas = {r: float(mgr.meas_voltage(r.upper())) for r in RAILS}
             status = "ok"; pulse = None
-            for attempt in (1, 2):
+            for attempt in ((1,) if args.no_retry else (1, 2)):
                 before = rec_linecount()
                 ok, raw = board_run()
                 after = rec_linecount()
