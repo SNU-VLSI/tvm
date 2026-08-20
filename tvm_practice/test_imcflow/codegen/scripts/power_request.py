@@ -466,10 +466,51 @@ def plot_timeline(args: argparse.Namespace) -> int:
             if "tag_boundary_ambiguous" in artifact
             else np.zeros(len(time_s), dtype=np.bool_)
         )
+        sample_monotonic_ns = (
+            artifact["server_monotonic_time_ns"]
+            if "server_monotonic_time_ns" in artifact
+            else None
+        )
+
+    events = []
+    tags_path = result_dir / "tags.jsonl"
+    if sample_monotonic_ns is not None and len(sample_monotonic_ns):
+        first_sample_ns = int(sample_monotonic_ns[0])
+        for line in tags_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("kind") != "event":
+                continue
+            event_ns = record.get(
+                "client_converted_monotonic_ns",
+                record.get(
+                    "server_monotonic_ns",
+                    record.get("server_receive_monotonic_ns"),
+                ),
+            )
+            if event_ns is not None:
+                events.append(
+                    ((int(event_ns) - first_sample_ns) / 1e9, str(record["name"]))
+                )
 
     figure, axes = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
     axes[0].plot(time_s, current, linewidth=0.7, label="current_A")
     axes[0].plot(time_s, power, linewidth=0.7, label="power_W", alpha=0.8)
+    for index, (event_time_s, event_name) in enumerate(events):
+        axes[0].axvline(event_time_s, color="tab:purple", linewidth=0.8, alpha=0.7)
+        axes[0].annotate(
+            event_name,
+            xy=(event_time_s, 1.0),
+            xycoords=("data", "axes fraction"),
+            xytext=(2, -4 - 12 * (index % 3)),
+            textcoords="offset points",
+            rotation=90,
+            va="top",
+            ha="left",
+            fontsize=7,
+            color="tab:purple",
+        )
     if ambiguous.any():
         axes[0].scatter(
             time_s[ambiguous],

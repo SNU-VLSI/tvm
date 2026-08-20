@@ -238,7 +238,17 @@ def test_result_validation_and_tag_filter(tmp_path):
     }
     (result_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
     (result_dir / "session.json").write_text(json.dumps(summary), encoding="utf-8")
-    (result_dir / "tags.jsonl").write_text("", encoding="utf-8")
+    (result_dir / "tags.jsonl").write_text(
+        json.dumps(
+            {
+                "kind": "event",
+                "name": "tile_start",
+                "client_converted_monotonic_ns": 2000,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     np.savez_compressed(
         rails_dir / "DMM_GPIB3.npz",
         current_A=np.asarray([0.1, 0.1, 0.1]),
@@ -325,7 +335,17 @@ def test_schema_v2_raw_checksum_and_ambiguity_validation(tmp_path):
     for name in ("summary.json", "session.json"):
         (result_dir / name).write_text(json.dumps(summary), encoding="utf-8")
     (result_dir / "time_alignment.json").write_text("{}\n", encoding="utf-8")
-    (result_dir / "tags.jsonl").write_text("", encoding="utf-8")
+    (result_dir / "tags.jsonl").write_text(
+        json.dumps(
+            {
+                "kind": "event",
+                "name": "tile_start",
+                "client_converted_monotonic_ns": 2000,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     np.savez_compressed(
         rails_dir / "DMM_GPIB3.npz",
         reading_number=np.asarray([1, 2]),
@@ -344,6 +364,9 @@ def test_schema_v2_raw_checksum_and_ambiguity_validation(tmp_path):
     assert '"status": "complete"' in validated.stdout
     filtered = run_tool("summarize", result_dir, "--exclude-ambiguous")
     assert "samples=1" in filtered.stdout
+    plot_path = result_dir / "power_trace.png"
+    run_tool("plot", result_dir, "--output", plot_path)
+    assert plot_path.stat().st_size > 0
 
     raw_path.write_bytes(raw + b"corrupt")
     rejected = run_tool("validate-result", result_dir, check=False)
@@ -414,11 +437,8 @@ def test_codegen_helpers_are_linux_only(monkeypatch):
     )
     assert "dmm_measure.h" in generator.generateHeader()
     assert "power_measure_runtime.h" in generator.generateHeader()
-    assert 'getenv("DEBUG_PRINT_INSTRUMENT")' in generator.generateHeader()
-    assert 'strcasecmp(value, "true")' in generator.generateHeader()
-    assert 'strcasecmp(value, "yes")' in generator.generateHeader()
-    assert 'strcasecmp(value, "on")' in generator.generateHeader()
-    assert "fflush(stderr)" in generator.generateHeader()
+    assert 'getenv("DEBUG_PRINT_INSTRUMENT")' not in generator.generateHeader()
+    assert "IMCFLOW_DEBUG_PRINT" not in generator.generateHeader()
 
     generator.os = "baremetal"
     assert generator.emit_power_tag_set("kernel", "x") == ""
@@ -441,7 +461,7 @@ def test_normal_tensor_word_accesses_use_per_word_mmio_barriers(monkeypatch):
     assert read == "imcflow_mmio_read32(npu_pointer, base + i)"
 
 
-def test_debug_print_instruments_tensor_block_and_word_progress(monkeypatch):
+def test_tensor_transfer_has_no_debug_instrumentation(monkeypatch):
     module = _load_ext_codegen(monkeypatch)
     monkeypatch.setattr(module, "makeBaseAddrName", lambda _block: "INPUT_BASE_ADDR")
     monkeypatch.setattr(module, "getCInputVarName", lambda *_args: "input_tensor")
@@ -457,12 +477,9 @@ def test_debug_print_instruments_tensor_block_and_word_progress(monkeypatch):
     )
 
     generated = str(generator.generateToNpuTransferCode([block], None, "input"))
-    assert "input block begin name=INPUT_BASE_ADDR" in generated
-    assert "input INPUT_BASE_ADDR before word=%d/%zu" in generated
-    assert "((i + 1) % 256) == 0" in generated
-    assert "input block end name=INPUT_BASE_ADDR" in generated
-    assert generated.index("block begin") < generated.index("before word=%d/%zu")
-    assert generated.index("before word=%d/%zu") < generated.index("block end")
+    assert "IMCFLOW_DEBUG_PRINT" not in generated
+    assert "fprintf" not in generated
+    assert "for(int i=0; i<1024; i++)" in generated
 
 
 def test_invoke_run_wait_and_finalize_use_conservative_barriers(monkeypatch):
@@ -498,7 +515,7 @@ def test_invoke_run_wait_and_finalize_use_conservative_barriers(monkeypatch):
     )
 
 
-def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
+def test_generated_kernel_uses_only_timing_events(monkeypatch):
     monkeypatch.delenv("IMCFLOW_NO_PERKERNEL_WARMUP", raising=False)
     monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
     module = _load_ext_codegen(monkeypatch)
@@ -534,11 +551,11 @@ def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
         return generator
 
     linux = str(make_generator("linux").makeKernelDef())
-    assert 'dmm_tag_set("kernel", "kernel_with_\\\"quote")' in linux
-    assert 'dmm_tag_set("kernel_stage", "warmup")' in linux
-    assert 'dmm_tag_set("tile", "0")' in linux
-    assert 'dmm_tag_set("tile", "1")' in linux
-    assert 'dmm_tag_event("retry")' in linux
+    assert 'dmm_tag_set("kernel"' not in linux
+    assert 'dmm_tag_set("kernel_stage"' not in linux
+    assert 'dmm_tag_set("tile"' not in linux
+    assert 'dmm_tag_set("retry_attempt"' not in linux
+    assert 'power_measure_runtime_event("retry")' in linux
     assert (
         'TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION, '
         '"kernel_with_\\"quote")' in linux
@@ -553,22 +570,25 @@ def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
     assert linux.index("warmup_device();") < linux.index(
         "power_measure_runtime_model_start_after_first_warmup()"
     )
-    assert linux.index('dmm_tag_set("kernel_stage", "input_transfer")') < linux.index(
-        'dmm_tag_set("kernel_stage", "output_transfer")'
-    )
-    assert linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION") < linux.index(
-        'dmm_tag_set("kernel_stage", "compiled_transfer")'
-    )
     tile_begin = linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE")
-    tile_start = linux.index("npu_pointer[STATE_REG_IDX] = SET_RUN_CODE", tile_begin)
-    tile_wait = linux.index("wait_imcflow_interrupt", tile_start)
+    tile_event_start = linux.index(
+        'power_measure_runtime_event("tile_start")', tile_begin
+    )
+    tile_run = linux.index("npu_pointer[STATE_REG_IDX] = SET_RUN_CODE", tile_event_start)
+    tile_wait = linux.index("wait_imcflow_interrupt", tile_run)
     tile_ack = linux.index("generate_ack(int_ack_gen_pointer)", tile_wait)
     tile_intr_done = linux.index(
         "imcflow_mmio_write32(npu_pointer, INTR_DONE_REG_IDX, 1)", tile_ack
     )
-    tile_end = linux.index("TVM_POWER_REGION_END()", tile_intr_done)
+    tile_event_end = linux.index(
+        'power_measure_runtime_event("tile_end")', tile_intr_done
+    )
+    tile_end = linux.index("TVM_POWER_REGION_END()", tile_event_end)
     tight_tile_body = linux[tile_begin:tile_end]
-    assert tile_begin < tile_start < tile_wait < tile_ack < tile_intr_done < tile_end
+    assert (
+        tile_begin < tile_event_start < tile_run < tile_wait < tile_ack
+        < tile_intr_done < tile_event_end < tile_end
+    )
     assert "imcflow_mmio_barrier(" in tight_tile_body
     assert "imcflow_mmio_write32(" in tight_tile_body
     assert "dmm_tag_" not in tight_tile_body
@@ -589,14 +609,14 @@ def test_host_templates_cover_single_and_dataset_phases():
     for source in sources:
         text = source.read_text(encoding="utf-8")
         assert "power_measure_runtime_start()" in text
-        assert 'power_measure_runtime_phase("graph_execute")' in text
+        assert "power_measure_runtime_phase(" not in text
+        assert "power_measure_runtime_sample(" not in text
         assert "power_measure_runtime_finish()" in text
         assert "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL" in text
         assert '"--power-build-info"' in text
         assert "power_measure_runtime_print_build_info(stdout)" in text
     for source in sources[2:]:
         text = source.read_text(encoding="utf-8")
-        assert "power_measure_runtime_sample(sample_idx)" in text
         assert 'power_measure_runtime_event("sample_timeout")' in text
 
 
@@ -657,7 +677,7 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert "binary_tvm_git_rev" in runner
     assert "validate-build-identity" in runner
     assert "codegen_tvm_git_rev" in runner
-    assert "HELLO 5" in runner
+    assert "HELLO 6" in runner
     assert "IMCFLOW_POWER_SCOPE" in runner
     assert "IMCFLOW_POWER_MIN_SAMPLES" in runner
     assert "tracked repository changes must be committed" in runner

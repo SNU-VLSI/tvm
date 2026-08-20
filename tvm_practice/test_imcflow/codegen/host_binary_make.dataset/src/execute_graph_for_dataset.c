@@ -499,7 +499,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Prepare Input Tensor (reusable)
   // ============================================================================
-  power_measure_runtime_phase("input_setup");
   fprintf(stderr, "\n--- Preparing Input Tensor ---\n");
 
   // Create input tensor with shape (1, C, H, W) from dataset shape (N, C, H, W)
@@ -605,8 +604,6 @@ int main(int argc, char** argv) {
   for (size_t iter = 0; iter < num_samples; iter++) {
     // Determine actual sample index
     size_t sample_idx = (num_indices > 0) ? (size_t)sample_indices[iter] : iter;
-    power_measure_runtime_sample(sample_idx);
-    power_measure_runtime_phase("input_setup");
 
     // Reset failure flag before each inference
     g_imcflow_kernel_failed = 0;
@@ -628,7 +625,6 @@ int main(int argc, char** argv) {
     uint64_t t_setin1 = g_timing_enabled ? now_ns() : 0;
 
     // Run inference
-    power_measure_runtime_phase("graph_execute");
     TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL, "model");
     if (!g_timing_enabled) {
       TVMGraphExecutor_Run(exec);
@@ -669,7 +665,6 @@ int main(int argc, char** argv) {
     }
 
     // Get output
-    power_measure_runtime_phase("output");
     rc = TVMGraphExecutor_GetOutput(exec, 0, &output_tensor);
     if (rc != 0) {
       fprintf(stderr, "GetOutput failed for sample %zu: %d\n", sample_idx, rc);
@@ -778,7 +773,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Cleanup
   // ============================================================================
-  power_measure_runtime_phase("cleanup");
   fprintf(stderr, "--- Cleaning Up ---\n");
 
   if (g_result_file) {

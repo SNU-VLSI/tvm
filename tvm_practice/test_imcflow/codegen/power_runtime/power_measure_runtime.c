@@ -113,13 +113,6 @@ int power_measure_runtime_start(void)
     return -1;
   }
   g_power_atexit_installed = 1;
-  fprintf(stderr,
-          "[POWER] scope=%s loop=%d min_samples=%llu min_seconds=%.9g "
-          "tvm_revision=%s measurement_utils_revision=%s build_dirty=%d\n",
-          scope ? scope : "REGION", g_power_policy.loop_enable,
-          (unsigned long long)g_power_policy.min_samples,
-          g_power_policy.min_seconds, IMCFLOW_BUILD_TVM_GIT_REV,
-          IMCFLOW_BUILD_MEASUREMENT_UTILS_GIT_REV, IMCFLOW_BUILD_TREE_DIRTY);
   return 0;
 }
 

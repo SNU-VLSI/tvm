@@ -319,7 +319,7 @@ class KernelCodeGenerator:
   def emit_power_tag_event(self, name):
     if self.os != "linux":
       return ""
-    return f"dmm_tag_event({self._power_c_string(name)});\n"
+    return f"power_measure_runtime_event({self._power_c_string(name)});\n"
 
   def emit_power_region_begin(self, name):
     if self.os != "linux":
@@ -327,13 +327,6 @@ class KernelCodeGenerator:
     return (
         "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION, "
         f"{self._power_c_string(name)});\n"
-    )
-
-  def emitDebugPrint(self, message, indent=""):
-    """Emit a runtime-gated, immediately flushed debug marker."""
-    return (
-        f"{indent}IMCFLOW_DEBUG_PRINT("
-        f"{self._power_c_string(message)});\n"
     )
 
   def generateMmioBarrierUtility(self):
@@ -374,12 +367,9 @@ class KernelCodeGenerator:
     """Emit one removable, documented MMIO ordering point when enabled."""
     if mmio_block_barrier_usec() < 0:
       return ""
-    reason_literal = self._power_c_string(reason)
     return (
         f"// MMIO barrier: {reason}\n"
-        f"IMCFLOW_DEBUG_PRINT(\"barrier begin: %s\", {reason_literal});\n"
         "imcflow_mmio_barrier();\n"
-        f"IMCFLOW_DEBUG_PRINT(\"barrier end: %s\", {reason_literal});\n"
     )
 
   def emitMmioWrite32(self, pointer, index, value, indent=""):
@@ -420,11 +410,7 @@ class KernelCodeGenerator:
     code.nextIndent()
     code += f'fprintf(stderr, "[RETRY] Timeout at {location_label}, attempt %d/%d\\n", _retry_count+1, MAX_RETRY_COUNT);\n'
     if self.os == "linux":
-      code += "snprintf(_power_retry_value, sizeof(_power_retry_value), \"%d\", _retry_count + 1);\n"
-      code += "dmm_tag_set(\"retry_attempt\", _power_retry_value);\n"
       code += self.emit_power_tag_event("retry")
-      code += self.emit_power_tag_clear("tile")
-      code += self.emit_power_tag_set("kernel_stage", "retry_cleanup")
     if self.os == "linux":
       code += "generate_ack(int_ack_gen_pointer);\n"
       code += self.emitMmioBarrier("retry interrupt ACK visible before INTR_DONE")
@@ -437,11 +423,7 @@ class KernelCodeGenerator:
     code += f"#else\n"
     code += f"if (_wait_rc != 0) {{\n"
     code += f'  fprintf(stderr, "[TIMEOUT] {location_label} failed (retry disabled)\\n");\n'
-    code += self.emit_power_tag_set("retry_attempt", "1")
     code += self.emit_power_tag_event("retry")
-    code += self.emit_power_tag_clear("tile")
-    code += self.emit_power_tag_clear("kernel_stage")
-    code += self.emit_power_tag_clear("kernel")
     code += "  _power_retry_requested = 2;\n"
     code += "  break;\n"
     code += f"}}\n"
@@ -450,27 +432,6 @@ class KernelCodeGenerator:
 
   def generateHeader(self):
     """Generate C header includes."""
-    # Stage-heartbeat instrumentation (IMCFLOW_STAGE_HB, default OFF). When ON,
-    # IMCFLOW_STAGE_HB(msg) writes an unbuffered stderr line AND appends+fsyncs a
-    # line to /var/volatile/imcflow_stage_hb.txt on the board, so a host-side
-    # wedge monitor SSH-polling that file can record the LAST stage reached even
-    # after the SoC hard-wedges (stderr may be lost at the freeze). Localizes the
-    # region3 kernel-entry wedge (reset / warmup / compiled-block / const-block /
-    # policy-update / invoke). Host-side prints ONLY -- emits no accelerator
-    # (inode/imce) code, so region cpp/bin blobs stay byte-identical. When OFF the
-    # macro expands to nothing -> byte-identical to stock.
-    stage_hb_macro = ("""
-// --- IMCFLOW_STAGE_HB instrumentation (opt-in) ---
-#define IMCFLOW_STAGE_HB(msg) do { \\
-  fprintf(stderr, "[STAGE] %s\\n", (msg)); fflush(stderr); \\
-  int _hbfd = open("/var/volatile/imcflow_stage_hb.txt", O_WRONLY|O_CREAT|O_APPEND, 0644); \\
-  if (_hbfd >= 0) { \\
-    char _hbbuf[256]; int _n = snprintf(_hbbuf, sizeof(_hbbuf), "%s\\n", (msg)); \\
-    if (_n > 0) { ssize_t _w = write(_hbfd, _hbbuf, (size_t)_n); (void)_w; } \\
-    fsync(_hbfd); close(_hbfd); \\
-  } \\
-} while (0)
-""") if os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0") else ""
     power_header = (
         '#include "dmm_measure.h"\n#include "power_measure_runtime.h"\n'
         if self.os == "linux" else ""
@@ -491,31 +452,7 @@ class KernelCodeGenerator:
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <unistd.h>
-""" + power_header + stage_hb_macro + """
-// Runtime debug instrumentation. This is deliberately independent from the
-// compile-time IMCFLOW_STAGE_HB feature so one binary can be run with or without
-// dense diagnostics. Every emitted line is flushed before the next MMIO access.
-static inline int imcflow_debug_print_instrument_enabled(void)
-{
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char* value = getenv("DEBUG_PRINT_INSTRUMENT");
-    enabled = value != NULL &&
-              (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 ||
-               strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0);
-  }
-  return enabled;
-}
-
-#define IMCFLOW_DEBUG_PRINT(...) do { \\
-  if (imcflow_debug_print_instrument_enabled()) { \\
-    fprintf(stderr, "[IMCFLOW-DBG] "); \\
-    fprintf(stderr, __VA_ARGS__); \\
-    fputc('\\n', stderr); \\
-    fflush(stderr); \\
-  } \\
-} while (0)
-
+""" + power_header + """
 // Global failure flag: set by kernel on timeout, checked by host loop
 extern volatile int g_imcflow_kernel_failed;
 """)
@@ -526,11 +463,9 @@ extern volatile int g_imcflow_kernel_failed;
 static inline void enable_imcflow_interrupt(int fd)
 {
   uint32_t info = 1;
-  IMCFLOW_DEBUG_PRINT("interrupt enable: before UIO write fd=%d", fd);
 __UIO_WRITE_PRE__
   ssize_t nb = write(fd, &info, sizeof(info));
 __UIO_WRITE_POST__
-  IMCFLOW_DEBUG_PRINT("interrupt enable: after UIO write fd=%d nb=%zd", fd, nb);
   if (nb != (ssize_t)sizeof(info)) {
     perror("write failed");
     close(fd);
@@ -550,9 +485,7 @@ static inline int wait_imcflow_interrupt(int fd, volatile uint32_t* npu_pointer)
   // delivered), return immediately instead of blocking on an edge that will
   // never come. This is the primary fix for the ~sample-46 chip wedge: a single
   // missed UIO edge previously hung forever with no status cross-check.
-  IMCFLOW_DEBUG_PRINT("interrupt wait: entry fd=%d", fd);
   if (__STATE_READ__ == SET_IDLE_CODE) {
-    IMCFLOW_DEBUG_PRINT("interrupt wait: STATE already IDLE");
     return 0;
   }
 
@@ -562,9 +495,7 @@ static inline int wait_imcflow_interrupt(int fd, volatile uint32_t* npu_pointer)
   timeout.tv_sec = 1;
   timeout.tv_usec = 0;
 
-  IMCFLOW_DEBUG_PRINT("interrupt wait: before select");
   int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
-  IMCFLOW_DEBUG_PRINT("interrupt wait: select returned ret=%d", ret);
   if (ret == 0) {
     // Interrupt did not arrive within 1s. Do NOT declare failure yet — the edge
     // may have been missed while the compute actually finished. Fall back to
@@ -579,9 +510,7 @@ static inline int wait_imcflow_interrupt(int fd, volatile uint32_t* npu_pointer)
   }
 
 __UIO_READ_PRE__
-  IMCFLOW_DEBUG_PRINT("interrupt wait: before UIO read");
   ssize_t nb = read(fd, &info, sizeof(info));
-  IMCFLOW_DEBUG_PRINT("interrupt wait: after UIO read nb=%zd info=%u", nb, info);
 __UIO_READ_POST__
   if (nb != (ssize_t)sizeof(info)) {
     perror("read interrupt failed");
@@ -592,9 +521,7 @@ __UIO_READ_POST__
 
 static inline void generate_ack(uint32_t* int_ack_gen)
 {
-  IMCFLOW_DEBUG_PRINT("interrupt ACK: before write");
 __ACK_WRITE__
-  IMCFLOW_DEBUG_PRINT("interrupt ACK: after write");
 }
 """
     return (code
@@ -615,19 +542,15 @@ __ACK_WRITE__
     """Generate polling utility functions for non-interrupt based synchronization."""
     code = """
 // Poll until ImcFlow returns to IDLE state
-#define POLL_LOG_INTERVAL 1000
 #define MAX_POLL_COUNT 20000
 static int wait_for_idle(volatile uint32_t* npu_pointer) {
   uint32_t poll_count = 0;
   uint32_t state;
 
-  fprintf(stderr,"[POLLING] Waiting for ImcFlow to return to IDLE state...\\n");
-
   while (1) {
     state = __STATE_READ__;
 
     if (state == SET_IDLE_CODE) {
-      fprintf(stderr,"[POLLING] Operation complete! (polled %u times)\\n", poll_count);
       return 0;
     }
 
@@ -636,23 +559,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     // Check for timeout
     if (poll_count >= MAX_POLL_COUNT) {
       fprintf(stderr,"[POLLING ERROR] Timeout after %u polls (state: 0x%x)\\n", poll_count, state);
-      fprintf(stderr,"[POLLING ERROR] ImcFlow hardware appears to be stuck.\\n");
       return -1;
-    }
-
-    // Log progress every 1000 polls for debugging
-    if (poll_count % POLL_LOG_INTERVAL == 0) {
-      fprintf(stderr,"[POLLING] Still waiting... (poll count: %u, current state: 0x%x)\\n",
-             poll_count, state);
-      // [PROBE] region3-entry wedge localizer: dump all 8 ctrl_regs each interval.
-      // STATE=0x1 busy + INTR_ID/INTR_DONE unchanged across polls => wedge is BEFORE
-      // any inode's launch-end INTRT, i.e. stuck in imem/IMCU load + 255-barrier
-      // (Phase A), not the Phase-B fused-add SEND/RECV. fflush: SoC goes SSH-dead
-      // seconds after wedge, so unbuffered output is essential.
-      fprintf(stderr,"[PROBE] ctrl_reg: STATE=0x%x CMD=0x%x INODE_PC[0..3]=0x%x 0x%x 0x%x 0x%x INTR_ID=0x%x INTR_DONE=0x%x\\n",
-             __CTRL0_READ__,__CTRL1_READ__,__CTRL2_READ__,__CTRL3_READ__,
-             __CTRL4_READ__,__CTRL5_READ__,__CTRL6_READ__,__CTRL7_READ__);
-      fflush(stderr);
     }
   }
 }
@@ -660,17 +567,12 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 """
     code = code.replace("__STATE_READ__", self.emitMmioRead32Expr(
         "npu_pointer", "STATE_REG_IDX"))
-    for i in range(8):
-      code = code.replace(f"__CTRL{i}_READ__", self.emitMmioRead32Expr(
-          "npu_pointer", str(i)))
     return code
 
   def emitReset(self):
     """Generate code to reset the NPU state."""
     return (
-        self.emitDebugPrint("reset: before request write")
-        + self.emitMmioWrite32("reset_gen_pointer", "0", "1")
-        + self.emitDebugPrint("reset: after request write")
+        self.emitMmioWrite32("reset_gen_pointer", "0", "1")
         + self.emitMmioBarrier("reset request visible before subsequent MMIO")
     )
 
@@ -775,29 +677,21 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   def generatePolicyUpdateCode(self):
     """Generate policy update code."""
     code = CodeWriter()
-    code += self.emitDebugPrint(f"{self.func_name}: policy update begin")
     code += "// Set the inode pc to 0 and run.\n"
     code += "for(int i=0; i<INODE_NUM; i++) {\n"
     code += self.emitMmioWrite32(
         "npu_pointer", "(PC_REG_IDX + i)",
         "(INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0)", "  ")
     code += "}\n"
-    code += self.emitDebugPrint(f"{self.func_name}: policy PC writes complete")
     code += self.emitMmioBarrier("policy PC registers visible before interrupt arm")
     if self.os == "linux":
-      code += self.emitDebugPrint(f"{self.func_name}: policy before interrupt arm")
       code += "enable_imcflow_interrupt(npu_fd);\n"
-      code += self.emitDebugPrint(f"{self.func_name}: policy after interrupt arm")
       code += self.emitMmioBarrier("policy interrupt arm completes before PROGRAM doorbell")
-    code += self.emitDebugPrint(f"{self.func_name}: policy before PROGRAM doorbell")
     code += self.emitMmioWrite32(
         "npu_pointer", "STATE_REG_IDX", "SET_PROGRAM_CODE")
-    code += self.emitDebugPrint(f"{self.func_name}: policy after PROGRAM doorbell")
     code += self.emitMmioBarrier("PROGRAM doorbell visible before completion wait")
     if self.os == "linux":
-      code += self.emitDebugPrint(f"{self.func_name}: policy before completion wait")
       code += "int _wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);\n"
-      code += 'IMCFLOW_DEBUG_PRINT("policy completion wait returned rc=%d", _wait_rc);\n'
     elif USE_POLLING:
       code += "int _wait_rc = wait_for_idle(npu_pointer);\n"
     else:
@@ -808,7 +702,6 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.emitMmioBarrier("policy interrupt ACK visible before INTR_DONE")
     code += self.emitMmioWrite32("npu_pointer", "INTR_DONE_REG_IDX", "1")
     code += self.emitMmioBarrier("policy INTR_DONE visible before invoke setup")
-    code += self.emitDebugPrint(f"{self.func_name}: policy update end")
     return code
 
   def generateInvokeCode(self):
@@ -822,20 +715,15 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   def generateInvokePrepareCode(self):
     """Generate the setup that must complete before the RUN doorbell."""
     code = CodeWriter()
-    code += self.emitDebugPrint(f"{self.func_name}: invoke begin")
     code += "for(int i=0; i<INODE_NUM; i++) {\n"
     code += self.emitMmioWrite32(
         "npu_pointer", "(PC_REG_IDX + i)",
         "(INODE_PC_START_P1_ENUM_VAL << 30 + 0)", "  ")
     code += "}\n"
-    code += self.emitDebugPrint(f"{self.func_name}: invoke PC writes complete")
     code += self.emitMmioBarrier("invoke PC registers visible before interrupt arm")
     if self.os == "linux":
-      code += self.emitDebugPrint(f"{self.func_name}: invoke before interrupt arm")
       code += "enable_imcflow_interrupt(npu_fd);\n"
-      code += self.emitDebugPrint(f"{self.func_name}: invoke after interrupt arm")
       code += self.emitMmioBarrier("invoke interrupt arm completes before RUN doorbell")
-    code += self.emitDebugPrint(f"{self.func_name}: invoke before RUN doorbell")
     return code
 
   def generateInvokeStartWaitCode(self):
@@ -854,15 +742,12 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   def generateInvokeFinalizeCode(self):
     """Generate fenced ACK/INTR_DONE handling after an invoke wait."""
     code = CodeWriter()
-    code += self.emitDebugPrint(f"{self.func_name}: invoke after RUN wait")
-    code += 'IMCFLOW_DEBUG_PRINT("invoke completion wait returned rc=%d", _wait_rc);\n'
     code += self.emitMmioBarrier("invoke completion observed before interrupt ACK")
     if self.os == "linux":
       code += "generate_ack(int_ack_gen_pointer);\n"
       code += self.emitMmioBarrier("invoke interrupt ACK visible before INTR_DONE")
     code += self.emitMmioWrite32("npu_pointer", "INTR_DONE_REG_IDX", "1")
     code += self.emitMmioBarrier("invoke INTR_DONE visible before following MMIO")
-    code += self.emitDebugPrint(f"{self.func_name}: invoke end")
     return code
 
   def generateDevicePointerCleanup(self):
@@ -907,15 +792,6 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       if tile_idx is None:
         loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
         code += f"for(int i=0; i<{loop_end}; i++){{\n"
-        progress_format = self._power_c_string(
-            f"{self.func_name}: {transfer_kind} {base_address_name} before word=%d/%zu"
-        )
-        code += (
-            f"  if (i == 0 || ((i + 1) % 256) == 0 || "
-            f"(size_t)(i + 1) == {loop_end}) {{\n"
-            f"    IMCFLOW_DEBUG_PRINT({progress_format}, i, {loop_end});\n"
-            "  }\n"
-        )
         code += self.emitMmioWrite32(
             "npu_pointer", f"({base_address_name} / 4) + i",
             f"((uint32_t*){src_var})[i]", "  ")
@@ -935,23 +811,14 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
       src_var = getCInputVarName(func_name, block)
       word_count = loop_end - loop_start
-      progress_format = self._power_c_string(
-          f"{self.func_name}: {transfer_kind} {base_address_name} before word=%d/%zu"
-      )
 
       code += f"for(int i=0; i<{word_count}; i++){{\n"
-      code += (
-          f"  if (i == 0 || ((i + 1) % 256) == 0 || i + 1 == {word_count}) {{\n"
-          f"    IMCFLOW_DEBUG_PRINT({progress_format}, i, (size_t){word_count});\n"
-          "  }\n"
-      )
       code += self.emitTensorMmioWrite32(
           "npu_pointer", f"({base_address_name} / 4) + i",
           f"((uint32_t*){src_var})[i + {loop_start//4}]", "  ")
       code += f"}}\n"
       return code
 
-    _hb_on = os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0")
     # Host-side MMIO write-ordering barrier between block transfers (root-cause fix
     # for the region3 chip wedge; see imcflow.mmio_block_barrier_usec). -1 == OFF ->
     # emit nothing -> byte-identical. Accelerator blobs untouched (host-side only).
@@ -961,26 +828,10 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       base_address = block.base_address
       base_address_name = makeBaseAddrName(block)
       self.base_address_macros.update({base_address_name: base_address})
-      tile_label = "none" if tile_idx is None else str(tile_idx)
-      code += self.emitDebugPrint(
-          f"{self.func_name}: {transfer_kind} block begin "
-          f"name={base_address_name} tile={tile_label} bytes={block.size}"
-      )
-
-      # Per-block stage heartbeat (opt-in) so a mid-transfer SoC wedge localizes to
-      # the exact block whose MMIO write hung. Host-side print only.
-      if _hb_on:
-        try:
-          _blk_name = str(block.id)
-        except Exception:
-          _blk_name = base_address_name
-        _blk_name = _blk_name.replace('"', "'")[:120]
-        code += f"IMCFLOW_STAGE_HB(\"{self.func_name}: xfer block {base_address_name} ({_blk_name}) sz={block.size}\");\n"
 
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
-        code += f"fprintf(stderr,\"Transferring input block to NPU [TILE:{tile_idx}]\\n\");\n"
 
       # Determine source variable and loop parameters based on block type
       if isinstance(block.id, str):
@@ -992,10 +843,6 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       # buffer so the accelerator sees complete, in-order blocks; fixes the region3
       # host-side MMIO overrun wedge). usleep adds a real-time drain if needed.
       code += self.emitMmioBarrier("CPU-to-NPU block transfer complete")
-      code += self.emitDebugPrint(
-          f"{self.func_name}: {transfer_kind} block end "
-          f"name={base_address_name} tile={tile_label}"
-      )
 
     return code
 
@@ -1009,31 +856,17 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       base_address = block.base_address
       base_address_name = makeBaseAddrName(block)
       self.base_address_macros.update({base_address_name: base_address})
-      tile_label = "none" if tile_idx is None else str(tile_idx)
-      code += self.emitDebugPrint(
-          f"{self.func_name}: output block begin "
-          f"name={base_address_name} tile={tile_label} bytes={block.size}"
-      )
 
       # Add tiling comment if applicable
       if block.tiling_info is not None:
         code += f"// Transfer data [TILE:{tile_idx}]\n"
-        code += f"fprintf(stderr,\"Transferring output block to out{idx} [TILE:{tile_idx}]\\n\");\n"
 
       # Get loop parameters
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
 
       # Generate loop code
       word_count = loop_end - loop_start
-      progress_format = self._power_c_string(
-          f"{self.func_name}: output {base_address_name} before word=%d/%zu"
-      )
       code += f"for(int i=0; i<{word_count}; i++){{\n"
-      code += (
-          f"  if (i == 0 || ((i + 1) % 256) == 0 || i + 1 == {word_count}) {{\n"
-          f"    IMCFLOW_DEBUG_PRINT({progress_format}, i, (size_t){word_count});\n"
-          "  }\n"
-      )
       code += (
           f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = "
           + self.emitTensorMmioRead32Expr(
@@ -1042,10 +875,6 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       )
       code += f"}}\n"
       code += self.emitMmioBarrier("NPU-to-CPU output block transfer complete")
-      code += self.emitDebugPrint(
-          f"{self.func_name}: output block end "
-          f"name={base_address_name} tile={tile_label}"
-      )
     return code
 
   def generateBaseAddrMacros(self):
@@ -1144,14 +973,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     # Kernel function prototype and definition (C)
     code += f"void {self.func_name}_kernel({args_proto_type}) {{\n"
     code.nextIndent()
-    code += f"fprintf(stderr,\"{self.func_name}_kernel called\\n\");\n"
-    code += self.emitDebugPrint(f"{self.func_name}: kernel entry")
 
     # Early exit if a previous kernel already failed
     code += "if (g_imcflow_kernel_failed) return;\n"
-    if self.os == "linux":
-      code += "char _power_retry_value[32];\n"
-    code += self.emit_power_tag_set("kernel", self.func_name)
 
     # Retry loop start
     code += "int _power_retry_requested = 0;\n"
@@ -1165,25 +989,8 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += "}\n"
     code += "#endif\n"
 
-    # Stage-heartbeat markers (IMCFLOW_STAGE_HB, default OFF -> emit nothing ->
-    # byte-identical). Host-side only; localizes the region3 kernel-entry wedge.
-    _hb_on = os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0")
-    def _trace(stage):
-      message = f"{self.func_name}: {stage}"
-      debug = self.emitDebugPrint(message)
-      heartbeat = (
-          f"IMCFLOW_STAGE_HB({self._power_c_string(message)});\n"
-          if _hb_on else ""
-      )
-      return debug + heartbeat
-
-    code += _trace("before device_pointer_setup")
-    code += self.emit_power_tag_set("kernel_stage", "device_setup")
     code += self.generateDevicePointerSetup()
-    code += _trace("after device_pointer_setup / before reset")
-    code += self.emit_power_tag_set("kernel_stage", "reset")
     code += self.emitReset()
-    code += _trace("after reset")
     if self.os == "linux":
       # Per-kernel warmup gate. emitWarmup() forks `make clear_time && make warmup`
       # (a full accelerator hard-reset + 16 warmup binaries) on EVERY kernel call.
@@ -1195,85 +1002,56 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       if os.environ.get("IMCFLOW_NO_PERKERNEL_WARMUP", "") not in ("", "0"):
         pass  # per-kernel warmup intentionally skipped
       else:
-        code += _trace("before warmup")
-        code += self.emit_power_tag_set("kernel_stage", "warmup")
         code += self.emitWarmup()
-        code += _trace("after warmup")
     if self.os == "linux":
       code += "if (power_measure_runtime_model_start_after_first_warmup() != 0) {\n"
       code += self.generateDevicePointerCleanup()
       code += "  g_imcflow_kernel_failed = 1;\n"
       code += "  return;\n"
       code += "}\n"
-    code += _trace("before power region begin")
     code += self.emit_power_region_begin(self.func_name)
-    code += _trace("after power region begin")
     code += self.emitMmioBarrier("region iteration begins after prior MMIO is quiescent")
-    code += self.emit_power_tag_set("kernel", self.func_name)
-    code += _trace("before compiled_blocks transfer")
-    code += self.emit_power_tag_set("kernel_stage", "compiled_transfer")
     code += self.generateToNpuTransferCode(
         self.compiled_blocks, None, "compiled") # inode instrunction + policy
-    code += _trace("after compiled_blocks transfer / before const_blocks transfer")
-    code += self.emit_power_tag_set("kernel_stage", "const_transfer")
     code += self.generateToNpuTransferCode(
         self.const_blocks, None, "const") # constant
-    code += _trace("after const_blocks transfer / before policy_update")
-    code += self.emit_power_tag_set("kernel_stage", "policy_update")
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
-    code += _trace("after policy_update")
     code += self.generateRetryCheck("policy_update")
-    code += _trace("before invoke")
-    code += self.emit_power_tag_set("kernel_stage", "invoke")
     code += self.generateInvokeCode() # proceed up to halt
-    code += _trace("after invoke / before retry check")
     code += self.generateRetryCheck("invoke")
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
     code += f"// Tiled execution with factor {tile_factor}\n"
-    code += f"fprintf(stderr,\"Starting tiled execution with factor {tile_factor}\\n\");\n"
     for t_idx in range(tile_factor):
-      code += _trace(f"tile {t_idx} begin")
-      code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
-      code += self.emit_power_tag_set("tile", t_idx)
-      code += self.emit_power_tag_set("kernel_stage", "compiled_transfer")
       code += self.generateToNpuTransferCode(
           self.compiled_per_tile_blocks, t_idx,
           "compiled_per_tile") # per-tile: cnt_base_addr
-      code += self.emit_power_tag_set("kernel_stage", "input_transfer")
       code += self.generateToNpuTransferCode(
           self.input_blocks, t_idx, "input") # input
-      code += self.emit_power_tag_set("kernel_stage", "invoke")
       code += self.generateInvokePrepareCode()
       if self.os == "linux":
         code += (
             "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE, "
             f"{self._power_c_string(f'{self.func_name}_tile_{t_idx}')});\n"
         )
+        code += "if (power_measure_runtime_scope_is(IMCFLOW_POWER_SCOPE_TILE))\n"
+        code += "  " + self.emit_power_tag_event("tile_start")
       code += self.generateInvokeStartWaitCode()
       code += self.generateInvokeFinalizeCode()
       if self.os == "linux":
+        code += "if (power_measure_runtime_scope_is(IMCFLOW_POWER_SCOPE_TILE))\n"
+        code += "  " + self.emit_power_tag_event("tile_end")
         code += "TVM_POWER_REGION_END();\n"
       code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
       code += "if (_power_retry_requested) break;\n"
-      code += self.emit_power_tag_set("kernel_stage", "output_transfer")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
-      code += self.emit_power_tag_clear("tile")
-      code += _trace(f"tile {t_idx} end")
 
     # Retry loop end + cleanup
-    code += self.emit_power_tag_clear("retry_attempt")
-    code += self.emit_power_tag_clear("tile")
-    code += self.emit_power_tag_clear("kernel_stage")
-    code += self.emit_power_tag_clear("kernel")
     if self.os == "linux":
       code += self.emitMmioBarrier("region iteration completes before loop decision")
-      code += _trace("before power region end")
       code += "TVM_POWER_REGION_END();\n"
-      code += _trace("after power region end")
     code += self.generateDevicePointerCleanup()
-    code += _trace("after device pointer cleanup")
     if self.os == "linux":
       code += "if (power_measure_runtime_is_degraded()) {\n"
       code += "  g_imcflow_kernel_failed = 1;\n"
@@ -1289,10 +1067,6 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += "} while (_retry_count <= MAX_RETRY_COUNT);\n"
     code += "if (_retry_count > MAX_RETRY_COUNT) {\n"
     code += '  fprintf(stderr, "[RETRY] Exhausted %d retries.\\n", MAX_RETRY_COUNT);\n'
-    code += self.emit_power_tag_clear("retry_attempt")
-    code += self.emit_power_tag_clear("tile")
-    code += self.emit_power_tag_clear("kernel_stage")
-    code += self.emit_power_tag_clear("kernel")
     code += "  g_imcflow_kernel_failed = 1;\n"
     code += "  return;\n"
     code += "}\n"

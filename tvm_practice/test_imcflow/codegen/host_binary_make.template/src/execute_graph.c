@@ -355,7 +355,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Input Loading
   // ============================================================================
-  power_measure_runtime_phase("input_setup");
   fprintf(stderr, "\n--- Loading Inputs ---\n");
 
   int inputs_loaded = 0;
@@ -403,7 +402,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Execute Graph
   // ============================================================================
-  power_measure_runtime_phase("graph_execute");
   fprintf(stderr, "\n--- Executing Graph ---\n");
   TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL, "model");
   TVMGraphExecutor_Run(exec);
@@ -413,7 +411,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Output Retrieval and Saving
   // ============================================================================
-  power_measure_runtime_phase("output");
   fprintf(stderr, "\n--- Saving Outputs ---\n");
 
   // Get number of outputs
@@ -503,7 +500,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Cleanup
   // ============================================================================
-  power_measure_runtime_phase("cleanup");
   fprintf(stderr, "\n--- Cleaning Up ---\n");
 
   // Free loaded inputs

@@ -139,7 +139,6 @@ DMM 한 대만 등록되어 있다.
 ```bash
 python scripts/power_request.py validate-result <result-dir>
 python scripts/power_request.py summarize <result-dir> --exclude-ambiguous
-python scripts/power_request.py summarize <result-dir> --tag kernel_stage=invoke
 python scripts/power_request.py plot <result-dir> \
   --rail DMM_GPIB3 --output power_timeline.png
 ```
@@ -188,8 +187,9 @@ master runner
 
 [power_measure_runtime.c](../power_runtime/power_measure_runtime.c)는 host binary의
 power 측정 lifecycle을 관리한다. host 실행 code는 시작과 종료에 각각
-`power_measure_runtime_start()`와 `power_measure_runtime_finish()`를 호출하며,
-dataset loop에서는 `phase`, `sample`, timeout event tag도 기록한다.
+`power_measure_runtime_start()`와 `power_measure_runtime_finish()`를 호출한다.
+timeout처럼 실제로 발생한 비정상 시점만 event로 기록하며 `phase`와 `sample`을
+자동 state tag로 만들지 않는다.
 
 TVM은 `MODEL`, `REGION`, `TILE` 중 선택된 위치에만 macro pair를 활성화한다.
 measurement_utils에는 scope를 전달하지 않으며, 모든 활성 macro pair는 동일한
@@ -198,16 +198,11 @@ non-nested `power_region_begin/end`로 보인다. loop가 꺼져 있으면 body�
 반복한다.
 
 [ext_codegen.py](../../../../python/tvm/relay/backend/contrib/imcflow/ext_codegen.py)는
-Linux kernel code에 region과 비동기 tag를 삽입한다. region은 per-kernel warmup
-뒤에 시작하고 transfer, policy update, invoke, tile 실행을 포함한 뒤 cleanup 전에
-종료된다. region 내부에는 다음 tag가 들어간다.
-
-- `kernel`: generated kernel 이름
-- `kernel_stage`: `compiled_transfer`, `const_transfer`, `policy_update`, `invoke`,
-  `input_transfer`, `output_transfer`, retry cleanup 등
-- `tile`: tile index
-- `retry_attempt`: retry 번호
-- `retry`, `region_end`: 순간 event
+Linux kernel code에 power region을 삽입한다. region 이름과 loop policy는 session
+metadata에 저장하며 state tag로 중복 기록하지 않는다. `TILE` scope에서는
+`tile_start`를 RUN write 직전에, `tile_end`를 interrupt completion handshake 직후에
+event로 기록한다. retry와 timeout도 실제로 발생했을 때만 순간 event가 된다.
+Event는 `tag_state_id`를 바꾸지 않는다.
 
 [power_region.c](../../../../3rdparty/measurement_utils/capi/power_region.c)는 일반 C
 application에서도 사용할 수 있는 `POWER_REGION_BEGIN/END`와 `power_tag_*` API,
@@ -215,7 +210,11 @@ non-nesting 검사 및 minimum loop state machine을 제공한다.
 [dmm_measure.c](../../../../3rdparty/measurement_utils/capi/dmm_measure.c)는 board에서
 동작하는 C TCP client이다. board는 이 code를 통해 measurement server에 protocol
 handshake, session/region 시작, tag 변경, 종료 명령을 보낸다. DMM 제어 library나
-PyVISA는 board에 필요하지 않다.
+PyVISA는 board에 필요하지 않다. `event`는 예약 key이므로
+`power_tag_set("event", label)`과 `power_tag_event(label)`은 동일하게 일회성
+timestamp marker를 만든다. Event 호출은 timestamp와 label만 고정 크기 local
+queue에 저장하고 TCP 전송은 region 종료 직전에 수행한다. 사용자가 직접 호출하는
+일반 key/value state tag의 set/clear 기능은 유지된다.
 
 ### Measurement server와 timestamp 정렬
 
@@ -227,6 +226,15 @@ measurement server에서 동작한다. TCP 요청을 받아 DMM을 독점 예약
 
 server는 DMM reading metadata의 첫 sample 시각과 sample interval, DMM clock
 calibration, board/server clock anchor를 함께 사용해 각 sample을 server monotonic
-time에 정렬한다. 비동기 tag는 server가 packet을 받은 monotonic timestamp로
-기록되며, 각 sample의 timestamp/uncertainty와 비교해 tag state를 할당한다. 경계가
-불확실한 sample은 제거하지 않고 ambiguity flag와 함께 raw/NPZ 결과에 보존한다.
+time에 정렬한다. Board event는 API 호출 시 저장한 board monotonic timestamp를
+clock-sync offset으로 변환하고, GET 직전에는 measurement server가 자신의 clock으로
+`get_issue` event를 직접 기록한다. Event는 plot의 수직선과 label로 표시되고 일반
+state tag만 sample의 `tag_state_id`를 변경한다. 경계가 불확실한 sample은 제거하지
+않고 ambiguity flag와 함께 raw/NPZ 결과에 보존한다.
+
+| 주체 | 기록하는 시간 | 공통 timeline 정렬 |
+|---|---|---|
+| Master server | 실행 및 결과 파일 시각 | 정밀 sample 정렬에는 사용하지 않음 |
+| Board | `tile_start`, `tile_end`, timeout의 `CLOCK_MONOTONIC` | board/server clock-sync offset 적용 |
+| Measurement server | GET 발행 및 session lifecycle의 `CLOCK_MONOTONIC` | 공통 timeline 기준 |
+| DMM | reading metadata의 sample timestamp | GET timing bracket과 DMM metadata 적용 |

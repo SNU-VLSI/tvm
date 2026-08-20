@@ -358,7 +358,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Input Loading
   // ============================================================================
-  power_measure_runtime_phase("input_setup");
   fprintf(stderr, "\n--- Loading Inputs ---\n");
 
   int inputs_loaded = 0;
@@ -406,7 +405,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Execute Graph (Node-by-Node Debug Mode)
   // ============================================================================
-  power_measure_runtime_phase("graph_execute");
   fprintf(stderr, "\n--- Executing Graph (Debug: per-node output) ---\n");
 
   // Execute nodes one by one and save each node's output
@@ -450,7 +448,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Output Retrieval and Saving
   // ============================================================================
-  power_measure_runtime_phase("output");
   fprintf(stderr, "\n--- Saving Outputs ---\n");
 
   // Get number of outputs
@@ -540,7 +537,6 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Cleanup
   // ============================================================================
-  power_measure_runtime_phase("cleanup");
   fprintf(stderr, "\n--- Cleaning Up ---\n");
 
   // Free loaded inputs
