@@ -354,6 +354,18 @@ def input_reuse_feed_unroll() -> int:
     return 1
 
 
+def imce_load_unroll() -> bool:
+  """Step-3 of the per-pixel tax peel (IMCFLOW_IMCE_LOAD_UNROLL, default OFF).
+
+  The imce bitplane LOAD_LB burst compiles to a 2-instruction hardware loop
+  (recv + bne) costing ~3cyc/packet (issue + taken-branch refetch bubble).
+  Unroll it to straight-line `recv` x repeat (~1-2cyc each) -> saves ~6-8cyc
+  per pixel once the feed handshake (step 1) and psum drain (drop-all) are
+  gone. Same fifo_id per line (spread composes separately). Default OFF ->
+  byte-identical."""
+  return os.environ.get("IMCFLOW_IMCE_LOAD_UNROLL", "").strip().lower() in ("1", "on", "true", "yes")
+
+
 def qconv_nop_delay_cnt() -> int:
   """Max-throughput lever (IMCFLOW_QCONV_NOP_DELAY, integer nop count, default 10).
 

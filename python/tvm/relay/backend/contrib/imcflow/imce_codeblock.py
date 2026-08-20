@@ -8,7 +8,7 @@ from tvm import relay
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
-from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import bugfix_off_mode, imce_load_unroll
 from tvm.contrib.imcflow import drop_psum_send, drop_psum_keep_every, step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import step_freerun_pass_drain_nops
 from tvm.contrib.imcflow import feed_sync_per_pixel
@@ -382,6 +382,13 @@ class LoadLBBlock(ImceCodeBlock):
         body += "\n".join(pre_lines) + "\n"
       if self.repeat > 1 and eff > 1:
         body += _spread_bitplane_lines(load_lb_line) + "\n"
+      elif self.repeat > 1 and imce_load_unroll():
+        # Step-3 peel (IMCFLOW_IMCE_LOAD_UNROLL): straight-line the bitplane
+        # burst -- the SimpleFor form is a 2-instruction hw-loop (recv+bne,
+        # ~3cyc/packet with the taken-branch refetch bubble). Same fifo.
+        for _b in range(self.repeat):
+          body += load_lb_line(_b)
+        body += "\n"
       elif self.repeat > 1:
         body += SimpleFor(self.repeat, load_lb_line).render() + "\n"
       else:
