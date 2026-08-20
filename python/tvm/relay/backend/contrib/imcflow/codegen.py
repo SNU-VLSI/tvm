@@ -1048,6 +1048,14 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       else:
         self.add_send_block_interleaved(edges, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
 
+    # Task #8: func_out edges that will be emitted INTERLEAVED with a RESBUF resend
+    # (the add-imce this inode both feeds via resend AND collects func_out from) must
+    # NOT also be emitted as a standalone recv block below -- that plain collector
+    # RECV, placed before the resend, is exactly the ordering that deadlocks. Pull
+    # them out here; _add_resid_buffer_blocks() emits the interleaved version.
+    interleave_funcout = self._resbuf_funcout_interleave_edges()
+    output_edges = [e for e in output_edges if e not in interleave_funcout]
+
     # recv output edge interleaved
     # Group output edges by destination HID (inode)
     output_edges_by_hid = {}
@@ -1073,9 +1081,52 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # a simple in-order resend loop (pixel-timing is task #9).
     self._add_resid_buffer_blocks()
 
+  def _resbuf_funcout_interleave_edges(self):
+    """Task #8: return {func_out_edge: resbuf_gid} for every RESBUF on THIS inode
+    whose fed add-imce is ALSO the producer of a func_out this inode collects.
+
+    Those func_out collector RECVs must be interleaved with the RESBUF resend (see
+    ResidResendFuncoutInterleavedBlock) rather than emitted as a standalone leading
+    recv (which deadlocks: the add can't produce func_out until resent). No-op /
+    empty unless the residual inode-buffer sub-lever fired -> byte-identical."""
+    result = {}
+    from tvm.relay.op.contrib.imcflow import residual_inode_buffer_mode
+    if not residual_inode_buffer_mode():
+      return result
+    resid_info = getattr(DevConfig(), "ResidBufferInfo", None)
+    if not resid_info:
+      return result
+    def _outer(gid):
+      # graph_node_id may be a (outer, inner) composite tuple; the func_out edge
+      # (src inner 79) and the resbuf hopB dst (inner 76) are DIFFERENT internal
+      # calls of the SAME add composite (outer 105) -> match on the OUTER id.
+      return gid[0] if isinstance(gid, tuple) else gid
+    for resbuf_gid, info in resid_info.items():
+      if info.get("func_name") != self.func_name:
+        continue
+      hopB = info["hopB"]  # (RESBUF,resbuf_out) -> (add,data)
+      add_outer = _outer(hopB.dst_id.graph_node_id)
+      resend_hid = self.get_hid(hopB.src_id)
+      # the func_out this inode collects whose producer is the same add-imce
+      fn_id = getNodeID(self.func)
+      for out_edge in self.get_input_edges_from_id(fn_id):
+        if "func_out" not in str(getattr(out_edge.dst_id, "tensor_type", "")):
+          continue
+        if _outer(out_edge.src_id.graph_node_id) != add_outer:
+          continue
+        if self.get_hid(out_edge.dst_id, out_edge.split_idx) != resend_hid:
+          continue
+        result[out_edge] = resbuf_gid
+    return result
+
   def _add_resid_buffer_blocks(self):
     """Task #10: emit the RESBUF collector (RECV hop A) + resend (SEND hop B) on
-    the assigned inode. No-op unless the residual inode-buffer sub-lever fired."""
+    the assigned inode. No-op unless the residual inode-buffer sub-lever fired.
+
+    Task #8: when this inode ALSO collects the fed add-imce's func_out, the resend
+    (hop B) and that func_out collector are emitted INTERLEAVED (per output group)
+    so the add's fed-then-produce dependency does not deadlock. Otherwise the plain
+    in-order resend is used."""
     from tvm.relay.op.contrib.imcflow import residual_inode_buffer_mode
     if not residual_inode_buffer_mode():
       return
@@ -1083,6 +1134,9 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     if not resid_info:
       return
     phase = CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC
+    # func_out edges routed through the interleaved block, by resbuf gid.
+    interleave_by_gid = {gid: e for e, gid in
+                         self._resbuf_funcout_interleave_edges().items()}
     for resbuf_gid, info in resid_info.items():
       if info.get("func_name") != self.func_name:
         continue
@@ -1090,15 +1144,34 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       hopB = info["hopB"]  # (RESBUF,resbuf_out) -> (add,data)      resend  SEND
       db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(hopA)
       assert db is not None, f"RESBUF DataBlock not found for {hopA}"
-      # collector: INODE_RECV hop A into the buffer.
+      # collector: INODE_RECV hop A into the buffer (ALWAYS first, unchanged).
       recv_info = DevConfig().get_tensor_edge_info(hopA)
       recv_hid = self.get_hid(hopA.dst_id)
       recv_block = RecvBlock(self, db, recv_info.fifo_id,
                              f"resbuf collector recv: {hopA}")
       self.codeblocks.append(recv_hid, recv_block, phase)
-      # resend: INODE_SEND hop B out of the buffer (simple in-order loop).
+      # resend: INODE_SEND hop B out of the buffer.
       send_info = DevConfig().get_tensor_edge_info(hopB)
       send_hid = self.get_hid(hopB.src_id)
+      fout_edge = interleave_by_gid.get(resbuf_gid)
+      if fout_edge is not None:
+        # Task #8: interleave the resend with the add's func_out collector.
+        fout_info = DevConfig().get_tensor_edge_info(fout_edge)
+        fout_db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(fout_edge)
+        assert fout_db is not None, f"func_out DataBlock not found for {fout_edge}"
+        il_block = ResidResendFuncoutInterleavedBlock(
+            self, db, send_info, fout_db, fout_info.fifo_id, group=4,
+            annotation=f"resbuf resend/funcout interleave: {hopB} || {fout_edge}")
+        # stash for consistency counting (bill resend hopB + func_out edge).
+        il_block._resbuf_resend_edge = hopB
+        il_block._funcout_edge = fout_edge
+        self.codeblocks.append(send_hid, il_block, phase)
+        print(f"[resid-inode-buffer] codegen RESBUF {resbuf_gid}: "
+              f"collector RECV @ {recv_hid} (fifo {recv_info.fifo_id}) + "
+              f"resend/funcout INTERLEAVE @ {send_hid} "
+              f"(funcout fifo {fout_info.fifo_id})")
+        continue
+      # plain in-order resend (no co-located func_out collector on this inode).
       send_block = SendBlock(self, db, send_info,
                              f"resbuf resend send: {hopB}, "
                              f"{send_info.policy_info[0].router_id.name} -> "
@@ -1203,6 +1276,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           if own is not None and own in edge:
             edge = own
         _add_send_map(self.send_map, block.block, edge)
+      elif isinstance(block, ResidResendFuncoutInterleavedBlock):
+        # Task #8: RESBUF resend (hop B) interleaved with the add-imce's func_out
+        # collector. Bill BOTH halves exactly once: the resend edge as a SEND
+        # (mirrors the plain SendBlock resbuf_out branch) and the func_out edge as
+        # a RECV (mirrors the standalone collector we suppressed). Counts are the
+        # RESBUF word count (both hops of the same add, equal length). Lever OFF ->
+        # class never constructed -> byte-identical.
+        _resend_e = getattr(block, "_resbuf_resend_edge", None)
+        _fout_e = getattr(block, "_funcout_edge", None)
+        if _resend_e is not None:
+          _add_send_map(self.send_map, block.resbuf_db, _resend_e)
+        if _fout_e is not None:
+          if block.funcout_db.tiling_info:
+            _rc = sum(block.funcout_db.tiling_info.pkt_cnts)
+          else:
+            _rc = math.ceil(block.funcout_db.size / 32)
+          add_to_map(self.recv_map, _fout_e, _rc)
       elif isinstance(block, SendBlockResidualFanoutInterleaved):
         # IMCFLOW_RESIDUAL_IN_REGION: word-interleaved model-input fan-out. All
         # edges SHARE ONE DataBlock whose .id lists every fan-out edge, so counting

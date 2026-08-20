@@ -1138,6 +1138,100 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
     self.body.add(SimpleFor(trip, interleaved_body))
 
 
+class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
+  """Task #8: interleave the RESBUF resend (hop B) with the add-imce's func_out
+  collector RECV, on the inode that owns BOTH.
+
+  The in-region residual add (imce_3_1) is a SINGLE in-order imce whose fused loop,
+  per output group of `group` words, RECVs `group` resbuf_out words (from this
+  inode's resend) + `group` main words (from imce_3_2), computes, then SENDs
+  `group` func_out words BACK to this inode. Emitting the two inode-side hops
+  SEQUENTIALLY -- full func_out collector RECV loop, THEN the full RESBUF resend
+  loop (the plain _add_resid_buffer_blocks order) -- DEADLOCKS: the add cannot
+  produce ANY func_out until it has been fed resbuf_out by the resend, but the
+  resend is placed AFTER the func_out drain. With IMCE_SEND_FIFO_DEPTH==2 the add
+  can only buffer 2 func_out words, so no amount of reordering-without-interleave
+  helps (RESBUF resend-then-funcout still wedges at ~word 2).
+
+  Fix: ONE outer loop over output groups; per group emit `group` resends (each with
+  its own per-word presend rendezvous, identical to the plain SendBlock resend)
+  THEN `group` func_out RECVs -- matching the add's consume-`group`/produce-`group`
+  rhythm. The RESBUF collector RECV (hop A, from the independent producer imce_2_1)
+  is emitted BEFORE this block (unchanged) so the buffer is filled first.
+
+  Reuses a SendBlock helper purely for the resend's exact per-word rendezvous
+  (_get_presend_sync_code_str). Gated by residual_inode_buffer_mode() at the call
+  site; OFF / no-RESBUF -> never constructed -> byte-identical.
+  """
+
+  def __init__(self, builder, resbuf_db: DataBlock, resend_info: TensorEdgeInfo,
+               funcout_db: DataBlock, funcout_fifo_id: int, group: int = 4,
+               annotation: str = ""):
+    super().__init__(annotation)
+    self.builder = builder
+    self.resbuf_db = resbuf_db
+    self.resend_info = resend_info
+    self.funcout_db = funcout_db
+    self.funcout_fifo_id = funcout_fifo_id
+    self.group = group
+    # SendBlock helper: borrow ONLY its per-word resend presend rendezvous. Its
+    # own body is discarded (never registered / rendered).
+    self._resend_helper = SendBlock(builder, resbuf_db, resend_info, annotation="")
+    self._resend_helper.body = SequentialBlock()
+    self._build()
+
+  def _build(self):
+    # RESBUF buffer is fully allocated (task #10) -> fixed word count. The func_out
+    # collector on this inode is the same length (both hops of the same add, 256
+    # words in ResNet8's factor-1 tile); we drive BOTH by the resbuf word count so
+    # the resend/funcout stay in lockstep group-by-group.
+    total = math.ceil(self.resbuf_db.size / 32)
+    g = self.group
+    ngroups = total // g
+    tail = total - ngroups * g
+
+    resend_base = UniqueVar("resid_resend_base_address", dtype="int")
+    funcout_base = UniqueVar("resid_funcout_base_address", dtype="int")
+    self.body.add(TextBlock(f"{resend_base} = {self.resbuf_db.offset};"))
+    self.body.add(TextBlock(f"{funcout_base} = {self.funcout_db.offset};"))
+
+    resend_policy = self.resend_info.policy_info[0].address
+    resend_fifo = self.resend_info.fifo_id
+    fout_fifo = self.funcout_fifo_id
+
+    def group_body(iter, resend_base=resend_base, funcout_base=funcout_base,
+                   resend_policy=resend_policy, resend_fifo=resend_fifo,
+                   fout_fifo=fout_fifo, g=g):
+      code = ""
+      # resend `g` resbuf_out words (feed the add), each per-word rendezvous.
+      for j in range(g):
+        widx = f"(({iter})*{g} + {j})"
+        pre = self._resend_helper._get_presend_sync_code_str(iter_var=widx)
+        if pre:
+          code += pre
+        code += (f"__builtin_INODE_SEND({resend_base} + {widx}*32, 0, "
+                 f"{resend_policy}, {resend_fifo});\n")
+      # then collect `g` func_out words the add produced from them.
+      for j in range(g):
+        widx = f"(({iter})*{g} + {j})"
+        code += f"__builtin_INODE_RECV({funcout_base} + {widx}*32, 0, 0, {fout_fifo});\n"
+      return code
+
+    self.body.add(SimpleFor(ngroups, group_body,
+                            annotation="resid resend/funcout interleave"))
+
+    # Defensive tail (ResNet8 group|total, so tail==0 -> emits nothing).
+    for r in range(ngroups * g, ngroups * g + tail):
+      pre = self._resend_helper._get_presend_sync_code_str(iter_var=str(r))
+      if pre:
+        self.body.add(TextBlock(pre.rstrip("\n")))
+      self.body.add(TextBlock(
+          f"__builtin_INODE_SEND({resend_base} + {r}*32, 0, "
+          f"{resend_policy}, {resend_fifo});"))
+      self.body.add(TextBlock(
+          f"__builtin_INODE_RECV({funcout_base} + {r}*32, 0, 0, {fout_fifo});"))
+
+
 class SendBlockInterleaved(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
 
