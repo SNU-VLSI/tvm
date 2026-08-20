@@ -383,11 +383,55 @@ def test_codegen_helpers_are_linux_only(monkeypatch):
     )
     assert "dmm_measure.h" in generator.generateHeader()
     assert "power_measure_runtime.h" in generator.generateHeader()
+    assert 'getenv("DEBUG_PRINT_INSTRUMENT")' in generator.generateHeader()
+    assert 'strcasecmp(value, "true")' in generator.generateHeader()
+    assert 'strcasecmp(value, "yes")' in generator.generateHeader()
+    assert 'strcasecmp(value, "on")' in generator.generateHeader()
+    assert "fflush(stderr)" in generator.generateHeader()
 
     generator.os = "baremetal"
     assert generator.emit_power_tag_set("kernel", "x") == ""
     assert generator.emit_power_tag_clear("kernel") == ""
     assert "dmm_measure.h" not in generator.generateHeader()
+
+
+def test_normal_tensor_word_accesses_use_per_word_mmio_barriers(monkeypatch):
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
+    module = _load_ext_codegen(monkeypatch)
+    generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
+
+    write = generator.emitTensorMmioWrite32(
+        "npu_pointer", "base + i", "input[i]", "  "
+    )
+    read = generator.emitTensorMmioRead32Expr("npu_pointer", "base + i")
+
+    assert "imcflow_mmio_write32(npu_pointer, base + i, input[i]);" in write
+    assert "MMIO-BARRIER-EXPERIMENT: fence this individual write" in write
+    assert read == "imcflow_mmio_read32(npu_pointer, base + i)"
+
+
+def test_debug_print_instruments_tensor_block_and_word_progress(monkeypatch):
+    module = _load_ext_codegen(monkeypatch)
+    monkeypatch.setattr(module, "makeBaseAddrName", lambda _block: "INPUT_BASE_ADDR")
+    monkeypatch.setattr(module, "getCInputVarName", lambda *_args: "input_tensor")
+
+    generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
+    generator.func_name = "debug_kernel"
+    generator.base_address_macros = {}
+    block = SimpleNamespace(
+        id=0,
+        base_address=0x1000,
+        size=4096,
+        tiling_info=None,
+    )
+
+    generated = str(generator.generateToNpuTransferCode([block], None, "input"))
+    assert "input block begin name=INPUT_BASE_ADDR" in generated
+    assert "input INPUT_BASE_ADDR before word=%d/%zu" in generated
+    assert "((i + 1) % 256) == 0" in generated
+    assert "input block end name=INPUT_BASE_ADDR" in generated
+    assert generated.index("block begin") < generated.index("before word=%d/%zu")
+    assert generated.index("before word=%d/%zu") < generated.index("block end")
 
 
 def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
