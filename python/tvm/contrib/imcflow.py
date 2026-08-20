@@ -141,19 +141,21 @@ def drop_psum_send() -> bool:
   LOAD_LB / OUTPUT_HS can issue earlier. Only legal when conv correctness is
   irrelevant (garbage output). Default OFF -> byte-identical to stock.
 
-  RTL caveat (CHIP / BUGFIX-off build, imcu_ctrl.sv:69
-  `core_rx.ready = core_ready && core_tx.ready`): on the TAPED-OUT chip the
-  BUGFIX_STEP macro is NOT defined, so the crossbar input fetch is gated on the
-  post_imcu OUTPUT side being ready. The out_fifo is drained by the psum NoC
-  SEND being consumed (an inode RECV), NOT by OP_STEP. Dropping ALL psum SENDs
-  therefore leaves the depth-32 out_fifo undrained; once it fills (~a handful of
-  STEPs) core_tx.ready deasserts, the feed stalls, the array stops converting,
-  and DDA/ADC current goes flat. RTL-proven (2026-08-15, one_1x1_quant bugfix-off,
-  SRAM_BACKDOOR=0): DROP_PSUM=1 keep=0 X-fatals on imce_intf_tx after 4 STEP;
-  no-drop completes 64/64 STEP+ADC. So on chip a bounded keep (drop_psum_keep_every,
-  K <= 32 fifo depth) is REQUIRED, not optional. The earlier "OP_STEP drains the
-  out_fifo" reasoning holds ONLY under the BUGFIX_STEP build
-  (`core_rx.ready = core_ready && !core_tx.valid`), which the chip lacks."""
+  ★CORRECTED 2026-08-20: the earlier claim that keep=0 wedges the BUGFIX-off
+  chip via an undrained depth-32 out_fifo was a MISDIAGNOSIS. The out_fifo is
+  BUGFIX_STEP-ONLY (post_imcu.sv:207 `ifdef) and does NOT exist on the taped-out
+  chip. On BUGFIX-off the result path is pimc_result register -> compute_if ->
+  imce_ctrl hs_remaining (1-slot, re-armed by every OP_STEP), so dropping
+  GET_CREG/SEND never backpressures the crossbar. The 2026-08-15 "keep=0
+  X-fatals on imce_intf_tx after 4 STEP" was reproduced and root-caused to a
+  codegen ASYMMETRY: the bugfix-off imce path had no keep=0 wiring (SENDs still
+  emitted) while the inode omitted its RECV loop -> orphaned SENDs filled the
+  NoC -> flow_if cmd_test X-assertion. With the SYMMETRIC drop (imce SEND
+  omitted per pixel + inode RECV loop omitted), BUGFIX-off RTL PASSES with all
+  conversions retiring (one_1x1_quant_16sq 256/256 IMCU_OUT, 2026-08-20).
+  K-keep (drop_psum_keep_every) is therefore an OPTIONAL A/B lever on
+  BUGFIX-off, not a requirement; it remains required only under BUGFIX_STEP
+  builds if the out_fifo semantics demand draining."""
   return os.environ.get("IMCFLOW_DROP_PSUM", "").strip().lower() in ("1", "on", "true", "yes")
 
 
@@ -419,15 +421,17 @@ def drop_output_readback() -> bool:
 
 def drop_psum_keep_every() -> int:
   """When IMCFLOW_DROP_PSUM is on, still emit ONE psum drain (GET_CREG + IMCE_SEND
-  on imce, and the matching INODE_RECV) every K pixels so the depth-32 post_imcu
-  out_fifo is drained at least every K STEPs and core_tx.ready never sticks low
-  (see drop_psum_send). REQUIRED on the taped-out chip (BUGFIX-off), where the
-  out_fifo is NOT drained by OP_STEP. K MUST be <= 32 (out_fifo depth; the safe
-  bound is fifo_depth minus in-flight packets, so K<=8..16 has margin). K=0
-  (default) -> drop every SEND: only safe when the whole kernel's STEP count is
-  bounded < fifo depth (it is NOT for a normal conv / free-run) -> will wedge on
-  chip. K>=1 -> keep 1 drain per K pixels. Both imce (keep_psum_pixel) and inode
-  (matching RECV keep) use the SAME K so producer/consumer stay balanced."""
+  on imce, and the matching INODE_RECV) every K pixels.
+
+  ★CORRECTED 2026-08-20: K-keep is NOT required on the BUGFIX-off chip (see
+  drop_psum_send docstring: the depth-32 out_fifo is BUGFIX_STEP-only; the
+  earlier keep=0 X-fatal was a codegen imce/inode drop asymmetry, since fixed).
+  K=0 (default) -> TRUE symmetric drop-all: imce omits every psum SEND (GET_CREG
+  kept) and the inode omits its whole RECV loop; BUGFIX-off RTL-proven
+  (one_1x1_quant_16sq 256/256 conversions, 2026-08-20). K>=1 -> keep 1 drain per
+  K pixels (A/B lever / BUGFIX_STEP builds). Both imce (keep_psum_pixel) and
+  inode (matching RECV keep) use the SAME K so producer/consumer stay
+  balanced."""
   raw = os.environ.get("IMCFLOW_DROP_PSUM_KEEP", "").strip()
   if not raw:
     return 0

@@ -227,9 +227,10 @@ class RecvBlock(InodeCodeBlock):
     if drop_psum_send():
       _keep_k = drop_psum_keep_every()
       if _keep_k <= 0:
-        # legacy drop-all: producing imce also drops all psum sends (keep=0). No
-        # packets arrive -> omit the whole RECV loop. Wedges on chip (see
-        # drop_psum_keep_every docstring); kept for regression / bounded STEP.
+        # TRUE drop-all (keep=0): the producing imce drops all psum sends (see
+        # ConvBlock._build_structure _drop_all) -> no packets arrive -> omit the
+        # whole RECV loop. ★2026-08-20 BUGFIX-off RTL-proven symmetric-valid; the
+        # old "wedges on chip" note was a codegen asymmetry misdiagnosis.
         self.body.add(TextBlock(f"// [DROP_PSUM] omitted tiled INODE_RECV loop ({loop_cnt_var} iters, keep=0)"))
         return
       # K-keep: the producing imce keeps its BLK-block psum drain per K PIXELS

@@ -2178,6 +2178,16 @@ class ConvBlock(ImceCallCodeBlock):
          # keep<=0 -> single loop (drop-all legacy) or byte-identical.
          _kk = drop_psum_keep_every() if (drop_psum_send() and not self.post_ops
                                           and not skip_row_presend and not pad_drain_row) else 0
+         # keep=0 TRUE drop-all (symmetric with the inode's omitted RECV loop): the
+         # earlier "keep=0 X-fatal after 4 STEP" was reproduced 2026-08-20 with the
+         # imce side silently NOT dropping (this path had no keep=0 wiring) while the
+         # inode omitted its RECVs -> orphaned SENDs filled the NoC -> flow_if
+         # cmd_test X-fatal on imce_intf_tx. That failure is a codegen ASYMMETRY,
+         # not the post_imcu out_fifo (which is BUGFIX_STEP-only and absent on the
+         # BUGFIX-off chip). This wires the imce half: SEND omitted on EVERY pixel
+         # (GET_CREG kept), matching inode keep=0. Env-gated; default OFF.
+         _drop_all = (drop_psum_send() and not self.post_ops and not skip_row_presend
+                      and not pad_drain_row and drop_psum_keep_every() <= 0)
          if _kk and _kk > 1 and pat["count"] > 1:
            _cnt = pat["count"]
            # K must DIVIDE and not exceed the col_group pixel count: the imce keeps
@@ -2217,7 +2227,8 @@ class ConvBlock(ImceCallCodeBlock):
            continue
          inner_loop = SimpleFor(pat["count"],
                                 self._build_loop_body(pat["pattern"], skip_presend=skip_row_presend,
-                                                      pad_drain=pad_drain_row),
+                                                      pad_drain=pad_drain_row,
+                                                      drop_send=_drop_all),
                                 f"{tag}_col_group{inner_idx}")
          outer_body.add(inner_loop)
 
@@ -3308,10 +3319,10 @@ class RecvSendWrapper(ImceCodeBlock):
             code += "\n".join(pre_send)
 
       # Max-throughput lever (IMCFLOW_DROP_PSUM + IMCFLOW_DROP_PSUM_KEEP=K): a plain
-      # ConvBlock psum drain to an inode (func_out collector). On the taped-out chip
-      # (BUGFIX-off imcu_ctrl.sv:69 core_rx.ready = core_ready && core_tx.ready) the
-      # depth-32 out_fifo is drained by this SEND being consumed, NOT by OP_STEP, so
-      # dropping ALL sends wedges the feed after ~fifo-depth STEPs (RTL-proven).
+      # ConvBlock psum drain to an inode (func_out collector). ★2026-08-20: keep=0
+      # (drop EVERY send, symmetric with the inode's omitted RECV loop) is VALID on
+      # BUGFIX-off -- the old "wedges after ~fifo-depth STEPs" claim was a
+      # misdiagnosed codegen asymmetry (see drop_psum_send docstring).
       # K-keep is done STRUCTURALLY (the IMCE target only supports COUNTED hardware
       # loops -- a data-dependent `if (ctr % K) br_cc` is un-selectable, "Cannot
       # select br_cc"): the caller (ConvBlock._build_structure) splits the pixel
