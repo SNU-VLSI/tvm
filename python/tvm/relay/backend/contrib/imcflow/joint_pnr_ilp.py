@@ -225,6 +225,11 @@ class NodeType(Enum):
     SPLIT = "split"       # Split -> same as producer
     CONCAT = "concat"     # Concat -> same as last producer (topological order)
     CALL = "call"         # Regular call -> IMCE
+    # Task #10: in-region residual-skip buffer (RESBUF). A synthetic waypoint
+    # minted at an in-region diverge (NOT a function boundary). Mirrors FUNC_OUT
+    # machinery: fixed-assigned to an INODE (col 0) via inodebuf_to_inode, both
+    # hop commodities (producer->RESBUF, RESBUF->add) route to/from that inode.
+    INODE_BUFFER = "inode_buffer"  # residual-skip buffer -> INODE (fixed)
 
 
 @dataclass
@@ -289,6 +294,8 @@ class GraphInfo:
     funcout_to_inode: Dict[Any, Coord] = None  # funcout node_id -> INODE Coord
     const_to_inode: Dict[Any, Coord] = None    # const node_id -> INODE Coord
     tensor_edge_to_commodity_id: Dict[Any, int] = None  # TensorEdge -> commodity_id
+    inodebuf_nodes: List[Any] = None           # Task #10: RESBUF node ids
+    inodebuf_to_inode: Dict[Any, Coord] = None # RESBUF node_id -> INODE Coord
 
 
 @dataclass
@@ -305,6 +312,7 @@ class JointPnRResult:
     funcout_to_inode: Dict[Any, Coord] = None  # funcout node_id -> INODE Coord
     const_to_inode: Dict[Any, Coord] = None    # const node_id -> INODE Coord
     tensor_edge_to_commodity_id: Dict[Any, int] = None  # TensorEdge -> commodity_id
+    inodebuf_to_inode: Dict[Any, Coord] = None # Task #10: RESBUF node_id -> INODE Coord
 
 
 # ============================================================
@@ -440,6 +448,7 @@ class GraphExtractor:
         self.var_to_inode: Dict[Any, Coord] = {}
         self.funcout_to_inode: Dict[Any, Coord] = {}
         self.const_to_inode: Dict[Any, Coord] = {}  # const inner_id -> INODE Coord
+        self.inodebuf_to_inode: Dict[Any, Coord] = {}  # Task #10: RESBUF gid -> INODE Coord
         self.tensor_edge_to_commodity_id: Dict[Any, int] = {}  # TensorEdge -> commodity_id
 
     def extract(self, func: relay.Function, func_name: str,
@@ -470,12 +479,21 @@ class GraphExtractor:
         self.var_to_inode = {}
         self.funcout_to_inode = {}
         self.const_to_inode = {}
+        self.inodebuf_to_inode = {}
 
         # Build use-def chain first
         self._build_use_def_chain(func)
 
         # Visit function to extract nodes
         self._visit(func)
+
+        # Task #10: register synthetic RESBUF (INODE_BUFFER) nodes for in-region
+        # residual-skip buffers minted by splitResidualSkipThroughInodeBuffer().
+        # These are NOT in the relay graph, so _visit did not create them; we
+        # add them here (before commodity extraction) so BOTH hop commodities
+        # (producer->RESBUF, RESBUF->add) survive extraction and get routed.
+        # Mirrors the FUNC_OUT machinery: fixed-assigned to an INODE (col 0).
+        self._register_resbuf_nodes(func_name)
 
         for expr, node in self.var_to_inode.items():
             debug_print(f"[GraphExtractor] Var node ID: {getNodeID(expr)}, assigned INODE: {node}")
@@ -485,7 +503,10 @@ class GraphExtractor:
 
         for node_id, node in self.nodes.items():
             debug_print(f"[GraphExtractor] Node ID: {node_id}, Type: {node.node_type}, Topo Order: {node.topo_order}")
-            if node.node_type == NodeType.FUNC_OUT:
+            if node.node_type == NodeType.INODE_BUFFER:
+              # Task #10: synthetic RESBUF node has no CustomIDToName entry
+              debug_print(f"  Name : RESBUF{node_id}")
+            elif node.node_type == NodeType.FUNC_OUT:
               debug_print(f"  Name : {CustomIDToName()[getOuterNodeID(node_id)]}")
             else:
               debug_print(f"  Name : {CustomIDToName()[getInnerNodeID(node_id)]}")
@@ -500,6 +521,7 @@ class GraphExtractor:
         var_nodes = []
         const_nodes = []
         funcout_nodes = []
+        inodebuf_nodes = []
 
         for node_id, node in self.nodes.items():
             if node.node_type == NodeType.CALL:
@@ -514,6 +536,8 @@ class GraphExtractor:
                 const_nodes.append(node_id)
             elif node.node_type == NodeType.FUNC_OUT:
                 funcout_nodes.append(node_id)
+            elif node.node_type == NodeType.INODE_BUFFER:
+                inodebuf_nodes.append(node_id)
 
         debug_print(f"[GraphExtractor] Extracted: {len(call_nodes)} calls, "
                    f"{len(split_nodes)} splits, {len(concat_nodes)} concats, "
@@ -534,7 +558,40 @@ class GraphExtractor:
             funcout_to_inode=self.funcout_to_inode.copy(),
             const_to_inode=self.const_to_inode.copy(),
             tensor_edge_to_commodity_id=self.tensor_edge_to_commodity_id.copy(),
+            inodebuf_nodes=inodebuf_nodes,
+            inodebuf_to_inode=self.inodebuf_to_inode.copy(),
         )
+
+    def _register_resbuf_nodes(self, func_name):
+        """Task #10: create INODE_BUFFER GraphNodes for RESBUF gids recorded by
+        splitResidualSkipThroughInodeBuffer(), fixed-assigned to their inode.
+
+        No-op unless the residual inode-buffer sub-lever fired (ResidBufferInfo
+        empty) -> byte-identical when OFF."""
+        from tvm.contrib.imcflow import ImcflowDeviceConfig
+        cfg = ImcflowDeviceConfig()
+        resid_info = getattr(cfg, "ResidBufferInfo", None)
+        if not resid_info:
+            return
+        for resbuf_gid, info in resid_info.items():
+            if info.get("func_name") != func_name:
+                continue
+            if resbuf_gid in self.nodes:
+                continue
+            self.topo_order += 1
+            self.nodes[resbuf_gid] = GraphNode(
+                id=resbuf_gid,
+                node_type=NodeType.INODE_BUFFER,
+                relay_expr=None,
+                topo_order=self.topo_order,
+            )
+            # Fixed inode assignment (mirrors funcout_to_inode). The inode row is
+            # recorded by the split (NodeID); convert to Coord(row, 0).
+            inode_nid = info.get("inode")
+            row = inode_nid.to_coord()[0]
+            self.inodebuf_to_inode[resbuf_gid] = Coord(row, 0)
+            debug_print(f"[GraphExtractor] RESBUF (INODE_BUFFER) node {resbuf_gid} "
+                        f"@ INODE row {row} (func {func_name})")
 
     def _build_use_def_chain(self, func):
         """Build use-def chain: expr -> [users]"""
@@ -1313,6 +1370,31 @@ class JointPnRILP:
                             f"L4_funcout_dst_not_{k.id}_{v.row}_{v.col}"
                         )
 
+            # L4b: INODE_BUFFER endpoints (Task #10, residual-skip buffer).
+            # Fixed to an INODE (col 0) via inodebuf_to_inode -- mirrors VAR (src)
+            # and FUNC_OUT (dst) fixed placement. Hop A (producer->RESBUF): RESBUF
+            # is the DEST. Hop B (RESBUF->add): RESBUF is the SRC.
+            if dst_node.node_type == NodeType.INODE_BUFFER:
+                buf_inode = self.graph_info.inodebuf_to_inode.get(k.dest_node_id)
+                if buf_inode is None:
+                    raise KeyError(f"INODE_BUFFER dest_node_id {k.dest_node_id} not found in inodebuf_to_inode")
+                debug_print(f"[L4b] Commodity {k.id}: INODE_BUFFER {k.dest_node_id} (dst) -> INODE ({buf_inode.row}, {buf_inode.col})")
+                for v in self.all_nodes:
+                    self.prob += (
+                        self.dst[k.id][v] == (1 if v == buf_inode else 0),
+                        f"L4b_inodebuf_dst_{k.id}_{v.row}_{v.col}"
+                    )
+            if src_node.node_type == NodeType.INODE_BUFFER:
+                buf_inode = self.graph_info.inodebuf_to_inode.get(k.source_node_id)
+                if buf_inode is None:
+                    raise KeyError(f"INODE_BUFFER source_node_id {k.source_node_id} not found in inodebuf_to_inode")
+                debug_print(f"[L4b] Commodity {k.id}: INODE_BUFFER {k.source_node_id} (src) -> INODE ({buf_inode.row}, {buf_inode.col})")
+                for v in self.all_nodes:
+                    self.prob += (
+                        self.src[k.id][v] == (1 if v == buf_inode else 0),
+                        f"L4b_inodebuf_src_{k.id}_{v.row}_{v.col}"
+                    )
+
             # L5: Const source (same row INODE as consumer)
             if src_node.node_type == NodeType.CONST:
                 if k.dest_node_id in self.p:
@@ -1547,6 +1629,7 @@ class JointPnRILP:
             funcout_to_inode=gi.funcout_to_inode,
             const_to_inode=const_to_inode,
             tensor_edge_to_commodity_id=gi.tensor_edge_to_commodity_id,
+            inodebuf_to_inode=gi.inodebuf_to_inode,
         )
 
         # Dump result for debugging
@@ -1702,6 +1785,12 @@ def update_hw_node_map(
             for const_id, coord in result.const_to_inode.items():
                 node_id = NodeID.from_inode_coord(coord.row)
                 hw_node_map[getInnerNodeID(const_id)] = node_id
+
+        # Task #10: INODE mappings for residual-skip buffers (RESBUF). Fixed
+        # inode assignment; make HWNodeMap authoritative from the PnR result.
+        if result.inodebuf_to_inode:
+            for resbuf_gid, coord in result.inodebuf_to_inode.items():
+                hw_node_map[resbuf_gid] = NodeID.from_inode_coord(coord.row)
 
 
 def coord_to_node_id(coord: Coord) -> NodeID:
@@ -2389,10 +2478,41 @@ def construct_noc_paths_from_pnr_results(
                 noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
                 continue
 
+            # Task #10: residual-skip buffer (RESBUF / INODE_BUFFER) endpoints
+            # have NO relay node in CustomIDToNode. Resolve them directly from the
+            # fixed inode assignment (result.inodebuf_to_inode), mirroring how
+            # FUNC_OUT dst is resolved from funcout_to_inode. Either hop endpoint
+            # (hop A dst = RESBUF, hop B src = RESBUF) is handled here.
+            resbuf_map = pnr_result.inodebuf_to_inode or {}
+            src_is_resbuf = (src_tensor_id.tensor_type in ("resbuf", "resbuf_out")
+                             and src_gid in resbuf_map)
+            dst_is_resbuf = (dst_tensor_id.tensor_type in ("resbuf", "resbuf_out")
+                             and dst_gid in resbuf_map)
+            if src_is_resbuf or dst_is_resbuf:
+                if src_is_resbuf:
+                    src_hwnode = coord_to_node_id(resbuf_map[src_gid])
+                else:
+                    src_coord = pnr_result.mapping.get(getOuterNodeID(src_gid))
+                    if src_coord is None:
+                        raise KeyError(f"RESBUF hop src {src_gid} not in mapping")
+                    src_hwnode = coord_to_node_id(src_coord)
+                if dst_is_resbuf:
+                    dst_hwnode = coord_to_node_id(resbuf_map[dst_gid])
+                else:
+                    dst_coord = pnr_result.mapping.get(getOuterNodeID(dst_gid))
+                    if dst_coord is None:
+                        raise KeyError(f"RESBUF hop dst {dst_gid} not in mapping")
+                    dst_hwnode = coord_to_node_id(dst_coord)
+                noc_paths[func_name][tensor_edge] = (src_hwnode, dst_hwnode, split_idx)
+                debug_print(f"[construct_noc_paths] {func_name}: RESBUF hop "
+                            f"{src_tensor_id.tensor_type}->{dst_tensor_id.tensor_type} "
+                            f"{src_hwnode} -> {dst_hwnode}")
+                continue
+
             # Get graph node IDs (outer ID for composites)
             src_graph_id = getOuterNodeID(src_gid)
             dst_graph_id = getOuterNodeID(dst_gid)
-            dst_graph_node = CustomIDToNode()[dst_graph_id] 
+            dst_graph_node = CustomIDToNode()[dst_graph_id]
             if isinstance(dst_graph_node, relay.Function):
               if split_idx is not None:
                 dst_graph_id = (getOuterNodeID(dst_gid), split_idx) # func out node with tuple idx

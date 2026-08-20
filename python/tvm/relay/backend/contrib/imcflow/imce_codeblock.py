@@ -3098,7 +3098,12 @@ class RecvSendWrapper(ImceCodeBlock):
 
       # handle split ops in middle of functions. For example, qconv2d -> split
       output_edges=self.out_edges
-      split_case = all(isinstance(dst_node, relay.Call) and dst_node.op == relay.op.get("split") for dst_node in [CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)] for edge in self.out_edges])
+      # Task #10: a RESBUF (INODE_BUFFER) dst has no relay node in CustomIDToNode.
+      # Use .get() so the split-detection is None (never a split) for such hops.
+      split_case = all(
+          isinstance(dst_node, relay.Call) and dst_node.op == relay.op.get("split")
+          for dst_node in [CustomIDToNode().get(getInnerNodeID(edge.dst_id.graph_node_id))
+                           for edge in self.out_edges])
       # if not te_out_infos: # local edge
       if split_case:
         assert len(self.out_edges) == 1, "In split case, there should be only one out_edge from this block"
@@ -3263,7 +3268,11 @@ class RecvSendWrapper(ImceCodeBlock):
       te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(src_id, "out")
 
       output_edges = self.out_edges
-      split_case = all(isinstance(dst_node, relay.Call) and dst_node.op == relay.op.get("split") for dst_node in [CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)] for edge in self.out_edges])
+      # Task #10: RESBUF (INODE_BUFFER) dst has no relay node -> .get() => None.
+      split_case = all(
+          isinstance(dst_node, relay.Call) and dst_node.op == relay.op.get("split")
+          for dst_node in [CustomIDToNode().get(getInnerNodeID(edge.dst_id.graph_node_id))
+                           for edge in self.out_edges])
       if split_case:
         assert len(self.out_edges) == 1, "In split case, there should be only one out_edge from this block"
         assert te_out_infos[0].fifo_id == TensorEdgeInfo.LOCAL_FIFO, "producer of split should have same HW node ID"

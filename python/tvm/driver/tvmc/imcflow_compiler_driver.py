@@ -262,6 +262,9 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
 
     # Step 20: Memory allocation (tensor memory)
     imcflow_transform.MemoryAllocator().run(mod, ttype_map)
+    # Task #5/#10: allocate the whole residual-skip tensor as an inode-dmem
+    # DataBlock (keyed by both RESBUF hops). No-op unless the sub-lever fired.
+    imcflow_transform.allocateResidBufferDataBlocks(mod)
     if save_intermediate:
         with open(f"{output_dir}/mem_layout.txt", "w") as f:
             pprint.pprint(DevConfig().MemLayout, stream=f)

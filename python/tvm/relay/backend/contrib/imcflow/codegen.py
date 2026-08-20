@@ -973,7 +973,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     for edge in self.edges:
       arg_id = edge.src_id.graph_node_id
-      if ConstPat.match(CustomIDToNode()[arg_id]):
+      # Task #10: a RESBUF (INODE_BUFFER) hop endpoint has no relay node. Its
+      # resend SEND (src tensor_type "resbuf_out") is emitted by
+      # _add_resid_buffer_blocks(), NOT the const-edge path -> skip it here.
+      _src_node = CustomIDToNode().get(getInnerNodeID(arg_id))
+      if _src_node is None:
+        continue
+      if ConstPat.match(_src_node):
         # Include DW conv weight (not standard conv weight which goes to IMCU)
         if edge.src_id.tensor_type != "weight" or is_dwconv_weight(edge):
           const_edges.append(edge)
@@ -1050,6 +1056,50 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       else:
         self.add_recv_block_interleaved(edges, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
 
+    # Task #10: in-region residual-skip buffer (RESBUF). For each RESBUF assigned
+    # to an inode in THIS function, emit the two hops on that inode:
+    #   collector: INODE_RECV hop A (producer imce -> inode dmem buffer)
+    #   resend   : INODE_SEND hop B (inode dmem buffer -> add imce)
+    # The producer imce SEND (hop A) and the add imce RECV (hop B) are emitted by
+    # the imce codegen (unchanged in shape). Mirrors the func_out collector +
+    # a simple in-order resend loop (pixel-timing is task #9).
+    self._add_resid_buffer_blocks()
+
+  def _add_resid_buffer_blocks(self):
+    """Task #10: emit the RESBUF collector (RECV hop A) + resend (SEND hop B) on
+    the assigned inode. No-op unless the residual inode-buffer sub-lever fired."""
+    from tvm.relay.op.contrib.imcflow import residual_inode_buffer_mode
+    if not residual_inode_buffer_mode():
+      return
+    resid_info = getattr(DevConfig(), "ResidBufferInfo", None)
+    if not resid_info:
+      return
+    phase = CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC
+    for resbuf_gid, info in resid_info.items():
+      if info.get("func_name") != self.func_name:
+        continue
+      hopA = info["hopA"]  # (producer,odata) -> (RESBUF,resbuf)   collector RECV
+      hopB = info["hopB"]  # (RESBUF,resbuf_out) -> (add,data)      resend  SEND
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(hopA)
+      assert db is not None, f"RESBUF DataBlock not found for {hopA}"
+      # collector: INODE_RECV hop A into the buffer.
+      recv_info = DevConfig().get_tensor_edge_info(hopA)
+      recv_hid = self.get_hid(hopA.dst_id)
+      recv_block = RecvBlock(self, db, recv_info.fifo_id,
+                             f"resbuf collector recv: {hopA}")
+      self.codeblocks.append(recv_hid, recv_block, phase)
+      # resend: INODE_SEND hop B out of the buffer (simple in-order loop).
+      send_info = DevConfig().get_tensor_edge_info(hopB)
+      send_hid = self.get_hid(hopB.src_id)
+      send_block = SendBlock(self, db, send_info,
+                             f"resbuf resend send: {hopB}, "
+                             f"{send_info.policy_info[0].router_id.name} -> "
+                             f"{send_info.policy_info[-1].router_id.name}")
+      self.codeblocks.append(send_hid, send_block, phase)
+      print(f"[resid-inode-buffer] codegen RESBUF {resbuf_gid}: "
+            f"collector RECV @ {recv_hid} (fifo {recv_info.fifo_id}) + "
+            f"resend SEND @ {send_hid}")
+
   def construct_recv_send_map(self):
     """
     Iterate code blocks and find SendBlock, SendBlockInterleaved, and RecvBlock.
@@ -1109,10 +1159,29 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           add_to_map(send_map, edge, send_count)
 
 
+    def _resbuf_owner_edge(edges, tensor_types):
+      """Task #10: a RESBUF block's DataBlock lists BOTH hops. Count only the hop
+      matching this block's direction (resbuf_out for the resend SEND; resbuf for
+      the collector RECV) so each hop is billed exactly once."""
+      if not isinstance(edges, list):
+        return None
+      for e in edges:
+        if getattr(e.src_id, "tensor_type", None) in tensor_types or \
+           getattr(e.dst_id, "tensor_type", None) in tensor_types:
+          return e
+      return None
+
     all_blocks = self.codeblocks.get_blocks()
     for block in all_blocks:
       if isinstance(block, SendBlock):
         edge = block.block.id
+        # Task #10: RESBUF resend SEND -> count only hop B (src tensor_type
+        # "resbuf_out"); the collector RECV hop A (in the same shared DataBlock)
+        # is billed by the RecvBlock branch below.
+        _resbuf_e = _resbuf_owner_edge(edge, ("resbuf_out",))
+        if _resbuf_e is not None:
+          _add_send_map(self.send_map, block.block, _resbuf_e)
+          continue
         # IMCFLOW_RESIDUAL_IN_REGION: a model-input multicast fan-out emits a
         # SEPARATE per-edge SendBlock per receiver, but all of them share ONE
         # DataBlock whose .id lists BOTH edges. Counting block.id (the list) for
@@ -1143,6 +1212,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
       elif isinstance(block, RecvBlock):
         edge = block.block.id
+        # Task #10: RESBUF collector RECV -> count only hop A (dst tensor_type
+        # "resbuf"); the resend SEND hop B is billed by the SendBlock branch.
+        _resbuf_e = _resbuf_owner_edge(edge, ("resbuf",))
+        if _resbuf_e is not None:
+          edge = _resbuf_e
         # Calculate actual number of recv operations (loop count)
         # recv_count = math.ceil(block.block.size / 32)
         if block.block.tiling_info:

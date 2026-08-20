@@ -496,6 +496,32 @@ class EdgeInfoGenerator:
         ID_dict: Dict,
     ) -> None:
         """Handle TensorEdge EdgeInfo generation with FIFO ID assignment."""
+        # Task #10: residual-skip buffer (RESBUF / INODE_BUFFER) hops.
+        #   hop A: (producer,odata) -> (RESBUF, resbuf)   [imce -> inode collector]
+        #   hop B: (RESBUF, resbuf_out) -> (add, data)    [inode resend -> add imce]
+        # The RESBUF endpoint has no relay node (ID_dict lookup would KeyError).
+        # hop A: dst is an inode collector (non-conv) -> assign a data fifo.
+        # hop B: src is the inode resend; dst (add imce) receives like a normal
+        # data input -> a fifo on the add imce.
+        if edge.dst_id.tensor_type == "resbuf":
+            # hop A: producer imce SEND -> inode buffer. Treat as a data edge to a
+            # non-conv (inode) consumer -> gets a fifo id at the dest (inode).
+            edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
+            fifo_id_cnt[dest_node] += 1
+            if fifo_id_cnt[dest_node] >= 8:
+                raise ValueError("FIFO ID cannot be over 7!")
+            ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
+            return
+        if edge.src_id.tensor_type == "resbuf_out":
+            # hop B: inode resend -> add imce data input. The add imce is a
+            # vecops/qconv consumer; assign a data fifo like a normal odata input.
+            edgeinfo = TensorEdgeInfo(router_entry_list, None, fifo_id_cnt[dest_node])
+            fifo_id_cnt[dest_node] += 1
+            if fifo_id_cnt[dest_node] >= 8:
+                raise ValueError("FIFO ID cannot be over 7!")
+            ImcflowDeviceConfig().add_tensor_edge_info(edge, edgeinfo)
+            return
+
         if edge.src_id.tensor_type in ["odata", "var"]:
             dst_node_name = ID_dict[getInnerNodeID(edge.dst_id.graph_node_id)]
 

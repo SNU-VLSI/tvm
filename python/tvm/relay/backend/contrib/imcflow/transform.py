@@ -5200,38 +5200,86 @@ def splitResidualSkipThroughInodeBuffer(mod):
     cfg.TensorEdgeList.extend(lst)
 
   # ---------------------------------------------------------------------------
-  # STRUCTURAL WALL (task #5 stop condition), empirically confirmed:
-  # The discriminator + edge-split above WORK (they correctly find only the
-  # b3.res SKIP edge (94,odata)->((95,66),data) and reroute it through the
-  # synthetic RESBUF waypoint). BUT the entire post-edge-list pipeline is driven
-  # by walking the RELAY graph and assumes every TensorEdge endpoint is a real
-  # relay Call/Var/Constant with a CustomIDToNode entry:
-  #   1. Joint PnR GraphExtractor builds nodes from _visit(func); a synthetic
-  #      RESBUF gid has NO node, so BOTH hop commodities are SILENTLY DROPPED
-  #      (_extract_graph_commodities_from_tensor_edge_list: `continue` when a
-  #      node is not in self.nodes) -> no routing, no policy entry.
-  #   2. construct_noc_paths_from_pnr_results does CustomIDToNode()[dst_graph_id]
-  #      -> HARD KeyError on the RESBUF gid (joint_pnr_ilp.py ~2395).
-  #   3. MemoryAllocator.get_size / the codegen block builders would fail the
-  #      same way (relay-walk driven, no synthetic node).
-  # Making the RESBUF a first-class routable+allocatable in-region inode buffer
-  # requires a NEW ILP NodeType (INODE_BUFFER) + MemoryAllocator DataBlock
-  # support + noc-path/policy/codegen recognition -- the infrastructure the
-  # design memory scopes as tasks #6/#7 (ILP residual-awareness). There is also
-  # a hard ORDERING conflict: the SKIP-vs-MAIN discriminator needs the add-imce
-  # placement (HWNodeMap), which only exists AFTER PnR, yet the edge-split must
-  # run BEFORE PnR. See BN_MINMAX_PACKING_HANDOFF / bn-minmax-packing-lever memo.
+  # Task #10 (INODE_BUFFER first-class node): the structural wall above is now
+  # RESOLVED. The RESBUF waypoint is registered as an INODE_BUFFER GraphNode in
+  # the Joint PnR GraphExtractor (fixed-assigned to an INODE, mirroring
+  # FUNC_OUT), both hop commodities survive extraction + get L4b linking +
+  # routing, construct_noc_paths_from_pnr_results resolves the RESBUF endpoints
+  # from inodebuf_to_inode, and a post-PnR pass (allocateResidBufferDataBlocks)
+  # allocates the whole-tensor DataBlock in the inode dmem + wires the collector
+  # / resend codegen. See joint_pnr_ilp.py (NodeType.INODE_BUFFER, L4b) and
+  # allocateResidBufferDataBlocks below.
   if cfg.ResidBufferInfo:
-    raise RuntimeError(
-      "IMCFLOW_RESID_INODE_BUFFER (task #5): the residual-SKIP edge-split fired "
-      f"({len(cfg.ResidBufferInfo)} skip edge(s) rerouted through inode buffers) "
-      "but the synthetic RESBUF waypoint is NOT routable/allocatable by the "
-      "current relay-walk-driven PnR + MemoryAllocator + noc-path pipeline "
-      "(Joint PnR silently drops the RESBUF commodities; "
-      "construct_noc_paths_from_pnr_results raises KeyError on the RESBUF gid). "
-      "This needs a first-class INODE_BUFFER ILP NodeType + MemoryAllocator "
-      "DataBlock support (tasks #6/#7). Detection/edge-split is validated; keep "
-      "this sub-lever OFF until the buffer node type lands.")
+    debug_print(f"[resid-inode-buffer] split fired for "
+                f"{len(cfg.ResidBufferInfo)} skip edge(s); routed as INODE_BUFFER")
+
+
+def allocateResidBufferDataBlocks(mod):
+  """Task #10: allocate the whole residual-skip tensor as a DataBlock in the
+  assigned inode's dmem, keyed by BOTH hop edges so get_data_block_by_edge()
+  resolves for the collector (hop A RECV base) and the resend (hop B SEND read).
+
+  Called AFTER MemoryAllocator.run (so per-func MemLayout regions exist and
+  CurrFuncMemLayout is set per function). No-op unless the residual inode-buffer
+  sub-lever fired -> byte-identical when OFF.
+
+  The user concept: allocate the WHOLE tensor (not tiled), footprint is not a
+  concern -- address calc stays simple. We assert it fits INODE_DATA_MEM_SIZE
+  alongside the already-allocated blocks (the region.allocate bump allocator
+  raises on overflow)."""
+  from tvm.relay.op.contrib.imcflow import residual_inode_buffer_mode
+  if not residual_inode_buffer_mode():
+    return
+  cfg = ImcflowDeviceConfig()
+  resid_info = getattr(cfg, "ResidBufferInfo", None)
+  if not resid_info:
+    return
+
+  def _skip_tensor_bytes(producer_tid):
+    """Whole-tensor size in bytes for the skip producer's output."""
+    src_node = transform_utils.getNodeFromTensorID(producer_tid)
+    ttype = transform_utils.get_type(mod, src_node)
+    shape, dtype = ttype.shape, ttype.dtype
+    n = 1
+    for d in shape:
+      n *= int(d)
+    return n * np.dtype(dtype).itemsize
+
+  for resbuf_gid, info in resid_info.items():
+    func_name = info["func_name"]
+    hopA = info["hopA"]  # (producer,odata) -> (RESBUF,resbuf)  [collector RECV]
+    hopB = info["hopB"]  # (RESBUF,resbuf_out) -> (add,data)     [resend SEND]
+    inode_nid = info["inode"]
+    inode_name = inode_nid.name  # e.g. inode_3_0
+
+    size = _skip_tensor_bytes(info["producer"])
+    # round up to a NoC packet (32B) multiple
+    size = ((size + 31) // 32) * 32
+
+    # One DataBlock shared by both hops (collector writes it, resend reads it).
+    # Allocate keyed by hopA ONLY (a single hashable TensorEdge -> valid region
+    # dict key; a 2-edge .id is a list, which is unhashable). AFTER allocation we
+    # append hopB to .edges so get_data_block_by_edge() resolves for BOTH the
+    # collector RECV (hopA) and the resend SEND (hopB) -- the region dict key was
+    # already fixed to hopA at allocate() time, so appending hopB is safe.
+    datablock = DataBlock(hopA, None)
+    datablock.set_size(size)
+
+    layout = cfg.MemLayout[func_name][f"{inode_name}_data"]
+    # phase="exec": lives during the compute phase (mirrors func_out collector
+    # DataBlocks, which are allocated in the exec phase region).
+    layout.allocate(datablock, phase="exec")
+    # Now that the block is keyed by hopA, register hopB as a second resolvable
+    # edge pointing at the SAME buffer (same offset/base_address).
+    datablock.edges.append(hopB)
+    # register a TensorEdgeInfo so downstream (recv/send blocks) can resolve it;
+    # the policy builder already added routing TensorEdgeInfo for both hops, so
+    # DO NOT overwrite those -- just attach the DataBlock reference used by the
+    # memory-layout lookup (get_data_block_by_edge scans block.edges).
+    cfg.ResidBufferInfo[resbuf_gid]["data_block"] = datablock
+    cfg.ResidBufferInfo[resbuf_gid]["size"] = size
+    debug_print(f"[resid-inode-buffer] allocated RESBUF {resbuf_gid} DataBlock "
+                f"size={size}B on {inode_name} (hops {hopA} / {hopB})")
 
 
 class MemoryAllocator:
