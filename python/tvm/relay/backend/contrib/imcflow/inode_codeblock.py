@@ -1012,6 +1012,132 @@ class SendBlock(InodeCodeBlock):
       return self.block.id
     return None
 
+class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
+  """IMCFLOW_RESIDUAL_IN_REGION: one inode source fans out a model-input identity
+  to TWO distinct converging consumers (the b1 conv-entry minmax AND the in-region
+  residual add's skip). Both streams reach the SAME add, so the pipeline needs BOTH
+  concurrently. Emitting them as SEPARATE per-edge send blocks (full burst to A,
+  THEN full burst to B) SERIALIZES them: consumer B starves while A's burst runs,
+  the converge at the add stalls, backpressure freezes the sender mid-burst and the
+  first tile wedges forever (region1 first-tile 20000-poll deadlock).
+
+  Fix: emit ONE loop over the shared (tiled) word count whose body alternates, per
+  word i: [presend-sync_A; SEND_A(word i)] [presend-sync_B; SEND_B(word i)]. Each
+  edge keeps its OWN fifo / policy / per-word rendezvous semantics (bare for the
+  conv-entry consumer, the 4-phase flag rendezvous for the residual-add consumer) --
+  only the EMISSION is interleaved, so neither consumer starves.
+
+  Reuses per-edge SendBlock instances purely to obtain each edge's exact presend
+  rendezvous (edge_info.owner selects the right receiver) and SEND parameters; they
+  are NOT registered as separate code blocks. Lever OFF -> never constructed
+  (visit_function only routes residual_fanout_edges here) -> byte-identical.
+  """
+
+  def __init__(self, builder, blocks: List[DataBlock], edge_infos: List[TensorEdgeInfo], annotation: str = ""):
+    super().__init__(annotation)
+    assert len(blocks) == len(edge_infos), "# of blocks and edge_infos must be equal"
+    assert len(blocks) >= 2, "residual fanout interleave needs >= 2 edges"
+    self.builder = builder
+    self.blocks = blocks
+    self.edge_infos = edge_infos
+    # Per-edge SendBlock helpers (own edge_info -> own owner -> own rendezvous).
+    self._helpers = []
+    for db, ei in zip(self.blocks, self.edge_infos):
+      h = SendBlock(builder, db, ei, annotation="")
+      # Discard the helper's self-built body; we only borrow its per-word sync
+      # (_get_presend_sync_code_str) below, never rendering the helper itself.
+      h.body = SequentialBlock()
+      self._helpers.append(h)
+    self._build()
+
+  def _build(self):
+    # All fan-out edges share ONE model-input DataBlock (same base offset) and are
+    # tiled on the SAME runtime packet count. Verify and use a single tile-count
+    # loop. Each edge still SENDs on its own fifo/policy (distinct routing entries).
+    tiled = all(db.tiling_info is not None for db in self.blocks)
+
+    # Resolve the tile packet-count pointer from the first edge (all identical).
+    if tiled:
+      first = self.blocks[0]
+      first_edge = first.id[0] if isinstance(first.id, list) else first.id
+      cnt_addr_var = UniqueVar(
+          f"{first_edge.simple_name()}_fanout_cnt_base_address",
+          dtype="int", pointer_type=True)
+      _cnt_block = DevConfig().MemLayout[self.builder.func_name].get_data_block_by_id(
+          f"{first_edge.simple_name()}_cnt_base_addr")
+      self.body.add(TextBlock(f"{cnt_addr_var} = (int*)({_cnt_block.offset});"))
+      loop_cnt_var = UniqueVar(f"{first_edge.simple_name()}_fanout_tile_loop_count", dtype="int")
+      self.body.add(TextBlock(f"{loop_cnt_var} = {cnt_addr_var}[0];"))
+      self.body.add(TextBlock('__asm__ volatile("nop");'))  # BUGFIX_LOAD_USE_HAZARD
+      trip = loop_cnt_var
+    else:
+      # Non-tiled fallback: fixed word count (all edges same size).
+      trip = math.ceil(self.blocks[0].size / 32)
+
+    # Per-edge base-offset vars + SEND parameters.
+    infos = []
+    for db, ei, h in zip(self.blocks, self.edge_infos, self._helpers):
+      base_var = UniqueVar("fanout_send_base_address", dtype="int")
+      self.body.add(TextBlock(f"{base_var} = {db.offset};"))
+      infos.append({
+          "base_var": base_var,
+          "policy": ei.policy_info[0].address,
+          "fifo": ei.fifo_id,
+          "helper": h,
+      })
+
+    nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
+
+    # ★ True-multicast collapse. In ResNet8's b1.res the two fan-out edges (b1 conv
+    # entry + residual-add skip) resolve to the SAME router policy entry AND the SAME
+    # inode send FIFO (all edges: policy 1, fifo 2) -- one INODE_SEND on that entry is
+    # MULTICAST and reaches BOTH imces at once (imce_0_2's RECV(2) is even annotated
+    # "-> imce_0_1, imce_0_2"). Emitting a SEPARATE SEND per edge then pushes each word
+    # TWICE into the single multicast FIFO: both consumers receive it twice -> RECV
+    # FIFO overflow / send backpressure -> first-tile wedge (~word 11/416). So when all
+    # edges share (policy, fifo, base), emit ONE SEND per word, preceded by the UNION of
+    # every edge's per-word rendezvous (bare for the conv entry, the 4-phase flag for the
+    # residual add), so the single multicast word is paced by every consumer that needs a
+    # handshake. If edges have DISTINCT policy/fifo (genuine separate streams) fall back
+    # to the word-interleaved per-edge emission (each keeps its own route+rendezvous).
+    same_route = (len({(x["policy"], x["fifo"]) for x in infos}) == 1
+                  and len({x["base_var"].__str__() for x in infos}) >= 1
+                  and len({b.offset for b in self.blocks}) == 1)
+
+    if same_route:
+      _policy = infos[0]["policy"]
+      _fifo = infos[0]["fifo"]
+      _base = infos[0]["base_var"]
+
+      def multicast_body(iter, infos=infos, policy=_policy, fifo=_fifo, base=_base,
+                         nop_delay=nop_delay):
+        code = ""
+        for x in infos:
+          pre = x["helper"]._get_presend_sync_code_str(iter_var=iter)
+          if pre:
+            code += pre
+        code += (f"__builtin_INODE_SEND({base} + {iter}*32, 0, {policy}, {fifo}); "
+                 f"// multicast fan-out to all consumers\n")
+        code += nop_delay
+        return code
+
+      self.body.add(SimpleFor(trip, multicast_body))
+      return
+
+    def interleaved_body(iter, infos=infos, nop_delay=nop_delay):
+      code = ""
+      for x in infos:
+        pre = x["helper"]._get_presend_sync_code_str(iter_var=iter)
+        if pre:
+          code += pre
+        code += (f"__builtin_INODE_SEND({x['base_var']} + {iter}*32, 0, "
+                 f"{x['policy']}, {x['fifo']});\n")
+        code += nop_delay
+      return code
+
+    self.body.add(SimpleFor(trip, interleaved_body))
+
+
 class SendBlockInterleaved(InodeCodeBlock):
   """ Code block for sending data from given fifo id """
 

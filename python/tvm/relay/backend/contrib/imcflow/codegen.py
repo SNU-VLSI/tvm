@@ -1012,19 +1012,27 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # bill each edge the full size (2x -> send 8192 vs recv 4096). Those distinct
     # unicast fan-outs must instead be emitted as SEPARATE per-edge send blocks
     # (each 4096, matching its receiver). Pull them out before the HID grouping.
-    residual_fanout_edges = []
+    # residual_fanout_groups: {src_id: [edgeA, edgeB, ...]} for a model-input param
+    # that fans out to >1 distinct converging consumer. These are emitted as ONE
+    # word-INTERLEAVED send block per source (not N sequential per-edge SendBlocks):
+    # both streams reach the same in-region residual add, so a serialized full-A-
+    # then-full-B burst starves the converge and wedges the first tile (region1
+    # 20000-poll deadlock). Interleaving alternates SEND-to-A / SEND-to-B per word,
+    # each keeping its own fifo/policy/rendezvous, so neither consumer starves.
+    residual_fanout_groups = {}
     grouped_param_edges = param_edges
     if residual_in_region_mode():
-      # a param source id feeding >1 distinct dst -> emit each edge on its own
       from collections import defaultdict as _dd
       _by_src = _dd(list)
       for e in param_edges:
         _by_src[e.src_id].append(e)
-      residual_fanout_edges = [e for es in _by_src.values() if len(es) > 1 for e in es]
-      grouped_param_edges = [e for e in param_edges if e not in residual_fanout_edges]
+      residual_fanout_groups = {src: es for src, es in _by_src.items() if len(es) > 1}
+      _fanout_edges = {e for es in residual_fanout_groups.values() for e in es}
+      grouped_param_edges = [e for e in param_edges if e not in _fanout_edges]
 
-    for edge in residual_fanout_edges:
-      self.add_send_block(edge, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
+    for src, edges in residual_fanout_groups.items():
+      self.add_send_block_residual_fanout_interleaved(
+          edges, CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC)
 
     param_edges_by_hid = {}
     for edge in grouped_param_edges:
@@ -1195,6 +1203,18 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           if own is not None and own in edge:
             edge = own
         _add_send_map(self.send_map, block.block, edge)
+      elif isinstance(block, SendBlockResidualFanoutInterleaved):
+        # IMCFLOW_RESIDUAL_IN_REGION: word-interleaved model-input fan-out. All
+        # edges SHARE ONE DataBlock whose .id lists every fan-out edge, so counting
+        # db.id (the shared list) would bill every edge once PER db (2 dbs x 2 edges
+        # -> each edge 2x -> send 8192 vs recv 4096 false deadlock, the original
+        # 1ee91d854 bug in interleaved form). Bill only each edge's OWN owner
+        # (edge_info.owner) so each edge is counted exactly once. Lever OFF ->
+        # class never constructed -> byte-identical.
+        for db, ei in zip(block.blocks, block.edge_infos):
+          own = getattr(ei, "owner", None)
+          edge = own if own is not None else db.id
+          _add_send_map(self.send_map, db, edge)
       elif isinstance(block, SendBlockInterleaved):
         # For interleaved sends, each block sends in parallel in the same loop
         for db in block.blocks:
@@ -1299,6 +1319,35 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         annotation += append_edgeinfo_and_db(edge, edge_infos, dbs)
 
     block = SendBlockInterleaved(self, dbs, edge_infos, annotation)
+    self.codeblocks.append(hid, block, phase)
+
+  def add_send_block_residual_fanout_interleaved(self, edge_list, phase: CodePhase):
+    """IMCFLOW_RESIDUAL_IN_REGION: emit the model-input residual fan-out (one inode
+    source -> TWO converging consumers) as ONE word-interleaved send loop instead of
+    N sequential per-edge SendBlocks. Serializing them (full burst A, then full burst
+    B) starves the converging consumer and wedges the first tile (region1 20000-poll
+    deadlock). Each edge keeps its own fifo/policy and per-word rendezvous; only the
+    emission is interleaved. Each edge carries its OWN edge_info (owner) so the
+    downstream helper SendBlock derives the correct per-consumer rendezvous."""
+    hids = [self.get_hid(edge.src_id) for edge in edge_list]
+    assert all(hid == hids[0] for hid in hids), \
+        "all residual-fanout edges must share the source inode for interleaving"
+    hid = hids[0]
+
+    dbs = []
+    edge_infos = []
+    annotation = ""
+    for edge in edge_list:
+      out_edge_info = DevConfig().get_tensor_edge_info(edge)
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
+      assert db is not None, f"Data block not found for residual-fanout edge: {edge}"
+      dbs.append(db)
+      edge_infos.append(out_edge_info)
+      annotation += (f"resid-fanout send - {edge}, "
+                     f"{out_edge_info.policy_info[0].router_id.name} -> "
+                     f"{out_edge_info.policy_info[-1].router_id.name}, ")
+
+    block = SendBlockResidualFanoutInterleaved(self, dbs, edge_infos, annotation)
     self.codeblocks.append(hid, block, phase)
 
   def add_recv_block(self, edge, phase: CodePhase):
