@@ -42,7 +42,7 @@ def test_default_config_prepares_now_request(tmp_path):
     value = json.loads(request.read_text(encoding="utf-8"))
     assert value["session_id"] == "unit_power_request"
     assert "scope" not in value
-    assert "mode" not in value
+    assert value["mode"] == "now"
     assert "region_loop" not in value
     assert value["rails"][0]["name"] == "DMM_GPIB3"
     assert value["metadata"]["model"] == "resnet8"
@@ -78,6 +78,24 @@ def test_default_config_prepares_now_request(tmp_path):
         "min_seconds": 0.0,
     }
 
+    wait_config_path = CODEGEN_DIR / "power_configs" / "tile_wait_min.json"
+    wait_config = json.loads(wait_config_path.read_text(encoding="utf-8"))
+    assert wait_config["mode"] == "wait"
+    assert wait_config["defaults"]["sample_interval_s"] == "MIN"
+    assert wait_config["defaults"]["sample_count"] == 50000
+    assert run_tool("config-mode", wait_config_path).stdout.strip() == "wait"
+    wait_request = tmp_path / "wait_request.json"
+    run_tool(
+        "prepare",
+        "--config",
+        wait_config_path,
+        "--output",
+        wait_request,
+        "--session-id",
+        "wait_request",
+    )
+    assert json.loads(wait_request.read_text(encoding="utf-8"))["mode"] == "wait"
+
 
 def test_disabled_config_does_not_prepare_session(tmp_path):
     config = tmp_path / "disabled.json"
@@ -89,13 +107,13 @@ def test_disabled_config_does_not_prepare_session(tmp_path):
     assert result.stdout.strip() == "disabled"
 
 
-def test_power_policy_rejects_legacy_scope_wait_and_impossible_minimum(tmp_path):
+def test_power_policy_rejects_legacy_scope_unknown_mode_and_impossible_minimum(tmp_path):
     base = json.loads(
         (CODEGEN_DIR / "power_configs/region.json").read_text(encoding="utf-8")
     )
     cases = [
         ("legacy_scope", {**base, "scope": "continuous"}),
-        ("wait_mode", {**base, "mode": "wait"}),
+        ("unknown_mode", {**base, "mode": "continuous"}),
         (
             "tile_scope_loop",
             {
@@ -138,6 +156,8 @@ def test_tvm_manifest_groups_scope_free_region_artifacts(tmp_path):
         result_dir,
         "--scope",
         "TILE",
+        "--mode",
+        "wait",
         "--region-loop",
         json.dumps(policy),
     )
@@ -145,6 +165,7 @@ def test_tvm_manifest_groups_scope_free_region_artifacts(tmp_path):
         (result_dir / "tvm_power_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["scope"] == "TILE"
+    assert manifest["mode"] == "wait"
     assert manifest["region_ids"] == ["r0001_tile_0", "r0002_tile_1"]
     assert manifest["region_loop"] == policy
 

@@ -68,8 +68,8 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
         raise ConfigError("scope must be MODEL, REGION, or TILE")
     normalized["scope"] = scope
     mode = str(normalized.get("mode", "now")).lower()
-    if mode != "now":
-        raise ConfigError("power-region measurement supports only mode=now")
+    if mode not in ("now", "wait"):
+        raise ConfigError("power-region measurement mode must be now or wait")
     normalized["mode"] = mode
     normalized["duration_budget_s"] = finite_number(
         normalized.get("duration_budget_s", 300),
@@ -177,7 +177,7 @@ def prepare(args: argparse.Namespace) -> int:
     measurement_request = {
         key: value
         for key, value in config.items()
-        if key not in ("enabled", "scope", "mode", "region_loop")
+        if key not in ("enabled", "scope", "region_loop")
     }
     measurement_request["session_id"] = args.session_id
     metadata = dict(measurement_request.get("metadata", {}))
@@ -197,6 +197,12 @@ def config_status(args: argparse.Namespace) -> int:
 def config_scope(args: argparse.Namespace) -> int:
     config = validate_config(load_object(Path(args.config)))
     print(config.get("scope", "REGION"))
+    return 0
+
+
+def config_mode(args: argparse.Namespace) -> int:
+    config = validate_config(load_object(Path(args.config)))
+    print(config.get("mode", "now"))
     return 0
 
 
@@ -221,7 +227,7 @@ def write_tvm_manifest(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "session_id": result_dir.name,
         "scope": str(args.scope).upper(),
-        "mode": "now",
+        "mode": str(args.mode).lower(),
         "region_loop": policy,
         "region_ids": region_ids,
     }
@@ -508,6 +514,10 @@ def build_parser() -> argparse.ArgumentParser:
     scope_parser.add_argument("config")
     scope_parser.set_defaults(handler=config_scope)
 
+    mode_parser = subparsers.add_parser("config-mode")
+    mode_parser.add_argument("config")
+    mode_parser.set_defaults(handler=config_mode)
+
     loop_parser = subparsers.add_parser("config-loop")
     loop_parser.add_argument("config")
     loop_parser.set_defaults(handler=config_loop)
@@ -515,6 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_parser = subparsers.add_parser("write-tvm-manifest")
     manifest_parser.add_argument("result_dir")
     manifest_parser.add_argument("--scope", required=True)
+    manifest_parser.add_argument("--mode", required=True, choices=("now", "wait"))
     manifest_parser.add_argument("--region-loop", required=True)
     manifest_parser.set_defaults(handler=write_tvm_manifest)
 

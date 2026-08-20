@@ -11,6 +11,7 @@ POWER_LOCAL_REQUEST=""
 POWER_REMOTE_REQUEST=""
 POWER_LOCAL_RESULT_DIR=""
 POWER_SCOPE="REGION"
+POWER_MODE="now"
 POWER_LOOP_ENABLE=0
 POWER_MIN_SAMPLES=0
 POWER_MIN_SECONDS=0
@@ -188,6 +189,7 @@ power_prepare() {
         return 1
     fi
     POWER_SCOPE="$(python "$SCRIPT_DIR/scripts/power_request.py" config-scope "$config")" || return 1
+    POWER_MODE="$(python "$SCRIPT_DIR/scripts/power_request.py" config-mode "$config")" || return 1
     local loop_json
     loop_json="$(python "$SCRIPT_DIR/scripts/power_request.py" config-loop "$config")" || return 1
     read -r POWER_LOOP_ENABLE POWER_MIN_SAMPLES POWER_MIN_SECONDS < <(
@@ -312,7 +314,7 @@ power_fetch_result() {
         return 1
     fi
     python "$SCRIPT_DIR/scripts/power_request.py" write-tvm-manifest \
-        "$POWER_LOCAL_RESULT_DIR" --scope "$POWER_SCOPE" \
+        "$POWER_LOCAL_RESULT_DIR" --scope "$POWER_SCOPE" --mode "$POWER_MODE" \
         --region-loop "$(printf '{\"loop_enable\":%s,\"min_samples\":%s,\"min_seconds\":%s}' \
             "$([[ "$POWER_LOOP_ENABLE" == 1 ]] && printf true || printf false)" \
             "$POWER_MIN_SAMPLES" "$POWER_MIN_SECONDS")" || return 1

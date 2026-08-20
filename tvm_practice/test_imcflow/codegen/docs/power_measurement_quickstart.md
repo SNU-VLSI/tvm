@@ -83,6 +83,7 @@ export IMCFLOW_POWER_CONFIG=power_configs/region.json
 |---|---|
 | [region.json](../power_configs/region.json) | 각 generated kernel region을 별도 DMM trace로 측정한다. |
 | [tile.json](../power_configs/tile.json) | 각 tile의 `RUN` write부터 interrupt ACK 및 `INTR_DONE` write까지를 별도 DMM trace로 측정한다. 이 구간에는 안정성을 위한 invoke MMIO barrier가 포함되며 TILE loop는 항상 비활성화된다. |
+| [tile_wait_min.json](../power_configs/tile_wait_min.json) | 각 TILE 종료 뒤에도 DMM의 NPLC 기반 최소 간격으로 50,000개가 찰 때까지 측정하여 idle 복귀 tail을 포함한다. |
 | [default.json](../power_configs/default.json) | 기본 `REGION` 측정이며 최대 예상 시간은 300초이다. |
 | [short_run.json](../power_configs/short_run.json) | 짧은 `MODEL` 측정용이며 예상 시간은 5초이다. |
 
@@ -92,13 +93,13 @@ JSON의 주요 항목은 다음과 같다.
 |---|---|
 | `enabled` | `false`이면 runner는 power 측정을 건너뛴다. |
 | `scope` | TVM-only 배치 정책. `MODEL`은 model 실행 전체, `REGION`은 generated region kernel, `TILE`은 tile invoke마다 별도 trace를 만든다. 기본은 `REGION`이다. |
-| `mode` | `now`만 지원한다. region END에서 DMM을 즉시 멈추고 현재 sample을 회수한다. |
+| `mode` | `now`는 region END에서 DMM을 즉시 멈춘다. `wait`는 END에서 설정된 `sample_count`가 모두 찰 때까지 기다린다. 기본은 `now`이다. |
 | `region_loop.loop_enable` | `MODEL` scope에서만 지원한다. `true`이면 model body 전체를 최소 조건이 충족될 때까지 반복한다. `REGION`과 `TILE` scope에서는 loop를 사용할 수 없다. |
 | `region_loop.min_samples` | 모든 rail에서 확보해야 할 최소 acquired sample 수이다. |
 | `region_loop.min_seconds` | 실제 DMM GET 이후 확보해야 할 최소 시간이다. sample/time 조건을 함께 지정하면 둘 다 만족해야 한다. |
 | `duration_budget_s` | 예상 측정 시간이다. `sample_interval_s=auto` 계산과 buffer coverage 검증에 사용된다. |
 | `sample_count` | DMM buffer에 설정할 sample 수이며 최대 50,000이다. |
-| `sample_interval_s` | 숫자(초), `auto`, 또는 `MIN`. `auto`는 `max(20 us, duration_budget_s / sample_count)`로 계산된다. |
+| `sample_interval_s` | 숫자(초), `auto`, 또는 `MIN`. `auto`는 `max(20 us, duration_budget_s / sample_count)`로 계산된다. `MIN`은 NPLC 등을 반영해 DMM이 선택한 최소값을 `SAMP:TIM?`으로 다시 읽어 사용한다. |
 | `nplc` | 적분 시간 설정이다. 작을수록 빠르지만 noise가 증가할 수 있다. |
 | `current_range_A` | DMM current range이다. `null` 또는 0 이하는 autorange로 해석한다. |
 | `autozero`, `reset` | 측정 시작 시 DMM autozero와 reset 사용 여부이다. |
