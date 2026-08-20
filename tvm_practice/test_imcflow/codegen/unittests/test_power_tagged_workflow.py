@@ -444,7 +444,7 @@ def test_debug_print_instruments_tensor_block_and_word_progress(monkeypatch):
     assert generated.index("before word=%d/%zu") < generated.index("block end")
 
 
-def test_invoke_run_wait_and_finalize_are_barrierless(monkeypatch):
+def test_invoke_run_wait_and_finalize_use_conservative_barriers(monkeypatch):
     monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
     module = _load_ext_codegen(monkeypatch)
     generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
@@ -461,19 +461,19 @@ def test_invoke_run_wait_and_finalize_are_barrierless(monkeypatch):
     assert run_wait == (
         "/* IMCFLOW-INVOKE: RUN doorbell intentionally has no post barrier. */\n"
         "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;\n"
-        "_wait_rc = wait_imcflow_interrupt_unfenced(npu_fd, npu_pointer);"
+        "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);"
     )
     assert "imcflow_mmio_barrier(" not in run_wait
     assert "IMCFLOW_DEBUG_PRINT(" not in run_wait
     assert "dmm_tag_" not in run_wait
-    assert "imcflow_mmio_barrier(" not in finalize
-    assert "generate_ack_unfenced(int_ack_gen_pointer)" in finalize
-    assert "npu_pointer[INTR_DONE_REG_IDX] = 1" in finalize
+    assert "invoke completion observed before interrupt ACK" in finalize
+    assert "generate_ack(int_ack_gen_pointer)" in finalize
+    assert "imcflow_mmio_write32(npu_pointer, INTR_DONE_REG_IDX, 1)" in finalize
     assert complete.index("enable_imcflow_interrupt") < complete.index(
         "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE"
     )
     assert complete.index("wait_imcflow_interrupt") < complete.index(
-        "generate_ack_unfenced(int_ack_gen_pointer)"
+        "generate_ack(int_ack_gen_pointer)"
     )
 
 
@@ -540,15 +540,16 @@ def test_generated_kernel_tags_stages_tiles_and_retry(monkeypatch):
     )
     tile_begin = linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE")
     tile_start = linux.index("npu_pointer[STATE_REG_IDX] = SET_RUN_CODE", tile_begin)
-    tile_wait = linux.index("wait_imcflow_interrupt_unfenced", tile_start)
-    tile_ack = linux.index("generate_ack_unfenced(int_ack_gen_pointer)", tile_wait)
-    tile_intr_done = linux.index("npu_pointer[INTR_DONE_REG_IDX] = 1", tile_ack)
+    tile_wait = linux.index("wait_imcflow_interrupt", tile_start)
+    tile_ack = linux.index("generate_ack(int_ack_gen_pointer)", tile_wait)
+    tile_intr_done = linux.index(
+        "imcflow_mmio_write32(npu_pointer, INTR_DONE_REG_IDX, 1)", tile_ack
+    )
     tile_end = linux.index("TVM_POWER_REGION_END()", tile_intr_done)
     tight_tile_body = linux[tile_begin:tile_end]
     assert tile_begin < tile_start < tile_wait < tile_ack < tile_intr_done < tile_end
-    assert "imcflow_mmio_barrier(" not in tight_tile_body
-    assert "imcflow_mmio_write32(" not in tight_tile_body
-    assert "imcflow_mmio_read32(" not in tight_tile_body
+    assert "imcflow_mmio_barrier(" in tight_tile_body
+    assert "imcflow_mmio_write32(" in tight_tile_body
     assert "dmm_tag_" not in tight_tile_body
 
     baremetal = str(make_generator("baremetal").makeKernelDef())

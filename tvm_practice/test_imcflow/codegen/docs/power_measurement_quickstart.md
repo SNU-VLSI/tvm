@@ -82,7 +82,7 @@ export IMCFLOW_POWER_CONFIG=power_configs/region.json
 | 파일 | 용도 |
 |---|---|
 | [region.json](../power_configs/region.json) | 각 generated kernel region을 별도 DMM trace로 측정한다. |
-| [tile.json](../power_configs/tile.json) | 각 tile의 `RUN` write부터 interrupt ACK 및 `INTR_DONE` write까지를 별도 DMM trace로 측정한다. 이 구간의 invoke MMIO는 barrierless이며 TILE loop는 항상 비활성화된다. |
+| [tile.json](../power_configs/tile.json) | 각 tile의 `RUN` write부터 interrupt ACK 및 `INTR_DONE` write까지를 별도 DMM trace로 측정한다. 이 구간에는 안정성을 위한 invoke MMIO barrier가 포함되며 TILE loop는 항상 비활성화된다. |
 | [default.json](../power_configs/default.json) | 기본 `REGION` 측정이며 최대 예상 시간은 300초이다. |
 | [short_run.json](../power_configs/short_run.json) | 짧은 `MODEL` 측정용이며 예상 시간은 5초이다. |
 
