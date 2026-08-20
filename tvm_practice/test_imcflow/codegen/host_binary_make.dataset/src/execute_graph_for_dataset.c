@@ -629,6 +629,7 @@ int main(int argc, char** argv) {
 
     // Run inference
     power_measure_runtime_phase("graph_execute");
+    TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL, "model");
     if (!g_timing_enabled) {
       TVMGraphExecutor_Run(exec);
     } else {
@@ -647,6 +648,7 @@ int main(int argc, char** argv) {
         if (g_imcflow_kernel_failed) break;
       }
     }
+    TVM_POWER_REGION_END();
 
     // Check if kernel failed (timeout)
     if (g_imcflow_kernel_failed) {

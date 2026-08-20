@@ -630,6 +630,7 @@ int main(int argc, char** argv) {
     }
 
     int sample_failed = 0;
+    TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL, "model_debug");
     for (uint32_t nid = 0; nid < exec->op_execs_count; nid++) {
       if (exec->op_execs[nid].fexec) {
         exec->op_execs[nid].Call(&(exec->op_execs[nid]));
@@ -659,6 +660,7 @@ int main(int argc, char** argv) {
         }
       }
     }
+    TVM_POWER_REGION_END();
 
     if (sample_failed) {
       power_measure_runtime_event("sample_timeout");
