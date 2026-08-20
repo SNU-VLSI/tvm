@@ -3871,7 +3871,27 @@ class AnnotGenerator:
               merged_cost = self.getRegionSize(shared_region) + self.getCost(node)
               import os as _os
               _cap = int(_os.environ.get("IMCFLOW_RESID_MERGE_CAP", str(ImcflowDeviceConfig.IMCE_NUM)))
-              if merged_cost <= _cap:
+              # Selective residual (IMCFLOW_RESID_INREGION_OC, comma list of output
+              # channels, e.g. "64"): merge ONLY the converges whose output-channel
+              # count matches -- e.g. 64 selects just ResNet8's b3.res, keeping
+              # region1/2 at their baseline (RTL-proven) shapes so the new inode-
+              # buffer machinery is validated in isolation. The blunt size cap
+              # cannot target a specific residual (cost ordering merges b1.res
+              # before b3.res); channel identity can. Unset -> no filter (cap
+              # alone governs, previous behavior, byte-identical).
+              _sel = _os.environ.get("IMCFLOW_RESID_INREGION_OC", "").strip()
+              _selected = True
+              if _sel:
+                try:
+                  _oc = int(node.checked_type.shape[1])
+                except Exception:
+                  _oc = None
+                _selected = _oc is not None and str(_oc) in [
+                    s.strip() for s in _sel.split(",") if s.strip()]
+                if not _selected:
+                  debug_print(f"[ConvergeCheck] RESIDUAL_IN_REGION: oc={_oc} not in "
+                              f"IMCFLOW_RESID_INREGION_OC={_sel} -> forced split (baseline)")
+              if _selected and merged_cost <= _cap:
                 debug_print(f"[ConvergeCheck] RESIDUAL_IN_REGION: keeping converge "
                             f"in-region (merged cost {merged_cost} <= "
                             f"{ImcflowDeviceConfig.IMCE_NUM})")
