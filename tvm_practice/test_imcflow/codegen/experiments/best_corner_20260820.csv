@@ -1,0 +1,3 @@
+idx,time,swept_v,vdd_meas,dda_meas,ddc_meas,idle_vdd_mA,idle_dda_mA,idle_ddc_mA,run_vdd_mA,run_dda_mA,run_ddc_mA,pulse_len,status,git_hash
+0,16:57:07,0.81,0.880914,0.870001,0.811767,12.5795871587,0.13859802849495,14.98397826515,56.835347215999995,15.820864626486484,48.99865329798658,150,ok,4cf32309d
+sanity,16:57:52,V1,,,,,,,,,,,baseline-ok,4cf32309d

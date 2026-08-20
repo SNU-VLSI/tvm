@@ -104,6 +104,7 @@ def main():
     ap.add_argument("--step", type=float, default=0.01)
     ap.add_argument("--settle", type=float, default=3.0)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--probe-collapse", action="store_true", help="continue past pulse-collapse points (marked invalid)")
     args = ap.parse_args()
 
     date = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -175,9 +176,11 @@ def main():
                         row_p["vdd"]["len"], status, git_hash])
             fcsv.flush()
             if pulse and pulse["vdd"]["run_mA"] is not None and row_p["vdd"]["len"] < 145:
-                stopped_reason = f"pulse-collapse at {v} (len={row_p['vdd']['len']})"
-                log(f"{v}: PULSE COLLAPSE (len={row_p['vdd']['len']}) -> invalid, stop")
-                break
+                log(f"{v}: PULSE COLLAPSE (len={row_p['vdd']['len']}) -> invalid")
+                if not args.probe_collapse:
+                    stopped_reason = f"pulse-collapse at {v} (len={row_p['vdd']['len']})"
+                    break
+                continue
             if pulse and pulse["vdd"]["run_mA"] is not None:
                 log(f"{args.sweep}={v}: run VDD/DDA/DDC = "
                     f"{row_p['vdd']['run_mA']:.2f}/{row_p['dda']['run_mA']:.2f}/"
