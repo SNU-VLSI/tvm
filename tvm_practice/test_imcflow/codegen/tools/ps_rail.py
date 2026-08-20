@@ -50,8 +50,12 @@ for _cand in (
 
 DEFAULT_HOST = os.environ.get("PSM_RPC_HOST", "147.46.117.49")
 DEFAULT_PORT = int(os.environ.get("PSM_RPC_PORT", "1331"))
+# NOTE: absolute path -- the rpyc server does NOT expand '~' (FileNotFoundError).
+# Local rpyc must match the server's major version (server: 6.0.2; 5.x fails
+# with 'brine ... not enough values to unpack').
 DEFAULT_CONFIG = os.environ.get(
-    "PSM_CONFIG", "~/measurement_utils/example/configs/ps_B2_config.json")
+    "PSM_CONFIG",
+    "/home/jihoonpark/measurement_utils/example/configs/ps_B2_config.json")
 RESTORE_PRESET = os.environ.get("PSM_RESTORE_PRESET", "V1")
 LOW_FRAC, HIGH_FRAC = 0.70, 1.02
 
