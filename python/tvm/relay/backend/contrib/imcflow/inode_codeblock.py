@@ -992,6 +992,20 @@ class SendBlock(InodeCodeBlock):
       - List of TensorEdge if multicast (block.id is list)
       - Single TensorEdge otherwise
     """
+    # IMCFLOW_RESIDUAL_IN_REGION: a model-input multicast fans out to TWO
+    # distinct receivers (b1 conv entry AND the residual skip) that share ONE
+    # DataBlock, so block.id lists BOTH edges. add_send_block emits a SEPARATE
+    # per-edge SendBlock for each, but block.id (shared) would make every one
+    # rendezvous with the SAME (first) receiver -> the 2nd fan-out SEND waits on
+    # the wrong node's flag (region1 imce_0_1 SEND standing by on imce_0_2) ->
+    # count mismatch + wrong-node wedge. Prefer this block's OWN per-edge owner
+    # (edge_info.owner, set per fan-out edge in add_send_block) so each SEND
+    # rendezvouses with its own consumer. Lever OFF -> predicate False -> the
+    # original block.id path -> byte-identical.
+    if residual_in_region_mode() and isinstance(self.block.id, list):
+      own = getattr(self.edge_info, "owner", None)
+      if own is not None and own in self.block.id:
+        return own
     if isinstance(self.block.id, list):
       return self.block.id  # Return list for multicast handling
     if isinstance(self.block.id, TensorEdge):

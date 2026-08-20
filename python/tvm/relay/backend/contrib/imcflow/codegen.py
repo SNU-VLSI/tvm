@@ -1113,6 +1113,18 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     for block in all_blocks:
       if isinstance(block, SendBlock):
         edge = block.block.id
+        # IMCFLOW_RESIDUAL_IN_REGION: a model-input multicast fan-out emits a
+        # SEPARATE per-edge SendBlock per receiver, but all of them share ONE
+        # DataBlock whose .id lists BOTH edges. Counting block.id (the list) for
+        # each per-edge block bills every edge once PER fan-out block (2 blocks x
+        # 2 edges -> each edge counted 2x -> send 8192 vs recv 4096 false
+        # deadlock). Count only THIS block's own edge (edge_info.owner) so each
+        # edge is billed exactly once. OFF / non-fanout -> owner not in a shared
+        # list -> unchanged.
+        if (residual_in_region_mode() and isinstance(edge, list)):
+          own = getattr(block.edge_info, "owner", None)
+          if own is not None and own in edge:
+            edge = own
         _add_send_map(self.send_map, block.block, edge)
       elif isinstance(block, SendBlockInterleaved):
         # For interleaved sends, each block sends in parallel in the same loop
