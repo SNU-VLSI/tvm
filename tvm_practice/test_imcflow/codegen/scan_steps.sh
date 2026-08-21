@@ -16,8 +16,14 @@
 NPZ_FILE_PATH="${NPZ_FILE_PATH:-scan_reg_files}"
 SCAN_SSH_RETRIES="${SCAN_SSH_RETRIES:-${REMOTE_SSH_RETRIES:-${FPGA_SSH_RETRIES:-3}}}"
 SCAN_SSH_RETRY_DELAY_SECONDS="${SCAN_SSH_RETRY_DELAY_SECONDS:-${REMOTE_SSH_RETRY_DELAY_SECONDS:-${FPGA_SSH_RETRY_DELAY_SECONDS:-30}}}"
+SCAN_SSH_CONNECT_TIMEOUT_SECONDS="${SCAN_SSH_CONNECT_TIMEOUT_SECONDS:-10}"
+SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS="${SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS:-5}"
+SCAN_SSH_SERVER_ALIVE_COUNT_MAX="${SCAN_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
 [[ "$SCAN_SSH_RETRIES" =~ ^[0-9]+$ ]] || SCAN_SSH_RETRIES=3
 [[ "$SCAN_SSH_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || SCAN_SSH_RETRY_DELAY_SECONDS=30
+[[ "$SCAN_SSH_CONNECT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || SCAN_SSH_CONNECT_TIMEOUT_SECONDS=10
+[[ "$SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS=5
+[[ "$SCAN_SSH_SERVER_ALIVE_COUNT_MAX" =~ ^[0-9]+$ ]] || SCAN_SSH_SERVER_ALIVE_COUNT_MAX=3
 
 # ---------------------------------------------------------------------------
 # chip lock (remote FPGA lock management)
@@ -80,9 +86,9 @@ load_env() {
 
 scan_ssh_display() {
     if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
-        echo "sshpass -p <redacted> ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
+        echo "sshpass -p <redacted> ssh -o ConnectTimeout=$SCAN_SSH_CONNECT_TIMEOUT_SECONDS -o ServerAliveInterval=$SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS -o ServerAliveCountMax=$SCAN_SSH_SERVER_ALIVE_COUNT_MAX -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
     else
-        echo "ssh -o BatchMode=yes -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
+        echo "ssh -o BatchMode=yes -o ConnectTimeout=$SCAN_SSH_CONNECT_TIMEOUT_SECONDS -o ServerAliveInterval=$SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS -o ServerAliveCountMax=$SCAN_SSH_SERVER_ALIVE_COUNT_MAX -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
     fi
 }
 
@@ -117,18 +123,28 @@ scan_retry() {
 }
 
 scan_ssh_once() {
+    local -a ssh_options=(
+        -o "ConnectTimeout=$SCAN_SSH_CONNECT_TIMEOUT_SECONDS"
+        -o "ServerAliveInterval=$SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS"
+        -o "ServerAliveCountMax=$SCAN_SSH_SERVER_ALIVE_COUNT_MAX"
+    )
     if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
-        sshpass -p "$REMOTE_PASSWORD" ssh -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
+        sshpass -p "$REMOTE_PASSWORD" ssh "${ssh_options[@]}" -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
     else
-        ssh -o BatchMode=yes -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
+        ssh -o BatchMode=yes "${ssh_options[@]}" -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
     fi
 }
 
 scan_scp_once() {
+    local -a ssh_options=(
+        -o "ConnectTimeout=$SCAN_SSH_CONNECT_TIMEOUT_SECONDS"
+        -o "ServerAliveInterval=$SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS"
+        -o "ServerAliveCountMax=$SCAN_SSH_SERVER_ALIVE_COUNT_MAX"
+    )
     if [[ "${REMOTE_AUTH_METHOD:-key}" == "password" ]]; then
-        sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" "$@"
+        sshpass -p "$REMOTE_PASSWORD" scp "${ssh_options[@]}" -P "$REMOTE_PORT" "$@"
     else
-        scp -o BatchMode=yes -P "$REMOTE_PORT" "$@"
+        scp -o BatchMode=yes "${ssh_options[@]}" -P "$REMOTE_PORT" "$@"
     fi
 }
 

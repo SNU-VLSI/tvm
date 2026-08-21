@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+log_stage() {
+    printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TVM_VENV="${TVM_VENV:-$SCRIPT_DIR/../../tvm_env}"
 POWER_CONFIG="${IMCFLOW_POWER_CONFIG:-$SCRIPT_DIR/power_configs/model_wait_min.json}"
@@ -33,8 +37,18 @@ IMCFLOW_BUGFIX="${IMCFLOW_BUGFIX:-off}"
 ACC_MASK="${ACC_MASK:-1}"
 IMCFLOW_NO_PERKERNEL_WARMUP="${IMCFLOW_NO_PERKERNEL_WARMUP:-0}"
 IMCFLOW_MMIO_BARRIER="${IMCFLOW_MMIO_BARRIER:-100}"
+export IMCFLOW_PRE_RUN_WARMUP="${IMCFLOW_PRE_RUN_WARMUP:-1}"
+export SCAN_SSH_CONNECT_TIMEOUT_SECONDS="${SCAN_SSH_CONNECT_TIMEOUT_SECONDS:-10}"
+export SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS="${SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS:-5}"
+export SCAN_SSH_SERVER_ALIVE_COUNT_MAX="${SCAN_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
+CHIP_RUN_TIMEOUT_SECONDS="${CHIP_RUN_TIMEOUT_SECONDS:-360}"
 
-echo "[1/3] Compiling $MODEL with MODEL power event tags"
+if [[ ! "$CHIP_RUN_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: CHIP_RUN_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 1
+fi
+
+log_stage "[1/3] Compiling $MODEL with MODEL power event tags"
 CKPT="$CKPT" \
 MODEL_PROFILE="$MODEL_PROFILE" \
 DATASET_NAME="$DATASET_NAME" \
@@ -51,21 +65,37 @@ python3 -u main.py \
     --sample "$SAMPLE_INDEX" \
     --stop-at compile
 
-echo "[2/3] Building the ARM dataset executable"
+log_stage "[2/3] Building the ARM dataset executable"
 (
     export DEBUG_EXE=0
     cd host_binary_make.dataset
     ./build.sh "../eval_dir/$MODEL_EVL" arm 1
 )
 
-echo "[3/3] Running one MODEL/wait/loop-off power capture"
+log_stage "[3/3] Running one MODEL/wait/loop-off power capture"
+echo "  pre-run warmup: $IMCFLOW_PRE_RUN_WARMUP"
+echo "  chip-run timeout: ${CHIP_RUN_TIMEOUT_SECONDS}s"
+echo "  SSH liveness: connect=${SCAN_SSH_CONNECT_TIMEOUT_SECONDS}s, keepalive=${SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS}s x ${SCAN_SSH_SERVER_ALIVE_COUNT_MAX}"
+set +e
 CKPT="$CKPT" \
 DATASET_NAME="$DATASET_NAME" \
 DEBUG_EXE=0 \
 CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-INFO}" \
 IMCFLOW_BUGFIX="$IMCFLOW_BUGFIX" \
-./run_dataset_eval.sh \
+timeout --signal=TERM --kill-after=20s "${CHIP_RUN_TIMEOUT_SECONDS}s" ./run_dataset_eval.sh \
     -s 1 \
     -i "$SAMPLE_INDEX" \
     -m "$MODEL_EVL" \
     --power-config "$POWER_CONFIG"
+run_status=$?
+set -e
+
+if [[ $run_status -eq 124 || $run_status -eq 137 ]]; then
+    echo "Error: chip run exceeded ${CHIP_RUN_TIMEOUT_SECONDS}s; stopped instead of waiting indefinitely" >&2
+    exit "$run_status"
+fi
+if [[ $run_status -ne 0 ]]; then
+    echo "Error: dataset power run failed with status $run_status" >&2
+    exit "$run_status"
+fi
+log_stage "MODEL wait power run completed"

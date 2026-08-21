@@ -705,3 +705,26 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert 'metadata["tvm_git_rev"]' in pipeline
     assert 'metadata["measurement_utils_git_rev"]' in pipeline
     assert 'metadata["build_tree_dirty"]' in pipeline
+
+
+def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards():
+    dataset_runner = (CODEGEN_DIR / "run_dataset_eval.sh").read_text(
+        encoding="utf-8"
+    )
+    warmup = "cd /home/root/imcflow/xilinx/petalinux-csrc && make warmup"
+    execute = "taskset -c $CHIP_EVAL_CPU"
+    assert "IMCFLOW_PRE_RUN_WARMUP" in dataset_runner
+    assert warmup in dataset_runner
+    assert dataset_runner.index(warmup) < dataset_runner.index(execute)
+
+    scan_steps = (CODEGEN_DIR / "scan_steps.sh").read_text(encoding="utf-8")
+    assert "ConnectTimeout=$SCAN_SSH_CONNECT_TIMEOUT_SECONDS" in scan_steps
+    assert "ServerAliveInterval=$SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS" in scan_steps
+    assert "ServerAliveCountMax=$SCAN_SSH_SERVER_ALIVE_COUNT_MAX" in scan_steps
+
+    model_runner = (
+        CODEGEN_DIR / "scripts/run_resnet_model_wait_power.sh"
+    ).read_text(encoding="utf-8")
+    assert 'IMCFLOW_PRE_RUN_WARMUP:-1' in model_runner
+    assert 'CHIP_RUN_TIMEOUT_SECONDS:-360' in model_runner
+    assert "timeout --signal=TERM --kill-after=20s" in model_runner
