@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import math
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -46,6 +47,38 @@ def load_captures(path: Path) -> list[list[float]]:
     return captures
 
 
+def load_tags(raw_path: Path) -> dict[int, int]:
+    """Load the optional ``<raw>.tags.json`` sample-index map."""
+
+    tag_path = Path(f"{raw_path}.tags.json")
+    if not tag_path.is_file():
+        return {}
+    try:
+        document = json.loads(tag_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise PlotInputError(f"{tag_path}: invalid JSON") from exc
+    tag_map = document.get("tags", {})
+    if not isinstance(tag_map, dict):
+        raise PlotInputError(f"{tag_path}: tags must be an object")
+
+    tags: dict[int, int] = {}
+    for tag_id, sample_index in tag_map.items():
+        try:
+            parsed_tag_id = int(tag_id)
+        except (TypeError, ValueError) as exc:
+            raise PlotInputError(f"{tag_path}: invalid tag ID {tag_id!r}") from exc
+        if isinstance(sample_index, bool) or not isinstance(sample_index, int):
+            raise PlotInputError(
+                f"{tag_path}: sample index for tag {parsed_tag_id} must be an integer"
+            )
+        if sample_index < 0:
+            raise PlotInputError(
+                f"{tag_path}: sample index for tag {parsed_tag_id} must be non-negative"
+            )
+        tags[parsed_tag_id] = sample_index
+    return tags
+
+
 def _common_token_prefix(paths: Sequence[Path]) -> int:
     tokens = [path.stem.split("_") for path in paths]
     if len(tokens) < 2:
@@ -64,7 +97,12 @@ def _trace_label(path: Path, common_tokens: int) -> str:
     return label or path.stem
 
 
-def _plot_axis(axis, captures: Sequence[Sequence[float]], label: str) -> None:
+def _plot_axis(
+    axis,
+    captures: Sequence[Sequence[float]],
+    label: str,
+    tags: dict[int, int] | None = None,
+) -> None:
     import numpy as np
 
     offset = 0
@@ -82,6 +120,28 @@ def _plot_axis(axis, captures: Sequence[Sequence[float]], label: str) -> None:
     axis.set_title(label, fontsize=9)
     axis.set_ylabel("current (A)")
     axis.grid(alpha=0.25)
+    for label_index, (tag_id, sample_index) in enumerate(sorted((tags or {}).items())):
+        if sample_index > len(stats):
+            continue
+        axis.axvline(
+            sample_index,
+            color="tab:red",
+            linewidth=0.9,
+            linestyle="--",
+            alpha=0.85,
+        )
+        axis.text(
+            sample_index,
+            0.04 + 0.08 * (label_index % 2),
+            f"tag {tag_id}",
+            transform=axis.get_xaxis_transform(),
+            rotation=90,
+            ha="right",
+            va="bottom",
+            fontsize=7,
+            color="tab:red",
+            bbox={"facecolor": "white", "alpha": 0.65, "edgecolor": "none", "pad": 0.5},
+        )
     axis.text(
         0.995,
         0.98,
@@ -111,7 +171,7 @@ def plot_directory(
     if not raw_paths:
         raise PlotInputError(f"{input_dir}: no legacy raw .txt files found")
 
-    loaded = [(path, load_captures(path)) for path in raw_paths]
+    loaded = [(path, load_captures(path), load_tags(path)) for path in raw_paths]
     common_tokens = _common_token_prefix(raw_paths)
     figure, axes = plt.subplots(
         len(loaded),
@@ -119,8 +179,8 @@ def plot_directory(
         squeeze=False,
         figsize=(12, max(3.2, 2.7 * len(loaded))),
     )
-    for axis, (path, captures) in zip(axes[:, 0], loaded):
-        _plot_axis(axis, captures, _trace_label(path, common_tokens))
+    for axis, (path, captures, tags) in zip(axes[:, 0], loaded):
+        _plot_axis(axis, captures, _trace_label(path, common_tokens), tags)
     axes[-1, 0].set_xlabel("sample index (capture boundaries are gray lines)")
     figure.suptitle(input_dir.name)
     figure.tight_layout()
@@ -131,9 +191,9 @@ def plot_directory(
     outputs = [output]
     if individual_dir is not None:
         individual_dir.mkdir(parents=True, exist_ok=True)
-        for path, captures in loaded:
+        for path, captures, tags in loaded:
             trace_figure, trace_axis = plt.subplots(1, 1, figsize=(12, 3.5))
-            _plot_axis(trace_axis, captures, path.stem)
+            _plot_axis(trace_axis, captures, path.stem, tags)
             trace_axis.set_xlabel("sample index (capture boundaries are gray lines)")
             trace_figure.tight_layout()
             trace_output = individual_dir / f"{path.stem}.png"

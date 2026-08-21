@@ -630,6 +630,11 @@ if [[ "$SKIP_STEP6" != true ]]; then
             echo "Fetching raw DMM samples from $MEASUREMENT_SSH_HOST after evaluation..."
             if scp "${MEASUREMENT_SSH_HOST}:${POWER_SERVER_OUTPUT_PREFIX}_*.txt" "$POWER_LOCAL_DIR/"; then
                 echo "Raw DMM samples saved to: $POWER_LOCAL_DIR"
+                if scp "${MEASUREMENT_SSH_HOST}:${POWER_SERVER_OUTPUT_PREFIX}_*.txt.tags.json" "$POWER_LOCAL_DIR/"; then
+                    echo "Power tag metadata saved to: $POWER_LOCAL_DIR"
+                else
+                    echo "Warning: raw samples were fetched, but no power tag metadata was fetched"
+                fi
                 if python3 "$SCRIPT_DIR/scripts/plot_legacy_power.py" \
                     "$POWER_LOCAL_DIR" --output "$POWER_LOCAL_DIR/power_trace.png" \
                     --individual-dir "$POWER_LOCAL_DIR/plots"; then

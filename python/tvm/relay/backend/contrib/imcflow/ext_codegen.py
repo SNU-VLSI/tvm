@@ -704,6 +704,19 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += "}\n"
     return code
 
+  def generatePowerRegionTag(self, region_number, boundary):
+    """Record a region boundary inside one MODEL-scoped DMM trace.
+
+    Even IDs identify region starts and the following odd IDs identify ends:
+    region N start = 2*N, region N end = 2*N+1.
+    """
+    assert boundary in ("start", "end")
+    tag_id = 2 * region_number + (1 if boundary == "end" else 0)
+    return (
+        f"// MODEL trace: region {region_number} {boundary} "
+        f"(tag {tag_id})\n"
+        f"(void)set_tag({tag_id});\n")
+
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
     if self.os == "linux":
@@ -1015,6 +1028,11 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         DevConfig().ImcflowFuncMap.keys(), key=_power_function_order_key)
     first_power_func = bool(power_func_names) and self.func_name == power_func_names[0]
     last_power_func = bool(power_func_names) and self.func_name == power_func_names[-1]
+    region_match = re.search(r"_region(\d+)_", self.func_name)
+    region_number = (
+        int(region_match.group(1)) if region_match
+        else (power_func_names.index(self.func_name) + 1
+              if self.func_name in power_func_names else 1))
 
     code = CodeWriter()
     code += self.generateHeader()
@@ -1077,6 +1095,8 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         code += self.generatePowerMeasureStart("MODEL")
       elif POWER_MEASURE_SCOPE == "REGION":
         code += self.generatePowerMeasureStart("REGION")
+      if POWER_MEASURE_SCOPE == "MODEL":
+        code += self.generatePowerRegionTag(region_number, "start")
     code += _hb("before compiled_blocks transfer")
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += _hb("after compiled_blocks transfer / before const_blocks transfer")
@@ -1116,6 +1136,8 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
 
     if power_measure_active:
+      if POWER_MEASURE_SCOPE == "MODEL":
+        code += self.generatePowerRegionTag(region_number, "end")
       if POWER_MEASURE_SCOPE == "REGION":
         code += self.generatePowerMeasureEnd("REGION")
       elif POWER_MEASURE_SCOPE == "MODEL" and last_power_func:
