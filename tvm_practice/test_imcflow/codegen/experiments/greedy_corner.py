@@ -14,11 +14,8 @@ spec = importlib.util.spec_from_file_location("rs", os.path.join(HERE, "rail_swe
 rs = importlib.util.module_from_spec(spec); spec.loader.exec_module(rs)
 from ps_ctrl.rpc import RemotePowerSupplyManager  # path set by rail_sweep import
 
-START = {"VDD": 0.81, "DDA": 0.87, "DDC": 0.81}   # L1-verified deepest combined point
-AXES = ["DDC", "DDA"]                              # step-power gain order; VDD already at floor
-FLOORS = {"DDC": 0.70, "DDA": 0.70}
 STEP = 0.01
-FP50_REF, FP50_TOL = 27.8, 1.0
+FP_REFS = {50: (27.8, 1.0, 280, 310), 100: (45.9, 1.4, 140, 160)}  # ref, tol, len_lo, len_hi
 CODEGEN = rs.CODEGEN
 
 
@@ -32,7 +29,7 @@ def board_alive():
     return "ok" in r.stdout
 
 
-def run_point(mgr, volts, log):
+def run_point(mgr, volts, log, len_lo):
     for rail, v in volts.items():
         mgr.set_voltage(rail, v)
     time.sleep(3)
@@ -43,14 +40,14 @@ def run_point(mgr, volts, log):
         log(f"  FAIL at {volts} ({raw.strip()[:80]})")
         return None
     p = rs.extract_pulse()
-    if not p or p["vdd"]["run_mA"] is None or p["vdd"]["len"] < 280:
+    if not p or p["vdd"]["run_mA"] is None or p["vdd"]["len"] < len_lo:
         log(f"  INVALID pulse at {volts} (len={p and p['vdd']['len']})")
         return None
     return p
 
 
-def fp_gate(mgr, log):
-    """V1 fingerprint at 50MHz, append-checked with one transient retry."""
+def fp_gate(mgr, log, freq):
+    """V1 fingerprint at the campaign freq, append-checked with one transient retry."""
     mgr.apply_preset("V1"); time.sleep(3)
     for t in (1, 2):
         before = rs.rec_linecount()
@@ -58,13 +55,14 @@ def fp_gate(mgr, log):
         if rs.rec_linecount() > before:
             p = rs.extract_pulse()
             d = p["ddc"]["run_mA"] - p["ddc"]["idle_mA"]
-            log(f"  [gate] FP50 ddc_delta={d:.2f} len={p['ddc']['len']}")
-            return abs(d - FP50_REF) < FP50_TOL and p["ddc"]["len"] > 280
+            ref, tol, lo, hi = FP_REFS[freq]
+            log(f"  [gate] FP{freq} ddc_delta={d:.2f} len={p['ddc']['len']}")
+            return abs(d - ref) < tol and lo < p["ddc"]["len"] < hi
         log(f"  [gate] no-append (try {t})")
     return False
 
 
-def rescan_cycle(log):
+def rescan_cycle(log, freq):
     log("  [gate] corrupted -> 100MHz rescan cycle")
     subprocess.run(["bash", os.path.join(CODEGEN, "tools", "pl_freq.sh"), "set", "100"],
                    capture_output=True)
@@ -73,20 +71,32 @@ def rescan_cycle(log):
       cd /home/root/imcflow/xilinx/measurement && timeout -s INT 0.5s ./program_scan_reg $B/scan_gen/scan_reg_files
       cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time >/dev/null 2>&1 && make warmup >/dev/null 2>&1"""],
                    capture_output=True, timeout=180)
-    subprocess.run(["bash", os.path.join(CODEGEN, "tools", "pl_freq.sh"), "set", "50"],
+    subprocess.run(["bash", os.path.join(CODEGEN, "tools", "pl_freq.sh"), "set", str(freq)],
                    capture_output=True)
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--freq", type=int, choices=(50, 100), required=True)
+    ap.add_argument("--start", required=True, help="VDD=..,DDA=..,DDC=..")
+    ap.add_argument("--axes", default="DDC,DDA")
+    ap.add_argument("--floors", required=True, help="DDC=..,DDA=..[,VDD=..]")
+    args = ap.parse_args()
+    START = {k: float(v) for k, v in (kv.split("=") for kv in args.start.split(","))}
+    AXES = args.axes.split(",")
+    FLOORS = {k: float(v) for k, v in (kv.split("=") for kv in args.floors.split(","))}
+    _, _, len_lo, _ = FP_REFS[args.freq]
+    tops = 2.85 if args.freq == 100 else 1.425
     date = time.strftime("%Y%m%d_%H%M")
-    out_csv = os.path.join(CODEGEN, "experiments", f"greedy_corner_{date}.csv")
+    out_csv = os.path.join(CODEGEN, "experiments", f"greedy_{args.freq}mhz_{date}.csv")
     f = open(out_csv, "w", newline=""); w = csv.writer(f)
     w.writerow(["step", "vdd", "dda", "ddc", "run_vdd_mA", "run_dda_mA", "run_ddc_mA",
                 "pulse_len", "P_mW", "status"]); f.flush()
 
     def log(*a): print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
 
-    subprocess.run(["bash", os.path.join(CODEGEN, "tools", "pl_freq.sh"), "set", "50"],
+    subprocess.run(["bash", os.path.join(CODEGEN, "tools", "pl_freq.sh"), "set", str(args.freq)],
                    capture_output=True)
     mgr = RemotePowerSupplyManager("147.46.117.49", 1331,
         "/home/jihoonpark/measurement_utils/example/configs/ps_B2_config.json")
@@ -96,8 +106,11 @@ def main():
     best = None
     step_i = 0
     try:
-        # verify start point first
-        p = run_point(mgr, cur, log)
+        # verify start point first (one retry: post-freq-switch first-run transient)
+        p = run_point(mgr, cur, log, len_lo)
+        if p is None:
+            log("start attempt1 failed (freq-switch transient?) -> retry")
+            p = run_point(mgr, cur, log, len_lo)
         if p is None:
             log("START point failed?! abort"); return
         P = sum(p[r.lower()]["run_mA"] * cur[r] for r in ("VDD", "DDA", "DDC")) / 1000.0
@@ -112,21 +125,24 @@ def main():
             for ax in AXES:
                 if ax in blocked:
                     continue
-                cand = dict(cur); cand[ax] = round(cand[ax] - STEP, 3)
-                if cand[ax] < FLOORS[ax]:
+                rails = ax.split("+")
+                cand = dict(cur)
+                for r_ in rails:
+                    cand[r_] = round(cand[r_] - STEP, 3)
+                if min(cand[r_] for r_ in rails) < FLOORS[ax]:
                     blocked.add(ax); continue
                 step_i += 1
-                log(f"try {ax} -> {cand[ax]}")
-                p = run_point(mgr, cand, log)
+                log(f"try {ax} -> {[cand[r_] for r_ in rails]}")
+                p = run_point(mgr, cand, log, len_lo)
                 if p is None:
                     w.writerow([step_i, cand["VDD"], cand["DDA"], cand["DDC"],
                                 "", "", "", 0, "", f"fail-block-{ax}"]); f.flush()
                     blocked.add(ax)
                     if not board_alive():
                         log("BOARD DEAD -> stop"); return
-                    if not fp_gate(mgr, log):
-                        rescan_cycle(log)
-                        if not fp_gate(mgr, log):
+                    if not fp_gate(mgr, log, args.freq):
+                        rescan_cycle(log, args.freq)
+                        if not fp_gate(mgr, log, args.freq):
                             log("RESCAN failed -> stop"); return
                     # re-establish current point after gate (rails back to cur)
                     continue
@@ -144,8 +160,7 @@ def main():
                        capture_output=True)
         if best:
             c, p, P = best
-            tops = 1.425
-            log(f"COMBINED FLOOR: {c} P={P*1000:.1f}mW TOPS/W={tops/P:.1f}")
+            log(f"COMBINED FLOOR ({args.freq}MHz): {c} P={P*1000:.1f}mW TOPS/W={tops/P:.1f}")
         log(f"CSV: {out_csv} (V1 + 100MHz restored)")
         f.close()
 
