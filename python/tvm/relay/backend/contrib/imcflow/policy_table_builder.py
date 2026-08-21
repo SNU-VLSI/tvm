@@ -243,6 +243,34 @@ class PathTreeBuilder:
                         tensor_id = (tensor_id, split_idx)
                         debug_print(f"[PathTreeBuilder] Non-multicast split: tensor_id={tensor_id}, split_idx={split_idx}")
 
+            # IMCFLOW_RESIDUAL_IN_REGION (task #12 L1): a model-input param that
+            # fans out to BOTH the conv-chain entry AND the in-region residual
+            # add's rhs would otherwise share ONE (source, tensor) multicast
+            # tree -> one policy entry -> every SEND replicates to BOTH
+            # consumers with a single credit. The add's 16-word rhs fifo then
+            # gates the whole input stream far below the main-path priming
+            # need (~85 words), wedging the region (L1g RTL census; same root
+            # as the 10th-session resnet8 region1 stall). Split the ADD-side
+            # commodity into its OWN tree (mirroring the DW-conv non-multicast
+            # split idiom) so codegen's fanout-lead can pace two INDEPENDENT
+            # unicast streams. Predicate: param src (gid < 0) + composite
+            # tuple dst = the residual add's data operand. Lever OFF ->
+            # unchanged grouping (byte-identical).
+            from tvm.relay.op.contrib.imcflow import residual_in_region_mode as _rirm
+            if _rirm() and tensor_id is not None:
+                try:
+                    _edge = commodity.metadata[0]
+                    _sgid = getattr(_edge.src_id, "graph_node_id", None)
+                    _dgid = getattr(_edge.dst_id, "graph_node_id", None)
+                    if (isinstance(_sgid, int) and _sgid < 0
+                            and isinstance(_dgid, tuple)
+                            and getattr(_edge.dst_id, "tensor_type", None) == "data"):
+                        tensor_id = (tensor_id, "resid_rhs")
+                        debug_print(f"[PathTreeBuilder] residual rhs unicast split: "
+                                    f"tensor_id={tensor_id}, edge={_edge}")
+                except (TypeError, AttributeError, IndexError):
+                    pass
+
             key = (commodity.source, tensor_id)
             if key not in groups:
                 groups[key] = []
