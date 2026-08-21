@@ -231,13 +231,13 @@ def mmio_block_barrier_usec() -> int:
   transfers is the accidental fix; without it the un-ordered/buffered MMIO store
   stream overruns the SoC<->accelerator bus and wedges (region3 = largest xfer).
 
-  When >= 0, generateToNpuTransferCode() emits a `__sync_synchronize()` full
-  memory barrier AFTER each block's transfer loop (drains the store buffer, no
-  syscall), plus a `usleep(<value>)` when value > 0 (matches the fsync's
-  CPU-yield / real-time drain if the bare barrier is insufficient). value == 0 ->
-  barrier only. value < 0 (default, env unset) -> emit nothing -> byte-identical
-  to stock. Host-side ONLY: accelerator (inode/imce) blobs are untouched, so no
-  RTL rerun is required. Independent of all codegen-sync levers."""
+  When >= 0, bulk transfer loops emit a `__sync_synchronize()` every
+  ``IMCFLOW_MMIO_BARRIER_INTERVAL`` words and once after each block. Control
+  register accesses remain individually fenced. A `usleep(<value>)` is added
+  to each barrier when value > 0; value == 0 selects a barrier without delay.
+  value < 0 (default, env unset) emits nothing. Host-side ONLY: accelerator
+  (inode/imce) blobs are untouched, so no RTL rerun is required. Independent
+  of all codegen-sync levers."""
   raw = os.environ.get("IMCFLOW_MMIO_BARRIER", "").strip()
   if not raw:
     return -1
@@ -245,6 +245,25 @@ def mmio_block_barrier_usec() -> int:
     return int(raw)
   except ValueError:
     return -1
+
+
+def mmio_transfer_barrier_interval() -> int:
+  """Words transferred between periodic host MMIO barriers (default: 8).
+
+  ``IMCFLOW_MMIO_BARRIER_INTERVAL`` only affects bulk input, constant,
+  instruction, policy, and output transfer loops.  Control-register accesses
+  retain their conservative per-access fencing.  Non-positive or malformed
+  values fall back to 8 so an accidental setting cannot remove all ordering
+  points from a long transfer loop.
+  """
+  raw = os.environ.get("IMCFLOW_MMIO_BARRIER_INTERVAL", "").strip()
+  if not raw:
+    return 8
+  try:
+    value = int(raw)
+  except ValueError:
+    return 8
+  return value if value > 0 else 8
 
 
 def multiblock_fusedadd_bare() -> bool:

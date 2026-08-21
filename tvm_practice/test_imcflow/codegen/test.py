@@ -465,6 +465,10 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
 
   # Save board and vmode from environment / runtime
   metadata["board"] = os.getenv("BOARD", None)
+  metadata["imcflow_mmio_barrier_usec"] = os.getenv("IMCFLOW_MMIO_BARRIER", None)
+  metadata["imcflow_mmio_barrier_interval"] = os.getenv(
+    "IMCFLOW_MMIO_BARRIER_INTERVAL", "8"
+  )
   try:
     from tvm.relay.backend.contrib.imcflow.acim_util import get_default_vmode
     metadata["vmode"] = str(get_default_vmode().name)

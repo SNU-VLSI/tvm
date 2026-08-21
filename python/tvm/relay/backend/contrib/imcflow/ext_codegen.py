@@ -6,7 +6,10 @@ from tvm.contrib.imcflow import DataBlock
 from tvm.relay.ty import TensorType, TupleType
 from . import transform as imcflow_transform
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, TensorEdge
-from tvm.contrib.imcflow import mmio_block_barrier_usec
+from tvm.contrib.imcflow import (
+    mmio_block_barrier_usec,
+    mmio_transfer_barrier_interval,
+)
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
@@ -336,9 +339,8 @@ class KernelCodeGenerator:
       return ""
     delay = f"  usleep({delay_usec});\n" if delay_usec > 0 else ""
     return (
-        "// MMIO-BARRIER-EXPERIMENT: keep these accessors until the all-access\n"
-        "// barrier experiment is complete.  Every ImcFlow MMIO load/store goes\n"
-        "// through them, with a barrier both before and after the actual access.\n"
+        "// MMIO-BARRIER-EXPERIMENT: control-register accesses use these maximally\n"
+        "// fenced accessors. Bulk tensor/blob transfers use periodic barriers.\n"
         "static inline void imcflow_mmio_barrier(void)\n"
         "{\n"
         "  __sync_synchronize();\n"
@@ -360,6 +362,14 @@ class KernelCodeGenerator:
         "  // MMIO-BARRIER-EXPERIMENT: post-read ordering/drain point.\n"
         "  imcflow_mmio_barrier();\n"
         "  return value;\n"
+        "}\n\n"
+        "static inline void imcflow_mmio_transfer_write32(volatile uint32_t* base, size_t index, uint32_t value)\n"
+        "{\n"
+        "  base[index] = value;\n"
+        "}\n\n"
+        "static inline uint32_t imcflow_mmio_transfer_read32(volatile uint32_t* base, size_t index)\n"
+        "{\n"
+        "  return base[index];\n"
         "}\n\n"
     )
 
@@ -388,16 +398,34 @@ class KernelCodeGenerator:
     return f"imcflow_mmio_read32({pointer}, {index})"
 
   def emitTensorMmioWrite32(self, pointer, index, value, indent=""):
-    """Emit a maximally fenced normal-tensor MMIO store.
+    """Emit one unfenced but volatile bulk-transfer MMIO store.
 
-    Keep this separate from ``emitMmioWrite32`` so the all-access experiment can
-    later be narrowed without having to rediscover transfer-loop call sites.
+    Transfer loops add a periodic barrier separately. Control-register writes
+    continue to use ``emitMmioWrite32`` and retain per-access fencing.
     """
-    return self.emitMmioWrite32(pointer, index, value, indent)
+    if mmio_block_barrier_usec() < 0:
+      return f"{indent}{pointer}[{index}] = {value};\n"
+    return (
+        f"{indent}imcflow_mmio_transfer_write32("
+        f"{pointer}, {index}, {value});\n"
+    )
 
   def emitTensorMmioRead32Expr(self, pointer, index):
-    """Return a maximally fenced normal-tensor MMIO load expression."""
-    return self.emitMmioRead32Expr(pointer, index)
+    """Return one unfenced but volatile bulk-transfer MMIO load expression."""
+    if mmio_block_barrier_usec() < 0:
+      return f"{pointer}[{index}]"
+    return f"imcflow_mmio_transfer_read32({pointer}, {index})"
+
+  def emitTransferLoopBarrier(self, iteration, indent=""):
+    """Emit the periodic ordering point for a bulk MMIO transfer loop."""
+    if mmio_block_barrier_usec() < 0:
+      return ""
+    interval = mmio_transfer_barrier_interval()
+    return (
+        f"{indent}// MMIO transfer barrier every {interval} words.\n"
+        f"{indent}if ((({iteration}) + 1) % {interval} == 0) "
+        "imcflow_mmio_barrier();\n"
+    )
 
   def generateRetryCheck(self, location_label):
     """Generate retry check code after a wait call.
@@ -792,17 +820,19 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       if tile_idx is None:
         loop_end = f"(size_t)({var_prefix}_end-{var_prefix}_start)"
         code += f"for(int i=0; i<{loop_end}; i++){{\n"
-        code += self.emitMmioWrite32(
+        code += self.emitTensorMmioWrite32(
             "npu_pointer", f"({base_address_name} / 4) + i",
             f"((uint32_t*){src_var})[i]", "  ")
+        code += self.emitTransferLoopBarrier("i", "  ")
         code += f"}}\n"
       else:
-        code += self.emitMmioWrite32(
+        code += self.emitTensorMmioWrite32(
             "npu_pointer", f"({base_address_name} / 4)",
             f"((uint32_t*){src_var})[{tile_idx}]", "  ")
         code += f"for(int i=1; i<8; i++){{\n"
-        code += self.emitMmioWrite32(
+        code += self.emitTensorMmioWrite32(
             "npu_pointer", f"({base_address_name} / 4) + i", "0", "  ")
+        code += self.emitTransferLoopBarrier("i", "  ")
         code += f"}}\n"
       return code
 
@@ -816,6 +846,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += self.emitTensorMmioWrite32(
           "npu_pointer", f"({base_address_name} / 4) + i",
           f"((uint32_t*){src_var})[i + {loop_start//4}]", "  ")
+      code += self.emitTransferLoopBarrier("i", "  ")
       code += f"}}\n"
       return code
 
@@ -873,6 +904,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
               "npu_pointer", f"({base_address_name} / 4) + i")
           + ";\n"
       )
+      code += self.emitTransferLoopBarrier("i", "  ")
       code += f"}}\n"
       code += self.emitMmioBarrier("NPU-to-CPU output block transfer complete")
     return code

@@ -446,8 +446,9 @@ def test_codegen_helpers_are_linux_only(monkeypatch):
     assert "dmm_measure.h" not in generator.generateHeader()
 
 
-def test_normal_tensor_word_accesses_use_per_word_mmio_barriers(monkeypatch):
+def test_bulk_transfer_accesses_use_configurable_periodic_mmio_barriers(monkeypatch):
     monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER_INTERVAL", "8")
     module = _load_ext_codegen(monkeypatch)
     generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
 
@@ -456,9 +457,17 @@ def test_normal_tensor_word_accesses_use_per_word_mmio_barriers(monkeypatch):
     )
     read = generator.emitTensorMmioRead32Expr("npu_pointer", "base + i")
 
-    assert "imcflow_mmio_write32(npu_pointer, base + i, input[i]);" in write
-    assert "MMIO-BARRIER-EXPERIMENT: fence this individual write" in write
-    assert read == "imcflow_mmio_read32(npu_pointer, base + i)"
+    periodic = generator.emitTransferLoopBarrier("i", "  ")
+
+    assert write == (
+        "  imcflow_mmio_transfer_write32(npu_pointer, base + i, input[i]);\n"
+    )
+    assert read == "imcflow_mmio_transfer_read32(npu_pointer, base + i)"
+    assert "every 8 words" in periodic
+    assert "((i) + 1) % 8 == 0" in periodic
+
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER_INTERVAL", "3")
+    assert "every 3 words" in generator.emitTransferLoopBarrier("i")
 
 
 def test_tensor_transfer_has_no_debug_instrumentation(monkeypatch):
@@ -480,6 +489,30 @@ def test_tensor_transfer_has_no_debug_instrumentation(monkeypatch):
     assert "IMCFLOW_DEBUG_PRINT" not in generated
     assert "fprintf" not in generated
     assert "for(int i=0; i<1024; i++)" in generated
+
+
+def test_tensor_transfer_loop_uses_volatile_access_and_periodic_barrier(monkeypatch):
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER_INTERVAL", "8")
+    module = _load_ext_codegen(monkeypatch)
+    monkeypatch.setattr(module, "makeBaseAddrName", lambda _block: "INPUT_BASE_ADDR")
+    monkeypatch.setattr(module, "getCInputVarName", lambda *_args: "input_tensor")
+
+    generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
+    generator.func_name = "periodic_transfer_kernel"
+    generator.base_address_macros = {}
+    block = SimpleNamespace(
+        id=0,
+        base_address=0x1000,
+        size=4096,
+        tiling_info=None,
+    )
+
+    generated = str(generator.generateToNpuTransferCode([block], None, "input"))
+    assert "imcflow_mmio_transfer_write32(npu_pointer" in generated
+    assert "imcflow_mmio_write32(npu_pointer" not in generated
+    assert "((i) + 1) % 8 == 0" in generated
+    assert "CPU-to-NPU block transfer complete" in generated
 
 
 def test_invoke_run_wait_and_finalize_use_conservative_barriers(monkeypatch):
