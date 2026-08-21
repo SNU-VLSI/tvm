@@ -734,3 +734,5 @@ def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards()
     assert 'INT_ACK_GEN_LEN:-0x10000' in model_runner
     assert '$TVM_ROOT/tvm_practice:$SCRIPT_DIR/tools:/root/project/CIM' in model_runner
     assert 'LD_LIBRARY_PATH="$TVM_ROOT/build:${LD_LIBRARY_PATH:-}"' in model_runner
+    assert 'BOARD="${BOARD:-B1}"' in model_runner
+    assert 'BOARD="$BOARD"' in model_runner

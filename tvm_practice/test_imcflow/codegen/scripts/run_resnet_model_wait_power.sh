@@ -37,6 +37,7 @@ export POWER_MEASUREMENT_HOST="${POWER_MEASUREMENT_HOST:-147.46.117.49}"
 export POWER_MEASUREMENT_PORT="${POWER_MEASUREMENT_PORT:-9910}"
 
 CKPT="${CKPT:-chip3_run4_ft_e80_iter003}"
+BOARD="${BOARD:-B1}"
 MODEL="${MODEL:-resnet8_subset31_pretrained_orig}"
 MODEL_EVL="${MODEL_EVL:-resnet8_subset31_pretrained_orig_evl.linux.bugfixoff}"
 MODEL_PROFILE="${MODEL_PROFILE:-resnet8}"
@@ -59,6 +60,7 @@ fi
 
 log_stage "[1/3] Compiling $MODEL with MODEL power event tags"
 CKPT="$CKPT" \
+BOARD="$BOARD" \
 MODEL_PROFILE="$MODEL_PROFILE" \
 DATASET_NAME="$DATASET_NAME" \
 IMCFLOW_BUGFIX="$IMCFLOW_BUGFIX" \
@@ -87,6 +89,7 @@ echo "  chip-run timeout: ${CHIP_RUN_TIMEOUT_SECONDS}s"
 echo "  SSH liveness: connect=${SCAN_SSH_CONNECT_TIMEOUT_SECONDS}s, keepalive=${SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS}s x ${SCAN_SSH_SERVER_ALIVE_COUNT_MAX}"
 set +e
 CKPT="$CKPT" \
+BOARD="$BOARD" \
 DATASET_NAME="$DATASET_NAME" \
 DEBUG_EXE=0 \
 CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-INFO}" \
