@@ -404,3 +404,67 @@ measurement_utils revision만 검증한다.
   force-push 또는 history rewrite를 하지 않는다.
 - hardware failure가 발생하면 board 재부팅 전에 마지막 START/GO/RESULT 상태와
   accelerator 진행 위치를 보존한다.
+
+## 11. 수행 결과 (2026-08-21)
+
+### 11.1 revision과 배포 상태
+
+| 위치 | branch | revision | 상태 |
+|---|---|---|---|
+| master TVM | `power_v2` | `04c661caed` | `origin/power_v2` push 완료 |
+| master measurement_utils submodule | `power_v2` | `5c79c1e9ed` | TVM gitlink로 고정 |
+| meas-2 measurement_utils | `power_v2` | `5c79c1e9ed` | pull 및 실행 확인 |
+| board | standalone C client 및 TVM ARM binary | 위 revision에서 build | 실행 확인 |
+
+TVM은 `chip_acc_measure`의 `dc6e7b3e28`에서, measurement_utils는 `main`의
+`a6ad97adf9`에서 각각 분기했다. 사용자 소유 untracked 파일인 `_run.sh`는 수정하거나
+commit하지 않았다.
+
+### 11.2 구현 결과
+
+- measurement_utils에 `DMM_GPIB3 -> GPIB1::3::INSTR` 설정을 추가했다.
+- legacy C client가 숫자 IP뿐 아니라 hostname도 사용할 수 있도록
+  `getaddrinfo()` 기반 연결로 보완했다.
+- standalone `now` mode C smoke client를 추가했다.
+- TVM generated C에는 power가 활성화된 경우에만 legacy
+  `START -> STARTED -> GO -> RESULT -> CLOSE` 호출을 삽입한다.
+- `MODEL`, `REGION`, `TILE` scope와 `now`, `wait` mode를 선택할 수 있게 했으며,
+  기본값은 power OFF, `REGION`, `now`이다.
+- dataset/chiptest runner는 bridge 주소를 board에 전달한다.
+- raw sample SCP는 region 종료 시점이 아니라 전체 evaluation이 끝난 뒤 한 번만
+  수행한다.
+- tag, clock sync, metadata 정렬, region loop 구현은 포함하지 않았다.
+
+### 11.3 검증 결과
+
+- measurement_utils bridge daemon test: `47 passed`
+- C API syntax 및 ARM cross build: 통과
+- board standalone GPIB3 actual measurement:
+  `avg=0.0247196827`, `count=21381`
+- ResNet `REGION + now`, sample 0:
+  - evaluation 완료, failed sample 0, accelerator deadlock 없음
+  - 4개 region 모두 START/GO/RESULT/CLOSE가 일대일로 완료
+  - sample count: `5932`, `8357`, `15534`, `15546`
+  - raw sample은 meas-2와 master 양쪽에 보존
+- ResNet power OFF, 같은 sample 0:
+  - evaluation 완료, failed sample 0, accelerator deadlock 없음
+  - generated C에서 DMM include/call이 생성되지 않음을 확인
+  - power ON/OFF 모두 이 단일 sample의 accuracy는 `0/1`로 동일
+
+master에 수집된 power ON raw data는 다음 디렉터리에 있다.
+
+```text
+tvm_practice/test_imcflow/codegen/eval_results/power/20260821_175104/
+```
+
+meas-2 원본은 `/tmp/power_v2_resnet_*.txt`이며, standalone 원본은
+`/tmp/power_v2_standalone.txt`이다. 검증용 daemon은 다른 사용자의 9900/1329
+process를 건드리지 않기 위해 bridge `9910`, RPC `1330`을 사용했다.
+
+### 11.4 후속 검증 범위
+
+최소 완료 조건인 standalone actual DMM, power-OFF regression, TVM
+`REGION + now` actual DMM gate까지 수행했다. `TILE + now`, `MODEL + now`,
+`REGION + wait`의 실제 장시간 hardware matrix는 최소 legacy baseline과 분리해
+후속 실험에서 순차 수행한다. 해당 scope/mode의 codegen 경로와 환경변수 parsing은
+이번 구현에 포함되어 있다.
