@@ -3,7 +3,8 @@
 `power_v2`는 tag나 clock synchronization 없이 measurement_utils의 기존
 `START -> STARTED -> GO -> RESULT -> CLOSE` TCP protocol을 사용한다. power 측정은
 기본적으로 꺼져 있으며, board에는 socket C client만 들어간다. PyVISA와 DMM
-제어는 meas-2에서만 실행된다.
+제어는 meas-2의 direct bridge process 하나에서 실행된다. 별도 RPyC server는
+사용하지 않는다.
 
 ## 1. Revision 준비
 
@@ -33,26 +34,16 @@ TVM은 submodule gitlink로 정확한 measurement_utils commit을 고정한다.
 example/configs/dmm_gpib3_config.json
 ```
 
-이 설정의 logical name `DMM_GPIB3`은 `GPIB1::3::INSTR`에 대응한다. RPC server와
-bridge daemon을 각각 실행한다. 아래의 1330/9910은 다른 사용자의 1329/9900
-server와 충돌하지 않도록 선택한 예시 port다.
+이 설정의 logical name `DMM_GPIB3`은 `GPIB1::3::INSTR`에 대응한다. direct bridge
+daemon 하나가 TCP 요청 수신과 PyVISA DMM 제어를 모두 담당한다. 아래 9910은 다른
+사용자의 9900 server와 충돌하지 않도록 선택한 예시 port다.
 
 ```bash
-# meas-2 terminal 1
+# meas-2
 conda activate imcflow
 cd /home/jaeyongjang/project.local/measurement_utils
-ps-rpc-server --host 127.0.0.1 --port 1330 \
-  --log-file /tmp/power_v2_rpc.log --log-level INFO
-```
-
-```bash
-# meas-2 terminal 2
-conda activate imcflow
-cd /home/jaeyongjang/project.local/measurement_utils
-DMM_RPC_HOST=127.0.0.1 \
-DMM_RPC_PORT=1330 \
-DMM_CONFIG=$PWD/example/configs/dmm_gpib3_config.json \
 measure-bridge-daemon --host 0.0.0.0 --port 9910 \
+  --config "$PWD/example/configs/dmm_gpib3_config.json" \
   --log-file /tmp/power_v2_bridge.log --log-level INFO
 ```
 
@@ -144,8 +135,7 @@ meas-2 raw file을 master로 SCP한다.
 | `DMM_BRIDGE_HOST` | `127.0.0.1` | board가 접속할 bridge 주소 |
 | `DMM_BRIDGE_PORT` | `9900` | bridge TCP port |
 | `DMM_MEASUREMENT_SSH_HOST` | `meas-2` | run 종료 뒤 raw file을 가져올 SSH alias |
-| `DMM_RPC_LOG_PATH` | `/tmp/power_v2_rpc.log` | run 구간만 복사할 RPC/DMM log |
-| `DMM_BRIDGE_LOG_PATH` | `/tmp/power_v2_bridge.log` | run 구간만 복사할 bridge/protocol log |
+| `DMM_BRIDGE_LOG_PATH` | `/tmp/power_v2_bridge.log` | run 구간만 복사할 direct bridge/DMM log |
 | `IMCFLOW_POWER_RUN_ID` | 자동 생성 | 결과 디렉터리의 run ID |
 | `IMCFLOW_POWER_LOCAL_RESULT_DIR` | `eval_dir/<model>/power/<run_id>` | 전체 local 결과 디렉터리 override |
 
@@ -168,8 +158,8 @@ Scope 경계는 다음과 같다.
   `IMCFLOW_POWER_LOCAL_RESULT_DIR`
 - board의 평균/count: dataset evaluation console log의 `[POWER]` line
 - board accuracy 결과: 기존 `eval_results/dataset_results_*.txt`
-- `measurement_rpc.log`: 이 run 동안의 실제 적용 interval, GET/ABORt, read count
-- `measurement_bridge.log`: START/GO protocol, raw output filename, 요청 설정과 실제 interval
+- `measurement_bridge.log`: START/GO protocol, raw output filename, 실제 interval,
+  GET/ABORt와 read count
 - `build_metadata.json`: generated C에 내장된 scope/mode/DMM 요청 설정
 
 raw file에는 DMM에서 읽은 current sample list가 저장된다. 전체 evaluation이 끝나고
@@ -184,7 +174,7 @@ index이다. 같은 raw file에 여러 측정 결과가 append되어 있으면 p
 `power/` run 디렉터리는 보존된다. tag, event, clock offset은 생성하지 않는다.
 
 모든 scope는 compile 시 정한 하나의 `IMCFLOW_POWER_INTERVAL_S`를 사용한다. 음수로
-`MIN`을 요청하면 DMM이 결정한 실제 값은 `measurement_rpc.log`의
+`MIN`을 요청하면 DMM이 결정한 실제 값은 `measurement_bridge.log`의
 `current burst 시작 (interval=...s)`에서 확인한다. START log에는 raw output file과
 요청 설정도 함께 기록되므로 바로 다음 actual-interval line과 대응할 수 있다.
 

@@ -73,8 +73,7 @@ show_help() {
     echo "  PRESERVE_DEBUG_DUMPS=1  Keep existing local sample_* and remote debug_nodes after fetch"
     echo "  IMCFLOW_POWER_RUN_ID    Override the generated power result run ID"
     echo "  IMCFLOW_POWER_LOCAL_RESULT_DIR  Override the complete local power result directory"
-    echo "  DMM_RPC_LOG_PATH       RPC/DMM server log to capture (default: /tmp/power_v2_rpc.log)"
-    echo "  DMM_BRIDGE_LOG_PATH    bridge protocol log to capture (default: /tmp/power_v2_bridge.log)"
+    echo "  DMM_BRIDGE_LOG_PATH    direct bridge/DMM log to capture (default: /tmp/power_v2_bridge.log)"
     echo ""
     echo "Remote configuration is loaded from .env file."
     exit 0
@@ -243,10 +242,8 @@ fi
 # Allocate the local power artifact directory at invocation time. Measurement
 # remains board/meas-2 only; this path is used after the full evaluation ends.
 POWER_LOCAL_DIR=""
-POWER_RPC_LOG_START_LINE=""
 POWER_BRIDGE_LOG_START_LINE=""
 MEASUREMENT_SSH_HOST="${DMM_MEASUREMENT_SSH_HOST:-meas-2}"
-POWER_RPC_LOG_PATH="${DMM_RPC_LOG_PATH:-/tmp/power_v2_rpc.log}"
 POWER_BRIDGE_LOG_PATH="${DMM_BRIDGE_LOG_PATH:-/tmp/power_v2_bridge.log}"
 case "${IMCFLOW_MEASURE_POWER:-0}" in
     1|true|TRUE|yes|YES|on|ON)
@@ -281,10 +278,6 @@ remote_log_next_line() {
 
 capture_power_log_start() {
     [[ -n "$POWER_LOCAL_DIR" ]] || return 0
-    POWER_RPC_LOG_START_LINE="$(remote_log_next_line "$POWER_RPC_LOG_PATH")" || {
-        POWER_RPC_LOG_START_LINE=""
-        echo "Warning: could not determine DMM RPC log position"
-    }
     POWER_BRIDGE_LOG_START_LINE="$(remote_log_next_line "$POWER_BRIDGE_LOG_PATH")" || {
         POWER_BRIDGE_LOG_START_LINE=""
         echo "Warning: could not determine DMM bridge log position"
@@ -309,11 +302,9 @@ fetch_power_debug_artifacts() {
     mkdir -p "$POWER_LOCAL_DIR"
 
     fetch_remote_log_slice \
-        "$POWER_RPC_LOG_PATH" "$POWER_RPC_LOG_START_LINE" "measurement_rpc.log"
-    fetch_remote_log_slice \
         "$POWER_BRIDGE_LOG_PATH" "$POWER_BRIDGE_LOG_START_LINE" "measurement_bridge.log"
 
-    if [[ -z "$POWER_RPC_LOG_START_LINE" && -z "$POWER_BRIDGE_LOG_START_LINE" ]]; then
+    if [[ -z "$POWER_BRIDGE_LOG_START_LINE" ]]; then
         echo "Warning: could not determine measurement-server log position"
     fi
 
