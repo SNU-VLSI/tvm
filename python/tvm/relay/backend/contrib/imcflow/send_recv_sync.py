@@ -1007,6 +1007,40 @@ class SendRecvPairManager:
                     return True
         return False
 
+    def _is_residual_add_odata_multicast(self, edge: TensorEdge) -> bool:
+        """IMCFLOW_RESIDUAL_IN_REGION: True iff `edge` carries a standalone ADD's
+        odata that MULTICASTS to >=2 imce consumers.
+
+        This is the b2.res-projection fan-out: the previous block's residual add
+        result (%26) is re-quantized twice with different min/max -- once for the
+        main downsample conv (imce_0_2) and once for the projection shortcut conv
+        (imce_1_1). Both quantize consumers RECV the SAME multicast word.
+
+        Such an edge structurally matches _is_fixb_multicast_edge (multicast +
+        the add sender also RECVs its two add operands = an input rendezvous), so
+        it wrongly gets the Fix B flag-2 window. But a flag-2 per-word rendezvous
+        shared by a producer + 2 consumers is racy: the producer's SETFLAG(2)/
+        SETFLAG(0) pulses outrun the slower consumers (RTL: producer completes 64
+        iters, consumers stall at ~4 -> lost wakeup). The correct behaviour is
+        BARE (NoC valid/ready + fifo backpressure pace it) -- the residual
+        philosophy. Gated on the lever; OFF -> False -> unchanged.
+        """
+        if not residual_in_region_mode():
+            return False
+        pair = self.get_pair(edge)
+        if pair is None:
+            return False
+        if len([r for r in pair.receiver_nodes if r.is_imce()]) < 2:
+            return False
+        try:
+            src_node = CustomIDToNode()[getInnerNodeID(edge.src_id.graph_node_id)]
+            import tvm
+            return (isinstance(src_node, tvm.relay.expr.Call)
+                    and isinstance(src_node.op, tvm.ir.Op)
+                    and src_node.op.name == "add")
+        except (KeyError, AttributeError, Exception):
+            return False
+
     def _is_fixb_multicast_edge(self, edge: TensorEdge) -> bool:
         """Fix B target discriminator.
 
@@ -1021,6 +1055,11 @@ class SendRecvPairManager:
         multicast rendezvous MUST use a distinct flag (2) from the input
         rendezvous (1) or they alias and deadlock. region1 has no imce->imce
         multicast producer -> (a) is never true there -> region1 unaffected.
+
+        EXCLUSION (residual-in-region): the residual-add-odata multicast
+        (b2.res projection: add result re-quantized for main + skip) also
+        satisfies (a)+(b) but its flag-2 3-way rendezvous is racy and must be
+        BARE -- see _is_residual_add_odata_multicast.
         """
         pair = self.get_pair(edge)
         if pair is None:
@@ -1028,6 +1067,9 @@ class SendRecvPairManager:
         # (a) multicast: >=2 distinct receiver hw nodes, all imce
         imce_receivers = [r for r in pair.receiver_nodes if r.is_imce()]
         if len(imce_receivers) < 2:
+            return False
+        # residual-add odata multicast -> bare, not flag-2 (racy 3-way barrier)
+        if self._is_residual_add_odata_multicast(edge):
             return False
         # (b) sender also has an inode-fed input rendezvous this iteration
         return self._node_has_input_rendezvous(pair.sender_node)
@@ -1133,6 +1175,13 @@ class SendRecvPairManager:
                 ]
                 # window closes before the RECV -> everything in pre_lines
                 return pre, []
+            return None, None
+
+        # IMCFLOW_RESIDUAL_IN_REGION: the residual-add odata multicast consumer
+        # is fully BARE (paired with the bared sender pre-send, get_pre_send_sync).
+        # A self-flag window here is harmless but the matching sender no longer
+        # STANDBYs it, so drop it for a clean bare RECV. OFF -> predicate False.
+        if self._is_residual_add_odata_multicast(edge):
             return None, None
 
         # imce -> imce pipeline: burst window, no STANDBY on receiver side.
@@ -1531,6 +1580,17 @@ class SendRecvPairManager:
         # and imce_1_1->imce_2_1 STANDBY(11,1) are absent). region1's analogous
         # edge has a single-output mid-chain receiver -> predicate False -> synced.
         if self._is_conv_data_into_terminal_or_fanout(edge):
+            return []
+
+        # IMCFLOW_RESIDUAL_IN_REGION: the residual-add odata multicast to two
+        # re-quantize consumers is fully BARE on the sender side. A per-word
+        # STANDBY on BOTH plain-dst consumers (Fix F below) locks the producer to
+        # the SLOWER branch each word; the two branches' downstream convs drain at
+        # different rates, so the producer stalls (RTL: imce_0_1 computes 4 then
+        # blocks). NoC valid/ready + fifo backpressure pace the multicast without
+        # the per-word rendezvous (the residual philosophy; matches the bared
+        # receiver windows in get_recv_window_sync). OFF -> predicate False.
+        if self._is_residual_add_odata_multicast(edge):
             return []
 
         # Fix F (region3 imce_2_2): an imce->imce MULTICAST SEND (>=2 imce
