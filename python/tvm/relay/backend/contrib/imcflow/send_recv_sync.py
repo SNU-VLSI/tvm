@@ -1346,64 +1346,47 @@ class SendRecvPairManager:
         input_edges = self.collect_residual_data_input_edges(edges)
         senders = []
         seen = set()
-        filtered_resbuf = False
-        dropped_imce = False
+        bared_operand = False
         for edge in input_edges:
-            # Task #8 iter4 (bare RESBUF): the resbuf_out operand rides pure
-            # NoC valid/ready -- its resend is emitted with NO flag rendezvous
-            # (ResidResendFuncoutInterleavedBlock), so the add must NOT STANDBY
-            # on the buffer inode's flag (it would never rise -> instant wedge).
-            # Drop that sender from the window; the remaining main producer
-            # keeps the standard single-producer pipeline window below.
+            # BARE operands ride pure NoC valid/ready and must NOT be waited
+            # on in the window (their sender never raises a flag -> instant
+            # wedge). Three kinds, each lockstep with the matching sender-side
+            # presend skip:
+            #   * resbuf_out: RESBUF resend is emitted flag-free
+            #     (ResidResendFuncoutInterleavedBlock).
+            #   * IMCE producer: its scalar flag is already overloaded by its
+            #     own input pacing -- the window would eat a spurious toggle
+            #     as a fake ACK (RTL-traced generation race).
+            #   * REGION-INPUT src (identity-skip fanout, src gid < 0): paced
+            #     by rhs-fifo backpressure + fanout-lead.
+            # Dedicated INODE senders (e.g. an entry add fed by 2 inodes)
+            # KEEP the window -- that protocol is region2-proven.
             src_tt = getattr(edge.src_id, "tensor_type", None)
-            if (residual_inode_buffer_mode() and src_tt == "resbuf_out"):
-                filtered_resbuf = True
+            if residual_inode_buffer_mode() and src_tt == "resbuf_out":
+                bared_operand = True
                 continue
             pair = self.get_pair(edge)
             if pair is None:
                 continue
             s = pair.sender_node
-            # Task #8 iter6 (bare imce->imce lhs): an IMCE producer's scalar flag
-            # is ALREADY overloaded by its own input pacing (SETFLAG(1)/(0)
-            # around LOAD_LB/RECV) -- the add's STANDBY(producer,1) eats one of
-            # those spurious toggles as a fake ACK, closes its window, and parks
-            # in RECV with flag=0 while the producer's STANDBY(add,1) then waits
-            # a pulse that already passed (RTL-traced: add frozen at first lhs
-            # RECV from launch start, producer at STANDBY(16,1), both iter4 and
-            # iter5). A plain imce->imce data edge rides NoC valid/ready; drop
-            # the window for IMCE senders entirely (lockstep: get_pre_send_sync
-            # skips the producer-side STANDBY(add,1) under the same predicate).
-            # Inode senders (entry add fed by 2 inodes) KEEP the merged window
-            # (inode flags are dedicated; that protocol is region2-proven).
             if residual_inode_buffer_mode() and s.is_imce():
-                dropped_imce = True
+                bared_operand = True
                 continue
-            # Task #12 L1 (bare identity rhs): an INODE sender whose edge src
-            # is the REGION INPUT (identity-skip fanout, src graph id < 0)
-            # goes bare too -- valid/ready + fanout-lead pace it; every
-            # windowed variant raced (L1 iters a-f). LOCKSTEP with the inode
-            # presend skip in inode_codeblock._get_presend_sync_code_str.
             _sgid = getattr(edge.src_id, "graph_node_id", None)
             if isinstance(_sgid, int) and _sgid < 0:
-                dropped_imce = True
+                bared_operand = True
                 continue
             if s.value not in seen:
                 seen.add(s.value)
                 senders.append(s)
-        if filtered_resbuf or dropped_imce:
-            # Some operand(s) went bare (resbuf and/or imce lhs); the window
-            # covers only the remaining producer(s) -- typically the single
-            # INODE fanout sender of a b1-style identity skip -- so its
-            # pre-send STANDBY(add,1) still pairs correctly. L1 unit-test
-            # lesson (subset11, b1.res in-region): falling into the generic
-            # len<2 -> None branch here KILLS the window while the inode's
-            # presend STANDBY(add,1) remains -> mutual first-word deadlock.
-            # No producers left (resbuf bare + imce senders bare, iter6) ->
-            # return [] (NOT None): the consumer emits NO window lines but KEEPS
-            # the merged block-outer pairwise RECV order (imce_codeblock joins
-            # merged_input_pre==[] to ""), which the IMCE register allocator
-            # needs -- edge-outer 4+4 RECVs overflow the register file
-            # (storeRegToStackSlot crash, no spill support).
+        if bared_operand:
+            # The window covers only the remaining (windowed) producers, even
+            # a SINGLE one -- falling into the generic len<2 -> None branch
+            # would kill the window while its sender's presend STANDBY(add,1)
+            # remains (mutual first-word deadlock, L1 unit test). All bare ->
+            # return [] (NOT None): no window lines, but the merged pairwise
+            # RECV order is KEPT (imce_codeblock joins [] to "") -- edge-outer
+            # RECV order overflows the IMCE register file (no spill support).
             if not senders:
                 return []
         elif len(senders) < 2:
@@ -1466,13 +1449,10 @@ class SendRecvPairManager:
         if (pair is not None
                 and pair.sender_node.is_imce()
                 and self.is_residual_data_input_recv(edge)):
-            # Task #8 iter6: under the RESBUF lever this edge is BARE (pure NoC
-            # valid/ready). The consumer window is dropped for IMCE senders in
-            # get_merged_residual_input_window (flag-overload generation race,
-            # see the comment there) -- LOCKSTEP: skip the producer-side
-            # STANDBY(add,1) too, else the producer waits a window that never
-            # opens. Emit BARE (which is also what the ordinary composite-
-            # boundary classification would produce for this edge).
+            # Under the RESBUF lever this edge is BARE: the consumer window
+            # drops IMCE senders (flag-overload race, see
+            # get_merged_residual_input_window) -- LOCKSTEP: skip the
+            # producer-side STANDBY(add,1) too.
             if residual_inode_buffer_mode():
                 return []
             add_hw = self.residual_add_consumer_of(edge)

@@ -396,18 +396,13 @@ class SendBlock(InodeCodeBlock):
     self.builder = builder
     self.block = block
     self.edge_info = edge_info
-    # Task #8 iter4b: the consumer's merged input window now PRE-CLEARS
-    # (STANDBY(sender,0)) before each word to close the stale-level generation
-    # race. The sense-reversing all-inode barrier deliberately leaves this
-    # inode's flag at 254/255 (no clear-to-0, straggler protection), so without
-    # an explicit reset the FIRST pre-clear waits for 0 forever while this
-    # sender waits for the consumer's window -> mutual first-word deadlock
-    # (observed: region2 first-window wedge). One-time SET_FLAG(0) before the
-    # data-feed loop clears the barrier residue. Gated on the lever + this SEND
-    # actually having a data rendezvous; OFF byte-identical. Placed BEFORE the
-    # tiled/non-tiled dispatch so both paths get it; must be render-time
-    # deferred -- at build time the pair_manager is not attached yet, so
-    # probing _get_presend_sync_code_str here would return "".
+    # Barrier residue-clear: the consumer's merged window PRE-CLEARS
+    # (STANDBY(sender,0)) per word, but the sense-reversing all-inode barrier
+    # leaves this inode's flag at 254/255 -- without a one-time SET_FLAG(0)
+    # the first pre-clear and this sender's rendezvous mutually wait forever.
+    # Gated on the lever + this SEND actually having a data rendezvous (OFF
+    # byte-identical). Must be render-time deferred: at build time the
+    # pair_manager is not attached yet, so the probe would return "".
     if residual_in_region_mode():
       self.body.add(DeferredTextBlock(
           lambda: "__builtin_INODE_SET_FLAG(0); // iter4b: clear barrier residue for pre-clear"
@@ -881,13 +876,9 @@ class SendBlock(InodeCodeBlock):
       for e in edges:
         if not pm.is_residual_data_input_recv(e):
           continue
-        # Task #12 L1 (bare identity rhs): when the residual add's operand is
-        # the REGION INPUT itself (identity skip, src graph id < 0 -- the
-        # model-input fanout), the whole stream is pure NoC valid/ready: the
-        # add's rhs fifo backpressure paces this SEND, and the fanout-lead
-        # keeps the conv stream decoupled. Every windowed variant tried here
-        # produced a fresh pairwise flag race (L1 iters a-f). LOCKSTEP: the
-        # add-side window drops this sender too
+        # Bare identity rhs: a REGION-INPUT operand (identity skip, src gid <
+        # 0) is paced by rhs-fifo backpressure + fanout-lead, not flags.
+        # LOCKSTEP: the add-side window drops this sender too
         # (get_merged_residual_input_window, same predicate).
         _sgid = getattr(e.src_id, "graph_node_id", None)
         if isinstance(_sgid, int) and _sgid < 0:
@@ -1080,13 +1071,8 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
     self._build()
 
   def _build(self):
-    # iter4b residue-clear, fanout variant (L1 unit-test lesson, subset11
-    # b1.res): the residual add's window PRE-CLEARS on this inode's flag
-    # (STANDBY(inode,0)) but the launch barriers leave the flag at 254/255,
-    # so without a one-time SET_FLAG(0) the first pre-clear and this loop's
-    # STANDBY(add,1) mutually wait forever. SendBlock got this prologue in
-    # its own __init__, but this class DISCARDS the helper bodies -- emit it
-    # here too. Render-time deferred (pair_manager attaches later).
+    # Barrier residue-clear (see the SendBlock.__init__ prologue for the
+    # rationale); this class discards the helper bodies, so emit it here too.
     if residual_in_region_mode():
       self.body.add(DeferredTextBlock(
           lambda: "__builtin_INODE_SET_FLAG(0); // iter4b: clear barrier residue for pre-clear"
@@ -1118,14 +1104,23 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
     # Per-edge base-offset vars + SEND parameters.
     infos = []
     for db, ei, h in zip(self.blocks, self.edge_infos, self._helpers):
-      base_var = UniqueVar("fanout_send_base_address", dtype="int")
-      self.body.add(TextBlock(f"{base_var} = {db.offset};"))
       infos.append({
-          "base_var": base_var,
+          "offset": db.offset,
           "policy": ei.policy_info[0].address,
           "fifo": ei.fifo_id,
           "helper": h,
       })
+
+    def _base_var(x):
+      """Lazily emit `varN = <offset>;` once for this edge and return the var.
+
+      Emitted only by the paths that actually index off a base (same_route /
+      legacy lockstep); the fanout-lead path walks cursors instead.
+      """
+      if "base_var" not in x:
+        x["base_var"] = UniqueVar("fanout_send_base_address", dtype="int")
+        self.body.add(TextBlock(f"{x['base_var']} = {x['offset']};"))
+      return x["base_var"]
 
     nop_delay = NopLoopBlock(NOP_LOOP_CNTS).render() + "\n" if DevConfig().single_qconv else ""
 
@@ -1142,13 +1137,12 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
     # handshake. If edges have DISTINCT policy/fifo (genuine separate streams) fall back
     # to the word-interleaved per-edge emission (each keeps its own route+rendezvous).
     same_route = (len({(x["policy"], x["fifo"]) for x in infos}) == 1
-                  and len({x["base_var"].__str__() for x in infos}) >= 1
                   and len({b.offset for b in self.blocks}) == 1)
 
     if same_route:
       _policy = infos[0]["policy"]
       _fifo = infos[0]["fifo"]
-      _base = infos[0]["base_var"]
+      _base = _base_var(infos[0])
 
       def multicast_body(iter, infos=infos, policy=_policy, fifo=_fifo, base=_base,
                          nop_delay=nop_delay):
@@ -1165,139 +1159,104 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
       self.body.add(SimpleFor(trip, multicast_body))
       return
 
-    # Task #12 L1 (fanout-lead): word-LOCKSTEP emission paces the whole input
-    # at the windowed consumer's (the residual add's) rate, but the add cannot
-    # consume word 0 until the main conv path primes ~2 input rows -- so the
-    # chain starves and the region wedges (L1 RTL: fanout parked at word 3,
-    # add at first lhs RECV). The input is fully resident in this inode's
-    # dmem (degenerate RESBUF: no fill), so the BARE stream(s) (conv head)
-    # can run ahead: prime LEAD bare words, then per word [synced edges (w);
-    # bare edges (w+LEAD)], then drain the synced tail. Which edges are
-    # bare/synced is only knowable at render (pair_manager), so each loop
-    # body classifies lazily; degenerate cases (all-bare / all-synced) fall
-    # out naturally (empty prime/drain bodies). Only for DISTINCT routes --
-    # the same_route true-multicast above is one single-credit stream and
-    # cannot lead (needs a RESBUF-style second copy instead).
+    # FANOUT-LEAD (distinct routes only; see resid_fanout_lead_words for the
+    # full pacing rationale). The add's rhs stream cannot deliver anything
+    # until the main path primes, so the conv-head stream must run LEAD words
+    # ahead: prime LEAD conv words, then per word [add-stream (w);
+    # conv-stream (w+LEAD)], then drain the add-stream tail. The same_route
+    # true-multicast above is one single-credit stream and cannot lead.
     lead = resid_fanout_lead_words()
 
     if lead <= 0:
+      # Legacy word-lockstep interleave (knob explicitly 0).
       def interleaved_body(iter, infos=infos, nop_delay=nop_delay):
         code = ""
         for x in infos:
           pre = x["helper"]._get_presend_sync_code_str(iter_var=iter)
           if pre:
             code += pre
-          code += (f"__builtin_INODE_SEND({x['base_var']} + {iter}*32, 0, "
+          code += (f"__builtin_INODE_SEND({_base_var(x)} + {iter}*32, 0, "
                    f"{x['policy']}, {x['fifo']});\n")
           code += nop_delay
         return code
       self.body.add(SimpleFor(trip, interleaved_body))
       return
 
-    def _is_synced(x):
-      """True for the residual-ADD stream (lagged side of the lead schedule).
+    def _is_add_stream(x):
+      """True for the residual-ADD stream (the lagged side of the schedule).
 
-      Historically this meant 'has a presend rendezvous', but the identity-rhs
-      stream is now fully BARE (valid/ready paced) -- classify by the EDGE
-      instead: any edge whose dst is the residual add's data operand. The
-      rendezvous string (if any) is still emitted in the steady/drain bodies.
-      Render-time only (needs pair_manager)."""
+      Classified by EDGE (dst is the residual add's data operand), falling
+      back to 'has a presend rendezvous' for any windowed edge. Render-time
+      only (needs pair_manager); loop bodies call this lazily.
+      """
       h = x["helper"]
       if bool(h._get_presend_sync_code_str(iter_var="0")):
         return True
       pm = getattr(self.builder, "pair_manager", None)
-      if pm is None:
-        return False
-      ee = h._get_edge()
+      ee = h._get_edge() if pm is not None else None
       if ee is None:
         return False
-      for e in (ee if isinstance(ee, list) else [ee]):
-        if pm.is_residual_data_input_recv(e):
-          return True
-      return False
+      return any(pm.is_residual_data_input_recv(e)
+                 for e in (ee if isinstance(ee, list) else [ee]))
 
-    # CURSOR addressing throughout (cur += 32 only): the INODE isel rejects
-    # both `(iter + var)*32` and even plain reg+reg adds on these globals
-    # ("Second operand should be constant"); reg+const ADDI is the one proven
-    # pattern. The bare cursor runs prime(0..lead-1) then steady(lead..trip-1)
-    # continuously; the synced cursor runs steady(0..steady_cnt-1) then
-    # drain(..trip-1) continuously.
-    cur_bare = UniqueVar("fanout_lead_bare_cursor", dtype="int")
-    cur_sync = UniqueVar("fanout_lead_sync_cursor", dtype="int")
-    self.body.add(TextBlock(f"{cur_bare} = {infos[0]['base_var']};"))
-    self.body.add(TextBlock(f"{cur_sync} = {infos[0]['base_var']};"))
+    # CURSOR addressing only (cur += 32): the INODE ISA has no reg-reg
+    # arithmetic, so `(iter + var)*32` / `var + var` fail isel. The conv
+    # cursor runs prime(0..lead-1) then steady(lead..trip-1) continuously;
+    # the add cursor runs steady(0..steady_cnt-1) then drain(..trip-1).
+    # For a runtime trip we assume trip > lead (steady_cnt would go negative
+    # and the drain would overrun otherwise); the int case clamps.
+    if isinstance(trip, int):
+      lead = min(lead, trip)
+    cur_conv = UniqueVar("fanout_lead_conv_cursor", dtype="int")
+    cur_add = UniqueVar("fanout_lead_add_cursor", dtype="int")
+    self.body.add(TextBlock(f"{cur_conv} = {infos[0]['offset']};"))
+    self.body.add(TextBlock(f"{cur_add} = {infos[0]['offset']};"))
     steady_cnt = UniqueVar("fanout_lead_steady_count", dtype="int")
     self.body.add(TextBlock(f"{steady_cnt} = {trip} - {lead};"))
 
-    def prime_body(iter, infos=infos):
+    def _sends(pred, cur, iter=None, with_sync=False):
       code = ""
       for x in infos:
-        if not _is_synced(x):
-          code += (f"__builtin_INODE_SEND({cur_bare}, 0, "
-                   f"{x['policy']}, {x['fifo']});\n")
-      code += f"{cur_bare} = {cur_bare} + 32;\n"
-      return code
-
-    def steady_body(iter, infos=infos, nop_delay=nop_delay):
-      code = ""
-      for x in infos:
-        if _is_synced(x):
+        if not pred(x):
+          continue
+        if with_sync:
           code += x["helper"]._get_presend_sync_code_str(iter_var=iter)
-          code += (f"__builtin_INODE_SEND({cur_sync}, 0, "
-                   f"{x['policy']}, {x['fifo']});\n")
+        code += f"__builtin_INODE_SEND({cur}, 0, {x['policy']}, {x['fifo']});\n"
+        if with_sync:
           code += nop_delay
-      code += f"{cur_sync} = {cur_sync} + 32;\n"
-      for x in infos:
-        if not _is_synced(x):
-          code += (f"__builtin_INODE_SEND({cur_bare}, 0, "
-                   f"{x['policy']}, {x['fifo']});\n")
-      code += f"{cur_bare} = {cur_bare} + 32;\n"
-      return code
+      return code + f"{cur} = {cur} + 32;\n"
 
-    def drain_body(iter, infos=infos, nop_delay=nop_delay):
-      code = ""
-      for x in infos:
-        if _is_synced(x):
-          code += x["helper"]._get_presend_sync_code_str(iter_var=iter)
-          code += (f"__builtin_INODE_SEND({cur_sync}, 0, "
-                   f"{x['policy']}, {x['fifo']});\n")
-          code += nop_delay
-      code += f"{cur_sync} = {cur_sync} + 32;\n"
-      return code
-
-    self.body.add(SimpleFor(min(lead, trip) if isinstance(trip, int) else lead,
-                            prime_body,
-                            annotation="resid fanout-lead prime (bare stream ahead)"))
-    self.body.add(SimpleFor(steady_cnt, steady_body,
-                            annotation="resid fanout-lead steady"))
-    self.body.add(SimpleFor(lead, drain_body,
-                            annotation="resid fanout-lead drain (synced tail)"))
+    self.body.add(SimpleFor(
+        lead,
+        lambda iter: _sends(lambda x: not _is_add_stream(x), cur_conv),
+        annotation="resid fanout-lead prime (conv stream ahead)"))
+    self.body.add(SimpleFor(
+        steady_cnt,
+        lambda iter: (_sends(_is_add_stream, cur_add, iter, with_sync=True)
+                      + _sends(lambda x: not _is_add_stream(x), cur_conv)),
+        annotation="resid fanout-lead steady"))
+    self.body.add(SimpleFor(
+        lead,
+        lambda iter: _sends(_is_add_stream, cur_add, iter, with_sync=True),
+        annotation="resid fanout-lead drain (add-stream tail)"))
 
 
 class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
-  """Task #8: interleave the RESBUF resend (hop B) with the add-imce's func_out
-  collector RECV, on the inode that owns BOTH.
+  """RESBUF fill / resend / func_out-collect, interleaved on the owning inode.
 
-  The in-region residual add (imce_3_1) is a SINGLE in-order imce whose fused loop,
-  per output group of `group` words, RECVs `group` resbuf_out words (from this
-  inode's resend) + `group` main words (from imce_3_2), computes, then SENDs
-  `group` func_out words BACK to this inode. Emitting the two inode-side hops
-  SEQUENTIALLY -- full func_out collector RECV loop, THEN the full RESBUF resend
-  loop (the plain _add_resid_buffer_blocks order) -- DEADLOCKS: the add cannot
-  produce ANY func_out until it has been fed resbuf_out by the resend, but the
-  resend is placed AFTER the func_out drain. With IMCE_SEND_FIFO_DEPTH==2 the add
-  can only buffer 2 func_out words, so no amount of reordering-without-interleave
-  helps (RESBUF resend-then-funcout still wedges at ~word 2).
+  The in-region residual add is a single in-order imce: per `group`-word
+  output group it RECVs `group` rhs words (this inode's resend) + `group`
+  main-path words, computes, and SENDs `group` func_out words back here.
+  Any schedule that lets ONE of the three inode-side streams run dry or run
+  unboundedly ahead deadlocks the region (sequential whole-loops, group
+  lockstep, and word-level pacing all wedged on RTL); the working schedule
+  is FILL-LEAD -- see resid_fill_lead_groups() for the analysis and the
+  measured LAG window.
 
-  Fix: ONE outer loop over output groups; per group emit `group` resends (each with
-  its own per-word presend rendezvous, identical to the plain SendBlock resend)
-  THEN `group` func_out RECVs -- matching the add's consume-`group`/produce-`group`
-  rhythm. The RESBUF collector RECV (hop A, from the independent producer imce_2_1)
-  is emitted BEFORE this block (unchanged) so the buffer is filled first.
-
-  Reuses a SendBlock helper purely for the resend's exact per-word rendezvous
-  (_get_presend_sync_code_str). Gated by residual_inode_buffer_mode() at the call
-  site; OFF / no-RESBUF -> never constructed -> byte-identical.
+  All sends/recvs here are BARE (NoC valid/ready paced; the add-side window
+  drops its matching STANDBY in get_merged_residual_input_window). Gated by
+  residual_inode_buffer_mode() at the call site; OFF / no-RESBUF -> never
+  constructed -> byte-identical.
   """
 
   def __init__(self, builder, resbuf_db: DataBlock, resend_info: TensorEdgeInfo,
@@ -1310,19 +1269,11 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
     self.funcout_db = funcout_db
     self.funcout_fifo_id = funcout_fifo_id
     self.group = group
-    # Task #8 iter3: when set, the RESBUF collector (hop A, from the skip producer
-    # imce) fill is folded INTO this block's per-group interleave (3-way:
-    # fill G -> resend G -> funcout G) instead of a standalone leading 256-word
-    # drain. The standalone drain wedges: the skip producer (deep in the compute
-    # pipeline, e.g. imce_0_1->imce_1_1->imce_2_1) only trickles words as the input
-    # streams, so demanding all 256 up-front before ANY resend starves the add and
-    # backpressures the whole region (iter2: stalled at collector word 64/256).
-    # Interleaving the fill keeps the dataflow acyclic per group.
+    # When set, the RESBUF collector fill (hop A, from the skip producer imce)
+    # is folded into this block's schedule instead of a standalone leading
+    # whole-buffer drain (which starves the add: the skip producer only
+    # trickles words as the input streams).
     self.collector_fifo_id = collector_fifo_id
-    # SendBlock helper: borrow ONLY its per-word resend presend rendezvous. Its
-    # own body is discarded (never registered / rendered).
-    self._resend_helper = SendBlock(builder, resbuf_db, resend_info, annotation="")
-    self._resend_helper.body = SequentialBlock()
     self._build()
 
   def _build(self):
@@ -1335,75 +1286,30 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
     ngroups = total // g
     tail = total - ngroups * g
 
-    # base-address vars only exist on the legacy (lockstep) path; the fill-lead
-    # path walks cursor vars instead (imem is the binding constraint there).
-    resend_base = UniqueVar("resid_resend_base_address", dtype="int")
-    funcout_base = UniqueVar("resid_funcout_base_address", dtype="int")
-
     resend_policy = self.resend_info.policy_info[0].address
     resend_fifo = self.resend_info.fifo_id
     fout_fifo = self.funcout_fifo_id
     coll_fifo = self.collector_fifo_id
 
-    def _fill_words(iter, offset, g=g, resend_base=resend_base, coll_fifo=coll_fifo):
-      """`g` collector RECVs for group (iter + offset). C-level index arithmetic."""
-      gidx = f"({iter})" if offset == 0 else f"(({iter}) + {offset})"
-      code = ""
-      for j in range(g):
-        widx = f"({gidx}*{g} + {j})"
-        code += (f"__builtin_INODE_RECV({resend_base} + {widx}*32, 0, 0, "
-                 f"{coll_fifo});\n")
-      return code
-
-    def _resend_funcout_words(iter, offset, g=g, resend_base=resend_base,
-                              funcout_base=funcout_base, resend_policy=resend_policy,
-                              resend_fifo=resend_fifo, fout_fifo=fout_fifo):
-      # resend `g` resbuf_out words (feed the add), BARE -- no flag rendezvous.
-      # Task #8 iter4 (user design): the NoC is valid/ready flow-controlled, so
-      # this producer->consumer stream needs NO flag sync for correctness (RECV
-      # blocks on empty, SEND blocks on full, in-order). The add-side window
-      # drops the matching STANDBY(inode) (get_merged_residual_input_window).
-      gidx = f"({iter})" if offset == 0 else f"(({iter}) + {offset})"
-      code = ""
-      for j in range(g):
-        widx = f"({gidx}*{g} + {j})"
-        code += (f"__builtin_INODE_SEND({resend_base} + {widx}*32, 0, "
-                 f"{resend_policy}, {resend_fifo});\n")
-      # then collect `g` func_out words the add produced from them.
-      for j in range(g):
-        widx = f"({gidx}*{g} + {j})"
-        code += f"__builtin_INODE_RECV({funcout_base} + {widx}*32, 0, 0, {fout_fifo});\n"
-      return code
-
-    # Task #8 iter5: FILL-LEAD schedule. The iter3 group-LOCKSTEP order
-    # (fill G -> resend G -> funcout G) deadlocks structurally: funcout(0)
-    # needs the add's first output, which needs the MAIN path's first lhs
-    # (~2 conv stages of priming, ~224 diverge words), but the halted fill
-    # backpressures the skip side (skip-conv SEND push-stall at NoC fifo
-    # depth) and freezes the 2-consumer diverge multicast at ~word 17 before
-    # the main path ever primes (RTL-traced cycle; see resid_fill_lead_groups
-    # docstring for the window analysis). Fix: prime the fill LAG groups
-    # ahead (whole buffer is allocated, fill-ahead is always safe), then per
-    # group: resend(g) -> funcout(g) -> fill(g+LAG). Emitted as three loops
-    # (prime / steady / drain-tail) to keep hardware-loop bodies branch-free.
+    # FILL-LEAD schedule (see resid_fill_lead_groups for the deadlock analysis
+    # and the measured LAG window): prime the fill LAG groups ahead -- the
+    # whole buffer is allocated, so fill-ahead is always safe -- then per
+    # group resend(g) -> funcout(g) -> fill(g+LAG), then drain the tail.
     lag = resid_fill_lead_groups() if coll_fifo is not None else 0
     lag = min(lag, ngroups)
 
     if coll_fifo is not None and lag > 0:
-      # Prime is WORD-level, but the steady/drain loops keep the GROUP rhythm:
-      # the add's fused loop RECVs a whole `g`-word group of rhs before it
-      # emits ANY output words (iter7 RTL: word-level resend(0);funcout(0)
-      # wedged with the add's BN mid-group -- funcout(0) can never arrive
-      # until rhs words 0..3 are all in).
+      # Prime is WORD-level, but steady/drain keep the GROUP rhythm: the add
+      # RECVs a whole g-word rhs group before emitting ANY output (word-level
+      # resend/funcout pacing wedges mid-group, iter7 RTL). All sends/recvs
+      # are BARE (NoC valid/ready paces them; the add-side window dropped its
+      # matching STANDBY in get_merged_residual_input_window).
       lead_w = lag * g
 
-      # Group bodies keep the 4x unroll but walk CURSOR variables (cur += 32,
-      # 1 ADDI) instead of recomputing (g*4+j)*32 per op (MULI+ADDI) -- the
-      # unrolled 3-loop variant with full address arithmetic overflowed
-      # inode_3_0's 256-word imem (272), and the two alternatives fail to
-      # compile: a C `if` guard (INODE backend cannot select BR_CC) and nested
-      # hardware loops ("Second operand should be constant" in isel). All
-      # three cursors advance strictly sequentially across prime/steady/drain.
+      # CURSOR addressing only (cur += 32): the INODE ISA has no reg-reg
+      # arithmetic and full (g*4+j)*32 index math overflowed inode_3_0's
+      # 256-word imem. All three cursors advance strictly sequentially
+      # across prime/steady/drain.
       cur_fill = UniqueVar("resid_fill_cursor", dtype="int")
       cur_resend = UniqueVar("resid_resend_cursor", dtype="int")
       cur_fout = UniqueVar("resid_funcout_cursor", dtype="int")
@@ -1450,22 +1356,33 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
       self.body.add(SimpleFor(
           lag, drain_body,
           annotation="resid fill-lead drain: resend/funcout tail groups"))
-    else:
-      # legacy lockstep (LAG=0 explicit, or no folded collector): fill G ->
-      # resend G -> funcout G per group, as in iter3.
-      self.body.add(TextBlock(f"{resend_base} = {self.resbuf_db.offset};"))
-      self.body.add(TextBlock(f"{funcout_base} = {self.funcout_db.offset};"))
-      def group_body(iter):
-        code = _fill_words(iter, 0) if coll_fifo is not None else ""
-        return code + _resend_funcout_words(iter, 0)
-      self.body.add(SimpleFor(ngroups, group_body,
-                              annotation="resid resend/funcout interleave"))
+      return
 
-    # Defensive tail (ResNet8 group|total, so tail==0 -> emits nothing). The
-    # fill-lead path above is WORD-level over the full `total`, so it never
-    # leaves a tail; only the legacy group-lockstep path can.
-    if coll_fifo is not None and lag > 0:
-      tail = 0
+    # Legacy lockstep path (LAG=0 explicit, or no folded collector): per
+    # group fill G -> resend G -> funcout G, base+index addressing.
+    resend_base = UniqueVar("resid_resend_base_address", dtype="int")
+    funcout_base = UniqueVar("resid_funcout_base_address", dtype="int")
+    self.body.add(TextBlock(f"{resend_base} = {self.resbuf_db.offset};"))
+    self.body.add(TextBlock(f"{funcout_base} = {self.funcout_db.offset};"))
+
+    def group_body(iter, g=g):
+      code = ""
+      if coll_fifo is not None:
+        for j in range(g):
+          code += (f"__builtin_INODE_RECV({resend_base} + (({iter})*{g} + {j})*32, "
+                   f"0, 0, {coll_fifo});\n")
+      for j in range(g):
+        code += (f"__builtin_INODE_SEND({resend_base} + (({iter})*{g} + {j})*32, 0, "
+                 f"{resend_policy}, {resend_fifo});\n")
+      for j in range(g):
+        code += (f"__builtin_INODE_RECV({funcout_base} + (({iter})*{g} + {j})*32, "
+                 f"0, 0, {fout_fifo});\n")
+      return code
+
+    self.body.add(SimpleFor(ngroups, group_body,
+                            annotation="resid resend/funcout interleave"))
+
+    # Defensive tail (ResNet8 group|total, so tail==0 -> emits nothing).
     for r in range(ngroups * g, ngroups * g + tail):
       if coll_fifo is not None:
         self.body.add(TextBlock(

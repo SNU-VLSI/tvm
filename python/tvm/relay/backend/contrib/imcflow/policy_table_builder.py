@@ -221,6 +221,7 @@ class PathTreeBuilder:
         so each split output gets its own tree with separate address.
         """
         groups: Dict[Tuple[Coord, Any], List[int]] = {}
+        from tvm.relay.op.contrib.imcflow import residual_in_region_mode
 
         # Get SplitInfo for the current function
         split_info = {}
@@ -243,21 +244,17 @@ class PathTreeBuilder:
                         tensor_id = (tensor_id, split_idx)
                         debug_print(f"[PathTreeBuilder] Non-multicast split: tensor_id={tensor_id}, split_idx={split_idx}")
 
-            # IMCFLOW_RESIDUAL_IN_REGION (task #12 L1): a model-input param that
-            # fans out to BOTH the conv-chain entry AND the in-region residual
-            # add's rhs would otherwise share ONE (source, tensor) multicast
-            # tree -> one policy entry -> every SEND replicates to BOTH
-            # consumers with a single credit. The add's 16-word rhs fifo then
-            # gates the whole input stream far below the main-path priming
-            # need (~85 words), wedging the region (L1g RTL census; same root
-            # as the 10th-session resnet8 region1 stall). Split the ADD-side
-            # commodity into its OWN tree (mirroring the DW-conv non-multicast
-            # split idiom) so codegen's fanout-lead can pace two INDEPENDENT
-            # unicast streams. Predicate: param src (gid < 0) + composite
-            # tuple dst = the residual add's data operand. Lever OFF ->
-            # unchanged grouping (byte-identical).
-            from tvm.relay.op.contrib.imcflow import residual_in_region_mode as _rirm
-            if _rirm() and tensor_id is not None:
+            # IMCFLOW_RESIDUAL_IN_REGION: a model-input param fanning out to
+            # BOTH the conv-chain entry AND the in-region residual add's rhs
+            # must NOT share one (source, tensor) multicast tree -- a shared
+            # policy entry replicates every SEND to BOTH consumers with a
+            # single credit, so the add's 16-word rhs fifo gates the whole
+            # input below the main-path priming need (RTL-traced wedge).
+            # Split the ADD-side commodity into its OWN tree (the DW-conv
+            # non-multicast split idiom) so codegen's fanout-lead can pace
+            # two INDEPENDENT unicast streams. Predicate: param src (gid < 0)
+            # + composite tuple 'data' dst. Lever OFF -> unchanged grouping.
+            if residual_in_region_mode() and tensor_id is not None:
                 try:
                     _edge = commodity.metadata[0]
                     _sgid = getattr(_edge.src_id, "graph_node_id", None)
