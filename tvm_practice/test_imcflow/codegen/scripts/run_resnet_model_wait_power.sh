@@ -69,4 +69,3 @@ IMCFLOW_BUGFIX="$IMCFLOW_BUGFIX" \
     -i "$SAMPLE_INDEX" \
     -m "$MODEL_EVL" \
     --power-config "$POWER_CONFIG"
-
