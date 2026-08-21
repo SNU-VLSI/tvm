@@ -2053,21 +2053,24 @@ class ConvBlock(ImceCallCodeBlock):
                             if self.post_ops else self.out_edges)
       feeds_fused_consumer = any(
           isinstance(e.dst_id.graph_node_id, tuple) for e in external_out_edges)
-      # ...but a PLAIN conv (no post_ops) feeding a fused consumer's DATA/lhs slot
-      # (imce_2_2 -> imce_3_1 in the in-region residual add) is NOT a genuine
-      # zero-flush: its pure-pad row_group is the last VALID output row of a
-      # `same` conv (read-pattern 0 = no new input reads, but the line buffer
-      # still STEPs out a real row that the fused add consumes as its lhs). The
-      # generic feeds_fused_consumer gate dummied it to SEND(0) -> the add's last
-      # raster row got a stale/zero lhs (RTL: imce_3_1 row-7 lhs frozen, per-
-      # channel constant output error). The genuine dummy-flush case (imce_1_2)
-      # feeds a fused consumer that does NOT consume the flush row; a plain conv
-      # into a fused add's lhs always does. Keep the real STEP for that signature.
-      feeds_fused_lhs = (not self.post_ops) and any(
+      # ...but a PLAIN conv (no post_ops) feeding a fused consumer's DATA/lhs or
+      # RHS operand slot (L1: imce_2_2 -> fused add's data; L2: imce_2_3 ->
+      # fused conv+add imce_3_2's rhs) is NOT a genuine zero-flush: its pure-pad
+      # row_group is the last VALID output row of a `same` conv (read-pattern 0
+      # = no new input reads, but the line buffer still STEPs out a real row
+      # that the fused consumer consumes as a real operand). The generic
+      # feeds_fused_consumer gate dummied it to SEND(0) -> the consumer's last
+      # raster row lost that operand (L1 RTL: imce_3_1 row-7 lhs frozen; L2
+      # RTL: imce_3_2's h=3 rhs zeroed, vpu-isolated). The genuine dummy-flush
+      # case (imce_1_2) feeds a fused consumer that does NOT consume the flush
+      # row; a plain conv into a fused operand slot always does. Keep the real
+      # STEP for that signature. Lever-gated: OFF keeps handcraft dummy parity.
+      feeds_fused_operand = (residual_in_region_mode()
+          and (not self.post_ops) and any(
           isinstance(e.dst_id.graph_node_id, tuple)
-          and getattr(e.dst_id, "tensor_type", None) == "data"
-          for e in external_out_edges)
-      skip_row_presend = row_is_padding and feeds_fused_consumer and not feeds_fused_lhs
+          and getattr(e.dst_id, "tensor_type", None) in ("data", "rhs")
+          for e in external_out_edges))
+      skip_row_presend = row_is_padding and feeds_fused_consumer and not feeds_fused_operand
 
       # A pure-padding row of a FUSED conv+add whose operand arrives over the NoC
       # must DRAIN-and-forward without computing (no STEP/GET_CREG): the producer
