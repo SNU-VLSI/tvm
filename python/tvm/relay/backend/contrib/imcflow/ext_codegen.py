@@ -13,6 +13,7 @@ from tvm.runtime import String
 import math
 import os
 import json
+import re
 
 
 def _env_flag(name, default=False):
@@ -39,6 +40,22 @@ def _env_float(name, default, minimum=None):
   if minimum is not None and value < minimum:
     raise ValueError(f"{name} must be >= {minimum}, got {value}")
   return value
+
+
+def _power_function_order_key(func_name):
+  """Return the Relay graph order encoded in an IMCFLOW function name.
+
+  ``ImcflowFuncMap`` is populated from IRModule iteration and is not an
+  execution-order contract.  The final ``main_<custom_id>`` component is the
+  graph node id assigned while traversing the Relay program, so it provides a
+  stable boundary for MODEL-scoped measurement.
+  """
+  match = re.search(r"_main_(\d+)$", func_name)
+  if match:
+    return (0, int(match.group(1)), func_name)
+  # Keep code generation usable for hand-written names while making their
+  # ordering deterministic.
+  return (1, 0, func_name)
 
 
 POWER_MEASURE_ENABLED = False
@@ -994,7 +1011,8 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     args_proto_type = ", ".join(proto_list)
 
     power_measure_active = self.os == "linux" and POWER_MEASURE_ENABLED
-    power_func_names = list(DevConfig().ImcflowFuncMap.keys())
+    power_func_names = sorted(
+        DevConfig().ImcflowFuncMap.keys(), key=_power_function_order_key)
     first_power_func = bool(power_func_names) and self.func_name == power_func_names[0]
     last_power_func = bool(power_func_names) and self.func_name == power_func_names[-1]
 
