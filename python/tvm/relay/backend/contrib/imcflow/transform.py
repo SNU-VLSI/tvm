@@ -5255,15 +5255,30 @@ def allocateResidBufferDataBlocks(mod):
   if not resid_info:
     return
 
+  # The skip producer (a qconv) streams its odata at the array block GRANULARITY
+  # (GET_CREG 0..3 -> SEND x4), i.e. max(ceil(OC/16), 4) blocks/pixel -- NOT the
+  # logical ceil(OC/16). For OC < 64 (e.g. OC=32 -> ceil=2) the stream is padded
+  # up to the minimum granularity 4, so the logical tensor byte size under-counts
+  # the actual NoC word stream. The RESBUF holds every streamed word (both hops go
+  # over the NoC at this granularity), so size it by H*W*blocks*(16 lanes *
+  # itemsize), not C*H*W*itemsize. Sizing by the logical tensor undersized the
+  # buffer (RTL: hopA send 64 vs recv 32 deadlock on the b2.res OC=32 projection).
+  MIN_STREAM_GRANULARITY = 4  # MinmaxQuantBlock hard-codes 4 blocks/pixel minimum
+  LANES = 16
+
   def _skip_tensor_bytes(producer_tid):
-    """Whole-tensor size in bytes for the skip producer's output."""
+    """Streamed size in bytes for the skip producer's odata (granularity-padded)."""
     src_node = transform_utils.getNodeFromTensorID(producer_tid)
     ttype = transform_utils.get_type(mod, src_node)
     shape, dtype = ttype.shape, ttype.dtype
-    n = 1
-    for d in shape:
-      n *= int(d)
-    return n * np.dtype(dtype).itemsize
+    dims = [int(d) for d in shape]  # NCHW
+    channels = dims[1]
+    n_pixels = 1
+    for d in dims[2:]:  # H*W
+      n_pixels *= d
+    blocks = max(math.ceil(channels / LANES), MIN_STREAM_GRANULARITY)
+    words = n_pixels * blocks
+    return words * LANES * np.dtype(dtype).itemsize
 
   for resbuf_gid, info in resid_info.items():
     func_name = info["func_name"]
