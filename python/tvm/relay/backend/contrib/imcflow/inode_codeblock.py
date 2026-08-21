@@ -1271,7 +1271,8 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
 
   def __init__(self, builder, resbuf_db: DataBlock, resend_info: TensorEdgeInfo,
                funcout_db: DataBlock, funcout_fifo_id: int, group: int = 4,
-               collector_fifo_id: int = None, annotation: str = ""):
+               collector_fifo_id: int = None, auto_lag: int = None,
+               annotation: str = ""):
     super().__init__(annotation)
     self.builder = builder
     self.resbuf_db = resbuf_db
@@ -1284,6 +1285,10 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
     # whole-buffer drain (which starves the add: the skip producer only
     # trickles words as the input streams).
     self.collector_fifo_id = collector_fifo_id
+    # Geometry-derived fill-lead LAG (codegen._auto_fill_lead_groups); the
+    # IMCFLOW_RESID_FILL_LEAD env overrides. None + no env -> hard error at
+    # _build (no magic fallback; the window is geometry-dependent).
+    self.auto_lag = auto_lag
     self._build()
 
   def _build(self):
@@ -1305,7 +1310,25 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
     # and the measured LAG window): prime the fill LAG groups ahead -- the
     # whole buffer is allocated, so fill-ahead is always safe -- then per
     # group resend(g) -> funcout(g) -> fill(g+LAG), then drain the tail.
-    lag = resid_fill_lead_groups() if coll_fifo is not None else 0
+    # LAG resolution: env override > geometry-derived auto. NO magic fallback:
+    # the window is geometry-dependent (b3's measured 14 wedges a 16-group
+    # buffer), so a failed geometry walk must fail HERE at compile time -- a
+    # silently-wrong LAG costs a 20000-poll RTL wedge instead. Escape hatch:
+    # set IMCFLOW_RESID_FILL_LEAD explicitly.
+    if coll_fifo is not None:
+      _env = resid_fill_lead_groups()
+      if _env is not None:
+        lag = _env
+      elif self.auto_lag is not None:
+        lag = self.auto_lag
+      else:
+        raise RuntimeError(
+            "RESBUF fill-lead LAG could not be auto-derived from graph "
+            "geometry (codegen._auto_fill_lead_groups returned None) and "
+            "IMCFLOW_RESID_FILL_LEAD is unset. Fix the geometry walk for "
+            "this graph pattern or set the env override explicitly.")
+    else:
+      lag = 0
     lag = min(lag, ngroups)
 
     if coll_fifo is not None and lag > 0:

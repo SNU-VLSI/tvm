@@ -331,8 +331,8 @@ def imcu_intra_drain_nops() -> int:
     return 0
 
 
-def resid_fill_lead_groups() -> int:
-  """Task #8 iter5 (IMCFLOW_RESID_FILL_LEAD, integer group count, default 32).
+def resid_fill_lead_groups():
+  """Task #8 iter5 (IMCFLOW_RESID_FILL_LEAD, integer group count, default AUTO).
 
   Fill-lead for the RESBUF 3-way interleave (fill/resend/funcout) on the
   residual-buffer inode. The group-LOCKSTEP schedule (fill G -> resend G ->
@@ -355,16 +355,24 @@ def resid_fill_lead_groups() -> int:
     LAG*4 + 16(rhs-fifo slack) >= ~64  (while funcout(0) blocks awaiting the
                    add's first output, the halted fill must already hold
                    enough skip words for the diverge to reach lhs word 0).
-  => LAG in ~[12, 16] groups; default 14 (56 words) splits the margin.
-  Override for other shapes / empirical bisection. 0 -> legacy lockstep order
-  (fill;resend;funcout per group)."""
+  => LAG in ~[12, 16] groups (ResNet8 b3; subset18's 16-group b2.res measured
+  LAG=6 in-window, 2 and 14 both wedge -- the window is GEOMETRY-dependent).
+
+  DEFAULT IS AUTO-DERIVED: env unset -> return None and codegen computes the
+  LAG per RESBUF from the graph geometry (receptive-field arithmetic; see
+  codegen._auto_fill_lead_groups): N* = diverge pixels needed for the main
+  path's first lhs word at the add, f_skip = skip-chain words produced by
+  then, LAG = clamp(ceil((f_skip - fifo_slack)/group) + 1, 1, ngroups-1).
+  Sanity anchors: b3 f_skip~64w -> auto 13 (measured window [12,16]); L2
+  b2.res f_skip 32w -> auto 5 (hand-validated 6, RTL-verified). Set the env
+  to override (empirical bisection); 0 -> legacy lockstep order."""
   raw = os.environ.get("IMCFLOW_RESID_FILL_LEAD", "").strip()
   if not raw:
-    return 14
+    return None
   try:
     return max(0, int(raw))
   except ValueError:
-    return 14
+    return None
 
 
 def resid_fanout_lead_words() -> int:

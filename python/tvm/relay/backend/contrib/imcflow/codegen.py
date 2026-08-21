@@ -1137,9 +1137,154 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         result[out_edge] = resbuf_gid
     return result
 
+  def _auto_fill_lead_groups(self, hopA, hopB, total_words, group, ngroups):
+    """Derive the RESBUF fill-lead LAG from graph geometry (no hand tuning).
+
+    Receptive-field arithmetic (see resid_fill_lead_groups docstring for the
+    deadlock analysis whose window this computes):
+      N*      = diverge pixels the MAIN path must consume before the add's
+                first lhs pixel arrives (per-conv "output px k needs input
+                through px k_in" composed along the chain; passthrough ops
+                are 1:1; max over data+rhs operand paths).
+      f_skip  = skip-chain words produced by diverge px N* (same arithmetic
+                forward, x producer words/px = total_words / producer out-px).
+      LAG_lb  = ceil((f_skip - FIFO_SLACK) / group)   [prime + fifo must
+                absorb f_skip while funcout(0) blocks]
+      LAG     = min(LAG_lb + 1, ngroups - 1)          [+1 margin; the upper
+                bound (skip self-saturation ~ f_skip) keeps LAG*group <=
+                f_skip-ish, which lb+1 respects]
+    Anchors: ResNet8 b3 (f_skip~64w, 128 groups) -> 13, measured window
+    [12,16]; subset18 b2.res (N*=28px, f_skip=32w, 16 groups) -> 5,
+    hand-validated 6 / RTL-verified. Returns None if the walk fails; the
+    consuming block then raises unless IMCFLOW_RESID_FILL_LEAD is set (no
+    magic fallback -- the window is geometry-dependent)."""
+    FIFO_SLACK = 16
+    edges = DevConfig().TensorEdgeListDict.get(self.func_name, [])
+
+    def _outer(gid):
+      return gid[0] if isinstance(gid, tuple) else gid
+
+    resbuf_gid = _outer(hopA.dst_id.graph_node_id)
+    in_edges = {}
+    for e in edges:
+      if getattr(e.dst_id, "tensor_type", None) not in ("data", "rhs"):
+        continue
+      if _outer(e.src_id.graph_node_id) == resbuf_gid:
+        continue  # the RESBUF resend operand is what we're scheduling
+      in_edges.setdefault(_outer(e.dst_id.graph_node_id), []).append(e)
+
+    def _conv_of(gid_inner):
+      try:
+        n = CustomIDToNode()[getInnerNodeID(gid_inner)]
+      except Exception:
+        return None
+      if (isinstance(n, relay.expr.Call) and isinstance(n.op, tvm.ir.Op)
+          and n.op.name in ("nn.imcflow_qconv", "nn.imcflow_qdwconv")):
+        try:
+          sh = [int(x) for x in n.args[0].checked_type.shape]
+        except Exception:
+          try:
+            sh = [int(x) for x in infer_shape(n.args[0])]
+          except Exception:
+            return None
+        k = int(n.attrs.kernel_size[0])
+        p = int(n.attrs.padding[0])
+        s = int(n.attrs.strides[0]) if n.attrs.strides else 1
+        return (k, p, s, sh[2], sh[3])
+      return None
+
+    def _in_px(conv, k):
+      """Input px count needed for output raster px index k of `conv`."""
+      kk, pp, ss, H, W = conv
+      Wo = (W + 2 * pp - kk) // ss + 1
+      r, c = k // Wo, k % Wo
+      rin = min(max(r * ss + (kk - 1) - pp, 0), H - 1)
+      cin = min(max(c * ss + (kk - 1) - pp, 0), W - 1)
+      return rin * W + cin
+
+    # Skip back-chain: producer -> ... -> stream source (linear).
+    prod_gid = _outer(hopA.src_id.graph_node_id)
+    skip_nodes, skip_index = [], {}
+    cur = prod_gid
+    for _ in range(64):
+      es = in_edges.get(cur, [])
+      conv = _conv_of(es[0].dst_id.graph_node_id) if es else None
+      skip_index[cur] = len(skip_nodes)
+      skip_nodes.append((cur, conv))
+      if not es:
+        break
+      cur = _outer(es[0].src_id.graph_node_id)
+    if cur not in skip_index:
+      skip_index[cur] = len(skip_nodes)
+      skip_nodes.append((cur, None))
+
+    # Main walk: max diverge-px need over operand paths reaching the skip chain.
+    # Memoized on (gid, k): diamond fan-in patterns (split -> parallel convs ->
+    # add) otherwise explode the path count exponentially (25-min codegen hang
+    # on subset18 region2 without this).
+    add_outer = _outer(hopB.dst_id.graph_node_id)
+    _memo = {}
+    def _need(gid, k, depth=0):
+      if gid in skip_index:
+        return (k + 1, gid)
+      if depth > 32:
+        return None
+      key = (gid, k)
+      if key in _memo:
+        return _memo[key]
+      _memo[key] = None  # cycle guard
+      best = None
+      for e in in_edges.get(gid, []):
+        conv = _conv_of(e.dst_id.graph_node_id)
+        k_in = _in_px(conv, k) if conv else k
+        r = _need(_outer(e.src_id.graph_node_id), k_in, depth + 1)
+        if r is not None and (best is None or r[0] > best[0]):
+          best = r
+      _memo[key] = best
+      return best
+
+    res = _need(add_outer, 0)
+    if res is None:
+      return None
+    nstar, hit = res
+
+    # Skip forward: producible producer out-px given nstar px at the diverge.
+    n = nstar
+    for j in range(skip_index[hit] - 1, -1, -1):
+      _, conv = skip_nodes[j]
+      if conv is None:
+        continue
+      kk, pp, ss, H, W = conv
+      Wo = (W + 2 * pp - kk) // ss + 1
+      Ho = (H + 2 * pp - kk) // ss + 1
+      cnt = 0
+      for kpx in range(Ho * Wo):
+        if _in_px(conv, kpx) + 1 <= n:
+          cnt += 1
+        else:
+          break
+      n = cnt
+    prod_conv = skip_nodes[0][1]
+    if prod_conv is not None:
+      kk, pp, ss, H, W = prod_conv
+      out_px = ((H + 2 * pp - kk) // ss + 1) * ((W + 2 * pp - kk) // ss + 1)
+    else:
+      out_px = max(1, ngroups)
+    wordsppx = max(1, total_words // max(1, out_px))
+    f_words = n * wordsppx
+    lag_lb = max(1, -(-max(f_words - FIFO_SLACK, 0) // group))
+    lag = min(lag_lb + 1, max(1, ngroups - 1))
+    print(f"[resid-auto-lag] N*={nstar}px @diverge {hit}, f_skip={f_words}w "
+          f"({n}px x {wordsppx}w), lb={lag_lb} -> LAG={lag} "
+          f"(groups={ngroups}; IMCFLOW_RESID_FILL_LEAD overrides)")
+    return lag
+
   def _add_resid_buffer_blocks(self):
     """Task #10: emit the RESBUF collector (RECV hop A) + resend (SEND hop B) on
     the assigned inode. No-op unless the residual inode-buffer sub-lever fired.
+
+    Fill-lead LAG is AUTO-DERIVED per RESBUF from graph geometry (see
+    _auto_fill_lead_groups); IMCFLOW_RESID_FILL_LEAD overrides.
 
     Task #8: when this inode ALSO collects the fed add-imce's func_out, the resend
     (hop B) and that func_out collector are emitted INTERLEAVED (per output group)
@@ -1186,9 +1331,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         fout_info = DevConfig().get_tensor_edge_info(fout_edge)
         fout_db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(fout_edge)
         assert fout_db is not None, f"func_out DataBlock not found for {fout_edge}"
+        _total = -(-db.size // 32)
+        _auto_lag = self._auto_fill_lead_groups(hopA, hopB, _total, 4, _total // 4)
         il_block = ResidResendFuncoutInterleavedBlock(
             self, db, send_info, fout_db, fout_info.fifo_id, group=4,
             collector_fifo_id=(recv_info.fifo_id if fold_fill else None),
+            auto_lag=_auto_lag,
             annotation=f"resbuf resend/funcout interleave: {hopB} || {fout_edge}")
         # stash for consistency counting (bill resend hopB + func_out edge, and the
         # collector hop A when folded in).
