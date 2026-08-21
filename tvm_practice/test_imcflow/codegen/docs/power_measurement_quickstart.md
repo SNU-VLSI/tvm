@@ -94,7 +94,7 @@ JSON의 주요 항목은 다음과 같다.
 | `enabled` | `false`이면 runner는 power 측정을 건너뛴다. |
 | `scope` | TVM-only 배치 정책. `MODEL`은 model 실행 전체, `REGION`은 generated region kernel, `TILE`은 tile invoke마다 별도 trace를 만든다. 기본은 `REGION`이다. |
 | `mode` | `now`는 region END에서 DMM을 즉시 멈춘다. `wait`는 END에서 설정된 `sample_count`가 모두 찰 때까지 기다린다. 기본은 `now`이다. |
-| `region_loop.loop_enable` | `MODEL` scope에서만 지원한다. `true`이면 model body 전체를 최소 조건이 충족될 때까지 반복한다. `REGION`과 `TILE` scope에서는 loop를 사용할 수 없다. |
+| `region_loop.loop_enable` | `MODEL`과 `REGION` scope에서 지원한다. `true`이면 선택된 body를 최소 조건이 충족될 때까지 반복한다. `TILE` scope에서는 항상 비활성화된다. `false`이면 progress/stats와 board-server clock sync를 생략하는 최소 측정 경로를 사용한다. |
 | `region_loop.min_samples` | 모든 rail에서 확보해야 할 최소 acquired sample 수이다. |
 | `region_loop.min_seconds` | 실제 DMM GET 이후 확보해야 할 최소 시간이다. sample/time 조건을 함께 지정하면 둘 다 만족해야 한다. |
 | `duration_budget_s` | 예상 측정 시간이다. `sample_interval_s=auto` 계산과 buffer coverage 검증에 사용된다. |
@@ -215,6 +215,13 @@ PyVISA는 board에 필요하지 않다. `event`는 예약 key이므로
 timestamp marker를 만든다. Event 호출은 timestamp와 label만 고정 크기 local
 queue에 저장하고 TCP 전송은 region 종료 직전에 수행한다. 사용자가 직접 호출하는
 일반 key/value state tag의 set/clear 기능은 유지된다.
+
+`region_loop.loop_enable=false`인 최소 경로는 DMM `GET`, body 1회 실행,
+`STOP_BEGIN`에 의한 DMM `ABORt`, 결과 수집 및 `POWER_REGION_END`만 유지한다.
+loop 판단용 progress와 iteration stats, 시작/종료 board-server clock sync는 보내지
+않는다. 따라서 이 경로에서 board event는 호출 순서는 보존되지만 sample timeline에
+정밀하게 정렬되지 않으며, `get_issue`처럼 measurement server가 직접 기록한 event만
+server clock 기준의 정확한 timestamp를 갖는다.
 
 ### Measurement server와 timestamp 정렬
 

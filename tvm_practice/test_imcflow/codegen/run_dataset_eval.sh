@@ -411,11 +411,15 @@ else
     if [ -n "${IMCFLOW_TIMING:-}" ]; then
         TIMING_ENV="IMCFLOW_TIMING=$IMCFLOW_TIMING "
     fi
+    DEBUG_INSTRUMENT_ENV=""
+    if [[ "${DEBUG_PRINT_INSTRUMENT:-0}" =~ ^(1|true|TRUE|on|ON|yes|YES)$ ]]; then
+        DEBUG_INSTRUMENT_ENV="DEBUG_PRINT_INSTRUMENT=1 "
+    fi
     PRE_RUN_WARMUP_CMD=""
     if [[ "${IMCFLOW_PRE_RUN_WARMUP:-0}" =~ ^(1|true|TRUE|on|ON|yes|YES)$ ]]; then
         PRE_RUN_WARMUP_CMD="echo '[CHIP] pre-run warmup: start'; cd /home/root/imcflow/xilinx/petalinux-csrc && make warmup; warmup_status=\$?; if [ \$warmup_status -ne 0 ]; then echo '[CHIP] pre-run warmup: FAILED' >&2; exit \$warmup_status; fi; echo '[CHIP] pre-run warmup: complete'; "
     fi
-    REMOTE_CMD="${PRE_RUN_WARMUP_CMD}cd $REMOTE_BASE_PATH && echo '[CHIP] dataset execution: start' && ${POWER_REMOTE_ENV}${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    REMOTE_CMD="${PRE_RUN_WARMUP_CMD}cd $REMOTE_BASE_PATH && echo '[CHIP] dataset execution: start' && ${POWER_REMOTE_ENV}${TIMING_ENV}${DEBUG_INSTRUMENT_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \

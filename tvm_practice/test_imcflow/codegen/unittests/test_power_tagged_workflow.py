@@ -437,13 +437,53 @@ def test_codegen_helpers_are_linux_only(monkeypatch):
     )
     assert "dmm_measure.h" in generator.generateHeader()
     assert "power_measure_runtime.h" in generator.generateHeader()
-    assert 'getenv("DEBUG_PRINT_INSTRUMENT")' not in generator.generateHeader()
-    assert "IMCFLOW_DEBUG_PRINT" not in generator.generateHeader()
+    assert 'getenv("DEBUG_PRINT_INSTRUMENT")' in generator.generateHeader()
+    assert "IMCFLOW_DEBUG_PRINT" in generator.generateHeader()
+    assert 'strcasecmp(value, "true")' in generator.generateHeader()
+    assert "fflush(stderr)" in generator.generateHeader()
 
     generator.os = "baremetal"
     assert generator.emit_power_tag_set("kernel", "x") == ""
     assert generator.emit_power_tag_clear("kernel") == ""
     assert "dmm_measure.h" not in generator.generateHeader()
+
+
+def test_debug_print_instrument_runtime_gate(monkeypatch, tmp_path):
+    module = _load_ext_codegen(monkeypatch)
+    generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
+    generator.os = "linux"
+    header = generator.generateHeader()
+    debug_section = header[
+        header.index("// Runtime debug instrumentation"):
+        header.index("// Global failure flag")
+    ]
+    source = tmp_path / "debug_print_gate.c"
+    binary = tmp_path / "debug_print_gate"
+    source.write_text(
+        "#include <stdio.h>\n#include <stdlib.h>\n"
+        "#include <string.h>\n#include <strings.h>\n"
+        + debug_section
+        + 'int main(void) { IMCFLOW_DEBUG_PRINT("marker %d", 7); return 0; }\n',
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["cc", "-std=c11", "-Wall", "-Werror", str(source), "-o", str(binary)],
+        check=True,
+    )
+
+    disabled_env = os.environ.copy()
+    disabled_env["DEBUG_PRINT_INSTRUMENT"] = "0"
+    disabled = subprocess.run(
+        [str(binary)], env=disabled_env, capture_output=True, text=True, check=True
+    )
+    assert disabled.stderr == ""
+
+    enabled_env = os.environ.copy()
+    enabled_env["DEBUG_PRINT_INSTRUMENT"] = "true"
+    enabled = subprocess.run(
+        [str(binary)], env=enabled_env, capture_output=True, text=True, check=True
+    )
+    assert enabled.stderr == "[IMCFLOW-DBG] marker 7\n"
 
 
 def test_bulk_transfer_accesses_use_configurable_periodic_mmio_barriers(monkeypatch):
@@ -496,7 +536,7 @@ def test_extra_mmio_barriers_can_restore_block_end_only_pacing(monkeypatch):
     assert generated.count("imcflow_mmio_barrier();") == 1
 
 
-def test_tensor_transfer_has_no_debug_instrumentation(monkeypatch):
+def test_tensor_transfer_has_runtime_gated_debug_instrumentation(monkeypatch):
     module = _load_ext_codegen(monkeypatch)
     monkeypatch.setattr(module, "makeBaseAddrName", lambda _block: "INPUT_BASE_ADDR")
     monkeypatch.setattr(module, "getCInputVarName", lambda *_args: "input_tensor")
@@ -512,8 +552,11 @@ def test_tensor_transfer_has_no_debug_instrumentation(monkeypatch):
     )
 
     generated = str(generator.generateToNpuTransferCode([block], None, "input"))
-    assert "IMCFLOW_DEBUG_PRINT" not in generated
+    assert "IMCFLOW_DEBUG_PRINT" in generated
     assert "fprintf" not in generated
+    assert "input block begin name=INPUT_BASE_ADDR" in generated
+    assert "((i + 1) % 256) == 0" in generated
+    assert "input block end name=INPUT_BASE_ADDR" in generated
     assert "for(int i=0; i<1024; i++)" in generated
 
 
@@ -790,10 +833,16 @@ def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards()
     warmup = "cd /home/root/imcflow/xilinx/petalinux-csrc && make warmup"
     execute = "taskset -c $CHIP_EVAL_CPU"
     assert "IMCFLOW_PRE_RUN_WARMUP" in dataset_runner
+    assert 'DEBUG_INSTRUMENT_ENV="DEBUG_PRINT_INSTRUMENT=1 "' in dataset_runner
     assert warmup in dataset_runner
     assert dataset_runner.index(warmup) < dataset_runner.index(execute)
     assert "--log-file)" in dataset_runner
     assert 'exec > >(tee "$RUN_LOG_FILE") 2>&1' in dataset_runner
+
+    output_filter = (
+        CODEGEN_DIR / "scripts/filter_eval_output.sh"
+    ).read_text(encoding="utf-8")
+    assert "^\\[IMCFLOW-DBG\\]" in output_filter
 
     scan_steps = (CODEGEN_DIR / "scan_steps.sh").read_text(encoding="utf-8")
     assert "ConnectTimeout=$SCAN_SSH_CONNECT_TIMEOUT_SECONDS" in scan_steps
@@ -814,6 +863,7 @@ def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards()
     assert 'LD_LIBRARY_PATH="$TVM_ROOT/build:${LD_LIBRARY_PATH:-}"' in model_runner
     assert 'BOARD="${BOARD:-B1}"' in model_runner
     assert 'BOARD="$BOARD"' in model_runner
+    assert 'DEBUG_PRINT_INSTRUMENT="${DEBUG_PRINT_INSTRUMENT:-0}"' in model_runner
     assert "--skip-compile)" in model_runner
     assert 'if [[ "$SKIP_COMPILE" == "1" ]]' in model_runner
     assert "--skip-compile requires an existing ARM executable" in model_runner

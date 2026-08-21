@@ -77,6 +77,15 @@ BEGIN {
     # --- Pass through important lines ---
     if ($0 ~ /Starting evaluation of/) { print; fflush(); next }
     if ($0 ~ /^\[CHIP\]/)              { print; fflush(); next }
+    if ($0 ~ /^\[IMCFLOW-DBG\]/) {
+        if (last_progress != "") {
+            printf "\n"
+            last_progress = ""
+        }
+        print
+        fflush()
+        next
+    }
     if ($0 ~ /^\[SKIP\]/)              { print; fflush(); next }
     if ($0 ~ /FAILED/)                 { print; fflush(); next }
     if ($0 ~ /^Error:/)                { print; fflush(); next }
