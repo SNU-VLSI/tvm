@@ -392,6 +392,37 @@ def resid_fanout_lead_words() -> int:
     return 24
 
 
+def residual_add_outer_gids(edges):
+  """Outer composite graph ids that are genuine in-region residual ADDs.
+
+  A residual add is a composite (tuple-gid) consumer with >= 2 `data` operands
+  arriving from DISTINCT sources (main-path conv + skip). This is THE shared
+  discriminator for every residual-in-region special-casing site -- the inode
+  fanout-lead schedule, the PathTreeBuilder unicast split, and the imce-side
+  bare-consumer window must all key on the SAME condition, or a producer goes
+  bare while its consumer stays windowed (protocol mismatch -> deadlock).
+  Concretely: subset18's region1 fans its model input out to a conv head AND a
+  single-operand skip-EXPORT vecops (the b1 residual add lives in region2) --
+  NOT a residual fanout. The inode side treated any >1-consumer param fanout
+  as residual (bare fanout-lead conv stream) while the imce consumer kept its
+  per-word STANDBY(inode,1) window -> imce_0_2 waited for a flag pulse the
+  bare fanout never sends (RTL: region1 launch3 20000-poll wedge). Keying all
+  sites on this set restores the OFF-identical path for ordinary fanouts.
+
+  `edges` is any iterable of TensorEdge; returns a set of outer gids.
+  """
+  from collections import defaultdict
+  srcs = defaultdict(set)
+  for e in edges:
+    dgid = getattr(e.dst_id, "graph_node_id", None)
+    if not isinstance(dgid, tuple):
+      continue
+    if getattr(e.dst_id, "tensor_type", None) != "data":
+      continue
+    srcs[dgid[0]].add(getattr(e.src_id, "graph_node_id", None))
+  return {outer for outer, s in srcs.items() if len(s) >= 2}
+
+
 def mmio_block_barrier_usec() -> int:
   """Silicon-SAFE HOST-SIDE lever (IMCFLOW_MMIO_BARRIER, default -1 = OFF).
 

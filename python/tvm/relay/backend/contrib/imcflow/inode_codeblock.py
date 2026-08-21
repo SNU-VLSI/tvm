@@ -765,6 +765,16 @@ class SendBlock(InodeCodeBlock):
       return ""
 
     edge_or_edges = self._get_edge()
+    # IMCFLOW_RESIDUAL_IN_REGION: a single multicast SendBlock over a shared
+    # DataBlock (the OFF-style [0]-only param send) must derive its rendezvous
+    # targets from EVERY edge of the multicast -- _get_edge() returns only
+    # .id[0], and if that happens to be the bare tuple-dst consumer the
+    # windowed plain-dst consumer (e.g. subset18 region1 imce_0_2) becomes
+    # invisible here, the SEND goes out bare, and the consumer STANDBYs on a
+    # flag the inode never raises (RTL region1 launch3 wedge). Lever OFF ->
+    # unchanged (single-edge ids).
+    if residual_in_region_mode() and isinstance(self.block.id, list):
+      edge_or_edges = self.block.id
     if edge_or_edges is None:
       return ""
     edges = edge_or_edges if isinstance(edge_or_edges, list) else [edge_or_edges]

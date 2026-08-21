@@ -228,6 +228,22 @@ class PathTreeBuilder:
         if self.func_name:
             split_info = ImcflowDeviceConfig().SplitInfo.get(self.func_name, {})
 
+        # Genuine in-region residual-ADD composites of this function (>= 2
+        # distinct-source `data` operands). The unicast split below must key on
+        # this -- splitting ANY param->tuple-data edge also split ordinary
+        # fanouts (subset18 region1's skip-EXPORT vecops) whose consumers keep
+        # windowed RECVs, desyncing them from the split/bare inode side. Shared
+        # discriminator with codegen's param fanout gate and send_recv_sync's
+        # is_residual_data_input_recv (see residual_add_outer_gids).
+        _resid_outers = set()
+        if residual_in_region_mode() and self.func_name:
+            try:
+                from tvm.contrib.imcflow import residual_add_outer_gids
+                _resid_outers = residual_add_outer_gids(
+                    ImcflowDeviceConfig().TensorEdgeListDict.get(self.func_name, []))
+            except Exception:
+                _resid_outers = set()
+
         for cid in routing_result.get_all_commodity_ids():
             commodity = routing_result.get_commodity(cid)
             tensor_id = self.tensor_id_extractor(commodity.metadata)
@@ -261,7 +277,8 @@ class PathTreeBuilder:
                     _dgid = getattr(_edge.dst_id, "graph_node_id", None)
                     if (isinstance(_sgid, int) and _sgid < 0
                             and isinstance(_dgid, tuple)
-                            and getattr(_edge.dst_id, "tensor_type", None) == "data"):
+                            and getattr(_edge.dst_id, "tensor_type", None) == "data"
+                            and _dgid[0] in _resid_outers):
                         tensor_id = (tensor_id, "resid_rhs")
                         debug_print(f"[PathTreeBuilder] residual rhs unicast split: "
                                     f"tensor_id={tensor_id}, edge={_edge}")

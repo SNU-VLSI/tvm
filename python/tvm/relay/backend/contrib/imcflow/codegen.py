@@ -935,6 +935,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     const_edges = []
     output_edges = []
     from tvm.relay.op.contrib.imcflow import residual_in_region_mode
+    from tvm.contrib.imcflow import residual_add_outer_gids
+    # Only a fanout that actually feeds an in-region residual ADD gets the
+    # per-edge emission (and downstream the fanout-lead schedule + policy split
+    # + bare consumers). An ordinary >1-consumer param fanout (e.g. subset18
+    # region1: conv head + single-operand skip-EXPORT vecops, the add being in
+    # the NEXT region) keeps the OFF-identical [0]-only single multicast send --
+    # its consumers keep their windows, and a bare fanout-lead against a
+    # windowed consumer wedges (see residual_add_outer_gids).
+    _resid_outers = (residual_add_outer_gids(self.edges)
+                     if residual_in_region_mode() else set())
+    def _feeds_residual_add(es):
+      for _e in es:
+        _d = getattr(_e.dst_id, "graph_node_id", None)
+        if (isinstance(_d, tuple) and _d[0] in _resid_outers
+            and getattr(_e.dst_id, "tensor_type", None) == "data"):
+          return True
+      return False
     for x in fn.params:
       # self.visit(x)
       param_id = getNodeID(x)
@@ -945,10 +962,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # fifo2 AND the residual add's skip on fifo3). Those are separate router
       # entries -> each needs its own send block, else the un-sent receiver's RECV
       # blocks forever. Emit every output edge in that case; the downstream
-      # param_edges_by_hid grouping then interleaves them. OFF / single-consumer
-      # params keep the [0]-only behavior -> byte-identical.
+      # param_edges_by_hid grouping then interleaves them. OFF / single-consumer /
+      # non-residual fanout params keep the [0]-only behavior -> byte-identical.
       out_edges = self.get_output_edges_from_id(param_id)
-      if residual_in_region_mode() and len(out_edges) > 1:
+      if (residual_in_region_mode() and len(out_edges) > 1
+          and _feeds_residual_add(out_edges)):
         param_edges.extend(out_edges)
       else:
         param_edges.append(out_edges[0])
@@ -1265,6 +1283,18 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       return None
 
     all_blocks = self.codeblocks.get_blocks()
+    # IMCFLOW_RESIDUAL_IN_REGION: SendBlocks per shared DataBlock. A residual
+    # per-edge fanout emits N SendBlocks over ONE DataBlock (owner-narrowed
+    # billing below); a single multicast SendBlock over a shared DataBlock (the
+    # OFF-style [0]-only param send whose one SEND reaches every edge of the
+    # multicast) must bill the WHOLE edge list -- owner-narrowing it leaves the
+    # sibling edge at send 0 (false "send 0 vs recv N" deadlock report).
+    _sendblocks_per_db = {}
+    if residual_in_region_mode():
+      for _b in all_blocks:
+        if isinstance(_b, SendBlock):
+          _k = id(_b.block)
+          _sendblocks_per_db[_k] = _sendblocks_per_db.get(_k, 0) + 1
     for block in all_blocks:
       if isinstance(block, SendBlock):
         edge = block.block.id
@@ -1281,9 +1311,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         # each per-edge block bills every edge once PER fan-out block (2 blocks x
         # 2 edges -> each edge counted 2x -> send 8192 vs recv 4096 false
         # deadlock). Count only THIS block's own edge (edge_info.owner) so each
-        # edge is billed exactly once. OFF / non-fanout -> owner not in a shared
-        # list -> unchanged.
-        if (residual_in_region_mode() and isinstance(edge, list)):
+        # edge is billed exactly once. Applies ONLY when the DataBlock really
+        # has multiple SendBlocks; a lone multicast SendBlock bills every edge
+        # (one physical SEND reaches all receivers). OFF / non-fanout ->
+        # unchanged.
+        if (residual_in_region_mode() and isinstance(edge, list)
+            and _sendblocks_per_db.get(id(block.block), 0) > 1):
           own = getattr(block.edge_info, "owner", None)
           if own is not None and own in edge:
             edge = own
