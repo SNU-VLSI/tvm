@@ -12,6 +12,47 @@ from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
 import math
 import os
+import json
+
+
+def _env_flag(name, default=False):
+  value = os.getenv(name)
+  if value is None:
+    return default
+  normalized = value.strip().lower()
+  if normalized in ("1", "true", "yes", "on"):
+    return True
+  if normalized in ("0", "false", "no", "off", ""):
+    return False
+  raise ValueError(f"{name} must be a boolean value, got {value!r}")
+
+
+def _env_int(name, default, minimum=None):
+  value = int(os.getenv(name, str(default)))
+  if minimum is not None and value < minimum:
+    raise ValueError(f"{name} must be >= {minimum}, got {value}")
+  return value
+
+
+def _env_float(name, default, minimum=None):
+  value = float(os.getenv(name, str(default)))
+  if minimum is not None and value < minimum:
+    raise ValueError(f"{name} must be >= {minimum}, got {value}")
+  return value
+
+
+POWER_MEASURE_ENABLED = False
+POWER_MEASURE_SCOPE = "REGION"
+POWER_MEASURE_MODE = "now"
+POWER_DMM_NAME = "DMM_GPIB3"
+POWER_DMM_NPLC = 0.001
+POWER_DMM_INTERVAL_S = -1.0
+POWER_DMM_SAMPLE_COUNT = 50000
+POWER_DMM_CURRENT_RANGE = 0.1
+POWER_DMM_RESET = True
+POWER_DMM_START_TIMEOUT_S = 30
+POWER_DMM_RESULT_TIMEOUT_S = 300
+POWER_SERVER_OUTPUT_PREFIX = "/tmp/imcflow_power"
 
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
@@ -31,6 +72,33 @@ elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
   INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
   RESET_GEN_ADDR = 0xa0130000 
+  POWER_MEASURE_ENABLED = _env_flag("IMCFLOW_MEASURE_POWER", False)
+  if POWER_MEASURE_ENABLED:
+    POWER_MEASURE_SCOPE = os.getenv("IMCFLOW_POWER_SCOPE", "REGION").strip().upper()
+    if POWER_MEASURE_SCOPE not in ("MODEL", "REGION", "TILE"):
+      raise ValueError(
+          "IMCFLOW_POWER_SCOPE must be MODEL, REGION, or TILE, "
+          f"got {POWER_MEASURE_SCOPE!r}")
+    POWER_MEASURE_MODE = os.getenv("IMCFLOW_POWER_MODE", "now").strip().lower()
+    if POWER_MEASURE_MODE not in ("now", "wait"):
+      raise ValueError(
+          f"IMCFLOW_POWER_MODE must be now or wait, got {POWER_MEASURE_MODE!r}")
+    POWER_DMM_NAME = os.getenv("IMCFLOW_POWER_DMM_NAME", "DMM_GPIB3").strip()
+    if not POWER_DMM_NAME:
+      raise ValueError("IMCFLOW_POWER_DMM_NAME must not be empty")
+    POWER_DMM_NPLC = _env_float("IMCFLOW_POWER_NPLC", 0.001, 0.0)
+    POWER_DMM_INTERVAL_S = _env_float("IMCFLOW_POWER_INTERVAL_S", -1.0)
+    POWER_DMM_SAMPLE_COUNT = _env_int("IMCFLOW_POWER_SAMPLE_COUNT", 50000, 1)
+    POWER_DMM_CURRENT_RANGE = _env_float("IMCFLOW_POWER_CURRENT_RANGE", 0.1)
+    POWER_DMM_RESET = _env_flag("IMCFLOW_POWER_RESET", True)
+    POWER_DMM_START_TIMEOUT_S = _env_int(
+        "IMCFLOW_POWER_START_TIMEOUT_S", 30, 0)
+    POWER_DMM_RESULT_TIMEOUT_S = _env_int(
+        "IMCFLOW_POWER_RESULT_TIMEOUT_S", 300, 0)
+    POWER_SERVER_OUTPUT_PREFIX = os.getenv(
+        "IMCFLOW_POWER_SERVER_OUTPUT_PREFIX", "/tmp/imcflow_power").strip()
+    if not POWER_SERVER_OUTPUT_PREFIX:
+      raise ValueError("IMCFLOW_POWER_SERVER_OUTPUT_PREFIX must not be empty")
 else:
   raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
 
@@ -297,7 +365,7 @@ class KernelCodeGenerator:
 #endif
 """)
 
-  def generateRetryCheck(self, location_label):
+  def generateRetryCheck(self, location_label, power_session_active=False):
     """Generate retry check code after a wait call.
     On failure: cleanup device pointers, increment retry count, continue loop.
     With RETRY_DISABLE: exit(1) on failure (original behavior).
@@ -317,6 +385,8 @@ class KernelCodeGenerator:
       # still valid, i.e. before generateDevicePointerCleanup() munmaps them.
       code += "generate_ack(int_ack_gen_pointer);\n"
       code += "npu_pointer[INTR_DONE_REG_IDX] = 1;\n"
+    if power_session_active:
+      code += "dmm_close();\n"
     code += self.generateDevicePointerCleanup()
     code += f"_retry_count++;\n"
     code += f"continue;\n"
@@ -325,6 +395,8 @@ class KernelCodeGenerator:
     code += f"#else\n"
     code += f"if (_wait_rc != 0) {{\n"
     code += f'  fprintf(stderr, "[TIMEOUT] {location_label} failed (retry disabled)\\n");\n'
+    if power_session_active:
+      code += "  dmm_close();\n"
     code += self.generateDevicePointerCleanup()
     code += f"  g_imcflow_kernel_failed = 1;\n"
     code += f"  return;\n"
@@ -355,7 +427,7 @@ class KernelCodeGenerator:
   } \\
 } while (0)
 """) if os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0") else ""
-    return ("""
+    code = ("""
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -374,6 +446,9 @@ class KernelCodeGenerator:
 // Global failure flag: set by kernel on timeout, checked by host loop
 extern volatile int g_imcflow_kernel_failed;
 """)
+    if self.os == "linux" and POWER_MEASURE_ENABLED:
+      code += '#include "dmm_measure.h"\n'
+    return code
 
   def generateInterruptUtilities(self):
     """Generate interrupt handling utility functions."""
@@ -518,6 +593,99 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   }
 }
     """)
+
+  def _power_server_ofname(self, scope, tile_idx=None):
+    suffix = self.func_name
+    if scope == "MODEL":
+      suffix = "model"
+    elif tile_idx is not None:
+      suffix = f"{suffix}_tile{tile_idx}"
+    return f"{POWER_SERVER_OUTPUT_PREFIX}_{suffix}.txt"
+
+  def generatePowerMeasureStart(self, scope, tile_idx=None):
+    """Start one legacy START/STARTED DMM session."""
+    assert self.os == "linux" and POWER_MEASURE_ENABLED
+    server_ofname = json.dumps(self._power_server_ofname(scope, tile_idx))
+    dmm_name = json.dumps(POWER_DMM_NAME)
+    start_func = (
+        "dmm_start_current_now" if POWER_MEASURE_MODE == "now"
+        else "dmm_start_current")
+    label = scope.lower()
+    if tile_idx is not None:
+      label += f" tile {tile_idx}"
+
+    code = CodeWriter()
+    code += f"// Legacy power measurement begin ({label})\n"
+    code += "{\n"
+    code.nextIndent()
+    code += "dmm_config_t _power_dmm_cfg = {\n"
+    code.nextIndent()
+    code += f".name = {dmm_name},\n"
+    code += f".nplc = {POWER_DMM_NPLC!r},\n"
+    code += f".interval_s = {POWER_DMM_INTERVAL_S!r},\n"
+    code += f".sample_count = {POWER_DMM_SAMPLE_COUNT},\n"
+    code += f".curr_range = {POWER_DMM_CURRENT_RANGE!r},\n"
+    code += f".reset = {1 if POWER_DMM_RESET else 0},\n"
+    code += ".ofname = NULL,\n"
+    code += f".server_ofname = {server_ofname},\n"
+    code.prevIndent()
+    code += "};\n"
+    code += (
+        f"dmm_set_timeouts({POWER_DMM_START_TIMEOUT_S}, "
+        f"{POWER_DMM_RESULT_TIMEOUT_S});\n")
+    code += f"if ({start_func}(1, &_power_dmm_cfg) != 0) {{\n"
+    code.nextIndent()
+    code += (
+        f'fprintf(stderr, "[POWER] {label} begin failed: %s\\n", '
+        "dmm_last_error());\n")
+    code += "dmm_close();\n"
+    code += self.generateDevicePointerCleanup()
+    code += "g_imcflow_kernel_failed = 1;\n"
+    code += "return;\n"
+    code.prevIndent()
+    code += "}\n"
+    code.prevIndent()
+    code += "}\n"
+    return code
+
+  def generatePowerMeasureEnd(self, scope, tile_idx=None):
+    """Send legacy GO, receive RESULT, and close the DMM session."""
+    assert self.os == "linux" and POWER_MEASURE_ENABLED
+    result_func = (
+        "dmm_get_result_now" if POWER_MEASURE_MODE == "now"
+        else "dmm_wait_result")
+    label = scope.lower()
+    if tile_idx is not None:
+      label += f" tile {tile_idx}"
+
+    code = CodeWriter()
+    code += f"// Legacy power measurement end ({label})\n"
+    code += "{\n"
+    code.nextIndent()
+    code += "char _power_dmm_name[64];\n"
+    code += "double _power_dmm_avg = 0.0;\n"
+    code += "int _power_dmm_count = 0;\n"
+    code += (
+        f"int _power_dmm_rc = {result_func}(_power_dmm_name, "
+        "sizeof(_power_dmm_name), &_power_dmm_avg, &_power_dmm_count);\n")
+    code += "if (_power_dmm_rc != 0) {\n"
+    code.nextIndent()
+    code += (
+        f'fprintf(stderr, "[POWER] {label} result failed: %s\\n", '
+        "dmm_last_error());\n")
+    code += "dmm_close();\n"
+    code += self.generateDevicePointerCleanup()
+    code += "g_imcflow_kernel_failed = 1;\n"
+    code += "return;\n"
+    code.prevIndent()
+    code += "}\n"
+    code += (
+        f'fprintf(stderr, "[POWER] {label}: %s avg=%.9g A samples=%d\\n", '
+        "_power_dmm_name, _power_dmm_avg, _power_dmm_count);\n")
+    code += "dmm_close();\n"
+    code.prevIndent()
+    code += "}\n"
+    return code
 
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
@@ -825,6 +993,11 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
     args_proto_type = ", ".join(proto_list)
 
+    power_measure_active = self.os == "linux" and POWER_MEASURE_ENABLED
+    power_func_names = list(DevConfig().ImcflowFuncMap.keys())
+    first_power_func = bool(power_func_names) and self.func_name == power_func_names[0]
+    last_power_func = bool(power_func_names) and self.func_name == power_func_names[-1]
+
     code = CodeWriter()
     code += self.generateHeader()
     code += self.generateRetryMacros()
@@ -881,6 +1054,11 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         code += _hb("before warmup")
         code += self.emitWarmup()
         code += _hb("after warmup")
+    if power_measure_active:
+      if POWER_MEASURE_SCOPE == "MODEL" and first_power_func:
+        code += self.generatePowerMeasureStart("MODEL")
+      elif POWER_MEASURE_SCOPE == "REGION":
+        code += self.generatePowerMeasureStart("REGION")
     code += _hb("before compiled_blocks transfer")
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += _hb("after compiled_blocks transfer / before const_blocks transfer")
@@ -888,11 +1066,17 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += _hb("after const_blocks transfer / before policy_update")
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
     code += _hb("after policy_update")
-    code += self.generateRetryCheck("policy_update")
+    code += self.generateRetryCheck(
+        "policy_update",
+        power_session_active=(
+            power_measure_active and POWER_MEASURE_SCOPE == "REGION"))
     code += _hb("before invoke")
     code += self.generateInvokeCode() # proceed up to halt
     code += _hb("after invoke / before poll")
-    code += self.generateRetryCheck("invoke")
+    code += self.generateRetryCheck(
+        "invoke",
+        power_session_active=(
+            power_measure_active and POWER_MEASURE_SCOPE == "REGION"))
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
@@ -902,9 +1086,22 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
+      if power_measure_active and POWER_MEASURE_SCOPE == "TILE":
+        code += self.generatePowerMeasureStart("TILE", t_idx)
       code += self.generateInvokeCode() # end of exec
-      code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
+      code += self.generateRetryCheck(
+          f"tile_{t_idx}_invoke",
+          power_session_active=(
+              power_measure_active and POWER_MEASURE_SCOPE == "TILE"))
+      if power_measure_active and POWER_MEASURE_SCOPE == "TILE":
+        code += self.generatePowerMeasureEnd("TILE", t_idx)
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
+
+    if power_measure_active:
+      if POWER_MEASURE_SCOPE == "REGION":
+        code += self.generatePowerMeasureEnd("REGION")
+      elif POWER_MEASURE_SCOPE == "MODEL" and last_power_func:
+        code += self.generatePowerMeasureEnd("MODEL")
 
     # Retry loop end + cleanup
     code += self.generateDevicePointerCleanup()

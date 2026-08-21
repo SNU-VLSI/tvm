@@ -91,6 +91,26 @@ CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-DEBUG}"
 MODEL_EVL_DIR="resnet8_subset31_pretrained_orig_evl.linux"
 CKPT="${CKPT:-}"
 
+POWER_RUNTIME_ENV=""
+case "${IMCFLOW_MEASURE_POWER:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        if [[ -z "${DMM_BRIDGE_HOST:-}" ]]; then
+            echo "Error: DMM_BRIDGE_HOST is required when IMCFLOW_MEASURE_POWER is enabled"
+            exit 1
+        fi
+        if [[ ! "$DMM_BRIDGE_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            echo "Error: DMM_BRIDGE_HOST contains unsupported characters"
+            exit 1
+        fi
+        DMM_BRIDGE_PORT="${DMM_BRIDGE_PORT:-9900}"
+        if [[ ! "$DMM_BRIDGE_PORT" =~ ^[0-9]+$ ]]; then
+            echo "Error: DMM_BRIDGE_PORT must be numeric"
+            exit 1
+        fi
+        POWER_RUNTIME_ENV="DMM_BRIDGE_HOST=$DMM_BRIDGE_HOST DMM_BRIDGE_PORT=$DMM_BRIDGE_PORT "
+        ;;
+esac
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
@@ -364,7 +384,7 @@ else
     if [ -n "${IMCFLOW_TIMING:-}" ]; then
         TIMING_ENV="IMCFLOW_TIMING=$IMCFLOW_TIMING "
     fi
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${POWER_RUNTIME_ENV}${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
@@ -511,4 +531,24 @@ for k, v in m.items():
         echo "Warning: Failed to fetch result file from remote"
         echo "=========================================="
     fi
+fi
+
+# Fetch raw DMM samples only after all board-side work and result collection.
+# This deliberately stays outside generated kernels and POWER end calls so SCP
+# latency is never included in the measured interval.
+if [[ "$SKIP_STEP6" != true ]]; then
+    case "${IMCFLOW_MEASURE_POWER:-0}" in
+        1|true|TRUE|yes|YES|on|ON)
+            MEASUREMENT_SSH_HOST="${DMM_MEASUREMENT_SSH_HOST:-meas-2}"
+            POWER_SERVER_OUTPUT_PREFIX="${IMCFLOW_POWER_SERVER_OUTPUT_PREFIX:-/tmp/imcflow_power}"
+            POWER_LOCAL_DIR="${IMCFLOW_POWER_LOCAL_RESULT_DIR:-$LOCAL_RESULT_DIR/power/$(date +%Y%m%d_%H%M%S)}"
+            mkdir -p "$POWER_LOCAL_DIR"
+            echo "Fetching raw DMM samples from $MEASUREMENT_SSH_HOST after evaluation..."
+            if scp "${MEASUREMENT_SSH_HOST}:${POWER_SERVER_OUTPUT_PREFIX}_*.txt" "$POWER_LOCAL_DIR/"; then
+                echo "Raw DMM samples saved to: $POWER_LOCAL_DIR"
+            else
+                echo "Warning: failed to fetch raw DMM samples; files remain on $MEASUREMENT_SSH_HOST"
+            fi
+            ;;
+    esac
 fi
