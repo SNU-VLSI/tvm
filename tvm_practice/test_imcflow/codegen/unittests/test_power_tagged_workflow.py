@@ -570,6 +570,16 @@ def test_generated_kernel_uses_only_timing_events(monkeypatch):
     assert linux.index("warmup_device();") < linux.index(
         "power_measure_runtime_model_start_after_first_warmup()"
     )
+    model_start_status = linux.index(
+        "power_measure_runtime_model_start_after_first_warmup()"
+    )
+    model_start_event = linux.index(
+        'power_measure_runtime_event("model_start")', model_start_status
+    )
+    region_begin = linux.index(
+        "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION", model_start_event
+    )
+    assert model_start_status < model_start_event < region_begin
     tile_begin = linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE")
     tile_event_start = linux.index(
         'power_measure_runtime_event("tile_start")', tile_begin
@@ -615,6 +625,10 @@ def test_host_templates_cover_single_and_dataset_phases():
         assert "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_MODEL" in text
         assert '"--power-build-info"' in text
         assert "power_measure_runtime_print_build_info(stdout)" in text
+    runtime = (
+        CODEGEN_DIR / "power_runtime/power_measure_runtime.c"
+    ).read_text(encoding="utf-8")
+    assert 'power_measure_runtime_event("model_end")' in runtime
     for source in sources[2:]:
         text = source.read_text(encoding="utf-8")
         assert 'power_measure_runtime_event("sample_timeout")' in text

@@ -36,6 +36,8 @@ int power_measure_scope_begin(power_measure_scope_context_t *ctx,
                               const char *name);
 int power_measure_scope_next(power_measure_scope_context_t *ctx);
 int power_measure_scope_end(power_measure_scope_context_t *ctx);
+/* Returns 1 when this call starts MODEL measurement, 0 if already started,
+ * and -1 on failure. */
 int power_measure_runtime_model_start_after_first_warmup(void);
 
 void power_measure_runtime_phase(const char *phase);

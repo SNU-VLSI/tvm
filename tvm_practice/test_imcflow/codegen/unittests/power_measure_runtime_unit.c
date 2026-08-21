@@ -8,6 +8,8 @@
 static int begin_count;
 static int end_count;
 static int active;
+static int event_count;
+static char last_event[32];
 static power_region_policy_t last_policy;
 
 int power_region_runtime_init(const char *path)
@@ -58,7 +60,8 @@ int power_tag_clear(const char *key)
 }
 int power_tag_event(const char *name)
 {
-    (void)name;
+    ++event_count;
+    snprintf(last_event, sizeof(last_event), "%s", name ? name : "");
     return 0;
 }
 int power_region_last_status(void) { return 0; }
@@ -79,7 +82,7 @@ int main(void)
         return 2;
     if (begin_count != 0 || !power_measure_scope_next(&ctx))
         return 3;
-    if (power_measure_runtime_model_start_after_first_warmup() != 0)
+    if (power_measure_runtime_model_start_after_first_warmup() != 1)
         return 4;
     if (begin_count != 1 || !active || !last_policy.loop_enable ||
         last_policy.min_samples != 30000)
@@ -91,6 +94,8 @@ int main(void)
         return 7;
     if (power_measure_scope_end(&ctx) != 0 || end_count != 1 || active)
         return 8;
+    if (event_count != 1 || strcmp(last_event, "model_end") != 0)
+        return 22;
     if (power_measure_runtime_finish() != 0)
         return 9;
 

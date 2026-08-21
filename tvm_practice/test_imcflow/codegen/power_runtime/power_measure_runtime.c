@@ -170,7 +170,7 @@ int power_measure_runtime_model_start_after_first_warmup(void)
     g_power_degraded = 1;
     return -1;
   }
-  return 0;
+  return 1;
 }
 
 int power_measure_scope_next(power_measure_scope_context_t *ctx)
@@ -202,6 +202,7 @@ int power_measure_scope_end(power_measure_scope_context_t *ctx)
       g_power_degraded = 1;
       return -1;
     }
+    power_measure_runtime_event("model_end");
   }
   result = power_region_end(&ctx->region);
   if (result != 0) {

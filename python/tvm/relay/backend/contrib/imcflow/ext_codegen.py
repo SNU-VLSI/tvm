@@ -1004,11 +1004,15 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       else:
         code += self.emitWarmup()
     if self.os == "linux":
-      code += "if (power_measure_runtime_model_start_after_first_warmup() != 0) {\n"
+      code += "int _power_model_start_status = "
+      code += "power_measure_runtime_model_start_after_first_warmup();\n"
+      code += "if (_power_model_start_status < 0) {\n"
       code += self.generateDevicePointerCleanup()
       code += "  g_imcflow_kernel_failed = 1;\n"
       code += "  return;\n"
       code += "}\n"
+      code += "if (_power_model_start_status > 0)\n"
+      code += "  " + self.emit_power_tag_event("model_start")
     code += self.emit_power_region_begin(self.func_name)
     code += self.emitMmioBarrier("region iteration begins after prior MMIO is quiescent")
     code += self.generateToNpuTransferCode(
