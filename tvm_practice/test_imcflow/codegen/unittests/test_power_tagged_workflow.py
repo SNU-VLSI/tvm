@@ -580,6 +580,18 @@ def test_generated_kernel_uses_only_timing_events(monkeypatch):
         "TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_REGION", model_start_event
     )
     assert model_start_status < model_start_event < region_begin
+    region_event_start = linux.index(
+        'power_measure_runtime_event("region_start")', region_begin
+    )
+    region_event_end = linux.index(
+        'power_measure_runtime_event("region_end")', region_event_start
+    )
+    region_end = linux.index("TVM_POWER_REGION_END()", region_event_end)
+    assert region_begin < region_event_start < region_event_end < region_end
+    assert (
+        "power_measure_runtime_scope_is(IMCFLOW_POWER_SCOPE_REGION)"
+        in linux[region_begin:region_end]
+    )
     tile_begin = linux.index("TVM_POWER_REGION_BEGIN(IMCFLOW_POWER_SCOPE_TILE")
     tile_event_start = linux.index(
         'power_measure_runtime_event("tile_start")', tile_begin

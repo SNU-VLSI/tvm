@@ -1014,6 +1014,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       code += "if (_power_model_start_status > 0)\n"
       code += "  " + self.emit_power_tag_event("model_start")
     code += self.emit_power_region_begin(self.func_name)
+    if self.os == "linux":
+      code += "if (power_measure_runtime_scope_is(IMCFLOW_POWER_SCOPE_REGION))\n"
+      code += "  " + self.emit_power_tag_event("region_start")
     code += self.emitMmioBarrier("region iteration begins after prior MMIO is quiescent")
     code += self.generateToNpuTransferCode(
         self.compiled_blocks, None, "compiled") # inode instrunction + policy
@@ -1054,6 +1057,8 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     # Retry loop end + cleanup
     if self.os == "linux":
       code += self.emitMmioBarrier("region iteration completes before loop decision")
+      code += "if (power_measure_runtime_scope_is(IMCFLOW_POWER_SCOPE_REGION))\n"
+      code += "  " + self.emit_power_tag_event("region_end")
       code += "TVM_POWER_REGION_END();\n"
     code += self.generateDevicePointerCleanup()
     if self.os == "linux":
