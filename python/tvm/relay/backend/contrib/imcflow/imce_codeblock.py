@@ -2082,6 +2082,22 @@ class ConvBlock(ImceCallCodeBlock):
       # no STEP. Decoupled from feeds_fused_consumer here.
       pad_drain_row = row_is_padding and self.has_noc_rhs and bool(self.post_ops)
 
+      # IMCFLOW_RESIDUAL_IN_REGION: a `same` conv's trailing pure-pad row_group
+      # is the last VALID output row -- read-pattern 0 means no NEW loads, but
+      # the line buffer still STEPs out a real row (c3f2d50d2 proved this on
+      # the plain conv imce_2_2: real STEP fixed the last raster row with no
+      # RTL hang). Draining it (RECV rhs + ADD(0,rhs), no STEP) drops the conv
+      # term of the whole last output row (L2 subset18 RTL: 42/512 numeric
+      # errors, ALL on h=3, from fused conv+add imce_3_2's drained row_group2).
+      # Route these rows through the REAL compute+postop path instead: STEP +
+      # CREG + postop rhs RECV + true ADD. skip_row_presend is forced off for
+      # the same rows so the drain branch (which also triggers on it) cannot
+      # fire and the normal path emits fully. Lever OFF -> unchanged (handcraft
+      # keeps its drain parity).
+      if pad_drain_row and residual_in_region_mode():
+        pad_drain_row = False
+        skip_row_presend = False
+
       # Marker A: boundary col_group = the LAST non-zero-load col_group in this
       # row_group (the one immediately before pure zero-padding). Its FINAL
       # iteration is the "padding boundary" where the fused NoC-rhs RECV (has_noc_rhs,
