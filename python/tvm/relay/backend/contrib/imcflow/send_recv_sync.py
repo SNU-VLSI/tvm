@@ -13,7 +13,7 @@ from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
-from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode, residual_in_region_mode
+from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode, residual_in_region_mode, residual_inode_buffer_mode
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
 import logging
 
@@ -1295,6 +1295,24 @@ class SendRecvPairManager:
             return None  # not a multi-inode-input receiver -> no merge (region1)
         senders.sort(key=lambda x: x.value)
         pre = ["__builtin_IMCE_SETFLAG(1);"]
+        if residual_in_region_mode():
+            # Task #8 iter4 GENERATION GUARD (pre-clear): with pure level flags
+            # the per-word 4-phase can one-side complete -- the consumer's
+            # STANDBY(s,1) eats the sender's STALE flag=1 left from the PREVIOUS
+            # word (the sender had not yet lowered), so the consumer runs one
+            # word ahead and parks in RECV while the sender waits for a pulse
+            # that was already consumed (fsim: hub imce_0_1 in RECV + inode_0_0
+            # in STANDBY(1,1) simultaneously, wedged at word ~16 when the
+            # downstream drain timing shifts). Waiting for every sender to be
+            # CLEARED (flag==0) before raising the next window forces strict
+            # word-generation alternation: consumer closes word k -> sender
+            # lowers+sends -> pre-clear passes -> word k+1 window opens. No
+            # circular wait (the close->lower->pre-clear chain is acyclic).
+            # Gated on the lever; OFF baseline stays byte-identical.
+            pre = []
+            for s in senders:
+                pre.append(f"__builtin_IMCE_STANDBY({s.value}, 0);")
+            pre.append("__builtin_IMCE_SETFLAG(1);")
         for s in senders:
             pre.append(f"__builtin_IMCE_STANDBY({s.value}, 1);")
         pre.append("__builtin_IMCE_SETFLAG(0);")
@@ -1328,18 +1346,60 @@ class SendRecvPairManager:
         input_edges = self.collect_residual_data_input_edges(edges)
         senders = []
         seen = set()
+        filtered_resbuf = False
         for edge in input_edges:
+            # Task #8 iter4 (bare RESBUF): the resbuf_out operand rides pure
+            # NoC valid/ready -- its resend is emitted with NO flag rendezvous
+            # (ResidResendFuncoutInterleavedBlock), so the add must NOT STANDBY
+            # on the buffer inode's flag (it would never rise -> instant wedge).
+            # Drop that sender from the window; the remaining main producer
+            # keeps the standard single-producer pipeline window below.
+            src_tt = getattr(edge.src_id, "tensor_type", None)
+            if (residual_inode_buffer_mode() and src_tt == "resbuf_out"):
+                filtered_resbuf = True
+                continue
             pair = self.get_pair(edge)
             if pair is None:
                 continue
             s = pair.sender_node
+            # Task #8 iter6 (bare imce->imce lhs): an IMCE producer's scalar flag
+            # is ALREADY overloaded by its own input pacing (SETFLAG(1)/(0)
+            # around LOAD_LB/RECV) -- the add's STANDBY(producer,1) eats one of
+            # those spurious toggles as a fake ACK, closes its window, and parks
+            # in RECV with flag=0 while the producer's STANDBY(add,1) then waits
+            # a pulse that already passed (RTL-traced: add frozen at first lhs
+            # RECV from launch start, producer at STANDBY(16,1), both iter4 and
+            # iter5). A plain imce->imce data edge rides NoC valid/ready; drop
+            # the window for IMCE senders entirely (lockstep: get_pre_send_sync
+            # skips the producer-side STANDBY(add,1) under the same predicate).
+            # Inode senders (entry add fed by 2 inodes) KEEP the merged window
+            # (inode flags are dedicated; that protocol is region2-proven).
+            if residual_inode_buffer_mode() and s.is_imce():
+                continue
             if s.value not in seen:
                 seen.add(s.value)
                 senders.append(s)
-        if len(senders) < 2:
+        if filtered_resbuf:
+            # resbuf operand went bare; window covers only the remaining
+            # producer(s) so its pre-send STANDBY(add,1) still pairs correctly.
+            # No producers left (resbuf bare + imce senders bare, iter6) ->
+            # return [] (NOT None): the consumer emits NO window lines but KEEPS
+            # the merged block-outer pairwise RECV order (imce_codeblock joins
+            # merged_input_pre==[] to ""), which the IMCE register allocator
+            # needs -- edge-outer 4+4 RECVs overflow the register file
+            # (storeRegToStackSlot crash, no spill support).
+            if not senders:
+                return []
+        elif len(senders) < 2:
             return None
         senders.sort(key=lambda x: x.value)
-        pre = ["__builtin_IMCE_SETFLAG(1);"]
+        # iter4 generation guard (pre-clear) -- same stale-level race as
+        # get_merged_inode_input_window; see the comment there. Always under
+        # the residual lever here (this function is residual-only).
+        pre = []
+        for s in senders:
+            pre.append(f"__builtin_IMCE_STANDBY({s.value}, 0);")
+        pre.append("__builtin_IMCE_SETFLAG(1);")
         for s in senders:
             pre.append(f"__builtin_IMCE_STANDBY({s.value}, 1);")
         pre.append("__builtin_IMCE_SETFLAG(0);")
@@ -1390,6 +1450,15 @@ class SendRecvPairManager:
         if (pair is not None
                 and pair.sender_node.is_imce()
                 and self.is_residual_data_input_recv(edge)):
+            # Task #8 iter6: under the RESBUF lever this edge is BARE (pure NoC
+            # valid/ready). The consumer window is dropped for IMCE senders in
+            # get_merged_residual_input_window (flag-overload generation race,
+            # see the comment there) -- LOCKSTEP: skip the producer-side
+            # STANDBY(add,1) too, else the producer waits a window that never
+            # opens. Emit BARE (which is also what the ordinary composite-
+            # boundary classification would produce for this edge).
+            if residual_inode_buffer_mode():
+                return []
             add_hw = self.residual_add_consumer_of(edge)
             if add_hw is not None:
                 return [f"__builtin_IMCE_STANDBY({add_hw.value}, 1);"]

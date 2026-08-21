@@ -5,6 +5,7 @@ from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.contrib.imcflow import drop_psum_send
 from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import imcu_intra_drain_nops
+from tvm.contrib.imcflow import resid_fill_lead_groups
 from tvm.relay.op.contrib.imcflow import CustomIDToNode, residual_in_region_mode
 from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
 from textwrap import indent
@@ -394,6 +395,22 @@ class SendBlock(InodeCodeBlock):
     self.builder = builder
     self.block = block
     self.edge_info = edge_info
+    # Task #8 iter4b: the consumer's merged input window now PRE-CLEARS
+    # (STANDBY(sender,0)) before each word to close the stale-level generation
+    # race. The sense-reversing all-inode barrier deliberately leaves this
+    # inode's flag at 254/255 (no clear-to-0, straggler protection), so without
+    # an explicit reset the FIRST pre-clear waits for 0 forever while this
+    # sender waits for the consumer's window -> mutual first-word deadlock
+    # (observed: region2 first-window wedge). One-time SET_FLAG(0) before the
+    # data-feed loop clears the barrier residue. Gated on the lever + this SEND
+    # actually having a data rendezvous; OFF byte-identical. Placed BEFORE the
+    # tiled/non-tiled dispatch so both paths get it; must be render-time
+    # deferred -- at build time the pair_manager is not attached yet, so
+    # probing _get_presend_sync_code_str here would return "".
+    if residual_in_region_mode():
+      self.body.add(DeferredTextBlock(
+          lambda: "__builtin_INODE_SET_FLAG(0); // iter4b: clear barrier residue for pre-clear"
+          if self._get_presend_sync_code_str(iter_var="0") else ""))
     if self.block.tiling_info is not None:
       self._build_tiled()
     else:
@@ -1199,55 +1216,141 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
     ngroups = total // g
     tail = total - ngroups * g
 
+    # base-address vars only exist on the legacy (lockstep) path; the fill-lead
+    # path walks cursor vars instead (imem is the binding constraint there).
     resend_base = UniqueVar("resid_resend_base_address", dtype="int")
     funcout_base = UniqueVar("resid_funcout_base_address", dtype="int")
-    self.body.add(TextBlock(f"{resend_base} = {self.resbuf_db.offset};"))
-    self.body.add(TextBlock(f"{funcout_base} = {self.funcout_db.offset};"))
 
     resend_policy = self.resend_info.policy_info[0].address
     resend_fifo = self.resend_info.fifo_id
     fout_fifo = self.funcout_fifo_id
     coll_fifo = self.collector_fifo_id
 
-    def group_body(iter, resend_base=resend_base, funcout_base=funcout_base,
-                   resend_policy=resend_policy, resend_fifo=resend_fifo,
-                   fout_fifo=fout_fifo, coll_fifo=coll_fifo, g=g):
+    def _fill_words(iter, offset, g=g, resend_base=resend_base, coll_fifo=coll_fifo):
+      """`g` collector RECVs for group (iter + offset). C-level index arithmetic."""
+      gidx = f"({iter})" if offset == 0 else f"(({iter}) + {offset})"
       code = ""
-      # Task #8 iter3: FILL `g` words from the skip producer into the RESBUF buffer
-      # FIRST (hop A collector RECV, same buffer base as the resend). Folding the
-      # fill per-group -- instead of one leading 256-word drain -- lets the skip
-      # producer keep pace with the streaming input while the add downstream makes
-      # progress, so no side of the region starves.
-      if coll_fifo is not None:
-        for j in range(g):
-          widx = f"(({iter})*{g} + {j})"
-          code += (f"__builtin_INODE_RECV({resend_base} + {widx}*32, 0, 0, "
-                   f"{coll_fifo});\n")
-      # resend `g` resbuf_out words (feed the add), each per-word rendezvous.
       for j in range(g):
-        widx = f"(({iter})*{g} + {j})"
-        pre = self._resend_helper._get_presend_sync_code_str(iter_var=widx)
-        if pre:
-          code += pre
+        widx = f"({gidx}*{g} + {j})"
+        code += (f"__builtin_INODE_RECV({resend_base} + {widx}*32, 0, 0, "
+                 f"{coll_fifo});\n")
+      return code
+
+    def _resend_funcout_words(iter, offset, g=g, resend_base=resend_base,
+                              funcout_base=funcout_base, resend_policy=resend_policy,
+                              resend_fifo=resend_fifo, fout_fifo=fout_fifo):
+      # resend `g` resbuf_out words (feed the add), BARE -- no flag rendezvous.
+      # Task #8 iter4 (user design): the NoC is valid/ready flow-controlled, so
+      # this producer->consumer stream needs NO flag sync for correctness (RECV
+      # blocks on empty, SEND blocks on full, in-order). The add-side window
+      # drops the matching STANDBY(inode) (get_merged_residual_input_window).
+      gidx = f"({iter})" if offset == 0 else f"(({iter}) + {offset})"
+      code = ""
+      for j in range(g):
+        widx = f"({gidx}*{g} + {j})"
         code += (f"__builtin_INODE_SEND({resend_base} + {widx}*32, 0, "
                  f"{resend_policy}, {resend_fifo});\n")
       # then collect `g` func_out words the add produced from them.
       for j in range(g):
-        widx = f"(({iter})*{g} + {j})"
+        widx = f"({gidx}*{g} + {j})"
         code += f"__builtin_INODE_RECV({funcout_base} + {widx}*32, 0, 0, {fout_fifo});\n"
       return code
 
-    self.body.add(SimpleFor(ngroups, group_body,
-                            annotation="resid resend/funcout interleave"))
+    # Task #8 iter5: FILL-LEAD schedule. The iter3 group-LOCKSTEP order
+    # (fill G -> resend G -> funcout G) deadlocks structurally: funcout(0)
+    # needs the add's first output, which needs the MAIN path's first lhs
+    # (~2 conv stages of priming, ~224 diverge words), but the halted fill
+    # backpressures the skip side (skip-conv SEND push-stall at NoC fifo
+    # depth) and freezes the 2-consumer diverge multicast at ~word 17 before
+    # the main path ever primes (RTL-traced cycle; see resid_fill_lead_groups
+    # docstring for the window analysis). Fix: prime the fill LAG groups
+    # ahead (whole buffer is allocated, fill-ahead is always safe), then per
+    # group: resend(g) -> funcout(g) -> fill(g+LAG). Emitted as three loops
+    # (prime / steady / drain-tail) to keep hardware-loop bodies branch-free.
+    lag = resid_fill_lead_groups() if coll_fifo is not None else 0
+    lag = min(lag, ngroups)
 
-    # Defensive tail (ResNet8 group|total, so tail==0 -> emits nothing).
+    if coll_fifo is not None and lag > 0:
+      # Prime is WORD-level, but the steady/drain loops keep the GROUP rhythm:
+      # the add's fused loop RECVs a whole `g`-word group of rhs before it
+      # emits ANY output words (iter7 RTL: word-level resend(0);funcout(0)
+      # wedged with the add's BN mid-group -- funcout(0) can never arrive
+      # until rhs words 0..3 are all in).
+      lead_w = lag * g
+
+      # Group bodies keep the 4x unroll but walk CURSOR variables (cur += 32,
+      # 1 ADDI) instead of recomputing (g*4+j)*32 per op (MULI+ADDI) -- the
+      # unrolled 3-loop variant with full address arithmetic overflowed
+      # inode_3_0's 256-word imem (272), and the two alternatives fail to
+      # compile: a C `if` guard (INODE backend cannot select BR_CC) and nested
+      # hardware loops ("Second operand should be constant" in isel). All
+      # three cursors advance strictly sequentially across prime/steady/drain.
+      cur_fill = UniqueVar("resid_fill_cursor", dtype="int")
+      cur_resend = UniqueVar("resid_resend_cursor", dtype="int")
+      cur_fout = UniqueVar("resid_funcout_cursor", dtype="int")
+      self.body.add(TextBlock(f"{cur_fill} = {self.resbuf_db.offset};"))
+      self.body.add(TextBlock(f"{cur_resend} = {self.resbuf_db.offset};"))
+      self.body.add(TextBlock(f"{cur_fout} = {self.funcout_db.offset};"))
+
+      def _step(cur, op):
+        return f"{op}\n{cur} = {cur} + 32;\n"
+
+      self.body.add(SimpleFor(
+          lead_w,
+          lambda iter: _step(cur_fill,
+                             f"__builtin_INODE_RECV({cur_fill}, 0, 0, {coll_fifo});"),
+          annotation="resid fill prime (fill-lead)"))
+
+      def steady_body(iter, g=g):
+        code = ""
+        for _ in range(g):
+          code += _step(cur_resend,
+                        f"__builtin_INODE_SEND({cur_resend}, 0, {resend_policy}, {resend_fifo});")
+        for _ in range(g):
+          code += _step(cur_fout,
+                        f"__builtin_INODE_RECV({cur_fout}, 0, 0, {fout_fifo});")
+        for _ in range(g):
+          code += _step(cur_fill,
+                        f"__builtin_INODE_RECV({cur_fill}, 0, 0, {coll_fifo});")
+        return code
+
+      self.body.add(SimpleFor(
+          ngroups - lag, steady_body,
+          annotation="resid fill-lead steady: resend/funcout + fill-ahead groups"))
+
+      def drain_body(iter, g=g):
+        code = ""
+        for _ in range(g):
+          code += _step(cur_resend,
+                        f"__builtin_INODE_SEND({cur_resend}, 0, {resend_policy}, {resend_fifo});")
+        for _ in range(g):
+          code += _step(cur_fout,
+                        f"__builtin_INODE_RECV({cur_fout}, 0, 0, {fout_fifo});")
+        return code
+
+      self.body.add(SimpleFor(
+          lag, drain_body,
+          annotation="resid fill-lead drain: resend/funcout tail groups"))
+    else:
+      # legacy lockstep (LAG=0 explicit, or no folded collector): fill G ->
+      # resend G -> funcout G per group, as in iter3.
+      self.body.add(TextBlock(f"{resend_base} = {self.resbuf_db.offset};"))
+      self.body.add(TextBlock(f"{funcout_base} = {self.funcout_db.offset};"))
+      def group_body(iter):
+        code = _fill_words(iter, 0) if coll_fifo is not None else ""
+        return code + _resend_funcout_words(iter, 0)
+      self.body.add(SimpleFor(ngroups, group_body,
+                              annotation="resid resend/funcout interleave"))
+
+    # Defensive tail (ResNet8 group|total, so tail==0 -> emits nothing). The
+    # fill-lead path above is WORD-level over the full `total`, so it never
+    # leaves a tail; only the legacy group-lockstep path can.
+    if coll_fifo is not None and lag > 0:
+      tail = 0
     for r in range(ngroups * g, ngroups * g + tail):
       if coll_fifo is not None:
         self.body.add(TextBlock(
             f"__builtin_INODE_RECV({resend_base} + {r}*32, 0, 0, {coll_fifo});"))
-      pre = self._resend_helper._get_presend_sync_code_str(iter_var=str(r))
-      if pre:
-        self.body.add(TextBlock(pre.rstrip("\n")))
       self.body.add(TextBlock(
           f"__builtin_INODE_SEND({resend_base} + {r}*32, 0, "
           f"{resend_policy}, {resend_fifo});"))

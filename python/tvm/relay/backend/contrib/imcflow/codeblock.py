@@ -138,6 +138,27 @@ class TextBlock(CodeBlock):
     return f"{indent_str}TextBlock(text='{preview}')"
 
 
+class DeferredTextBlock(CodeBlock):
+  """TextBlock whose content is computed lazily at render() time.
+
+  Needed when the content depends on state attached AFTER block construction
+  (e.g. SendBlock's pre-send rendezvous requires the pair_manager, which the
+  builder wires up only after the block tree is assembled). The callable is
+  invoked at render; returning ""/None renders nothing.
+  """
+
+  def __init__(self, fn, annotation: str = ""):
+    super().__init__(annotation)
+    self.fn = fn
+
+  def _render(self) -> str:
+    return self.fn() or ""
+
+  def dump(self, indent_level=0) -> str:
+    indent_str = "  " * indent_level
+    return f"{indent_str}DeferredTextBlock()"
+
+
 class SequentialBlock(CodeBlock):
   """A block that holds a list of blocks and renders them sequentially."""
   def __init__(self, blocks: List[CodeBlock] = None, annotation: str = ""):

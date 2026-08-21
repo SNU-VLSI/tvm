@@ -331,6 +331,42 @@ def imcu_intra_drain_nops() -> int:
     return 0
 
 
+def resid_fill_lead_groups() -> int:
+  """Task #8 iter5 (IMCFLOW_RESID_FILL_LEAD, integer group count, default 32).
+
+  Fill-lead for the RESBUF 3-way interleave (fill/resend/funcout) on the
+  residual-buffer inode. The group-LOCKSTEP schedule (fill G -> resend G ->
+  funcout G) deadlocks structurally: funcout(0) needs the residual add's first
+  output, which needs the MAIN path's first lhs word -- ~2 conv stages of
+  pipeline priming (~224 diverge words for ResNet8 b3) -- but with the fill
+  halted at group 1 the skip side backpressures (skip-conv SEND push-stall at
+  NoC fifo depth ~16) and freezes the 2-consumer diverge multicast at ~word 17,
+  so the main path never primes (RTL-traced full cycle, 2026-08-20).
+
+  Fix: PRIME the fill by LAG groups, then per group run resend(g), funcout(g),
+  fill(g+LAG). The whole RESBUF is allocated up-front (task #5) so fill-ahead
+  is always safe. Window MEASURED on the iter6 RTL run (ResNet8 b3, bare add,
+  group=4 words=1 output px; freeze snapshot: feed word 127/512 consumed =
+  diverge 64 px, add's first lhs word just delivered, skip side ~64 words
+  producible at main-path self-saturation):
+    LAG*4 <= ~64  (prime must not demand more skip words than the main path's
+                   no-rhs absorption allows -- LAG=32's 128-word prime stuck
+                   at ~64 and wedged) and
+    LAG*4 + 16(rhs-fifo slack) >= ~64  (while funcout(0) blocks awaiting the
+                   add's first output, the halted fill must already hold
+                   enough skip words for the diverge to reach lhs word 0).
+  => LAG in ~[12, 16] groups; default 14 (56 words) splits the margin.
+  Override for other shapes / empirical bisection. 0 -> legacy lockstep order
+  (fill;resend;funcout per group)."""
+  raw = os.environ.get("IMCFLOW_RESID_FILL_LEAD", "").strip()
+  if not raw:
+    return 14
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 14
+
+
 def mmio_block_barrier_usec() -> int:
   """Silicon-SAFE HOST-SIDE lever (IMCFLOW_MMIO_BARRIER, default -1 = OFF).
 
