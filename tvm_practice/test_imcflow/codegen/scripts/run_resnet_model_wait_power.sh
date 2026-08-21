@@ -25,7 +25,7 @@ source "$TVM_VENV/bin/activate"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/imcflow-linux.sh"
 
-export PYTHONPATH="$TVM_ROOT/python:$TVM_ROOT/vta/python:$SCRIPT_DIR/tools:/root/project/CIM:${PYTHONPATH:-}"
+export PYTHONPATH="$TVM_ROOT/python:$TVM_ROOT/vta/python:$TVM_ROOT/tvm_practice:$SCRIPT_DIR/tools:/root/project/CIM:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$TVM_ROOT/build:${LD_LIBRARY_PATH:-}"
 export IMCFLOW_DIR="${IMCFLOW_DIR:-/root/project/imcflow}"
 export IMCFLOW_HOME="${IMCFLOW_HOME:-$IMCFLOW_DIR}"
