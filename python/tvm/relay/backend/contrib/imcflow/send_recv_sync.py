@@ -1378,6 +1378,15 @@ class SendRecvPairManager:
             if residual_inode_buffer_mode() and s.is_imce():
                 dropped_imce = True
                 continue
+            # Task #12 L1 (bare identity rhs): an INODE sender whose edge src
+            # is the REGION INPUT (identity-skip fanout, src graph id < 0)
+            # goes bare too -- valid/ready + fanout-lead pace it; every
+            # windowed variant raced (L1 iters a-f). LOCKSTEP with the inode
+            # presend skip in inode_codeblock._get_presend_sync_code_str.
+            _sgid = getattr(edge.src_id, "graph_node_id", None)
+            if isinstance(_sgid, int) and _sgid < 0:
+                dropped_imce = True
+                continue
             if s.value not in seen:
                 seen.add(s.value)
                 senders.append(s)

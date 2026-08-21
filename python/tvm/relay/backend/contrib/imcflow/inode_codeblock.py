@@ -881,6 +881,17 @@ class SendBlock(InodeCodeBlock):
       for e in edges:
         if not pm.is_residual_data_input_recv(e):
           continue
+        # Task #12 L1 (bare identity rhs): when the residual add's operand is
+        # the REGION INPUT itself (identity skip, src graph id < 0 -- the
+        # model-input fanout), the whole stream is pure NoC valid/ready: the
+        # add's rhs fifo backpressure paces this SEND, and the fanout-lead
+        # keeps the conv stream decoupled. Every windowed variant tried here
+        # produced a fresh pairwise flag race (L1 iters a-f). LOCKSTEP: the
+        # add-side window drops this sender too
+        # (get_merged_residual_input_window, same predicate).
+        _sgid = getattr(e.src_id, "graph_node_id", None)
+        if isinstance(_sgid, int) and _sgid < 0:
+          continue
         rnode = pm._get_hw_node(e.dst_id)
         if isinstance(rnode, tuple):
           rnode = rnode[0]
@@ -1184,7 +1195,26 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
       return
 
     def _is_synced(x):
-      return bool(x["helper"]._get_presend_sync_code_str(iter_var="0"))
+      """True for the residual-ADD stream (lagged side of the lead schedule).
+
+      Historically this meant 'has a presend rendezvous', but the identity-rhs
+      stream is now fully BARE (valid/ready paced) -- classify by the EDGE
+      instead: any edge whose dst is the residual add's data operand. The
+      rendezvous string (if any) is still emitted in the steady/drain bodies.
+      Render-time only (needs pair_manager)."""
+      h = x["helper"]
+      if bool(h._get_presend_sync_code_str(iter_var="0")):
+        return True
+      pm = getattr(self.builder, "pair_manager", None)
+      if pm is None:
+        return False
+      ee = h._get_edge()
+      if ee is None:
+        return False
+      for e in (ee if isinstance(ee, list) else [ee]):
+        if pm.is_residual_data_input_recv(e):
+          return True
+      return False
 
     # CURSOR addressing throughout (cur += 32 only): the INODE isel rejects
     # both `(iter + var)*32` and even plain reg+reg adds on these globals
