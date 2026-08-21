@@ -2,6 +2,35 @@
 
 set -euo pipefail
 
+SKIP_COMPILE=0
+
+usage() {
+    cat <<'EOF'
+Usage: run_resnet_model_wait_power.sh [--skip-compile]
+
+  --skip-compile  Reuse the existing TVM artifacts and ARM executable.
+  -h, --help      Show this help.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-compile)
+            SKIP_COMPILE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
 log_stage() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
 }
@@ -47,7 +76,8 @@ IMCFLOW_BUGFIX="${IMCFLOW_BUGFIX:-off}"
 ACC_MASK="${ACC_MASK:-1}"
 IMCFLOW_NO_PERKERNEL_WARMUP="${IMCFLOW_NO_PERKERNEL_WARMUP:-0}"
 IMCFLOW_MMIO_BARRIER="${IMCFLOW_MMIO_BARRIER:-100}"
-IMCFLOW_MMIO_BARRIER_INTERVAL="${IMCFLOW_MMIO_BARRIER_INTERVAL:-8}"
+IMCFLOW_MMIO_BARRIER_INTERVAL="${IMCFLOW_MMIO_BARRIER_INTERVAL:-1}"
+IMCFLOW_MMIO_EXTRA_BARRIERS="${IMCFLOW_MMIO_EXTRA_BARRIERS:-1}"
 export IMCFLOW_PRE_RUN_WARMUP="${IMCFLOW_PRE_RUN_WARMUP:-1}"
 export SCAN_SSH_CONNECT_TIMEOUT_SECONDS="${SCAN_SSH_CONNECT_TIMEOUT_SECONDS:-10}"
 export SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS="${SCAN_SSH_SERVER_ALIVE_INTERVAL_SECONDS:-5}"
@@ -59,31 +89,47 @@ if [[ ! "$CHIP_RUN_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-log_stage "[1/3] Compiling $MODEL with MODEL power event tags"
-CKPT="$CKPT" \
-BOARD="$BOARD" \
-MODEL_PROFILE="$MODEL_PROFILE" \
-DATASET_NAME="$DATASET_NAME" \
-IMCFLOW_BUGFIX="$IMCFLOW_BUGFIX" \
-ACC_MASK="$ACC_MASK" \
-IMCFLOW_NO_PERKERNEL_WARMUP="$IMCFLOW_NO_PERKERNEL_WARMUP" \
-IMCFLOW_MMIO_BARRIER="$IMCFLOW_MMIO_BARRIER" \
-IMCFLOW_MMIO_BARRIER_INTERVAL="$IMCFLOW_MMIO_BARRIER_INTERVAL" \
-python3 -u main.py \
-    --model "$MODEL" \
-    --acc-mask "$ACC_MASK" \
-    --ref-models transformed \
-    --random-seed 42 \
-    --dataset "$DATASET_NAME" \
-    --sample "$SAMPLE_INDEX" \
-    --stop-at compile
+if [[ "$SKIP_COMPILE" == "1" ]]; then
+    EXISTING_BINARY="$SCRIPT_DIR/host_binary_make.dataset/build/execute_graph_for_dataset"
+    EXISTING_METADATA="$SCRIPT_DIR/eval_dir/$MODEL_EVL/build_metadata.json"
+    if [[ ! -x "$EXISTING_BINARY" ]]; then
+        echo "Error: --skip-compile requires an existing ARM executable: $EXISTING_BINARY" >&2
+        exit 1
+    fi
+    if [[ ! -f "$EXISTING_METADATA" ]]; then
+        echo "Error: --skip-compile requires existing build metadata: $EXISTING_METADATA" >&2
+        exit 1
+    fi
+    log_stage "[1/3] Skipping TVM compile; reusing existing artifacts"
+    log_stage "[2/3] Skipping ARM build; reusing $EXISTING_BINARY"
+else
+    log_stage "[1/3] Compiling $MODEL with MODEL power event tags"
+    CKPT="$CKPT" \
+    BOARD="$BOARD" \
+    MODEL_PROFILE="$MODEL_PROFILE" \
+    DATASET_NAME="$DATASET_NAME" \
+    IMCFLOW_BUGFIX="$IMCFLOW_BUGFIX" \
+    ACC_MASK="$ACC_MASK" \
+    IMCFLOW_NO_PERKERNEL_WARMUP="$IMCFLOW_NO_PERKERNEL_WARMUP" \
+    IMCFLOW_MMIO_BARRIER="$IMCFLOW_MMIO_BARRIER" \
+    IMCFLOW_MMIO_BARRIER_INTERVAL="$IMCFLOW_MMIO_BARRIER_INTERVAL" \
+    IMCFLOW_MMIO_EXTRA_BARRIERS="$IMCFLOW_MMIO_EXTRA_BARRIERS" \
+    python3 -u main.py \
+        --model "$MODEL" \
+        --acc-mask "$ACC_MASK" \
+        --ref-models transformed \
+        --random-seed 42 \
+        --dataset "$DATASET_NAME" \
+        --sample "$SAMPLE_INDEX" \
+        --stop-at compile
 
-log_stage "[2/3] Building the ARM dataset executable"
-(
-    export DEBUG_EXE=0
-    cd host_binary_make.dataset
-    ./build.sh "../eval_dir/$MODEL_EVL" arm 1
-)
+    log_stage "[2/3] Building the ARM dataset executable"
+    (
+        export DEBUG_EXE=0
+        cd host_binary_make.dataset
+        ./build.sh "../eval_dir/$MODEL_EVL" arm 1
+    )
+fi
 
 log_stage "[3/3] Running one MODEL/wait/loop-off power capture"
 echo "  pre-run warmup: $IMCFLOW_PRE_RUN_WARMUP"
@@ -94,12 +140,13 @@ CKPT="$CKPT" \
 BOARD="$BOARD" \
 DATASET_NAME="$DATASET_NAME" \
 DEBUG_EXE=0 \
-CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-INFO}" \
+CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-DEBUG}" \
 IMCFLOW_BUGFIX="$IMCFLOW_BUGFIX" \
 timeout --signal=TERM --kill-after=20s "${CHIP_RUN_TIMEOUT_SECONDS}s" ./run_dataset_eval.sh \
     -s 1 \
     -i "$SAMPLE_INDEX" \
     -m "$MODEL_EVL" \
+    --log-file "log_dataset_eval_${MODEL_EVL}_sample${SAMPLE_INDEX}.txt" \
     --power-config "$POWER_CONFIG"
 run_status=$?
 set -e

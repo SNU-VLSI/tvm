@@ -8,6 +8,7 @@ from . import transform as imcflow_transform
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorID, DataBlock, TensorEdge
 from tvm.contrib.imcflow import (
     mmio_block_barrier_usec,
+    mmio_extra_barriers_enabled,
     mmio_transfer_barrier_interval,
 )
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
@@ -374,7 +375,7 @@ class KernelCodeGenerator:
     )
 
   def emitMmioBarrier(self, reason):
-    """Emit one removable, documented MMIO ordering point when enabled."""
+    """Emit the original CPU-to-ImcFlow block pacing barrier."""
     if mmio_block_barrier_usec() < 0:
       return ""
     return (
@@ -382,9 +383,15 @@ class KernelCodeGenerator:
         "imcflow_mmio_barrier();\n"
     )
 
+  def emitExtraMmioBarrier(self, reason):
+    """Emit a broad experimental barrier when its global knob is enabled."""
+    if not mmio_extra_barriers_enabled():
+      return ""
+    return self.emitMmioBarrier(reason)
+
   def emitMmioWrite32(self, pointer, index, value, indent=""):
     """Emit one ImcFlow MMIO write, maximally fenced when the knob is enabled."""
-    if mmio_block_barrier_usec() < 0:
+    if mmio_block_barrier_usec() < 0 or not mmio_extra_barriers_enabled():
       return f"{indent}{pointer}[{index}] = {value};\n"
     return (
         f"{indent}// MMIO-BARRIER-EXPERIMENT: fence this individual write.\n"
@@ -393,7 +400,7 @@ class KernelCodeGenerator:
 
   def emitMmioRead32Expr(self, pointer, index):
     """Return one ImcFlow MMIO read expression, fenced when the knob is enabled."""
-    if mmio_block_barrier_usec() < 0:
+    if mmio_block_barrier_usec() < 0 or not mmio_extra_barriers_enabled():
       return f"{pointer}[{index}]"
     return f"imcflow_mmio_read32({pointer}, {index})"
 
@@ -403,7 +410,7 @@ class KernelCodeGenerator:
     Transfer loops add a periodic barrier separately. Control-register writes
     continue to use ``emitMmioWrite32`` and retain per-access fencing.
     """
-    if mmio_block_barrier_usec() < 0:
+    if mmio_block_barrier_usec() < 0 or not mmio_extra_barriers_enabled():
       return f"{indent}{pointer}[{index}] = {value};\n"
     return (
         f"{indent}imcflow_mmio_transfer_write32("
@@ -412,13 +419,13 @@ class KernelCodeGenerator:
 
   def emitTensorMmioRead32Expr(self, pointer, index):
     """Return one unfenced but volatile bulk-transfer MMIO load expression."""
-    if mmio_block_barrier_usec() < 0:
+    if mmio_block_barrier_usec() < 0 or not mmio_extra_barriers_enabled():
       return f"{pointer}[{index}]"
     return f"imcflow_mmio_transfer_read32({pointer}, {index})"
 
   def emitTransferLoopBarrier(self, iteration, indent=""):
     """Emit the periodic ordering point for a bulk MMIO transfer loop."""
-    if mmio_block_barrier_usec() < 0:
+    if mmio_block_barrier_usec() < 0 or not mmio_extra_barriers_enabled():
       return ""
     interval = mmio_transfer_barrier_interval()
     return (
@@ -441,9 +448,9 @@ class KernelCodeGenerator:
       code += self.emit_power_tag_event("retry")
     if self.os == "linux":
       code += "generate_ack(int_ack_gen_pointer);\n"
-      code += self.emitMmioBarrier("retry interrupt ACK visible before INTR_DONE")
+      code += self.emitExtraMmioBarrier("retry interrupt ACK visible before INTR_DONE")
       code += self.emitMmioWrite32("npu_pointer", "INTR_DONE_REG_IDX", "1")
-      code += self.emitMmioBarrier("retry INTR_DONE visible before control flow resumes")
+      code += self.emitExtraMmioBarrier("retry INTR_DONE visible before control flow resumes")
     code += "_power_retry_requested = 1;\n"
     code += "break;\n"
     code.prevIndent()
@@ -553,15 +560,15 @@ __ACK_WRITE__
 }
 """
     return (code
-            .replace("__UIO_WRITE_PRE__", self.emitMmioBarrier(
+            .replace("__UIO_WRITE_PRE__", self.emitExtraMmioBarrier(
                 "MMIO-BARRIER-EXPERIMENT: before UIO interrupt-enable write").rstrip())
-            .replace("__UIO_WRITE_POST__", self.emitMmioBarrier(
+            .replace("__UIO_WRITE_POST__", self.emitExtraMmioBarrier(
                 "MMIO-BARRIER-EXPERIMENT: after UIO interrupt-enable write").rstrip())
             .replace("__STATE_READ__", self.emitMmioRead32Expr(
                 "npu_pointer", "STATE_REG_IDX"))
-            .replace("__UIO_READ_PRE__", self.emitMmioBarrier(
+            .replace("__UIO_READ_PRE__", self.emitExtraMmioBarrier(
                 "MMIO-BARRIER-EXPERIMENT: before UIO interrupt read").rstrip())
-            .replace("__UIO_READ_POST__", self.emitMmioBarrier(
+            .replace("__UIO_READ_POST__", self.emitExtraMmioBarrier(
                 "MMIO-BARRIER-EXPERIMENT: after UIO interrupt read").rstrip())
             .replace("__ACK_WRITE__", self.emitMmioWrite32(
                 "int_ack_gen", "0", "0b1", "  ").rstrip()))
@@ -601,7 +608,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     """Generate code to reset the NPU state."""
     return (
         self.emitMmioWrite32("reset_gen_pointer", "0", "1")
-        + self.emitMmioBarrier("reset request visible before subsequent MMIO")
+        + self.emitExtraMmioBarrier("reset request visible before subsequent MMIO")
     )
 
   def emitWarmup(self):
@@ -711,25 +718,25 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         "npu_pointer", "(PC_REG_IDX + i)",
         "(INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0)", "  ")
     code += "}\n"
-    code += self.emitMmioBarrier("policy PC registers visible before interrupt arm")
+    code += self.emitExtraMmioBarrier("policy PC registers visible before interrupt arm")
     if self.os == "linux":
       code += "enable_imcflow_interrupt(npu_fd);\n"
-      code += self.emitMmioBarrier("policy interrupt arm completes before PROGRAM doorbell")
+      code += self.emitExtraMmioBarrier("policy interrupt arm completes before PROGRAM doorbell")
     code += self.emitMmioWrite32(
         "npu_pointer", "STATE_REG_IDX", "SET_PROGRAM_CODE")
-    code += self.emitMmioBarrier("PROGRAM doorbell visible before completion wait")
+    code += self.emitExtraMmioBarrier("PROGRAM doorbell visible before completion wait")
     if self.os == "linux":
       code += "int _wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);\n"
     elif USE_POLLING:
       code += "int _wait_rc = wait_for_idle(npu_pointer);\n"
     else:
       code += "int _wait_rc = 0;\n"
-    code += self.emitMmioBarrier("policy completion observed before interrupt ACK")
+    code += self.emitExtraMmioBarrier("policy completion observed before interrupt ACK")
     if self.os == "linux":
       code += "generate_ack(int_ack_gen_pointer);\n"
-      code += self.emitMmioBarrier("policy interrupt ACK visible before INTR_DONE")
+      code += self.emitExtraMmioBarrier("policy interrupt ACK visible before INTR_DONE")
     code += self.emitMmioWrite32("npu_pointer", "INTR_DONE_REG_IDX", "1")
-    code += self.emitMmioBarrier("policy INTR_DONE visible before invoke setup")
+    code += self.emitExtraMmioBarrier("policy INTR_DONE visible before invoke setup")
     return code
 
   def generateInvokeCode(self):
@@ -748,10 +755,10 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         "npu_pointer", "(PC_REG_IDX + i)",
         "(INODE_PC_START_P1_ENUM_VAL << 30 + 0)", "  ")
     code += "}\n"
-    code += self.emitMmioBarrier("invoke PC registers visible before interrupt arm")
+    code += self.emitExtraMmioBarrier("invoke PC registers visible before interrupt arm")
     if self.os == "linux":
       code += "enable_imcflow_interrupt(npu_fd);\n"
-      code += self.emitMmioBarrier("invoke interrupt arm completes before RUN doorbell")
+      code += self.emitExtraMmioBarrier("invoke interrupt arm completes before RUN doorbell")
     return code
 
   def generateInvokeStartWaitCode(self):
@@ -770,12 +777,12 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   def generateInvokeFinalizeCode(self):
     """Generate fenced ACK/INTR_DONE handling after an invoke wait."""
     code = CodeWriter()
-    code += self.emitMmioBarrier("invoke completion observed before interrupt ACK")
+    code += self.emitExtraMmioBarrier("invoke completion observed before interrupt ACK")
     if self.os == "linux":
       code += "generate_ack(int_ack_gen_pointer);\n"
-      code += self.emitMmioBarrier("invoke interrupt ACK visible before INTR_DONE")
+      code += self.emitExtraMmioBarrier("invoke interrupt ACK visible before INTR_DONE")
     code += self.emitMmioWrite32("npu_pointer", "INTR_DONE_REG_IDX", "1")
-    code += self.emitMmioBarrier("invoke INTR_DONE visible before following MMIO")
+    code += self.emitExtraMmioBarrier("invoke INTR_DONE visible before following MMIO")
     return code
 
   def generateDevicePointerCleanup(self):
@@ -906,7 +913,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
       )
       code += self.emitTransferLoopBarrier("i", "  ")
       code += f"}}\n"
-      code += self.emitMmioBarrier("NPU-to-CPU output block transfer complete")
+      code += self.emitExtraMmioBarrier("NPU-to-CPU output block transfer complete")
     return code
 
   def generateBaseAddrMacros(self):
@@ -1049,7 +1056,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     if self.os == "linux":
       code += "if (power_measure_runtime_scope_is(IMCFLOW_POWER_SCOPE_REGION))\n"
       code += "  " + self.emit_power_tag_event("region_start")
-    code += self.emitMmioBarrier("region iteration begins after prior MMIO is quiescent")
+    code += self.emitExtraMmioBarrier("region iteration begins after prior MMIO is quiescent")
     code += self.generateToNpuTransferCode(
         self.compiled_blocks, None, "compiled") # inode instrunction + policy
     code += self.generateToNpuTransferCode(
@@ -1088,7 +1095,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
     # Retry loop end + cleanup
     if self.os == "linux":
-      code += self.emitMmioBarrier("region iteration completes before loop decision")
+      code += self.emitExtraMmioBarrier("region iteration completes before loop decision")
       code += "if (power_measure_runtime_scope_is(IMCFLOW_POWER_SCOPE_REGION))\n"
       code += "  " + self.emit_power_tag_event("region_end")
       code += "TVM_POWER_REGION_END();\n"

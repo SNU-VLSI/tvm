@@ -470,6 +470,32 @@ def test_bulk_transfer_accesses_use_configurable_periodic_mmio_barriers(monkeypa
     assert "every 3 words" in generator.emitTransferLoopBarrier("i")
 
 
+def test_extra_mmio_barriers_can_restore_block_end_only_pacing(monkeypatch):
+    monkeypatch.setenv("IMCFLOW_MMIO_BARRIER", "0")
+    monkeypatch.setenv("IMCFLOW_MMIO_EXTRA_BARRIERS", "0")
+    module = _load_ext_codegen(monkeypatch)
+    monkeypatch.setattr(module, "makeBaseAddrName", lambda _block: "INPUT_BASE_ADDR")
+    monkeypatch.setattr(module, "getCInputVarName", lambda *_args: "input_tensor")
+
+    generator = module.KernelCodeGenerator.__new__(module.KernelCodeGenerator)
+    generator.func_name = "block_end_only_kernel"
+    generator.base_address_macros = {}
+    block = SimpleNamespace(id=0, base_address=0x1000, size=64, tiling_info=None)
+
+    assert generator.emitMmioWrite32("npu_pointer", "1", "2") == (
+        "npu_pointer[1] = 2;\n"
+    )
+    assert generator.emitMmioRead32Expr("npu_pointer", "1") == "npu_pointer[1]"
+    assert generator.emitExtraMmioBarrier("experimental") == ""
+    assert generator.emitTransferLoopBarrier("i") == ""
+
+    generated = str(generator.generateToNpuTransferCode([block], None, "input"))
+    assert "npu_pointer[(INPUT_BASE_ADDR / 4) + i]" in generated
+    assert "MMIO transfer barrier every" not in generated
+    assert "CPU-to-NPU block transfer complete" in generated
+    assert generated.count("imcflow_mmio_barrier();") == 1
+
+
 def test_tensor_transfer_has_no_debug_instrumentation(monkeypatch):
     module = _load_ext_codegen(monkeypatch)
     monkeypatch.setattr(module, "makeBaseAddrName", lambda _block: "INPUT_BASE_ADDR")
@@ -739,7 +765,10 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert "HELLO 6" in runner
     assert "IMCFLOW_POWER_SCOPE" in runner
     assert "IMCFLOW_POWER_MIN_SAMPLES" in runner
-    assert "tracked repository changes must be committed" in runner
+    assert "measurement_utils changes must be committed" in runner
+    assert "POWER_BOARD_TVM_REV" not in runner
+    assert 'git -C "$tvm_root/3rdparty/measurement_utils" status' in runner
+    assert 'git -C $board_tvm_root/3rdparty/measurement_utils status' in runner
     assert "$DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH" not in runner
     assert "/home/root/.venv/bin/activate" not in runner
 
@@ -750,6 +779,8 @@ def test_build_and_runner_gate_embed_deployed_revisions():
     assert 'metadata["tvm_git_rev"]' in pipeline
     assert 'metadata["measurement_utils_git_rev"]' in pipeline
     assert 'metadata["build_tree_dirty"]' in pipeline
+    assert 'bool(measurement_status)' in pipeline
+    assert 'bool(tvm_status or measurement_status)' not in pipeline
 
 
 def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards():
@@ -761,6 +792,8 @@ def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards()
     assert "IMCFLOW_PRE_RUN_WARMUP" in dataset_runner
     assert warmup in dataset_runner
     assert dataset_runner.index(warmup) < dataset_runner.index(execute)
+    assert "--log-file)" in dataset_runner
+    assert 'exec > >(tee "$RUN_LOG_FILE") 2>&1' in dataset_runner
 
     scan_steps = (CODEGEN_DIR / "scan_steps.sh").read_text(encoding="utf-8")
     assert "ConnectTimeout=$SCAN_SSH_CONNECT_TIMEOUT_SECONDS" in scan_steps
@@ -781,3 +814,6 @@ def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards()
     assert 'LD_LIBRARY_PATH="$TVM_ROOT/build:${LD_LIBRARY_PATH:-}"' in model_runner
     assert 'BOARD="${BOARD:-B1}"' in model_runner
     assert 'BOARD="$BOARD"' in model_runner
+    assert "--skip-compile)" in model_runner
+    assert 'if [[ "$SKIP_COMPILE" == "1" ]]' in model_runner
+    assert "--skip-compile requires an existing ARM executable" in model_runner

@@ -360,6 +360,9 @@ knob가 `off`라고 자동 활성화되지 않는다.
 - `IMCFLOW_MMIO_BARRIER`
 - `IMCFLOW_MMIO_BARRIER_INTERVAL` (기본값 `8`; bulk MMIO transfer loop에서
   barrier를 넣는 word iteration 간격)
+- `IMCFLOW_MMIO_EXTRA_BARRIERS` (기본값 `1`; `0`이면 control/interrupt/
+  region/output/periodic 실험 barrier를 제거하고 원래 CPU→NPU block-end
+  barrier만 유지)
 - `IMCFLOW_MULTIBLOCK_FUSEDADD_BARE`
 - `IMCFLOW_MULTIBLOCK_FUSEDADD_SAFE`
 - `IMCFLOW_FEED_SPREAD`

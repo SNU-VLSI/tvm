@@ -442,15 +442,13 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
     metadata["measurement_utils_git_rev"] = subprocess.check_output(
       ["git", "-C", measurement_root, "rev-parse", "HEAD"], text=True
     ).strip()
-    tvm_status = subprocess.check_output(
-      ["git", "-C", tvm_root, "status", "--porcelain", "--untracked-files=no"],
-      text=True,
-    ).strip()
     measurement_status = subprocess.check_output(
       ["git", "-C", measurement_root, "status", "--porcelain", "--untracked-files=no"],
       text=True,
     ).strip()
-    metadata["build_tree_dirty"] = bool(tvm_status or measurement_status)
+    # Only measurement_utils must be revision-synchronized with the board and
+    # measurement server. TVM runner/config/docs edits stay local to master.
+    metadata["build_tree_dirty"] = bool(measurement_status)
   except (OSError, subprocess.CalledProcessError) as exc:
     raise RuntimeError("failed to record codegen repository identity") from exc
 
@@ -468,6 +466,9 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
   metadata["imcflow_mmio_barrier_usec"] = os.getenv("IMCFLOW_MMIO_BARRIER", None)
   metadata["imcflow_mmio_barrier_interval"] = os.getenv(
     "IMCFLOW_MMIO_BARRIER_INTERVAL", "8"
+  )
+  metadata["imcflow_mmio_extra_barriers"] = os.getenv(
+    "IMCFLOW_MMIO_EXTRA_BARRIERS", "1"
   )
   try:
     from tvm.relay.backend.contrib.imcflow.acim_util import get_default_vmode

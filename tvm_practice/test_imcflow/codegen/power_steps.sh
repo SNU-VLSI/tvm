@@ -57,29 +57,25 @@ power_revision_preflight() {
     tvm_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)" || return 1
     POWER_MASTER_TVM_REV="$(git -C "$tvm_root" rev-parse HEAD)" || return 1
     POWER_MASTER_MEASUREMENT_REV="$(git -C "$tvm_root/3rdparty/measurement_utils" rev-parse HEAD)" || return 1
-    POWER_BOARD_TVM_REV="$(scan_ssh "git -C $board_tvm_root rev-parse HEAD")" || return 1
     POWER_BOARD_MEASUREMENT_REV="$(scan_ssh "git -C $board_tvm_root/3rdparty/measurement_utils rev-parse HEAD")" || return 1
     POWER_SERVER_MEASUREMENT_REV="$(ssh "$result_ssh" "git -C $meas_repo rev-parse HEAD")" || return 1
 
-    POWER_BOARD_TVM_REV="${POWER_BOARD_TVM_REV//$'\r'/}"
     POWER_BOARD_MEASUREMENT_REV="${POWER_BOARD_MEASUREMENT_REV//$'\r'/}"
     POWER_SERVER_MEASUREMENT_REV="${POWER_SERVER_MEASUREMENT_REV//$'\r'/}"
-    master_status="$(git -C "$tvm_root" status --porcelain --untracked-files=no)" || return 1
-    board_status="$(scan_ssh "git -C $board_tvm_root status --porcelain --untracked-files=no")" || return 1
+    # The generated executable is copied to the board, so the board's TVM
+    # checkout and master-only runner/config/docs edits do not need to match.
+    # measurement_utils is the shared source used by the binary and meas-2
+    # daemon, and is therefore the only repository that must be clean/synced.
+    master_status="$(git -C "$tvm_root/3rdparty/measurement_utils" status --porcelain --untracked-files=no)" || return 1
+    board_status="$(scan_ssh "git -C $board_tvm_root/3rdparty/measurement_utils status --porcelain --untracked-files=no")" || return 1
     server_status="$(ssh "$result_ssh" "git -C $meas_repo status --porcelain --untracked-files=no")" || return 1
     board_status="${board_status//$'\r'/}"
     server_status="${server_status//$'\r'/}"
     if [[ -n "$master_status" || -n "$board_status" || -n "$server_status" ]]; then
-        echo "Error: tracked repository changes must be committed before a power run" >&2
-        [[ -n "$master_status" ]] && echo "  master: $master_status" >&2
-        [[ -n "$board_status" ]] && echo "  board: $board_status" >&2
+        echo "Error: measurement_utils changes must be committed before a power run" >&2
+        [[ -n "$master_status" ]] && echo "  master measurement_utils: $master_status" >&2
+        [[ -n "$board_status" ]] && echo "  board measurement_utils: $board_status" >&2
         [[ -n "$server_status" ]] && echo "  meas-2: $server_status" >&2
-        return 1
-    fi
-    if [[ "$POWER_MASTER_TVM_REV" != "$POWER_BOARD_TVM_REV" ]]; then
-        echo "Error: TVM revision mismatch before power run" >&2
-        echo "  master=$POWER_MASTER_TVM_REV" >&2
-        echo "  board =$POWER_BOARD_TVM_REV" >&2
         return 1
     fi
     if [[ "$POWER_MASTER_MEASUREMENT_REV" != "$POWER_BOARD_MEASUREMENT_REV" ||
@@ -228,7 +224,6 @@ power_prepare() {
         --output "$POWER_LOCAL_REQUEST"
         --session-id "$POWER_SESSION_ID"
         --metadata "tvm_git_rev=$POWER_MASTER_TVM_REV"
-        --metadata "board_tvm_git_rev=$POWER_BOARD_TVM_REV"
         --metadata "measurement_utils_git_rev=$POWER_MASTER_MEASUREMENT_REV"
         --metadata "board_measurement_utils_git_rev=$POWER_BOARD_MEASUREMENT_REV"
         --metadata "measurement_server_utils_git_rev=$POWER_SERVER_MEASUREMENT_REV"

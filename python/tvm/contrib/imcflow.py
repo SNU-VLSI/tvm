@@ -231,13 +231,14 @@ def mmio_block_barrier_usec() -> int:
   transfers is the accidental fix; without it the un-ordered/buffered MMIO store
   stream overruns the SoC<->accelerator bus and wedges (region3 = largest xfer).
 
-  When >= 0, bulk transfer loops emit a `__sync_synchronize()` every
-  ``IMCFLOW_MMIO_BARRIER_INTERVAL`` words and once after each block. Control
-  register accesses remain individually fenced. A `usleep(<value>)` is added
-  to each barrier when value > 0; value == 0 selects a barrier without delay.
-  value < 0 (default, env unset) emits nothing. Host-side ONLY: accelerator
-  (inode/imce) blobs are untouched, so no RTL rerun is required. Independent
-  of all codegen-sync levers."""
+  When >= 0, the original CPU-to-ImcFlow block-end pacing barrier is emitted.
+  With ``IMCFLOW_MMIO_EXTRA_BARRIERS`` enabled (default), bulk transfer loops
+  additionally emit a barrier every ``IMCFLOW_MMIO_BARRIER_INTERVAL`` words,
+  and control-register accesses remain individually fenced. A
+  `usleep(<value>)` is added to each barrier when value > 0; value == 0 selects
+  a barrier without delay. value < 0 (default, env unset) emits nothing.
+  Host-side ONLY: accelerator blobs are untouched, so no RTL rerun is required.
+  Independent of all codegen-sync levers."""
   raw = os.environ.get("IMCFLOW_MMIO_BARRIER", "").strip()
   if not raw:
     return -1
@@ -264,6 +265,20 @@ def mmio_transfer_barrier_interval() -> int:
   except ValueError:
     return 8
   return value if value > 0 else 8
+
+
+def mmio_extra_barriers_enabled() -> bool:
+  """Whether broad experimental MMIO fences are emitted (default: ON).
+
+  ``IMCFLOW_MMIO_EXTRA_BARRIERS=0`` restores the narrow original pacing
+  behavior: only the CPU-to-ImcFlow block-end barrier controlled by
+  ``IMCFLOW_MMIO_BARRIER`` remains. Truthy values are ``1``, ``true``,
+  ``yes``, and ``on``; unset preserves the current broad-fence behavior.
+  """
+  raw = os.environ.get("IMCFLOW_MMIO_EXTRA_BARRIERS", "").strip().lower()
+  if not raw:
+    return True
+  return raw in ("1", "true", "yes", "on")
 
 
 def multiblock_fusedadd_bare() -> bool:

@@ -50,6 +50,7 @@ show_help() {
     echo "  -s, --skip LIST       Comma-separated step numbers to skip (e.g., 1,2,7)"
     echo "  -i, --indices LIST    Comma-separated sample indices (e.g., 0,5,10,15). Overrides num_samples."
     echo "  -l, --log-level LVL   Console log level: DEBUG (verbose, default) or INFO (progress bar)"
+    echo "  --log-file FILE       Save console stdout/stderr to FILE while still displaying it"
     echo "  -q, --quiet           Quiet mode: suppress remote stdout during evaluation"
     echo "  -o, --output DIR      Local directory to save result file (default: eval_results)"
     echo "  --power-config FILE   Enable tagged MODEL/REGION/TILE power measurement"
@@ -67,6 +68,7 @@ show_help() {
     echo "  $0 -i 0,5,10,15,20      # Evaluate specific sample indices"
     echo "  $0 -b host_binary_make.dataset.v1 20  # Use tagged binary directory"
     echo "  $0 -l INFO 100               # Progress bar only (less verbose)"
+    echo "  $0 --log-file logs/resnet.log 20  # Also save visible console output"
     echo "  CONSOLE_LOG_LEVEL=INFO $0 100 # Same via env var"
     echo ""
     echo "Environment variables:"
@@ -90,6 +92,7 @@ SKIP_LIST=""
 QUIET_MODE=false
 SAMPLE_INDICES=""
 CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-DEBUG}"
+RUN_LOG_FILE=""
 MODEL_EVL_DIR="resnet8_subset31_pretrained_orig_evl.linux"
 CKPT="${CKPT:-}"
 POWER_CONFIG="${IMCFLOW_POWER_CONFIG:-}"
@@ -153,6 +156,14 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --log-file)
+            if [[ -z "$2" ]]; then
+                echo "Error: Missing value for $1"
+                exit 1
+            fi
+            RUN_LOG_FILE="$2"
+            shift 2
+            ;;
         -q|--quiet)
             QUIET_MODE=true
             shift
@@ -186,6 +197,20 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$RUN_LOG_FILE" ]]; then
+    RUN_LOG_DIR="$(dirname "$RUN_LOG_FILE")"
+    if ! mkdir -p "$RUN_LOG_DIR"; then
+        echo "Error: Cannot create log directory: $RUN_LOG_DIR" >&2
+        exit 1
+    fi
+    if [[ -d "$RUN_LOG_FILE" ]]; then
+        echo "Error: Log path is a directory: $RUN_LOG_FILE" >&2
+        exit 1
+    fi
+    exec > >(tee "$RUN_LOG_FILE") 2>&1
+    echo "Run log: $RUN_LOG_FILE"
+fi
 
 if [[ -n "$SKIP_LIST" ]]; then
     IFS=',' read -ra SKIP_ARR <<< "$SKIP_LIST"
