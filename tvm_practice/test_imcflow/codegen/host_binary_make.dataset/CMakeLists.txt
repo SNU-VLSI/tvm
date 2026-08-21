@@ -157,6 +157,19 @@ target_include_directories(tvm_model PRIVATE
   "${TVM_ROOT}/3rdparty/dmlc-core/include"
 )
 
+# The generated Linux kernels include dmm_measure.h only when power measurement
+# is enabled. Build the socket-only C client once and expose it transitively from
+# tvm_model; the board does not need Python, PyVISA, or measurement-server code.
+if("$ENV{IMCFLOW_HOST_OS}" STREQUAL "linux")
+  set(DMM_CAPI_DIR "${TVM_ROOT}/3rdparty/measurement_utils/capi")
+  if(NOT EXISTS "${DMM_CAPI_DIR}/dmm_measure.c")
+    message(FATAL_ERROR "DMM C API not found: ${DMM_CAPI_DIR}/dmm_measure.c")
+  endif()
+  add_library(imcflow_dmm_measure STATIC "${DMM_CAPI_DIR}/dmm_measure.c")
+  target_include_directories(imcflow_dmm_measure PUBLIC "${DMM_CAPI_DIR}")
+  target_link_libraries(tvm_model PUBLIC imcflow_dmm_measure)
+endif()
+
 # Retry control options
 option(RETRY_DISABLE "Disable retry on timeout (exit on failure)" OFF)
 set(MAX_RETRY_COUNT "" CACHE STRING "Maximum retry count (default: 3 in code)")

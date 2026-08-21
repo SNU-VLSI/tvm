@@ -34,3 +34,4 @@
 [submodule "3rdparty/measurement_utils"]
 	path = 3rdparty/measurement_utils
 	url = git@github.com:SNU-VLSI/measurement_utils.git
+	branch = power_v2
