@@ -8,7 +8,7 @@ rails DDA/DDC/DDF/DVDD/VDD/DDL, PRESET V1 = the tuned baseline).
 
 Subcommands
   status [RAIL ...]          read setpoint + measured V/I (read-only)
-  set RAIL=V [RAIL=V ...]    set voltages (safety-bounded vs PRESET V1; --force to override)
+  set RAIL=V [RAIL=V ...]    set voltages (sanity-bounded: [0.50V, 1.02x preset])
   preset [NAME]              apply a named preset (default V1) -- the restore point
   sweep --points "SPEC;SPEC;..." --cmd 'SHELL'
                              for each point (e.g. "DDC=1.10,VDD=1.05"): set rails,
@@ -16,8 +16,7 @@ Subcommands
                              then ALWAYS restore PRESET V1 at the end (also on error).
 
 Safety
-  - voltages outside [LOW_FRAC, HIGH_FRAC] x preset-V1 value are refused
-    without --force (defaults 0.70 / 1.02: this tool is for UNDER-volting sweeps).
+  - voltages outside [0.50V, 1.02 x preset] are refused (no override flag).
   - every action is appended as JSON to --log (default ~/.ps_rail_log.jsonl).
   - outputs are never toggled on/off by this tool.
 
@@ -57,7 +56,11 @@ DEFAULT_CONFIG = os.environ.get(
     "PSM_CONFIG",
     "/home/jihoonpark/measurement_utils/example/configs/ps_B2_config.json")
 RESTORE_PRESET = os.environ.get("PSM_RESTORE_PRESET", "V1")
-LOW_FRAC, HIGH_FRAC = 0.70, 1.02
+# Absolute sanity bounds (no --force flag: the old per-preset window plus a
+# force override caused silent-arg confusion with rail_sweep and is stale now
+# that measured floors sit below it, e.g. DDA 0.66@50MHz). Anything inside
+# [ABS_MIN_V, preset*1.02] is accepted.
+ABS_MIN_V, HIGH_FRAC = 0.50, 1.02
 
 
 def _connect(args):
@@ -90,15 +93,15 @@ def _parse_assign(items):
     return pairs
 
 
-def _check_bounds(pairs, ref, force):
+def _check_bounds(pairs, ref):
     for rail, v in pairs:
         if rail not in ref:
             raise SystemExit(f"unknown rail {rail} (preset has: {sorted(ref)})")
-        lo, hi = ref[rail] * LOW_FRAC, ref[rail] * HIGH_FRAC
-        if not (lo <= v <= hi) and not force:
+        lo, hi = ABS_MIN_V, ref[rail] * HIGH_FRAC
+        if not (lo <= v <= hi):
             raise SystemExit(
-                f"{rail}={v}V outside safety window [{lo:.3f}, {hi:.3f}] "
-                f"(preset {ref[rail]}V); use --force to override")
+                f"{rail}={v}V outside sanity bounds [{lo:.2f}, {hi:.3f}] "
+                f"(preset {ref[rail]}V)")
 
 
 def cmd_status(args):
@@ -118,7 +121,7 @@ def cmd_set(args):
     mgr = _connect(args)
     pairs = _parse_assign(args.assign)
     ref = _preset_vols(mgr)
-    _check_bounds(pairs, ref, args.force)
+    _check_bounds(pairs, ref)
     before = {r: mgr.get_voltage(r) for r, _ in pairs}
     for r, v in pairs:
         mgr.set_voltage(r, v)
@@ -141,7 +144,7 @@ def cmd_sweep(args):
     points = [p.strip() for p in args.points.split(";") if p.strip()]
     parsed = [(_parse_assign(p.split(","))) for p in points]
     for pairs in parsed:
-        _check_bounds(pairs, ref, args.force)
+        _check_bounds(pairs, ref)
 
     results = []
     try:
@@ -186,14 +189,13 @@ def main():
 
     p = sub.add_parser("status"); p.add_argument("rails", nargs="*"); p.set_defaults(fn=cmd_status)
     p = sub.add_parser("set"); p.add_argument("assign", nargs="+", metavar="RAIL=V")
-    p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_set)
+    p.set_defaults(fn=cmd_set)
     p = sub.add_parser("preset"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_preset)
     p = sub.add_parser("sweep")
     p.add_argument("--points", required=True, help='e.g. "DDC=1.145;DDC=1.10,VDD=1.05"')
     p.add_argument("--cmd", default="", help="shell command per point (PS_* env exposed)")
     p.add_argument("--settle", type=float, default=3.0)
     p.add_argument("--keep-going", action="store_true")
-    p.add_argument("--force", action="store_true")
     p.set_defaults(fn=cmd_sweep)
 
     args = ap.parse_args()
