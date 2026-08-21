@@ -7,6 +7,7 @@ log_stage() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TVM_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TVM_VENV="${TVM_VENV:-$SCRIPT_DIR/../../tvm_env}"
 POWER_CONFIG="${IMCFLOW_POWER_CONFIG:-$SCRIPT_DIR/power_configs/model_wait_min.json}"
 
@@ -24,6 +25,8 @@ source "$TVM_VENV/bin/activate"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/imcflow-linux.sh"
 
+export PYTHONPATH="$TVM_ROOT/python:$TVM_ROOT/vta/python:$SCRIPT_DIR/tools:/root/project/CIM:${PYTHONPATH:-}"
+export LD_LIBRARY_PATH="$TVM_ROOT/build:${LD_LIBRARY_PATH:-}"
 export IMCFLOW_DIR="${IMCFLOW_DIR:-/root/project/imcflow}"
 export IMCFLOW_HOME="${IMCFLOW_HOME:-$IMCFLOW_DIR}"
 export IMCFLOW_ADDR="${IMCFLOW_ADDR:-0xa0000000}"
