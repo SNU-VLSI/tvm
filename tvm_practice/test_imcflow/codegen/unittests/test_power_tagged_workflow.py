@@ -728,3 +728,7 @@ def test_model_wait_runner_warms_chip_before_execution_and_has_liveness_guards()
     assert 'IMCFLOW_PRE_RUN_WARMUP:-1' in model_runner
     assert 'CHIP_RUN_TIMEOUT_SECONDS:-360' in model_runner
     assert "timeout --signal=TERM --kill-after=20s" in model_runner
+    assert 'IMCFLOW_ADDR:-0xa0000000' in model_runner
+    assert 'IMCFLOW_LEN:-0x100000' in model_runner
+    assert 'INT_ACK_GEN_ADDR:-0xa0110000' in model_runner
+    assert 'INT_ACK_GEN_LEN:-0x10000' in model_runner
