@@ -1,0 +1,4 @@
+mhz,div,pulse_len,run_vdd_mA,run_dda_mA,run_ddc_mA,dda_uC,P_mW,TOPS,TOPSW,status
+107.1,14,139,74.12,34.89,73.78,100.40,198.7,3.05,15.4,ok
+115.4,13,129,78.44,35.92,77.70,95.90,208.7,3.29,15.8,ok
+125.0,12,120,82.52,36.67,82.10,91.03,218.7,3.56,16.3,"gate-fail(len_ok=True,q_ok=False)"

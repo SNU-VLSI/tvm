@@ -78,16 +78,23 @@ def rescan_cycle(log, freq):
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--freq", type=int, choices=(50, 100), required=True)
+    ap.add_argument("--freq", type=int, required=True)
     ap.add_argument("--start", required=True, help="VDD=..,DDA=..,DDC=..")
     ap.add_argument("--axes", default="DDC,DDA")
     ap.add_argument("--floors", required=True, help="DDC=..,DDA=..[,VDD=..]")
+    ap.add_argument("--fp-auto", action="store_true", help="establish V1 fingerprint ref at this freq empirically")
     args = ap.parse_args()
     START = {k: float(v) for k, v in (kv.split("=") for kv in args.start.split(","))}
     AXES = args.axes.split(",")
     FLOORS = {k: float(v) for k, v in (kv.split("=") for kv in args.floors.split(","))}
-    _, _, len_lo, _ = FP_REFS[args.freq]
-    tops = 2.85 if args.freq == 100 else 1.425
+    if args.freq in FP_REFS:
+        _, _, len_lo, _ = FP_REFS[args.freq]
+    else:
+        args.fp_auto = True
+        scale = 100.0/args.freq
+        FP_REFS[args.freq] = (None, None, int(140*scale*0.93), int(160*scale*1.07))
+        _, _, len_lo, _ = FP_REFS[args.freq]
+    tops = 2.85 * args.freq / 100.0
     date = time.strftime("%Y%m%d_%H%M")
     out_csv = os.path.join(CODEGEN, "experiments", f"greedy_{args.freq}mhz_{date}.csv")
     f = open(out_csv, "w", newline=""); w = csv.writer(f)
@@ -100,6 +107,21 @@ def main():
                    capture_output=True)
     mgr = RemotePowerSupplyManager("147.46.117.49", 1331,
         "/home/jihoonpark/measurement_utils/example/configs/ps_B2_config.json")
+
+    if args.fp_auto:
+        mgr.apply_preset("V1"); time.sleep(3)
+        pr = None
+        for _t in (1,2,3):
+            before = rs.rec_linecount(); rs.board_run()
+            if rs.rec_linecount() > before:
+                pr = rs.extract_pulse(); break
+            log(f"fp-auto: no-append try{_t}")
+        if not pr:
+            log("fp-auto reference failed -> abort"); return
+        _ref = pr["ddc"]["run_mA"] - pr["ddc"]["idle_mA"]
+        r0 = FP_REFS[args.freq]
+        FP_REFS[args.freq] = (_ref, max(0.03*_ref, 0.5), r0[2], r0[3])
+        log(f"fp-auto ref@{args.freq}MHz: ddc_delta={_ref:.2f} len={pr['ddc']['len']} tol={FP_REFS[args.freq][1]:.2f}")
 
     cur = dict(START)
     blocked = set()
