@@ -1347,6 +1347,7 @@ class SendRecvPairManager:
         senders = []
         seen = set()
         filtered_resbuf = False
+        dropped_imce = False
         for edge in input_edges:
             # Task #8 iter4 (bare RESBUF): the resbuf_out operand rides pure
             # NoC valid/ready -- its resend is emitted with NO flag rendezvous
@@ -1375,13 +1376,19 @@ class SendRecvPairManager:
             # Inode senders (entry add fed by 2 inodes) KEEP the merged window
             # (inode flags are dedicated; that protocol is region2-proven).
             if residual_inode_buffer_mode() and s.is_imce():
+                dropped_imce = True
                 continue
             if s.value not in seen:
                 seen.add(s.value)
                 senders.append(s)
-        if filtered_resbuf:
-            # resbuf operand went bare; window covers only the remaining
-            # producer(s) so its pre-send STANDBY(add,1) still pairs correctly.
+        if filtered_resbuf or dropped_imce:
+            # Some operand(s) went bare (resbuf and/or imce lhs); the window
+            # covers only the remaining producer(s) -- typically the single
+            # INODE fanout sender of a b1-style identity skip -- so its
+            # pre-send STANDBY(add,1) still pairs correctly. L1 unit-test
+            # lesson (subset11, b1.res in-region): falling into the generic
+            # len<2 -> None branch here KILLS the window while the inode's
+            # presend STANDBY(add,1) remains -> mutual first-word deadlock.
             # No producers left (resbuf bare + imce senders bare, iter6) ->
             # return [] (NOT None): the consumer emits NO window lines but KEEPS
             # the merged block-outer pairwise RECV order (imce_codeblock joins

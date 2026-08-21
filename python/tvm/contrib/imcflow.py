@@ -367,6 +367,31 @@ def resid_fill_lead_groups() -> int:
     return 14
 
 
+def resid_fanout_lead_words() -> int:
+  """Task #12 L1 (IMCFLOW_RESID_FANOUT_LEAD, words, default 24).
+
+  Lead for the in-region IDENTITY-skip input fanout (b1.res-type): one inode
+  multicasts the model input to BOTH the conv-chain head (bare) and the
+  residual add's rhs (windowed). Emitting them word-lockstep paces the WHOLE
+  input at the add's consumption rate -- but the add cannot consume word 0
+  until the main path primes (~2 input rows through the conv chain), so the
+  chain starves and the region wedges (L1 RTL: fanout parked at word 3,
+  add parked at first lhs RECV). The input is FULLY resident in inode dmem
+  (the degenerate RESBUF case: no fill, no funcout), so the conv-head stream
+  can run arbitrarily ahead: prime LEAD bare words, then per word
+  [rendezvous; SEND_add(w); SEND_conv(w+LEAD)], then drain the windowed
+  tail. LEAD must cover the main-path priming in input words (~2 rows + 1:
+  8x8 -> >=17; 32x32 -> >=66); there is no upper bound short of the trip
+  count. Codegen asserts nothing (trip is runtime); pick per model."""
+  raw = os.environ.get("IMCFLOW_RESID_FANOUT_LEAD", "").strip()
+  if not raw:
+    return 24
+  try:
+    return max(0, int(raw))
+  except ValueError:
+    return 24
+
+
 def mmio_block_barrier_usec() -> int:
   """Silicon-SAFE HOST-SIDE lever (IMCFLOW_MMIO_BARRIER, default -1 = OFF).
 

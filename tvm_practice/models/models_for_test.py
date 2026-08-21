@@ -567,8 +567,11 @@ def getBigConvQuantConvModel():
   out = tvm.IRModule.from_expr(y)
   return out, param_dict
 
-def getResidualModel(random=False):
-  N, IC, H, W = 1, 16, 1, 1
+def getResidualModel(random=False, iH=1, iW=1):
+  # Task #12 residual unit tests: iH/iW generalized (default 1x1 keeps the
+  # legacy registry entries byte-identical). iH=iW>=8 gives the skip/main
+  # pipeline real spatial depth for RESBUF fill-lead validation.
+  N, IC, H, W = 1, 16, iH, iW
   y = relay.var("input", shape=(N,IC,H,W), dtype="uint8")
   y = imcflow_qconv2d(
     y,
@@ -612,6 +615,77 @@ def getResidualModel(random=False):
       "quant_min_2": np.array(-256, dtype="int16"),
       "quant_max_2": np.array(256, dtype="int16"),
     }
+
+  out = tvm.IRModule.from_expr(y)
+  return out, param_dict
+
+def getResidualProjModel(random=False, iH=8, iW=8):
+  """Task #12 U2: b3.res-shaped residual with a PROJECTION skip, unit scale.
+
+  input(uint8, 16ch, iHxiW) diverges to
+    main: qconv(3x3, s2) -> min_max_quantize -> qconv(3x3, s1)
+    skip: qconv(1x1, s2)   (imce-computed output -> RESBUF target)
+  then the int16 add. Mirrors ResNet8 b3.res topology at 16ch so the
+  residual-in-region machinery (RESBUF fill-lead schedule, bare imce lhs,
+  barrier residue-clear) validates in minutes with small inode programs.
+  """
+  N, IC, H, W = 1, 16, iH, iW
+  inp = relay.var("input", shape=(N, IC, H, W), dtype="uint8")
+
+  y = imcflow_qconv2d(
+    inp,
+    relay.var("w_main1", shape=(16,16,3,3), dtype="int8"),
+    ConfigData((N, IC, H, W), (16,16,3,3), padding=1, stride=2).get_as_const_tensor(),
+    in_channels=16,
+    channels=16,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    strides=(2, 2),
+    out_dtype="int16"
+  )
+  H2, W2 = get_height(H, 3, 1, 2), get_width(W, 3, 1, 2)
+
+  y = imcflow_min_max_quantize(y, relay.var("quant_min_m", shape=(), dtype="int16"),
+                               relay.var("quant_max_m", shape=(), dtype="int16"),
+                               axis=1, out_dtype="uint8", channel=16)
+  y = imcflow_qconv2d(
+    y,
+    relay.var("w_main2", shape=(16,16,3,3), dtype="int8"),
+    ConfigData((N, 16, H2, W2), (16,16,3,3), padding=1, stride=1).get_as_const_tensor(),
+    in_channels=16,
+    channels=16,
+    kernel_size=(3, 3),
+    padding=(1, 1),
+    out_dtype="int16"
+  )
+
+  skip = imcflow_qconv2d(
+    inp,
+    relay.var("w_skip", shape=(16,16,1,1), dtype="int8"),
+    ConfigData((N, IC, H, W), (16,16,1,1), padding=0, stride=2).get_as_const_tensor(),
+    in_channels=16,
+    channels=16,
+    kernel_size=(1, 1),
+    padding=(0, 0),
+    strides=(2, 2),
+    out_dtype="int16"
+  )
+
+  y = y + skip
+
+  if random:
+    def w(s): return np.random.randint(-8, 7, s, dtype="int8")
+    qmin, qmax = np.array(-256, dtype="int16"), np.array(256, dtype="int16")
+  else:
+    def w(s): return np.ones(s, dtype="int8")
+    qmin, qmax = np.array(-128, dtype="int16"), np.array(127, dtype="int16")
+  param_dict = {
+    "w_main1": w((16,16,3,3)),
+    "w_main2": w((16,16,3,3)),
+    "w_skip":  w((16,16,1,1)),
+    "quant_min_m": qmin,
+    "quant_max_m": qmax,
+  }
 
   out = tvm.IRModule.from_expr(y)
   return out, param_dict

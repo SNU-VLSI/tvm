@@ -133,6 +133,13 @@ MODEL_REGISTRY = {
     "big_conv_quant_conv": (models_for_test.getBigConvQuantConvModel, "ones"),
     "residual_model": (lambda: models_for_test.getResidualModel(False), "ones"),
     "residual_rnd_model": (lambda: models_for_test.getResidualModel(True), "ones"),
+    # Task #12 residual-in-region unit models (small; validate the RESBUF
+    # protocol before returning to resnet8): U1 = conv->diverge (skip = conv1
+    # int16 odata), U2 = projection skip (b3.res topology at 16ch).
+    "resid_unit8": (lambda: models_for_test.getResidualModel(False, iH=8, iW=8), "ones"),
+    "resid_unit8_rnd": (lambda: models_for_test.getResidualModel(True, iH=8, iW=8), "random"),
+    "resid_proj8": (lambda: models_for_test.getResidualProjModel(False, iH=8, iW=8), "ones"),
+    "resid_proj8_rnd": (lambda: models_for_test.getResidualProjModel(True, iH=8, iW=8), "random"),
 
     # ResNet8 variants
     "resnet8_subset04_pretrained_super_small": (lambda: resnet8_subset_models.getModel_from_pretrained_weight(iH=2, iW=2, until_relay=4), "ones"),

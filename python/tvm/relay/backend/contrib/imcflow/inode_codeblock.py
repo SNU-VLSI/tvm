@@ -6,6 +6,7 @@ from tvm.contrib.imcflow import drop_psum_send
 from tvm.contrib.imcflow import step_freerun_n, step_freerun_factors
 from tvm.contrib.imcflow import imcu_intra_drain_nops
 from tvm.contrib.imcflow import resid_fill_lead_groups
+from tvm.contrib.imcflow import resid_fanout_lead_words
 from tvm.relay.op.contrib.imcflow import CustomIDToNode, residual_in_region_mode
 from tvm.relay.backend.contrib.imcflow.transform import getInnerNodeID
 from textwrap import indent
@@ -1068,6 +1069,18 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
     self._build()
 
   def _build(self):
+    # iter4b residue-clear, fanout variant (L1 unit-test lesson, subset11
+    # b1.res): the residual add's window PRE-CLEARS on this inode's flag
+    # (STANDBY(inode,0)) but the launch barriers leave the flag at 254/255,
+    # so without a one-time SET_FLAG(0) the first pre-clear and this loop's
+    # STANDBY(add,1) mutually wait forever. SendBlock got this prologue in
+    # its own __init__, but this class DISCARDS the helper bodies -- emit it
+    # here too. Render-time deferred (pair_manager attaches later).
+    if residual_in_region_mode():
+      self.body.add(DeferredTextBlock(
+          lambda: "__builtin_INODE_SET_FLAG(0); // iter4b: clear barrier residue for pre-clear"
+          if any(h._get_presend_sync_code_str(iter_var="0") for h in self._helpers)
+          else ""))
     # All fan-out edges share ONE model-input DataBlock (same base offset) and are
     # tiled on the SAME runtime packet count. Verify and use a single tile-count
     # loop. Each edge still SENDs on its own fifo/policy (distinct routing entries).
@@ -1141,18 +1154,94 @@ class SendBlockResidualFanoutInterleaved(InodeCodeBlock):
       self.body.add(SimpleFor(trip, multicast_body))
       return
 
-    def interleaved_body(iter, infos=infos, nop_delay=nop_delay):
+    # Task #12 L1 (fanout-lead): word-LOCKSTEP emission paces the whole input
+    # at the windowed consumer's (the residual add's) rate, but the add cannot
+    # consume word 0 until the main conv path primes ~2 input rows -- so the
+    # chain starves and the region wedges (L1 RTL: fanout parked at word 3,
+    # add at first lhs RECV). The input is fully resident in this inode's
+    # dmem (degenerate RESBUF: no fill), so the BARE stream(s) (conv head)
+    # can run ahead: prime LEAD bare words, then per word [synced edges (w);
+    # bare edges (w+LEAD)], then drain the synced tail. Which edges are
+    # bare/synced is only knowable at render (pair_manager), so each loop
+    # body classifies lazily; degenerate cases (all-bare / all-synced) fall
+    # out naturally (empty prime/drain bodies). Only for DISTINCT routes --
+    # the same_route true-multicast above is one single-credit stream and
+    # cannot lead (needs a RESBUF-style second copy instead).
+    lead = resid_fanout_lead_words()
+
+    if lead <= 0:
+      def interleaved_body(iter, infos=infos, nop_delay=nop_delay):
+        code = ""
+        for x in infos:
+          pre = x["helper"]._get_presend_sync_code_str(iter_var=iter)
+          if pre:
+            code += pre
+          code += (f"__builtin_INODE_SEND({x['base_var']} + {iter}*32, 0, "
+                   f"{x['policy']}, {x['fifo']});\n")
+          code += nop_delay
+        return code
+      self.body.add(SimpleFor(trip, interleaved_body))
+      return
+
+    def _is_synced(x):
+      return bool(x["helper"]._get_presend_sync_code_str(iter_var="0"))
+
+    # CURSOR addressing throughout (cur += 32 only): the INODE isel rejects
+    # both `(iter + var)*32` and even plain reg+reg adds on these globals
+    # ("Second operand should be constant"); reg+const ADDI is the one proven
+    # pattern. The bare cursor runs prime(0..lead-1) then steady(lead..trip-1)
+    # continuously; the synced cursor runs steady(0..steady_cnt-1) then
+    # drain(..trip-1) continuously.
+    cur_bare = UniqueVar("fanout_lead_bare_cursor", dtype="int")
+    cur_sync = UniqueVar("fanout_lead_sync_cursor", dtype="int")
+    self.body.add(TextBlock(f"{cur_bare} = {infos[0]['base_var']};"))
+    self.body.add(TextBlock(f"{cur_sync} = {infos[0]['base_var']};"))
+    steady_cnt = UniqueVar("fanout_lead_steady_count", dtype="int")
+    self.body.add(TextBlock(f"{steady_cnt} = {trip} - {lead};"))
+
+    def prime_body(iter, infos=infos):
       code = ""
       for x in infos:
-        pre = x["helper"]._get_presend_sync_code_str(iter_var=iter)
-        if pre:
-          code += pre
-        code += (f"__builtin_INODE_SEND({x['base_var']} + {iter}*32, 0, "
-                 f"{x['policy']}, {x['fifo']});\n")
-        code += nop_delay
+        if not _is_synced(x):
+          code += (f"__builtin_INODE_SEND({cur_bare}, 0, "
+                   f"{x['policy']}, {x['fifo']});\n")
+      code += f"{cur_bare} = {cur_bare} + 32;\n"
       return code
 
-    self.body.add(SimpleFor(trip, interleaved_body))
+    def steady_body(iter, infos=infos, nop_delay=nop_delay):
+      code = ""
+      for x in infos:
+        if _is_synced(x):
+          code += x["helper"]._get_presend_sync_code_str(iter_var=iter)
+          code += (f"__builtin_INODE_SEND({cur_sync}, 0, "
+                   f"{x['policy']}, {x['fifo']});\n")
+          code += nop_delay
+      code += f"{cur_sync} = {cur_sync} + 32;\n"
+      for x in infos:
+        if not _is_synced(x):
+          code += (f"__builtin_INODE_SEND({cur_bare}, 0, "
+                   f"{x['policy']}, {x['fifo']});\n")
+      code += f"{cur_bare} = {cur_bare} + 32;\n"
+      return code
+
+    def drain_body(iter, infos=infos, nop_delay=nop_delay):
+      code = ""
+      for x in infos:
+        if _is_synced(x):
+          code += x["helper"]._get_presend_sync_code_str(iter_var=iter)
+          code += (f"__builtin_INODE_SEND({cur_sync}, 0, "
+                   f"{x['policy']}, {x['fifo']});\n")
+          code += nop_delay
+      code += f"{cur_sync} = {cur_sync} + 32;\n"
+      return code
+
+    self.body.add(SimpleFor(min(lead, trip) if isinstance(trip, int) else lead,
+                            prime_body,
+                            annotation="resid fanout-lead prime (bare stream ahead)"))
+    self.body.add(SimpleFor(steady_cnt, steady_body,
+                            annotation="resid fanout-lead steady"))
+    self.body.add(SimpleFor(lead, drain_body,
+                            annotation="resid fanout-lead drain (synced tail)"))
 
 
 class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
