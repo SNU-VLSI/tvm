@@ -350,6 +350,7 @@ meas-2의 결과 디렉터리를 한 번만 가져오는 별도 finalize 단계�
 - `POWER_REGION_END` 또는 DMM result 함수 안에서 SCP를 실행하지 않는다.
 - 전송 실패는 측정 결과 보존 여부를 알리는 명확한 error로 처리한다.
 - plot은 master로 가져온 raw current 파일을 입력으로 별도 생성한다.
+- 기본 local artifact 경로는 `eval_dir/<model>/power/<run_id>/`로 한다.
 
 ## 8. commit 및 sync 순서
 

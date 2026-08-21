@@ -463,6 +463,26 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
   # Save the command line that invoked main.py
   metadata["command_line"] = " ".join(sys.argv)
 
+  # Power settings are consumed by ext_codegen at compile time and embedded in
+  # the generated C.  Preserve them with the binary so a later power run can be
+  # interpreted without relying on the runner's (possibly different) env.
+  power_enabled = os.getenv("IMCFLOW_MEASURE_POWER", "").strip().lower() in (
+      "1", "true", "yes", "on")
+  metadata["power_measurement"] = {
+    "enabled": power_enabled,
+    "scope": os.getenv("IMCFLOW_POWER_SCOPE", "REGION").strip().upper(),
+    "mode": os.getenv("IMCFLOW_POWER_MODE", "now").strip().lower(),
+    "dmm_name": os.getenv("IMCFLOW_POWER_DMM_NAME", "DMM_GPIB3").strip(),
+    "nplc": float(os.getenv("IMCFLOW_POWER_NPLC", "0.001")),
+    "requested_interval_s": float(os.getenv("IMCFLOW_POWER_INTERVAL_S", "-1")),
+    "sample_count": int(os.getenv("IMCFLOW_POWER_SAMPLE_COUNT", "50000")),
+    "current_range_a": float(os.getenv("IMCFLOW_POWER_CURRENT_RANGE", "0.1")),
+    "reset": os.getenv("IMCFLOW_POWER_RESET", "1").strip().lower() in (
+        "1", "true", "yes", "on"),
+    "server_output_prefix": os.getenv(
+        "IMCFLOW_POWER_SERVER_OUTPUT_PREFIX", "/tmp/imcflow_power").strip(),
+  }
+
   metadata_path = os.path.join(eval_dir, "build_metadata.json")
   with open(metadata_path, "w") as f:
     json.dump(metadata, f, indent=2)
@@ -506,7 +526,9 @@ def setup_dir(test_name, suffix=""):
       item_path = os.path.join(path, item)
       if os.path.isfile(item_path) or os.path.islink(item_path):
         os.remove(item_path)
-      elif os.path.isdir(item_path) and item != "logs":
+      # Power artifacts are finalized after evaluation and must survive a
+      # subsequent compile of the same model (for example REGION then MODEL).
+      elif os.path.isdir(item_path) and item not in ("logs", "power"):
         clean_dir_recursive(item_path)
 
   def clean_runner_logs(logs_path, runner_dirs):

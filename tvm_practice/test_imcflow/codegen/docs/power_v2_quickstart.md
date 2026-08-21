@@ -144,7 +144,10 @@ meas-2 raw file을 master로 SCP한다.
 | `DMM_BRIDGE_HOST` | `127.0.0.1` | board가 접속할 bridge 주소 |
 | `DMM_BRIDGE_PORT` | `9900` | bridge TCP port |
 | `DMM_MEASUREMENT_SSH_HOST` | `meas-2` | run 종료 뒤 raw file을 가져올 SSH alias |
-| `IMCFLOW_POWER_LOCAL_RESULT_DIR` | `eval_results/power/<timestamp>` | master raw file 저장 위치 |
+| `DMM_RPC_LOG_PATH` | `/tmp/power_v2_rpc.log` | run 구간만 복사할 RPC/DMM log |
+| `DMM_BRIDGE_LOG_PATH` | `/tmp/power_v2_bridge.log` | run 구간만 복사할 bridge/protocol log |
+| `IMCFLOW_POWER_RUN_ID` | 자동 생성 | 결과 디렉터리의 run ID |
+| `IMCFLOW_POWER_LOCAL_RESULT_DIR` | `eval_dir/<model>/power/<run_id>` | 전체 local 결과 디렉터리 override |
 
 `now` mode는 scope 끝에서 즉시 acquisition을 중단하고 현재까지의 sample을 읽는다.
 `wait` mode는 scope 끝에서 설정된 `IMCFLOW_POWER_SAMPLE_COUNT`가 채워질 때까지
@@ -161,13 +164,36 @@ Scope 경계는 다음과 같다.
 ## 6. 결과 위치
 
 - meas-2 raw current: `<IMCFLOW_POWER_SERVER_OUTPUT_PREFIX>_<scope-name>.txt`
-- master 복사본: `eval_results/power/<timestamp>/` 또는
+- master 복사본: `eval_dir/<model>/power/<run_id>/` 또는
   `IMCFLOW_POWER_LOCAL_RESULT_DIR`
 - board의 평균/count: dataset evaluation console log의 `[POWER]` line
 - board accuracy 결과: 기존 `eval_results/dataset_results_*.txt`
+- `measurement_rpc.log`: 이 run 동안의 실제 적용 interval, GET/ABORt, read count
+- `measurement_bridge.log`: START/GO protocol, raw output filename, 요청 설정과 실제 interval
+- `build_metadata.json`: generated C에 내장된 scope/mode/DMM 요청 설정
 
-raw file에는 DMM에서 읽은 current sample list가 저장된다. tag, event, clock offset,
-plot artifact는 생성하지 않는다.
+raw file에는 DMM에서 읽은 current sample list가 저장된다. 전체 evaluation이 끝나고
+SCP가 성공하면 runner가 다음 plot도 자동 생성한다.
+
+- `power_trace.png`: run의 모든 legacy raw trace를 subplot으로 구성한 통합 plot
+- `plots/<raw-file-stem>.png`: region/model/tile raw file별 개별 plot
+
+legacy raw 형식에는 DMM reading timestamp가 없으므로 x축은 시간이 아니라 sample
+index이다. 같은 raw file에 여러 측정 결과가 append되어 있으면 plot의 회색 세로선이
+각 capture의 경계를 나타낸다. `eval_dir`을 같은 model로 다시 compile해도 기존
+`power/` run 디렉터리는 보존된다. tag, event, clock offset은 생성하지 않는다.
+
+모든 scope는 compile 시 정한 하나의 `IMCFLOW_POWER_INTERVAL_S`를 사용한다. 음수로
+`MIN`을 요청하면 DMM이 결정한 실제 값은 `measurement_rpc.log`의
+`current burst 시작 (interval=...s)`에서 확인한다. START log에는 raw output file과
+요청 설정도 함께 기록되므로 바로 다음 actual-interval line과 대응할 수 있다.
+
+`REGION`과 `TILE` scope는 raw filename으로 측정 대상을 구분할 수 있다. 반면 `MODEL`
+scope의 `..._model.txt`는 첫 region부터 마지막 region까지 하나의 연속 acquisition이다.
+legacy protocol에는 trace 도중 경계 marker가 없으므로 model trace 안에서 각 region의
+정확한 sample 범위를 복원할 수 없다. region별 분석이 필요하면 `REGION` scope로 다시
+측정한다. 하나의 연속 model trace에 region 경계까지 표시하려면 별도의 event/timestamp
+protocol을 추가해야 하며 이는 legacy protocol의 범위 밖이다.
 
 power를 완전히 끄려면 compile과 run 모두에서 다음을 사용한다.
 
