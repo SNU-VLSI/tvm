@@ -70,6 +70,7 @@ POWER_DMM_RESET = True
 POWER_DMM_START_TIMEOUT_S = 30
 POWER_DMM_RESULT_TIMEOUT_S = 300
 POWER_SERVER_OUTPUT_PREFIX = "/tmp/imcflow_power"
+REGION_TIMING_ENABLED = _env_flag("IMCFLOW_REGION_TIMING", False)
 
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
@@ -465,6 +466,8 @@ extern volatile int g_imcflow_kernel_failed;
 """)
     if self.os == "linux" and POWER_MEASURE_ENABLED:
       code += '#include "dmm_measure.h"\n'
+    if REGION_TIMING_ENABLED:
+      code += "#include <time.h>\n"
     return code
 
   def generateInterruptUtilities(self):
@@ -716,6 +719,29 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         f"// MODEL trace: region {region_number} {boundary} "
         f"(tag {tag_id})\n"
         f"(void)set_tag({tag_id});\n")
+
+  def generateRegionTimingStart(self, region_number):
+    """Start opt-in elapsed timing at the MODEL tag-start boundary."""
+    return (
+        f"// Region {region_number} timing start (MODEL tag boundary)\n"
+        "struct timespec _imcflow_region_time_start;\n"
+        "clock_gettime(CLOCK_MONOTONIC, &_imcflow_region_time_start);\n")
+
+  def generateRegionTimingEnd(self, region_number):
+    """Report elapsed timing at the MODEL tag-end boundary."""
+    return (
+        f"// Region {region_number} timing end (MODEL tag boundary)\n"
+        "struct timespec _imcflow_region_time_end;\n"
+        "clock_gettime(CLOCK_MONOTONIC, &_imcflow_region_time_end);\n"
+        "unsigned long long _imcflow_region_elapsed_ns =\n"
+        "    ((unsigned long long)_imcflow_region_time_end.tv_sec * 1000000000ull +\n"
+        "     (unsigned long long)_imcflow_region_time_end.tv_nsec) -\n"
+        "    ((unsigned long long)_imcflow_region_time_start.tv_sec * 1000000000ull +\n"
+        "     (unsigned long long)_imcflow_region_time_start.tv_nsec);\n"
+        f'fprintf(stderr, "[REGION_TIMING] region={region_number} '
+        f'function={self.func_name} elapsed_ns=%llu elapsed_ms=%.6f\\n",\n'
+        "        _imcflow_region_elapsed_ns,\n"
+        "        (double)_imcflow_region_elapsed_ns / 1000000.0);\n")
 
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
@@ -1095,6 +1121,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
         code += self.generatePowerMeasureStart("MODEL")
       elif POWER_MEASURE_SCOPE == "REGION":
         code += self.generatePowerMeasureStart("REGION")
+    if REGION_TIMING_ENABLED:
+      code += self.generateRegionTimingStart(region_number)
+    if power_measure_active:
       if POWER_MEASURE_SCOPE == "MODEL":
         code += self.generatePowerRegionTag(region_number, "start")
     code += _hb("before compiled_blocks transfer")
@@ -1138,6 +1167,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     if power_measure_active:
       if POWER_MEASURE_SCOPE == "MODEL":
         code += self.generatePowerRegionTag(region_number, "end")
+    if REGION_TIMING_ENABLED:
+      code += self.generateRegionTimingEnd(region_number)
+    if power_measure_active:
       if POWER_MEASURE_SCOPE == "REGION":
         code += self.generatePowerMeasureEnd("REGION")
       elif POWER_MEASURE_SCOPE == "MODEL" and last_power_func:
