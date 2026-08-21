@@ -15,7 +15,7 @@ rs = importlib.util.module_from_spec(spec); spec.loader.exec_module(rs)
 from ps_ctrl.rpc import RemotePowerSupplyManager  # path set by rail_sweep import
 
 STEP = 0.01
-FP_REFS = {50: (27.8, 1.0, 280, 310), 100: (45.9, 1.4, 140, 160)}  # ref, tol, len_lo, len_hi
+FP_REFS = {50: (28.1, 1.0, 280, 310), 100: (46.3, 1.4, 140, 160)}  # ref, tol, len_lo, len_hi (charge-integral basis)
 CODEGEN = rs.CODEGEN
 
 

@@ -59,7 +59,16 @@ for r in %s:
         continue
     i0,i1=above[0],above[-1]
     seg=v[i0:i1+1]
-    out[r]={"idle_mA":idle*1e3,"run_mA":statistics.mean(seg)*1e3,
+    # run current = idle + delta-charge integral over a GENEROUS window
+    # (pulse +-50 samples), normalized to the pulse length. Margin-insensitive
+    # (idle-subtraction), includes edge partial-integration samples and any
+    # low-intensity tails that the 0.4-threshold would clip (~+0.9 percent vs
+    # plain window mean on flat pulses). Threshold crossing still defines the
+    # pulse boundaries/len for the validity gates.
+    lo,hi=max(0,i0-50),min(len(v),i1+51)
+    dq=sum(x-idle for x in v[lo:hi])
+    run=idle+dq/len(seg)
+    out[r]={"idle_mA":idle*1e3,"run_mA":run*1e3,
             "len":len(seg),"cov":len(above)/len(seg)}
 print(json.dumps(out))
 """ % (RAILS, REC_BASE)
