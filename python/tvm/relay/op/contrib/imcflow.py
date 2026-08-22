@@ -612,6 +612,51 @@ def residual_inode_buffer_mode() -> bool:
     "1", "on", "true", "yes")
 
 
+def region_merge_mode() -> int:
+  """Region-merge lever (IMCFLOW_REGION_MERGE): fuse consecutive imcflow round
+  regions into fewer host-visible region functions, eliminating the host round
+  trip (output readback -> re-layout -> re-input + IMCE reprogram) at each
+  region boundary.
+
+  The combined pack+resid mode already runs several conv LAYERS inside one
+  region function via multi-launch (the inode rewrites each IMCE's imem per
+  launch, reusing the physical cores), so merging regions does NOT require
+  reducing the IMCE count -- the per-LAUNCH active-IMCE budget (<=16) and the
+  inode imem/dmem budgets are the real constraints, not the per-REGION
+  cumulative cost that partitionRound's capacity check assumes.
+
+  When active this lever (a) keeps ALL residual converge ADDs in-region (not
+  just the IMCFLOW_RESID_INREGION_OC-selected ones) and (b) relaxes the
+  per-region cumulative capacity check so accumulation past IMCE_NUM is allowed
+  (multi-launch reuse). It ONLY takes effect in the fully-combined mode
+  (pack_bn_minmax + residual_in_region + resid inode buffer), which is the
+  configuration the boundary-elimination roadmap targets; outside that it is a
+  no-op so partial modes stay byte-identical.
+
+  Values:
+    unset / 0 / off  -> no merge (DEFAULT), partitioning byte-identical to stock.
+    N (>=1)          -> merge consecutive regions until at most N regions remain
+                        (2 = merge R0+R1 keeping R2 separate; 1 = single region).
+
+  Read at pass time (not import time). Default OFF -> byte-identical.
+  """
+  import os
+  raw = os.environ.get("IMCFLOW_REGION_MERGE", "").strip().lower()
+  if raw in ("", "0", "off", "false", "no"):
+    return 0
+  # combined-mode gate: the merge machinery reuses the residual-in-region +
+  # inode-buffer boundary plumbing, so it is only sound (and only wired) in the
+  # fully-combined configuration. Outside it, ignore the lever (no-op).
+  if not (pack_bn_minmax_mode() and residual_in_region_mode()
+          and residual_inode_buffer_mode()):
+    return 0
+  try:
+    n = int(raw)
+  except ValueError:
+    return 0
+  return max(1, n)
+
+
 def makeBNPattern(data):
   gamma = is_constant()
   beta = is_constant()

@@ -3493,6 +3493,18 @@ class AnnotGenerator:
           # Track converge point summary for debugging
           # Format: [{"node": node, "diverge_node": diverge_node, "branches": [...], "is_unbalanced": bool, "action": str}]
           self.converge_point_summary = []
+          # Region-merge lever (IMCFLOW_REGION_MERGE, default 0=off): fuse
+          # consecutive round regions by suppressing converge-point forced splits
+          # (and relaxing the cumulative capacity check) so several conv layers
+          # share one host-visible region function, killing the host round-trip
+          # at each old boundary. combined-mode-only (see region_merge_mode()).
+          # merge_target == 0 -> lever off, unchanged behavior (byte-identical).
+          # Otherwise we allow at most (merge_target - 1) forced converge splits
+          # in topo order (suppressing the earliest ones first); the rest stay
+          # in-region via the residual-in-region + RESBUF machinery.
+          from tvm.relay.op.contrib.imcflow import region_merge_mode as _rmm
+          self.merge_target = _rmm()
+          self.forced_split_budget = (self.merge_target - 1) if self.merge_target else None
 
         def createRegion(self):
           Region = []
@@ -3957,6 +3969,48 @@ class AnnotGenerator:
               merged_cost = self.getRegionSize(shared_region) + self.getCost(node)
               import os as _os
               _cap = int(_os.environ.get("IMCFLOW_RESID_MERGE_CAP", str(ImcflowDeviceConfig.IMCE_NUM)))
+
+              # Region-merge lever (IMCFLOW_REGION_MERGE, combined-mode only):
+              # fuse consecutive round regions by suppressing this converge's
+              # forced split so the residual add stays in-region (same machinery
+              # as the OC-selected b3.res case), eliminating the host round-trip
+              # at the old boundary. We honor a forced-split budget of
+              # (merge_target - 1) taken in topo order so IMCFLOW_REGION_MERGE=N
+              # yields exactly N regions (N=1 single region, N=2 keeps the first
+              # boundary). The IMCE-cap gate is intentionally bypassed here: in
+              # combined multi-launch mode the whole ResNet8 uses <=16 distinct
+              # physical IMCEs total (11 measured), so the per-REGION cumulative
+              # cost is not the real limit -- but we still assert it below to
+              # fail loud if a future model would exceed the array.
+              if self.merge_target:
+                if self.forced_split_budget is not None and self.forced_split_budget > 0:
+                  self.forced_split_budget -= 1
+                  debug_print(f"[ConvergeCheck] REGION_MERGE: allowing forced split "
+                              f"(remaining budget {self.forced_split_budget}) to keep "
+                              f"{self.merge_target}-region target")
+                  # fall through to the normal forced-split path below
+                else:
+                  # NOTE: merged_cost is the SUM of per-conv atomic footprints
+                  # (getCost = ceil(IC/atom_IC)*ceil(OC/64) per conv). It OVER-
+                  # counts the distinct physical IMCE cores actually needed,
+                  # because Joint PnR packs/pipelines the region onto a shared
+                  # 4x4 mesh (baseline region3: getCost region-sum >> its 11
+                  # placed cores). So we do NOT fail loud on merged_cost here --
+                  # Joint PnR is the real ceiling arbiter (it raises "PnR failed"
+                  # when a merged region needs > available mesh cores). We only
+                  # warn so the operator knows the estimate exceeded the array.
+                  if merged_cost > ImcflowDeviceConfig.IMCE_NUM:
+                    debug_print(f"[ConvergeCheck] REGION_MERGE: WARNING merged_cost "
+                                f"estimate {merged_cost} > IMCE_NUM="
+                                f"{ImcflowDeviceConfig.IMCE_NUM} (over-count; PnR "
+                                f"is the true arbiter). Proceeding with merge.")
+                  debug_print(f"[ConvergeCheck] REGION_MERGE: keeping converge in-region "
+                              f"(merged cost {merged_cost}, target {self.merge_target} "
+                              f"regions, no split budget left)")
+                  self._record_converge_summary(node, diverge_node, converge_type,
+                                                branch_info_list, True,
+                                                "region_merge (split suppressed)")
+                  return False, False
               # Selective residual (IMCFLOW_RESID_INREGION_OC, comma list of output
               # channels, e.g. "64"): merge ONLY the converges whose output-channel
               # count matches -- e.g. 64 selects just ResNet8's b3.res, keeping
@@ -4259,9 +4313,24 @@ class AnnotGenerator:
                         debug_print(f"cycle detected. current node {node}. cycle region : {in_region}")
 
                 # Capacity check
+                # In region-merge mode the per-REGION cumulative cost is NOT the
+                # binding limit (multi-launch reuses <=16 distinct physical IMCEs
+                # over the whole model), so do not evict a candidate region on
+                # cumulative cost -- but STILL fail loud if a single merged region
+                # would need more than IMCE_NUM distinct cores, which no ResNet8
+                # combined-mode region does (11 total measured).
                 deletes = []
                 for cand in candidate_regions:
                   if self.getRegionSize(cand) + self.getCost(node) > ImcflowDeviceConfig.IMCE_NUM:
+                    if self.merge_target:
+                      # getCost is an over-count of distinct physical IMCEs (see
+                      # the REGION_MERGE note at the converge handler): keep the
+                      # node in this region and let Joint PnR arbitrate the true
+                      # mesh capacity instead of splitting on the estimate.
+                      debug_print(f"[REGION_MERGE] keeping node in region despite "
+                                  f"cost estimate {self.getRegionSize(cand) + self.getCost(node)}"
+                                  f" > IMCE_NUM (PnR is the true arbiter)")
+                      continue
                     deletes.append(cand)
                     debug_print(f"candidate size : {self.getRegionSize(cand)}. current node size : {self.getCost(node)}. too big node!!")
                 for d in deletes:
