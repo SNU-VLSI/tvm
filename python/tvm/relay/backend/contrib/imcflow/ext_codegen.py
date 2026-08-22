@@ -292,7 +292,20 @@ class KernelCodeGenerator:
       raise TypeError(f"unsupported node type {checked_type.__class__}")
 
   def generateRetryMacros(self):
-    """Generate retry control macros."""
+    """Generate retry control macros.
+
+    Default is RETRY OFF (fail fast): the RTL co-sim is deterministic, so a
+    kernel timeout times out identically on every retry -- 3 attempts just
+    triple the 20000-poll wait before a wedge is reported. Set
+    IMCFLOW_HOST_RETRY=1 at codegen time to restore the 3-attempt retry loop
+    (silicon runs where transient board-side flakiness is real)."""
+    import os
+    if os.getenv("IMCFLOW_HOST_RETRY", "0") != "1":
+      return ("""
+#ifndef RETRY_DISABLE
+#define RETRY_DISABLE
+#endif
+""")
     return ("""
 #ifndef RETRY_DISABLE
 #ifndef MAX_RETRY_COUNT
