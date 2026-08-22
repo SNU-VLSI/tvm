@@ -1153,12 +1153,22 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       LAG     = min(LAG_lb + 1, ngroups - 1)          [+1 margin; the upper
                 bound (skip self-saturation ~ f_skip) keeps LAG*group <=
                 f_skip-ish, which lb+1 respects]
-    Anchors: ResNet8 b3 (f_skip~64w, 128 groups) -> 13, measured window
-    [12,16]; subset18 b2.res (N*=28px, f_skip=32w, 16 groups) -> 5,
-    hand-validated 6 / RTL-verified. Returns None if the walk fails; the
-    consuming block then raises unless IMCFLOW_RESID_FILL_LEAD is set (no
-    magic fallback -- the window is geometry-dependent)."""
-    FIFO_SLACK = 16
+    FIFO_SLACK is the inode recv-fifo depth (INODE_RECV_FIFO_DEPTH=2 words
+    in params.svh) -- NOT 16. The original 16 assumption wedged subset31_orig
+    region3 (join 104->105: need f_skip=64w, absorbed 52 prime + 2 fifo + ~7
+    router/send-fifo in-flight = 61w, deadlocked 3w short; fsim fifo3 showed
+    push54/pop52 = full at 2). Router in-flight capacity is left as free
+    margin, never counted. Upper bound (do not prime too much): once the
+    prime exceeds ~(N* - rf_fill) groups the MAIN path emits funcout words
+    the inode is not yet receiving, the funcout fifo (also depth 2) fills,
+    the diverge node blocks, and -- since the fill chain hangs off the same
+    diverge -- the prime itself deadlocks. lb+1 stays far below that.
+    Anchors: subset18 b2.res (N*=28px, f_skip=32w, 16 groups) -> 9,
+    RTL bit-exact; subset31_orig region3 join (f_skip=64w, 64 groups) -> 17
+    (13 from the old slack=16 formula wedged). Returns None if the walk
+    fails; the consuming block then raises unless IMCFLOW_RESID_FILL_LEAD
+    is set (no magic fallback -- the window is geometry-dependent)."""
+    FIFO_SLACK = 2  # INODE_RECV_FIFO_DEPTH (params.svh); words, per fifo
     edges = DevConfig().TensorEdgeListDict.get(self.func_name, [])
 
     def _outer(gid):

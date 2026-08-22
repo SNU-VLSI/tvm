@@ -363,8 +363,12 @@ def resid_fill_lead_groups():
   codegen._auto_fill_lead_groups): N* = diverge pixels needed for the main
   path's first lhs word at the add, f_skip = skip-chain words produced by
   then, LAG = clamp(ceil((f_skip - fifo_slack)/group) + 1, 1, ngroups-1).
-  Sanity anchors: b3 f_skip~64w -> auto 13 (measured window [12,16]); L2
-  b2.res f_skip 32w -> auto 5 (hand-validated 6, RTL-verified). Set the env
+  fifo_slack = INODE_RECV_FIFO_DEPTH = 2 words (params.svh); the earlier
+  slack=16 assumption wedged subset31_orig region3 (need 64w, absorbed
+  52 prime + 2 fifo + ~7 in-flight = 61w; fsim recv_fifo push54/pop52 =
+  depth-2 full). Router/send-fifo in-flight is free margin, never counted.
+  Sanity anchors: subset31_orig region3 join f_skip=64w -> 17 (old 13
+  wedged); L2 b2.res f_skip=32w -> 9 (5/6 passed earlier). Set the env
   to override (empirical bisection); 0 -> legacy lockstep order."""
   raw = os.environ.get("IMCFLOW_RESID_FILL_LEAD", "").strip()
   if not raw:
