@@ -96,6 +96,11 @@ def parse_region_bodies(eval_dir):
         sm = re.search(r"%(\d+)\s*=\s*split\(", line)
         if sm:
             regions[cur]["split_vars"].add("%" + sm.group(1))
+        # bare add ops with their output channel count (residual adds; used to
+        # label a standalone-add imce by its TRUE block instead of nearest-conv)
+        am = re.search(r"=\s*add\(%\w+,\s*%\w+.*?custom_id=(\d+)\).*?ty=Tensor\[\(1,\s*(\d+),", line)
+        if am:
+            regions[cur].setdefault("adds", {})[int(am.group(1))] = int(am.group(2))
         qm = re.search(r"nn\.imcflow_(qconv|qdwconv)\(%(\w+),.*?custom_id=(\d+).*?"
                        r"channels=(\d+),\s*in_channels=(\d+),\s*kernel_size=\[(\d+),\s*(\d+)\]",
                        line)
@@ -296,8 +301,21 @@ def extract(eval_dir, model):
                         ns = max(ns or 0, nsp)
                 # defer split_part numbering to a post-pass (need all nodes' layers)
             else:
-                # standalone op: attribute to nearest conv layer by cid proximity
-                if ops_cids and conv_by_cid:
+                # standalone RESIDUAL add: label by its TRUE block (output channels
+                # 16/32/64 -> b1/b2/b3), not the nearest conv -- e.g. the b2 residual
+                # add placed at region3's head must read "b2.res", not "b3.c1".
+                body_adds = body.get("adds", {})
+                add_blk = None
+                if fam == "resnet8":
+                    for cid, nm in ops_cids:
+                        if _optag(nm) == "add" and cid in body_adds:
+                            add_blk = _RESNET8_BLK_BY_OC.get(body_adds[cid])
+                            if add_blk:
+                                break
+                if add_blk:
+                    layer = f"{add_blk}.res"
+                # otherwise attribute to the nearest conv layer by cid proximity
+                elif ops_cids and conv_by_cid:
                     mycid = min(c for c, _ in ops_cids)
                     nearest = min(conv_by_cid, key=lambda kv: abs(kv[0] - mycid))
                     layer = nearest[1]
@@ -560,11 +578,23 @@ def plot_noc_mesh(model, minfo, links, out_dir):
                     cell = imces.get(f"imce_{r}_{c}")
                     if cell:
                         sp = (cell.get("split_part") or "").replace("/of-", "/"); lab = cell["layer"] + (f" {sp}" if sp else "")
-                        ax.add_patch(Rectangle((bx, by), NB, NB, facecolor=color[cell["layer"]], edgecolor=ec or "black", lw=elw if ec else 1.3, alpha=0.92, zorder=5))
-                        ax.text(bx + NB / 2, by + NB * 0.62, lab, ha="center", va="center", fontsize=8.2, fontweight="bold", color="white", zorder=6)
-                        ax.text(bx + NB / 2, by + NB * 0.32, ",".join(cell["ops"]), ha="center", va="center", fontsize=6.4, color="white", zorder=6)
+                        lcol = color[cell["layer"]]
+                        hosts_conv = any(t in ("qconv", "dwconv") for t in cell["ops"])
+                        if hosts_conv:
+                            # conv-hosting core: solid layer color, layer name primary
+                            ax.add_patch(Rectangle((bx, by), NB, NB, facecolor=lcol, edgecolor=ec or "black", lw=elw if ec else 1.3, alpha=0.92, zorder=5))
+                            ax.text(bx + NB / 2, by + NB * 0.62, lab, ha="center", va="center", fontsize=8.2, fontweight="bold", color="white", zorder=6)
+                            ax.text(bx + NB / 2, by + NB * 0.32, ",".join(cell["ops"]), ha="center", va="center", fontsize=6.4, color="white", zorder=6)
+                        else:
+                            # standalone vector-op core (bn/minmax/add/...): hatched tile
+                            # tinted in the attributed layer's color, OP NAME primary --
+                            # independent non-conv nodes read distinctly from conv hosts.
+                            ax.add_patch(Rectangle((bx, by), NB, NB, facecolor="white", edgecolor=ec or lcol, lw=elw if ec else 1.6, hatch="///", zorder=5))
+                            ax.add_patch(Rectangle((bx, by), NB, NB, facecolor=lcol, edgecolor="none", alpha=0.18, zorder=5.1))
+                            ax.text(bx + NB / 2, by + NB * 0.60, "+".join(cell["ops"]), ha="center", va="center", fontsize=8.0, fontweight="bold", color=lcol, zorder=6)
+                            ax.text(bx + NB / 2, by + NB * 0.30, lab, ha="center", va="center", fontsize=6.6, color="#444", zorder=6)
                         if is_res_imce:
-                            ax.text(bx + NB * 0.5, by + NB * 0.08, "RES add", ha="center", va="center", fontsize=6.2, fontweight="bold", color="#ffe0f0", zorder=14)
+                            ax.text(bx + NB * 0.5, by + NB * 0.08, "RES add", ha="center", va="center", fontsize=6.2, fontweight="bold", color="#ffe0f0" if hosts_conv else "#c2185b", zorder=14)
                     else:
                         ax.add_patch(Rectangle((bx, by), NB, NB, facecolor="#f4f4f4", edgecolor="#bbb", lw=0.9, zorder=5))
                         ax.text(bx + NB / 2, by + NB / 2, f"IMCE\n#{(r*4)+(c-1)}", ha="center", va="center", fontsize=7, color="#aaa", zorder=6)
@@ -572,7 +602,9 @@ def plot_noc_mesh(model, minfo, links, out_dir):
         ax.set_xlim(-0.55, 4 * P + NB + 0.35); ax.set_ylim(-0.55, 3 * P + NB + 0.35); ax.set_aspect("equal"); ax.axis("off")
     used = [l for l in lo if counts.get(l)]
     lh = [Rectangle((0, 0), 1, 1, facecolor=color[l], edgecolor="black") for l in used]
-    leg1 = fig.legend(lh, [f"{l} ({counts[l]})" for l in used], loc="lower center", ncol=min(len(used) or 1, 6), fontsize=9, frameon=False, bbox_to_anchor=(0.5, 0.045))
+    lh.append(Rectangle((0, 0), 1, 1, facecolor="white", edgecolor="#666", hatch="///"))
+    leg1 = fig.legend(lh, [f"{l} ({counts[l]})" for l in used] + ["standalone vec-op (bn/minmax/add)"],
+                      loc="lower center", ncol=min(len(used) + 1, 6), fontsize=9, frameon=False, bbox_to_anchor=(0.5, 0.045))
     fig.add_artist(leg1)
     eh = [mlines.Line2D([], [], color=s["color"], lw=2.4) for s in KIND.values()]
     fig.legend(eh, [f"ch: {k}" for k in KIND], loc="lower center", ncol=5, fontsize=9, frameon=False, bbox_to_anchor=(0.5, 0.005))
