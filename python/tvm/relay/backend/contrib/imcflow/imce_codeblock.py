@@ -5,7 +5,7 @@ import math
 import os
 from pprint import pprint
 from tvm import relay
-from tvm.relay.op.contrib.imcflow import CustomIDToNode, residual_in_region_mode
+from tvm.relay.op.contrib.imcflow import CustomIDToNode, residual_in_region_mode, pack_bn_minmax_mode
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import NodeID, TensorID, TensorEdge, TensorEdgeInfo
 from tvm.contrib.imcflow import bugfix_off_mode
@@ -1393,7 +1393,16 @@ class ConvBlock(ImceCallCodeBlock):
         if rb is not None:
           chain_real = rb if chain_real is None else min(chain_real, rb)
       last = self.post_ops[-1]
-      if chain_real is not None and getattr(last, "real_blocks", None) is None:
+      # A MinmaxQuantBlock's num_out_blocks (=4) are the 4 BITPLANES of a single
+      # 16-channel group, NOT channel-blocks: all 4 are real regardless of OC.
+      # real_blocks counts channel-blocks (ceil(OC/16)), so stamping it here would
+      # make RecvSendWrapper's i>=real_blocks dummy-0 burst-pad zero out bitplanes
+      # 1..3 of the quantized activation -> the fused-conv consumer only receives
+      # the LSB bitplane -> corrupted psum (bit-exact FAIL). Only cap the tail SEND
+      # by real_blocks when the tail emits channel-blocks (e.g. BN-only chains
+      # whose padded blocks are genuine drain packets). See bn-minmax-packing memory.
+      if chain_real is not None and getattr(last, "real_blocks", None) is None \
+          and not isinstance(last, MinmaxQuantBlock):
         last.real_blocks = chain_real
 
     # Marker A (RTL-derived boundary-STEP reorder) discriminator.
@@ -2163,12 +2172,32 @@ class ConvBlock(ImceCallCodeBlock):
       # case (imce_1_2) feeds a fused consumer that does NOT consume the flush
       # row; a plain conv into a fused operand slot always does. Keep the real
       # STEP for that signature. Lever-gated: OFF keeps handcraft dummy parity.
-      feeds_fused_operand = (residual_in_region_mode()
+      feeds_fused_operand = ((residual_in_region_mode() or pack_bn_minmax_mode())
           and (not self.post_ops) and any(
           isinstance(e.dst_id.graph_node_id, tuple)
           and getattr(e.dst_id, "tensor_type", None) in ("data", "rhs")
           for e in external_out_edges))
-      skip_row_presend = row_is_padding and feeds_fused_consumer and not feeds_fused_operand
+      # PACKING analog (IMCFLOW_PACK_BN_MINMAX): a PACKED conv (conv+BN[+minmax],
+      # so self.post_ops is non-empty) whose fused local post-ops do NOT take an
+      # inter-node NoC rhs (has_noc_rhs False -> not the pad_drain_row converge
+      # case) and which feeds a DOWNSTREAM fused consumer's DATA slot is the SAME
+      # "real last output row" situation as feeds_fused_operand above: BN/minmax
+      # are per-element local ops that don't change the conv's spatial output
+      # count, so a `same` conv's trailing read-pattern-0 row_group is still the
+      # last VALID raster row the fused consumer's conv consumes (via its line
+      # buffer). The generic feeds_fused_consumer gate zeroed it (bitplane fix
+      # exposed this: b1.c1 imce_2_1 row_group2 emitted 32 pure-dummy SEND(0),
+      # dropping output row 31 -> the whole last raster row of b1.c2 psum was
+      # missing -> residual pooled-logit error). Emit the real STEP instead.
+      # OFF / non-pack -> pack_bn_minmax_mode() False -> byte-identical.
+      feeds_fused_operand_packed = (pack_bn_minmax_mode()
+          and bool(self.post_ops) and (not self.has_noc_rhs) and any(
+          isinstance(e.dst_id.graph_node_id, tuple)
+          and getattr(e.dst_id, "tensor_type", None) in ("data", "rhs")
+          for e in external_out_edges))
+      skip_row_presend = (row_is_padding and feeds_fused_consumer
+                          and not feeds_fused_operand
+                          and not feeds_fused_operand_packed)
 
       # A pure-padding row of a FUSED conv+add whose operand arrives over the NoC
       # must DRAIN-and-forward without computing (no STEP/GET_CREG): the producer
@@ -2196,6 +2225,20 @@ class ConvBlock(ImceCallCodeBlock):
       # fire and the normal path emits fully. Lever OFF -> unchanged (handcraft
       # keeps its drain parity).
       if pad_drain_row and residual_in_region_mode():
+        pad_drain_row = False
+        skip_row_presend = False
+
+      # PACKING (IMCFLOW_PACK_BN_MINMAX): same drain-drops-last-row bug for an
+      # IC-split psum-join packed conv (conv+ADD(noc rhs)+BN[+minmax], has_noc_rhs
+      # True). Its trailing pure-pad row_group is the last VALID output row of a
+      # `same` conv; pad_drain_row (RECV rhs + ADD(0,rhs), no STEP) zeroes the main
+      # conv (lhs) term -> the whole last raster row = only the IC-slice-rhs term
+      # (waveform: region2 imce_3_2 exec4_row_group2 emits ADD(0,var15); b2/b3
+      # psum-joins topo-106/121/139/145 last row wrong). Route through the REAL
+      # STEP + CREG + postop rhs RECV + true ADD instead (same fix as the residual
+      # branch above, c3f2d50d2). OFF / non-pack -> pack_bn_minmax_mode() False ->
+      # byte-identical (handcraft drain parity preserved).
+      if pad_drain_row and pack_bn_minmax_mode():
         pad_drain_row = False
         skip_row_presend = False
 
