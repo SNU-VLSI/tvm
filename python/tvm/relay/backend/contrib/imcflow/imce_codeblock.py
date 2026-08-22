@@ -674,6 +674,44 @@ class VecBlock(ImceCallCodeBlock):
       if len(resolved) >= 2:
         return [UniqueVar((op, i)) for op in internal_ops if op is not None]
 
+      # MIXED case (IMCFLOW_PACK_BN_MINMAX + IMCFLOW_RESIDUAL_IN_REGION):
+      # exactly ONE operand is an inner producer of THIS composite while the
+      # OTHER operand arrives over the NoC as an external TensorEdge. This is the
+      # residual add whose BN operand got packed into the conv composite: the
+      # add stays a standalone in-region vecops op, so its BN-side operand is now
+      # an intra-composite Call->Call link (NO TensorEdge -> not in in_edges,
+      # resolved as an internal producer op here), and its residual-side operand
+      # is a real RECV edge. Neither the >=2 internal-converge path (only 1
+      # producer) nor the pure-edge path (only 1 external edge) fills both slots,
+      # which produced the malformed 1-operand ADD(var,15). Fill each arg slot
+      # positionally: an internal producer -> its UniqueVar; a None slot -> the
+      # next external (non-const) in_edge, in in_edges order. _internal_operand_ops
+      # is positional to the relay Call args, so slot order == relay operand order
+      # (add is commutative, but this also keeps lhs/rhs edge tensor_type
+      # consistent). Only fires when there IS an internal producer AND at least
+      # one external edge remains -> pure OFF / linear / fully-internal composites
+      # are untouched (byte-identical).
+      if len(resolved) >= 1:
+        ext_edges = [e for e in self.in_edges if e != self.const_edge]
+        if ext_edges:
+          var_ins = []
+          ext_iter = iter(ext_edges)
+          for op in internal_ops:
+            if op is not None:
+              var_ins.append(UniqueVar((op, i)))
+            else:
+              try:
+                edge = next(ext_iter)
+              except StopIteration:
+                break
+              var_ins.append(self._make_unique_input_var_for_post_op(edge, i))
+          # Append any external edges not consumed by a None slot (defensive:
+          # more external edges than None slots -> keep them, preserving order).
+          for edge in ext_iter:
+            var_ins.append(self._make_unique_input_var_for_post_op(edge, i))
+          if len(var_ins) >= 2:
+            return var_ins
+
     # Build variables from non-constant edges only
     non_const_edges = [edge for edge in self.in_edges if edge != self.const_edge]
     var_ins_from_edges = [self._make_unique_input_var_for_post_op(

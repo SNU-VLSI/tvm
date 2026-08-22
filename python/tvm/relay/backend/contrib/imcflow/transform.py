@@ -5233,6 +5233,74 @@ def _find_residual_skip_edges(func_name):
       skip_edge = min(distinct_src.values(),
                       key=lambda e: getOuterNodeID(e.src_id.graph_node_id))
     results.append((skip_edge, recv_outer))
+
+  # PACKED form (IMCFLOW_PACK_BN_MINMAX + IMCFLOW_RESIDUAL_IN_REGION): with BN/
+  # minmax packing there is no 2-pass de-fuse, so the residual add's MAIN operand
+  # is folded into the packed conv/BN (a single `data` edge into the composite's
+  # BN inner), while the SKIP operand goes STRAIGHT into the inner `add` as `rhs`
+  # (or `lhs`). The de-fused detector above keys on ">=2 `data` producers" and so
+  # sees only ONE `data` producer here -> misses the residual -> the skip falls to
+  # a direct imce->imce RECV (historically a deadlock structure). Detect the packed
+  # residual STRUCTURALLY and route its skip through the RESBUF too.
+  #
+  # Discriminator (matches ONLY ResNet8 b3.res / packed-residual, NOT the psum-
+  # merge / conv-fused adds): the receiver outer composite is an `imcflow.vecops`
+  # (custom name) that contains an inner `add`, AND it receives BOTH
+  #   (a) a `data` operand from an in-region IMCE producer (the packed conv/BN main
+  #       input), and
+  #   (b) an `rhs`/`lhs` operand from a DISTINCT in-region IMCE producer (the skip).
+  # The conv-hosted residual adds (b1.res/b2.res fused as `imcflow.qconv2d-with
+  # -postop` with an `nn.imcflow_qconv_add_` pattern) are excluded because their
+  # OUTER name is `imcflow.qconv2d-with-postop`, not `imcflow.vecops` -- the conv
+  # host emits that add internally (no separate skip RECV to buffer). The de-fused
+  # residual (2x `data` producers, already handled above) is excluded because it
+  # never reaches here (recv_outer already in `results`).
+  from tvm.relay.op.contrib.imcflow import CustomIDToName
+  name_dict = CustomIDToName()
+  already = {ro for _, ro in results}
+  # group NON-data (rhs/lhs) operand edges by receiver outer composite
+  by_recv_skip = collections.defaultdict(list)
+  for e in edge_list:
+    if e.dst_id.tensor_type not in ("rhs", "lhs"):
+      continue
+    if not isinstance(e.dst_id.graph_node_id, tuple):
+      continue
+    if not _src_is_imce_producer(e.src_id):
+      continue  # exclude const-src (scale rhs) and inode/func_in operands
+    recv_outer = getOuterNodeID(e.dst_id.graph_node_id)
+    by_recv_skip[recv_outer].append(e)
+
+  for recv_outer, skip_cands in by_recv_skip.items():
+    if recv_outer in already:
+      continue  # already detected via the de-fused `data` path
+    # (1) outer composite must be an imcflow.vecops (packed residual add), NOT a
+    #     conv-hosted composite (qconv2d-with-postop) whose add is conv-internal.
+    if str(name_dict.get(recv_outer, "")) != "imcflow.vecops":
+      continue
+    # (2) it must ALSO receive a `data` operand from a DISTINCT in-region IMCE
+    #     producer (the packed conv/BN main path); this confirms a true converge
+    #     (main + skip) and excludes single-operand skip-export vecops.
+    data_srcs = {getOuterNodeID(e.src_id.graph_node_id)
+                 for e in by_recv.get(recv_outer, [])}
+    skip_by_src = {}
+    for e in skip_cands:
+      skip_by_src.setdefault(getOuterNodeID(e.src_id.graph_node_id), e)
+    # need >=1 main `data` producer AND >=1 skip producer, from DISTINCT sources.
+    skip_only = {s: e for s, e in skip_by_src.items() if s not in data_srcs}
+    if not data_srcs or not skip_only:
+      continue
+    # SKIP = the rhs/lhs operand. If several, prefer a plain (int-gid) downsample
+    # producer, else the numerically smallest producer gid (mirrors de-fused pick).
+    plain = [e for s, e in skip_only.items() if not isinstance(s, tuple)]
+    if plain:
+      skip_edge = plain[0]
+    else:
+      skip_edge = min(skip_only.values(),
+                      key=lambda e: getOuterNodeID(e.src_id.graph_node_id))
+    debug_print(f"[resid-inode-buffer] {func_name}: PACKED residual detected @ "
+                f"composite {recv_outer} (imcflow.vecops); skip={skip_edge}")
+    results.append((skip_edge, recv_outer))
+
   return results
 
 
