@@ -23,11 +23,12 @@ if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   IMCFLOW_LEN = DevConfig.IMCFLOW_ADDR_SIZE
   INT_ACK_GEN_ADDR = 0
   INT_ACK_GEN_LEN = 0
-  big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
-  if big_imem:
-    RESET_GEN_ADDR = 0x80000000 + 270464 + 4 
-  else:
-    RESET_GEN_ADDR = 0x80000000 + 266368 + 4 
+  # RESET_GEN sits right past the imcflow address window. Derive it from
+  # DevConfig.IMCFLOW_ADDR_SIZE (128 + 4*(dmem+imem)) so it tracks the imem
+  # sizes -- the earlier hardcoded 266368/270464 pair silently broke whenever
+  # the (BIG_IMEM) imem sizes changed and the host then poked GO at a stale
+  # address (poll-forever hang, no diagnostic).
+  RESET_GEN_ADDR = 0x80000000 + DevConfig.IMCFLOW_ADDR_SIZE + 4
 elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   print("IMCFLOW_HOST_OS: linux")
   IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]

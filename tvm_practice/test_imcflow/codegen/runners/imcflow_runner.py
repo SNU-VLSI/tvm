@@ -222,9 +222,12 @@ class ImcFlowRunner(ABC):
         # Convert to absolute path since run.sh executes from runner directory
         abs_runner_log_dir = os.path.abspath(runner_log_dir)
 
-        # Determine imc_size based on IMCFLOW_BIG_IMEM environment variable
-        big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
-        imc_size = 270464 if big_imem else 266368 # 0x42080 or 0x41080
+        # imcflow address-window size: derive from DevConfig so it always tracks
+        # the (BIG_IMEM) imem sizes -- the earlier hardcoded 266368/270464 pair
+        # broke silently whenever the imem layout changed (gem5 window mismatch,
+        # client disconnects right after connect).
+        from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+        imc_size = DevConfig.IMCFLOW_ADDR_SIZE
         imc_size += 32
         imc_size = str(imc_size)
 
@@ -520,9 +523,9 @@ class RTLRunner(ImcFlowRunner):
             # Convert to absolute path since run.sh executes from runner directory
             abs_runner_log_dir = os.path.abspath(runner_log_dir)
 
-            # Determine imc_size based on IMCFLOW_BIG_IMEM environment variable
-            big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
-            imc_size = 270464 if big_imem else 266368 # 0x42080 or 0x41080
+            # See above: derive from DevConfig, never hardcode the map size.
+            from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
+            imc_size = DevConfig.IMCFLOW_ADDR_SIZE
             imc_size += 32
             imc_size = str(imc_size)
 

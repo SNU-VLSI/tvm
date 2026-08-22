@@ -1316,15 +1316,19 @@ class ImcflowDeviceConfig:
   # INODE_DATA_MEM_SIZE = 65536
   # INODE_DATA_MEM_SIZE = 131072
 
+  # BIG_IMEM (sim-only, must match the RTL params.svh BIG_IMEM ifdef):
+  # inode imem 2048 words (8192B), imce imem 1024 words (4096B). The whole
+  # address map (bases below + IMCFLOW_ADDR_SIZE + RESET_GEN) derives from
+  # these, so RTL and codegen shift together.
   if not BIG_IMEM:
     INODE_INST_MEM_SIZE = 1024
   else:
-    INODE_INST_MEM_SIZE = 2048
+    INODE_INST_MEM_SIZE = 8192
 
   if not BIG_IMEM:
     IMCE_INST_MEM_SIZE = 1024
   else:
-    IMCE_INST_MEM_SIZE = 2048
+    IMCE_INST_MEM_SIZE = 4096
 
   # IMCFLOW_ADDR_SIZE = 266368 # 128 + 4*(65536+1024) == 260.125KB
   IMCFLOW_ADDR_SIZE = 128 + INODE_NUM * (INODE_DATA_MEM_SIZE + INODE_INST_MEM_SIZE) # 270464 for BIG_IMEM, 266368 for normal

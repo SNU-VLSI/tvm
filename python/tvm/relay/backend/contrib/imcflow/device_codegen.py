@@ -350,7 +350,11 @@ class DeviceCodegen:
   # so this compile-time guard stays honest against the actual built IMEM depth
   # (otherwise it would falsely fire at 297>256 and block the build). Default is
   # 256 -> byte-identical to stock behavior.
-  IMCE_IMEM_DEPTH_WORDS = int(os.environ.get("IMCFLOW_IMCE_IMEM_DEPTH", "256"))
+  # BIG_IMEM builds enlarge the IMCE imem to 1024 words (params.svh ifdef);
+  # default the guard accordingly so packed conv+bn programs >256w compile.
+  # IMCFLOW_IMCE_IMEM_DEPTH still overrides for one-off experiments.
+  _BIG = os.environ.get("IMCFLOW_BIG_IMEM", "0") == "1"
+  IMCE_IMEM_DEPTH_WORDS = int(os.environ.get("IMCFLOW_IMCE_IMEM_DEPTH", "1024" if _BIG else "256"))
   # The imem host object embeds one instruction per fixed-width slot; the emitted
   # binary blob (queried below via key="data") is words * IMEM_SLOT_BYTES.
   IMCE_IMEM_SLOT_BYTES = 32
