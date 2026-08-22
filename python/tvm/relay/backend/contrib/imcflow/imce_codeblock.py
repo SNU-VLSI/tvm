@@ -95,6 +95,38 @@ def add_to_map(edge, count, is_send=True):
     target_map[edge] = count
     print(f"    new count: {target_map[edge].total_num}")
 
+def group_send_infos_by_fifo(te_out_infos):
+  """Group a producer's out-edge TensorEdgeInfos into SEND groups by fifo_id.
+
+  Stock behavior: when a producer has multiple out-edges they are assumed to be
+  ONE multicast (all same first-hop address AND same fifo_id) and collapsed into
+  a single IMCE_SEND. The launch-aware PnR (region-merge) can co-locate two
+  consumers of one producer so their out-edges share the same address but carry
+  DIFFERENT fifo_ids (a conv consumer feeds fifo 0, a non-conv consumer feeds an
+  incrementing per-dest fifo). The HW dispatches an incoming packet to the RECV
+  fifo named by the packet's fifo_id field, so a same-address/different-fifo
+  fan-out is perfectly legal on the wire -- it is just TWO SENDs (one per fifo),
+  not one multicast. So instead of asserting fifo uniqueness we split by fifo_id:
+  each group (all edges sharing one fifo_id) becomes one SEND; a group with >1
+  edge is a genuine multicast and keeps the single-SEND semantics.
+
+  Returns a list of (representative_info, [edges_in_group]) in a deterministic
+  order (by fifo_id). All infos are assumed to share the same address (the
+  caller asserts len(addresses)==1). When every info has the same fifo_id this
+  returns a single group -> byte-identical to the stock single-SEND path.
+  """
+  from collections import OrderedDict
+  groups = OrderedDict()
+  for info in te_out_infos:
+    groups.setdefault(info.fifo_id, []).append(info)
+  out = []
+  for fid in sorted(groups.keys(), key=lambda x: (x is None, x)):
+    infos = groups[fid]
+    edges = [info.owner for info in infos if getattr(info, "owner", None) is not None]
+    out.append((infos[0], edges))
+  return out
+
+
 class ImceCodeBlock(CodeBlock):
   def __init__(self, annotation: str = ""):
     super().__init__(annotation)
@@ -3580,22 +3612,17 @@ class RecvSendWrapper(ImceCodeBlock):
 
       if not te_out_infos: raise RuntimeError(f"no tensor edge info found for src_id {src_id} even after checking split case")
 
+      # Group out-edges into SEND groups by fifo_id (launch-aware fan-out may put
+      # two same-address consumers on different fifos -> two SENDs, not one
+      # multicast). All infos share one address; a single fifo -> one group ->
+      # byte-identical to the stock single-SEND path. See group_send_infos_by_fifo.
       if split_case:
         assert len(te_out_infos) > 1, "In split case, there should be multiple tensor edge infos"
+      if len(te_out_infos) > 1:
         addresses = {info.policy_info[0].address for info in te_out_infos}
-        assert len(addresses) == 1, "In split case, all output addresses must be identical"
-        fifo_ids = {info.fifo_id for info in te_out_infos}
-        assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
-        te_out_info = te_out_infos[0] # we need just one edge info due to multicast
-      else:
-        if len(te_out_infos) > 1:
-          addresses = {info.policy_info[0].address for info in te_out_infos}
-          assert len(addresses) == 1, "In split case, all output addresses must be identical"
-          fifo_ids = {info.fifo_id for info in te_out_infos}
-          assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
-          te_out_info = te_out_infos[0] # we need just one edge info due to multicast
-        else:
-          te_out_info = te_out_infos[0]
+        assert len(addresses) == 1, "all merged output addresses must be identical"
+      send_groups = group_send_infos_by_fifo(te_out_infos)
+      te_out_info = send_groups[0][0]  # representative (pre-send gate below)
 
       # Producer IMCE signals start of output (flag 0)
       # TEMPORARILY DISABLED: Testing UUID-based sync instead
@@ -3634,9 +3661,12 @@ class RecvSendWrapper(ImceCodeBlock):
           if pre_send:
             code += "\n".join(pre_send)
 
+      _single_group = len(send_groups) == 1
       for i in range(self.num_out_blocks):
-        for te_out_info in [te_out_info]: #TODO: current version doesn't need it
-          if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+        # One SEND per fifo group (usually exactly one group == stock multicast;
+        # launch-aware fan-out to same-address/different-fifo consumers -> N).
+        for grp_info, grp_edges in send_groups:
+          if grp_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
             continue # this edge's src and dst hw node is equal
 
           if _drop_psum:
@@ -3653,10 +3683,19 @@ class RecvSendWrapper(ImceCodeBlock):
             var_o = "0"
           else:
             var_o = UniqueVar((actual_send_block, i))
-          if te_out_info:
-            annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
-            code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
-            for out_edge in output_edges:
+          if grp_info:
+            # Stock single-group path: keep the exact old annotation/count edges
+            # (self.out_edges / output_edges) -> byte-identical. Multi-group only
+            # for launch-aware fan-out: each SEND counts/annotates its own edges.
+            if _single_group:
+              count_edges = output_edges
+              annot_edges = self.out_edges
+            else:
+              count_edges = grp_edges if grp_edges else list(output_edges)
+              annot_edges = count_edges
+            annotation = f"{','.join(map(str, annot_edges))}, {grp_info.node_info_str}"
+            code += f"__builtin_IMCE_SEND({grp_info.policy_info[0].address}, {var_o}, {grp_info.fifo_id}, 0); // {annotation}"
+            for out_edge in count_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
       # Fix G producer side: notify the sibling boundary-STEP consumer that this
@@ -3744,22 +3783,14 @@ class RecvSendWrapper(ImceCodeBlock):
 
       if not te_out_infos: raise RuntimeError(f"no tensor edge info found for src_id {src_id} even after checking split case")
 
+      # Split same-address out-edges into per-fifo SEND groups (launch-aware
+      # fan-out). Single fifo -> one group -> byte-identical stock multicast.
       if split_case:
         assert len(te_out_infos) > 1, "In split case, there should be multiple tensor edge infos"
+      if len(te_out_infos) > 1:
         addresses = {info.policy_info[0].address for info in te_out_infos}
-        assert len(addresses) == 1, "In split case, all output addresses must be identical"
-        fifo_ids = {info.fifo_id for info in te_out_infos}
-        assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
-        te_out_info = te_out_infos[0]
-      else:
-        if len(te_out_infos) > 1:
-          addresses = {info.policy_info[0].address for info in te_out_infos}
-          assert len(addresses) == 1, "In split case, all output addresses must be identical"
-          fifo_ids = {info.fifo_id for info in te_out_infos}
-          assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
-          te_out_info = te_out_infos[0]
-        else:
-          te_out_info = te_out_infos[0]
+        assert len(addresses) == 1, "all merged output addresses must be identical"
+      send_groups = group_send_infos_by_fifo(te_out_infos)
 
       actual_send_block = self.send_block
       if isinstance(self.send_block, VecOpBlock):
@@ -3775,9 +3806,10 @@ class RecvSendWrapper(ImceCodeBlock):
                     and isinstance(actual_send_block, ConvBlock)
                     and not actual_send_block.post_ops)
 
+      _single_group = len(send_groups) == 1
       for i in range(self.num_out_blocks):
-        for te_out_info in [te_out_info]:
-          if te_out_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
+        for grp_info, grp_edges in send_groups:
+          if grp_info.fifo_id == TensorEdgeInfo.LOCAL_FIFO:
             continue
 
           if _drop_psum:
@@ -3787,15 +3819,25 @@ class RecvSendWrapper(ImceCodeBlock):
             continue
 
           var_o = UniqueVar((actual_send_block, i))
-          if te_out_info:
-            annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
-            code += f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, {var_o}, {te_out_info.fifo_id}, 0); // {annotation}"
-            for out_edge in output_edges:
+          if grp_info:
+            if _single_group:
+              count_edges = output_edges
+              annot_edges = self.out_edges
+            else:
+              count_edges = grp_edges if grp_edges else list(output_edges)
+              annot_edges = count_edges
+            annotation = f"{','.join(map(str, annot_edges))}, {grp_info.node_info_str}"
+            code += f"__builtin_IMCE_SEND({grp_info.policy_info[0].address}, {var_o}, {grp_info.fifo_id}, 0); // {annotation}"
+            for out_edge in count_edges:
               add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
 
+            # per-SEND after-sync: use an edge belonging to THIS fifo group so a
+            # multi-group fan-out syncs each consumer independently.
             if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
-              if output_edges:
-                code = self._add_sync_after_send(code, output_edges[0])
+              _sync_edge = (count_edges[0] if count_edges else
+                            (output_edges[0] if output_edges else None))
+              if _sync_edge is not None:
+                code = self._add_sync_after_send(code, _sync_edge)
 
     return code.render()
 

@@ -14,6 +14,7 @@ from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode, residual_in_region_mode, residual_inode_buffer_mode
+from tvm.relay.op.contrib.imcflow import region_merge_mode
 from tvm.relay.backend.contrib.imcflow.transform_utils import getInnerNodeID
 import logging
 
@@ -1070,6 +1071,18 @@ class SendRecvPairManager:
             return False
         # residual-add odata multicast -> bare, not flag-2 (racy 3-way barrier)
         if self._is_residual_add_odata_multicast(edge):
+            return False
+        # C1b launch-aware PnR (region-merge): wave-sharing can co-locate a
+        # conv producer that ALSO has an inode-fed input rendezvous with a
+        # fan-out to >=2 imce consumer nodes -- structurally (a)+(b), but this
+        # is the SAME racy 3-way flag-2 rendezvous the residual-add case above
+        # excludes (producer SETFLAG(2)/SETFLAG(0) pulses outrun the slower
+        # consumers -> lost wakeup). The proven baseline runs every imce->imce
+        # conv multicast BARE (NoC valid/ready + fifo backpressure pace it; the
+        # handshake map is empty for stock ResNet8). So under the merge lever we
+        # bare these too. Gated on the lever -> OFF is byte-identical (stock
+        # imce_1_3 flag-2 case in the non-merged region2 is untouched).
+        if region_merge_mode() and pair.sender_node.is_imce():
             return False
         # (b) sender also has an inode-fed input rendezvous this iteration
         return self._node_has_input_rendezvous(pair.sender_node)

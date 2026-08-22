@@ -296,6 +296,15 @@ class GraphInfo:
     tensor_edge_to_commodity_id: Dict[Any, int] = None  # TensorEdge -> commodity_id
     inodebuf_nodes: List[Any] = None           # Task #10: RESBUF node ids
     inodebuf_to_inode: Dict[Any, Coord] = None # RESBUF node_id -> INODE Coord
+    # C1b launch-aware PnR: placeable node_id -> wave index (0-based round).
+    # A "wave" is one original round (the merge lever fuses several rounds into
+    # one region function; each round still runs as a separate multi-launch on
+    # the shared IMCE cores, so nodes in DIFFERENT waves never need to be
+    # resident simultaneously and MAY share a physical core). Derived from the
+    # mm_quant (requant) boundaries along the data-dependency DAG. When the merge
+    # lever is off every placeable node is wave 0 -> the P2 exclusivity below is
+    # identical to the stock "1 call per IMCE" (byte-identical placement).
+    node_to_wave: Dict[Any, int] = None
 
 
 @dataclass
@@ -545,6 +554,18 @@ class GraphExtractor:
                    f"{len(funcout_nodes)} func_outs, "
                    f"{len(self.commodities)} commodities")
 
+        # C1b launch-aware PnR: compute per-node wave (round) index. Only the
+        # merged-region path (many CALL nodes > mesh IMCE slots) needs it; when
+        # every node is wave 0 the P2 constraint stays byte-identical, so it is
+        # safe to always compute.
+        node_to_wave = self._compute_node_waves()
+        try:
+            _nwaves = (max(node_to_wave.values()) + 1) if node_to_wave else 0
+        except ValueError:
+            _nwaves = 0
+        debug_print(f"[GraphExtractor] Derived {_nwaves} wave(s) over "
+                    f"{len(node_to_wave)} placeable nodes (launch-aware PnR)")
+
         return GraphInfo(
             nodes=self.nodes,
             commodities=self.commodities,
@@ -560,6 +581,7 @@ class GraphExtractor:
             tensor_edge_to_commodity_id=self.tensor_edge_to_commodity_id.copy(),
             inodebuf_nodes=inodebuf_nodes,
             inodebuf_to_inode=self.inodebuf_to_inode.copy(),
+            node_to_wave=node_to_wave,
         )
 
     def _register_resbuf_nodes(self, func_name):
@@ -776,6 +798,90 @@ class GraphExtractor:
         # Handle composite function
         if is_composite:
             self._visit(call.op, in_composite=True, composite_node_id=node_id)
+
+    def _is_mmquant_node(self, node: 'GraphNode') -> bool:
+        """True if this CALL node is an mm_quant (min_max_quantize) op.
+
+        Handles both the standalone op and a composite whose body ends with
+        min_max_quantize (the requant that terminates a ResNet round). Mirrors
+        transform.py::_AnnotatorBFS._is_mmquant_node so the wave boundaries the
+        ILP derives match the round boundaries the merge lever fused.
+        """
+        call = getattr(node, "relay_expr", None)
+        if not isinstance(call, relay.Call):
+            return False
+        op_ = call.op
+        if isinstance(op_, tvm.ir.Op) and op_.name == "qnn.imcflow_min_max_quantize":
+            return True
+        if isinstance(op_, relay.Function) and "Composite" in op_.attrs:
+            body = op_.body
+            if isinstance(body, relay.Call) and isinstance(body.op, tvm.ir.Op):
+                return body.op.name == "qnn.imcflow_min_max_quantize"
+        return False
+
+    def _compute_node_waves(self):
+        """Assign each placeable CALL node a wave index (0-based round).
+
+        C1b launch-aware PnR. A wave = one original round. Rounds are delimited
+        by the mm_quant (requant) op that ends each ResNet block; the merge lever
+        fuses several such rounds into one region function but each round still
+        executes as its own multi-launch (the inode reprograms the shared IMCE
+        cores per launch). Nodes in different waves are therefore never resident
+        together and may share a physical core.
+
+        wave[n] = max over data-producers p of ( wave[p] + (1 if p is mm_quant
+        else 0) ); source nodes (no placeable producer) start at wave 0. This
+        counts mm_quant crossings on the longest input path, so both branches of
+        a residual round land in the same wave (they share the same requant
+        depth) and a conv feeding the next round lands one wave later.
+
+        Only CALL/SPLIT/CONCAT (placeable) nodes get a wave. Returns
+        {node_id -> wave_int}. Robust to the custom_id re-stamp because it reads
+        only the current-region commodity DAG + relay_expr, not any pre-pass id.
+
+        GATED on the region-merge lever: when the lever is OFF every node is
+        forced to wave 0, so P2 stays byte-identical to the stock single
+        per-core exclusivity for ALL non-merged paths (lever-off, pack-only,
+        resid-only, and the baseline 3-region layout). Only when the lever is on
+        (the only path that produces an over-16-call region) do we segment into
+        real waves to make the merged region PnR-feasible.
+        """
+        from tvm.relay.op.contrib.imcflow import region_merge_mode
+        placeable = set()
+        for nid, n in self.nodes.items():
+            if n.node_type in (NodeType.CALL, NodeType.SPLIT, NodeType.CONCAT):
+                placeable.add(nid)
+        if not region_merge_mode():
+            return {nid: 0 for nid in placeable}
+        # data-dependency edges between placeable nodes (skip const/weight feeds)
+
+        producers = {nid: [] for nid in placeable}  # node -> [placeable producers]
+        for comm in self.commodities:
+            s, d = comm.source_node_id, comm.dest_node_id
+            if s in placeable and d in placeable and comm.get_congestion_group() == 'data':
+                producers[d].append(s)
+
+        mmq = {nid for nid in placeable if self._is_mmquant_node(self.nodes[nid])}
+
+        wave: Dict[Any, int] = {}
+        # topological longest-path in mm_quant crossings; iterate to fixed point
+        # (DAG, so bounded by depth). Sort by topo_order for a good first pass.
+        order = sorted(placeable, key=lambda x: self.nodes[x].topo_order)
+        changed = True
+        guard = 0
+        while changed and guard <= len(order) + 2:
+            changed = False
+            guard += 1
+            for nid in order:
+                best = 0
+                for p in producers[nid]:
+                    cand = wave.get(p, 0) + (1 if p in mmq else 0)
+                    if cand > best:
+                        best = cand
+                if wave.get(nid, -1) != best:
+                    wave[nid] = best
+                    changed = True
+        return wave
 
     def _extract_graph_commodities_from_tensor_edge_list(self, tensor_edge_list: List, func_name: str):
         """Extract commodities from TensorEdgeList.
@@ -1232,14 +1338,182 @@ class JointPnRILP:
                 f"P1_one_location_{hash(n) % 100000}"
             )
 
-        # P2: Each IMCE -> at most one REAL call (split/concat excluded)
-        for v in self.imce_nodes:
-            real_calls = gi.call_nodes  # Exclude split and concat
-            if real_calls:
-                self.prob += (
-                    pulp.lpSum(self.p[n][v] for n in real_calls) <= 1,
-                    f"P2_one_call_per_imce_{v.row}_{v.col}"
-                )
+        # P2: Each IMCE -> at most one REAL call PER WAVE (split/concat excluded).
+        #
+        # C1b launch-aware PnR. Stock behavior is "at most one real call per
+        # IMCE" over the whole region, which is INFEASIBLE once the merge lever
+        # fuses several rounds into one region function whose call count exceeds
+        # the mesh IMCE slot count (ResNet8 merged region2 = 17 atomic qconv >
+        # 16 slots). But nodes in different WAVES (rounds) never execute
+        # simultaneously -- each round runs as its own multi-launch, with the
+        # inode reprogramming the shared cores between launches (already the
+        # working codegen model: baseline maps 37 graph nodes onto 11 physical
+        # IMCEs across regions, and region3's inode re-WR_IMEMs the same core
+        # with a different program per launch). So we only forbid TWO nodes of
+        # the SAME wave from landing on one core; different-wave nodes may share.
+        #
+        # When node_to_wave is all-0 (merge lever off, or a single-round region)
+        # this collapses to exactly the stock single per-core constraint ->
+        # byte-identical placement / codegen for all non-merged paths.
+        #
+        # NEED gate: the wave relaxation is only APPLIED when strict 1-per-core
+        # is infeasible for this region (real-call count > mesh IMCE slots).
+        # Regions that already fit under strict exclusivity (baseline region1/2/3
+        # and, under MERGE=2, the un-merged region1) keep the strict single
+        # per-core constraint -> their placement is byte-identical to stock. Only
+        # the over-slot merged region takes the per-(core,wave) relaxation.
+        node_wave = gi.node_to_wave or {}
+        real_calls = gi.call_nodes  # Exclude split and concat
+        if real_calls:
+            n_slots = len(self.imce_nodes)
+            need_relax = len(real_calls) > n_slots and any(
+                node_wave.get(n, 0) != 0 for n in real_calls)
+            if not need_relax:
+                # stock: at most one real call per IMCE over the whole region
+                for v in self.imce_nodes:
+                    self.prob += (
+                        pulp.lpSum(self.p[n][v] for n in real_calls) <= 1,
+                        f"P2_one_call_per_imce_{v.row}_{v.col}"
+                    )
+            else:
+                waves_present = sorted({node_wave.get(n, 0) for n in real_calls})
+                debug_print(f"[JointPnRILP] P2 launch-aware relax: {len(real_calls)} "
+                            f"calls > {n_slots} slots -> per-(core,wave) exclusivity "
+                            f"over {len(waves_present)} waves "
+                            f"(sizes={[sum(1 for n in real_calls if node_wave.get(n,0)==w) for w in waves_present]})")
+                for v in self.imce_nodes:
+                    for w in waves_present:
+                        wave_calls = [n for n in real_calls if node_wave.get(n, 0) == w]
+                        if wave_calls:
+                            self.prob += (
+                                pulp.lpSum(self.p[n][v] for n in wave_calls) <= 1,
+                                f"P2_one_call_per_imce_{v.row}_{v.col}_w{w}"
+                            )
+
+                # P2b (launch-aware only): HARD per-core occupancy cap. Each core's
+                # policy table holds at most 32 entries (policy_table_builder
+                # NodeCapacityError); each node placed on a core plus each flow
+                # transiting it consumes entries, so over-packing one core (the
+                # solver otherwise legally piles 13 nodes on imce_2_1 under the
+                # wave relaxation) overflows the table. A soft objective penalty is
+                # not enough -- CBC under a time limit returns different feasible
+                # solutions run-to-run, some overflowing (non-deterministic).
+                # A HARD cap guarantees safety AND (with the objective tie-break)
+                # reproducibility. Cap = max(2, ceil(nodes/cores)+slack): loose
+                # enough to stay feasible (18 nodes over 16 cores) yet far below
+                # the 32-entry limit. Overridable via IMCFLOW_PNR_CORE_CAP.
+                import math as _math
+                _default_cap = max(2, _math.ceil(len(real_calls) / n_slots) + 4)
+                core_cap = int(os.environ.get("IMCFLOW_PNR_CORE_CAP", str(_default_cap)))
+                debug_print(f"[JointPnRILP] P2b per-core occupancy cap = {core_cap} "
+                            f"(nodes={len(real_calls)}, cores={n_slots})")
+                for v in self.imce_nodes:
+                    self.prob += (
+                        pulp.lpSum(self.p[n][v] for n in real_calls) <= core_cap,
+                        f"P2b_core_cap_{v.row}_{v.col}"
+                    )
+
+                # P2c (launch-aware only): HARD per-inode-ROW occupancy cap. Each
+                # inode (one per mesh ROW) stages ALL its row's imce imem programs
+                # + weights + config + tiling buffers for every launch in a single
+                # fixed 64KB data memory (INODE_DATA_MEM_SIZE). Wave-sharing can pile
+                # the imem-heavy convs onto one row (observed: imce_1_1 12640B +
+                # imce_1_2 11040B both on row 1 -> inode_1_0_data overflow at
+                # 67200/65536). The total staged data fits comfortably across the 4
+                # rows (43KB imem vs 4x64KB), so balancing node count per row keeps
+                # each inode's data region within budget. Cap per row = ceil(nodes/
+                # rows)+slack; overridable via IMCFLOW_PNR_ROW_CAP. Rows are the
+                # distinct v.row of the imce_nodes.
+                rows = sorted({v.row for v in self.imce_nodes})
+                n_rows = max(1, len(rows))
+                _row_default = max(2, _math.ceil(len(real_calls) / n_rows) + 2)
+                row_cap = int(os.environ.get("IMCFLOW_PNR_ROW_CAP", str(_row_default)))
+                debug_print(f"[JointPnRILP] P2c per-inode-row occupancy cap = {row_cap} "
+                            f"(nodes={len(real_calls)}, rows={n_rows})")
+                for r in rows:
+                    row_cores = [v for v in self.imce_nodes if v.row == r]
+                    self.prob += (
+                        pulp.lpSum(self.p[n][v] for n in real_calls for v in row_cores
+                                   if v in self.p.get(n, {})) <= row_cap,
+                        f"P2c_row_cap_{r}"
+                    )
+
+                # P5 (launch-aware only): a data hand-off between two DISTINCT
+                # placed nodes must NOT be co-located on one core. The codegen's
+                # SEND/LoadLB path routes every inter-op data flow over the NoC
+                # (or via inode) and has no notion of a same-core "local"
+                # hand-off -- construct_noc_paths skips src==dst edges, so a
+                # co-located producer/consumer leaves the consumer's load edge
+                # with empty policy_info and crashes node_info_str.
+                #
+                # This applies to any data edge whose BOTH endpoints have their
+                # own placement variable (CALL<->CALL, and split/concat<->CALL:
+                # a split is pinned to its producer's core by P3, so a conv that
+                # LoadLBs a split output must land on a different core). Edges
+                # where one endpoint is pinned TO the other (producer->split via
+                # P3, last_producer->concat via P4) are excluded -- those are
+                # meant to be local. Wave-sharing is still allowed between nodes
+                # with no direct data edge (e.g. wave-N and wave-N+2 convs).
+                placed = set(self.p.keys())
+                # exclude the P3/P4 pin pairs (their co-location is intentional)
+                pin_pairs = set()
+                for sid in gi.split_nodes:
+                    prod = gi.nodes[sid].producer
+                    if prod is not None:
+                        pin_pairs.add(frozenset((sid, prod)))
+                for cid in gi.concat_nodes:
+                    lp = gi.nodes[cid].last_producer
+                    if lp is not None:
+                        pin_pairs.add(frozenset((cid, lp)))
+                data_pairs = set()
+                for comm in gi.commodities:
+                    s, d = comm.source_node_id, comm.dest_node_id
+                    if (s in placed and d in placed and s != d
+                            and frozenset((s, d)) not in pin_pairs
+                            and comm.get_congestion_group() == 'data'):
+                        data_pairs.add((s, d))
+                for (s, d) in data_pairs:
+                    for v in self.imce_nodes:
+                        self.prob += (
+                            self.p[s][v] + self.p[d][v] <= 1,
+                            f"P5_no_colocate_{hash((s, d)) % 100000}_{v.row}_{v.col}"
+                        )
+                debug_print(f"[JointPnRILP] P5 launch-aware anti-affinity: "
+                            f"{len(data_pairs)} data edges forced off-core "
+                            f"({len(pin_pairs)} split/concat pin pairs excluded)")
+
+                # P6 (launch-aware only): the DISTINCT data consumers of one
+                # producer must NOT share a core. The producer emits ONE
+                # multicast SEND whose per-dst router entries all carry the same
+                # first-hop address; the codegen collapses same-address out-edges
+                # into that single SEND and REQUIRES them to share a fifo_id
+                # (imce_codeblock _render asserts len(fifo_ids)==1). But a conv
+                # consumer takes fifo 0 while a non-conv consumer (add/minmax)
+                # takes an incrementing per-dest fifo, so two co-located
+                # consumers of one producer collide (same address, different
+                # fifo). In stock placement fan-out siblings always sit on
+                # different cores -> different addresses -> the merge branch is
+                # never taken; wave-sharing can co-locate them. Forbid it.
+                fanout = {}
+                for comm in gi.commodities:
+                    s, d = comm.source_node_id, comm.dest_node_id
+                    if (s in placed and d in placed and s != d
+                            and comm.get_congestion_group() == 'data'):
+                        fanout.setdefault(s, set()).add(d)
+                sib_pairs = set()
+                for s, dsts in fanout.items():
+                    dl = sorted(dsts, key=lambda x: str(x))
+                    for i in range(len(dl)):
+                        for j in range(i + 1, len(dl)):
+                            sib_pairs.add((dl[i], dl[j]))
+                for (a, b) in sib_pairs:
+                    for v in self.imce_nodes:
+                        self.prob += (
+                            self.p[a][v] + self.p[b][v] <= 1,
+                            f"P6_no_sib_colocate_{hash((a, b)) % 100000}_{v.row}_{v.col}"
+                        )
+                debug_print(f"[JointPnRILP] P6 launch-aware fan-out anti-affinity: "
+                            f"{len(sib_pairs)} consumer-sibling pairs forced off-core")
 
         # P3: Split same as producer (skip pre-assigned splits with VAR producers)
         for split_id in gi.split_nodes:
@@ -1490,15 +1764,67 @@ class JointPnRILP:
                 else:
                     data_ucast_kids.extend(members)
 
-        # C1: Data group edge capacity = 1
-        for e in self.all_edges:
-            mcast_usage = pulp.lpSum(self.y[gid][e] for gid in data_mcast_gids) if data_mcast_gids else 0
-            ucast_usage = pulp.lpSum(self.x[k_id][e] for k_id in data_ucast_kids) if data_ucast_kids else 0
+        # C1: Data group edge capacity = 1.
+        #
+        # C1b launch-aware PnR: like P2, the stock "one data flow per NoC edge"
+        # is over-constrained for a merged region -- it forbids the WHOLE region's
+        # data flows from ever sharing an edge, but flows in different WAVES
+        # (rounds) run at different launches and never contend for the NoC
+        # simultaneously. We therefore apply the capacity per WAVE: two flows on
+        # the same edge are only forbidden when they belong to the same wave.
+        #
+        # NEED gate (same as P2): only relax when the region is over-slot AND
+        # multi-wave. Otherwise emit the stock single per-edge capacity so all
+        # non-merged / fitting regions stay byte-identical.
+        node_wave = gi.node_to_wave or {}
+        real_calls = gi.call_nodes
+        n_slots = len(self.imce_nodes)
+        relax = (len(real_calls) > n_slots) and any(
+            node_wave.get(n, 0) != 0 for n in real_calls)
 
-            self.prob += (
-                mcast_usage + ucast_usage <= 1,
-                f"C1_cap_{self.edge_to_idx[e]}"
-            )
+        def _commodity_wave(k):
+            # A data commodity's wave = the wave of its placeable endpoint. Use
+            # the source when placeable, else the destination; const/var/funcout
+            # endpoints inherit the placeable end's wave. Default 0.
+            s, d = k.source_node_id, k.dest_node_id
+            if s in node_wave:
+                return node_wave[s]
+            if d in node_wave:
+                return node_wave[d]
+            return 0
+
+        if not relax:
+            for e in self.all_edges:
+                mcast_usage = pulp.lpSum(self.y[gid][e] for gid in data_mcast_gids) if data_mcast_gids else 0
+                ucast_usage = pulp.lpSum(self.x[k_id][e] for k_id in data_ucast_kids) if data_ucast_kids else 0
+                self.prob += (
+                    mcast_usage + ucast_usage <= 1,
+                    f"C1_cap_{self.edge_to_idx[e]}"
+                )
+        else:
+            # Bucket mcast group ids and ucast commodity ids by wave.
+            mcast_wave = {}
+            for gid in data_mcast_gids:
+                members = list(self.multicast_groups.values())[gid]
+                first_k = next(k for k in gi.commodities if k.id == members[0])
+                mcast_wave.setdefault(_commodity_wave(first_k), []).append(gid)
+            ucast_wave = {}
+            kid_to_comm = {k.id: k for k in gi.commodities}
+            for kid in data_ucast_kids:
+                ucast_wave.setdefault(_commodity_wave(kid_to_comm[kid]), []).append(kid)
+            waves_present = sorted(set(mcast_wave) | set(ucast_wave))
+            debug_print(f"[JointPnRILP] C1 launch-aware relax: per-(edge,wave) "
+                        f"capacity over {len(waves_present)} waves")
+            for e in self.all_edges:
+                for w in waves_present:
+                    mcast_usage = pulp.lpSum(self.y[gid][e] for gid in mcast_wave.get(w, [])) or 0
+                    ucast_usage = pulp.lpSum(self.x[k_id][e] for k_id in ucast_wave.get(w, [])) or 0
+                    if mcast_usage == 0 and ucast_usage == 0:
+                        continue
+                    self.prob += (
+                        mcast_usage + ucast_usage <= 1,
+                        f"C1_cap_{self.edge_to_idx[e]}_w{w}"
+                    )
 
     def _set_objective(self):
         """Set objective function: minimize congestion + small wirelength penalty"""
@@ -1536,8 +1862,37 @@ class JointPnRILP:
             for e in self.all_edges
         )
 
-        # Objective: minimize congestion + small wirelength penalty
-        self.prob += max_congestion + 0.001 * total_hops
+        # C1b launch-aware PnR determinism + policy-load spreading. When the wave
+        # relaxation is active the solver has many equal-cost wave-shared
+        # placements; some overpack one core's policy table (32-entry cap in
+        # policy_table_builder) or re-trigger a codegen invariant. A per-core
+        # "excess occupancy" penalty (below the 0.001 hop weight) both (a)
+        # canonicalizes the pick deterministically and (b) discourages piling
+        # nodes onto one core, keeping per-core policy entries bounded -- exactly
+        # the failure mode a naive lexicographic tie-break caused (imce_2_1 32/32).
+        # Only when relaxing; OFF -> objective byte-identical to stock.
+        node_wave = gi.node_to_wave or {}
+        _relax = (len(gi.call_nodes) > len(self.imce_nodes)) and any(
+            node_wave.get(n, 0) != 0 for n in gi.call_nodes)
+        spread_pen = 0
+        if _relax:
+            real_calls = gi.call_nodes
+            # per-core occupancy o[v]; penalize occupancy above a soft target so
+            # the solver spreads. Target = ceil(nodes / cores). Penalty weight is
+            # small (1e-4) -- below hop (1e-3 * >=1 hop) only weakly, so hops still
+            # dominate but ties resolve toward a spread, capacity-safe placement.
+            import math as _math
+            n_cores = max(1, len(self.imce_nodes))
+            soft = max(1, _math.ceil(len(real_calls) / n_cores))
+            for v in self.imce_nodes:
+                occ = pulp.lpSum(self.p[n][v] for n in real_calls if v in self.p.get(n, {}))
+                over = pulp.LpVariable(f"occ_over_{v.row}_{v.col}", lowBound=0)
+                self.prob += (over >= occ - soft, f"occ_over_def_{v.row}_{v.col}")
+                spread_pen += over
+            spread_pen = 1e-4 * spread_pen
+
+        # Objective: minimize congestion + small wirelength penalty (+ spread)
+        self.prob += max_congestion + 0.001 * total_hops + spread_pen
 
         # Store for result extraction
         self.max_congestion_var = max_congestion
