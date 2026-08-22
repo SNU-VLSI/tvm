@@ -112,6 +112,15 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     mod = transform.InferType()(mod)
     _print("1_after_bind")
 
+    # Step 1b: (IMCFLOW_RESIDUAL_IN_REGION only) drop identity requant on the
+    # residual join -- multiply(x,1)/add(x,0) with int-1/int-0 constants -> x.
+    # Shrinks the fused vecops composite and its resident constant set so the
+    # block-major residual body fits the IMCE GPR budget (no creg/qreg spill).
+    # Runs BEFORE any composite merge / custom_id annotate so numbering stays
+    # self-consistent. Gated -> lever-OFF byte-identical.
+    mod = imcflow_transform.simplify_residual_identity_requant(mod)
+    _print("1b_after_resid_identity_simplify")
+
     # Step 2: First level imcflow graph partition
     mod = imcflow_transform.partitionImcflowSubGraph(mod)
     _print("2_after_L1_partition")

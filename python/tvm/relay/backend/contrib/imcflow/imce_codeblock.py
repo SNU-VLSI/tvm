@@ -698,12 +698,30 @@ class VecBlock(ImceCallCodeBlock):
         return [non_const_var, const_var]
     return var_ins_from_edges
 
+  def _render_block(self, i: int) -> str:
+    """Render exactly ONE block (i) of this vec op.
+
+    Factored out of _render so a block-major driver (VecOpBlock's
+    residual-in-region merged path) can interleave a whole op-chain per block.
+    Rendering _render as the concatenation of _render_block over range(n) is
+    byte-identical to the previous inline loop.
+    """
+    var_ins = self._build_var_ins(i)
+    var_o = UniqueVar((self, i))
+    var_in_str = ", ".join([f"{var_i}" for var_i in var_ins])
+    # e.g. __builtin_IMCE_ADD(a, b, 15);
+    return f"{var_o} = __builtin_IMCE_{self.op_name}({var_in_str}, {self.imm_value});"
+
   def _render(self) -> str:
     """Generate only computation, no RECV/SEND."""
     code = TextBlock("")
 
     # Fused post-op: only the predecessor's real_blocks are valid (see
     # effective_blocks). Standalone (prev_op None) -> num_blocks, unchanged.
+    # NOTE: kept as the original inline loop (NOT _render_block) so the
+    # UniqueVar CONSTRUCTION order -- hence the emitted var numbering / decl
+    # order -- is byte-identical to before. _render_block exists only for the
+    # gated block-major residual path.
     n = self.effective_blocks()
     for i in range(n):
       var_ins = self._build_var_ins(i)
@@ -744,13 +762,28 @@ class MultlBlock(VecBlock):
   def _op_name(self) -> str:
     return "MULTL"
 
+  def _render_block(self, i: int) -> str:
+    """Render exactly ONE block (i). Byte-identical concatenation form of
+    _render, so the block-major residual driver can interleave per block."""
+    if not _is_multl_swfix_enabled():
+      return super()._render_block(i)
+    code = TextBlock("")
+    var_ins = self._build_var_ins(i)
+    var_o = UniqueVar((self, i))
+    # low_pressure only in the block-major residual path (driver sets the flag).
+    code += MultlSWFixOp(var_ins[0], var_ins[1], var_o, (self, i), self.imm_value,
+                         low_pressure=getattr(self, "_low_pressure", False))
+    return code.render()
+
   def _render(self) -> str:
     """Generate MULTL with optional SW fix for overflow bug."""
     if not _is_multl_swfix_enabled():
       # Use standard VecBlock rendering
       return super()._render()
 
-    # SW fix enabled: use MultlSWFixOp
+    # SW fix enabled: use MultlSWFixOp. Kept as the original inline loop (NOT
+    # _render_block) so UniqueVar construction order / var numbering is
+    # byte-identical to before; _render_block is only for the block-major path.
     code = TextBlock("")
 
     n = self.effective_blocks()  # fused -> predecessor real_blocks; else num_blocks
@@ -781,7 +814,8 @@ class MultlSWFixOp(ImceCodeBlock):
   Can be used standalone or composed into other blocks.
   """
 
-  def __init__(self, var_a, var_b, var_out, block_id, imm_value: int = 15, annotation: str = ""):
+  def __init__(self, var_a, var_b, var_out, block_id, imm_value: int = 15, annotation: str = "",
+               low_pressure: bool = False):
     """Initialize MultlSWFixOp.
 
     Args:
@@ -791,6 +825,14 @@ class MultlSWFixOp(ImceCodeBlock):
         block_id: Unique identifier for intermediate variables (e.g., (self, i))
         imm_value: Immediate value for src_mask (default 15)
         annotation: Optional annotation string
+        low_pressure: If True, emit a re-scheduled variant that shortens the
+            live ranges of the temporaries (peak internal liveness 4 -> 3 regs)
+            without changing the RESULT or the emitted-instruction MULTISET --
+            only their order. Used ONLY by the in-region residual block-major
+            path, where 26 loop-invariant values (24 consts + 2 SW-fix
+            invariants) are pinned and only 4 GPRs remain: the default schedule
+            spilled onto the write-dropped creg/qreg. Default False -> the exact
+            original schedule (byte-identical for every other SW-fix use).
     """
     super().__init__(annotation)
     self.var_a = var_a
@@ -798,6 +840,7 @@ class MultlSWFixOp(ImceCodeBlock):
     self.var_out = var_out
     self.block_id = block_id
     self.imm_value = imm_value
+    self.low_pressure = low_pressure
 
   def _render(self) -> str:
     code = TextBlock("")
@@ -819,6 +862,23 @@ class MultlSWFixOp(ImceCodeBlock):
     code += f"{var_L} = __builtin_IMCE_MULTL({self.var_a}, {self.var_b}, {self.imm_value});"
     code += f"{var_H} = __builtin_IMCE_MULTH({self.var_a}, {self.var_b}, {self.imm_value});"
 
+    if self.low_pressure:
+      # Register-tight residual block-major path. Shorter live ranges (peak
+      # internal 3 instead of 4): compute part1 = mismatch & saturate_val BEFORE
+      # not_mismatch, so {mismatch, saturate_val} die before not_mismatch is
+      # born. RESULT-identical (same instruction multiset, reordered).
+      code += f"{var_neg1} = __builtin_IMCE_SUBI(0, 1);"
+      code += f"{var_const_7fff} = __builtin_IMCE_SRLI({var_neg1}, 1);"
+      code += f"{var_H_sign} = __builtin_IMCE_SRAI({var_H}, 15);"
+      code += f"{var_L_sign} = __builtin_IMCE_SRAI({var_L}, 15);"
+      code += f"{var_mismatch} = __builtin_IMCE_XOR({var_H_sign}, {var_L_sign}, {self.imm_value});"
+      code += f"{var_saturate_val} = __builtin_IMCE_XOR({var_H_sign}, {var_const_7fff}, {self.imm_value});"
+      code += f"{var_part1} = __builtin_IMCE_AND({var_mismatch}, {var_saturate_val}, {self.imm_value});"
+      code += f"{var_not_mismatch} = __builtin_IMCE_XOR({var_mismatch}, {var_neg1}, {self.imm_value});"
+      code += f"{var_part2} = __builtin_IMCE_AND({var_not_mismatch}, {var_L}, {self.imm_value});"
+      code += f"{self.var_out} = __builtin_IMCE_OR({var_part1}, {var_part2}, {self.imm_value});"
+      return code.render()
+
     # Constant generation (uses zero register directly, immediate 1 only)
     code += f"{var_neg1} = __builtin_IMCE_SUBI(0, 1);"  # 0 - 1 = -1 (0xFFFF), uses zero register
     code += f"{var_const_7fff} = __builtin_IMCE_SRLI({var_neg1}, 1);"  # -1 >>> 1 = 0x7FFF (32767)
@@ -833,7 +893,7 @@ class MultlSWFixOp(ImceCodeBlock):
     # Determine saturate value
     code += f"{var_saturate_val} = __builtin_IMCE_XOR({var_H_sign}, {var_const_7fff}, {self.imm_value});"
 
-    # Masking and synthesis
+    # Masking and synthesis (original schedule)
     code += f"{var_not_mismatch} = __builtin_IMCE_XOR({var_mismatch}, {var_neg1}, {self.imm_value});"
     code += f"{var_part1} = __builtin_IMCE_AND({var_mismatch}, {var_saturate_val}, {self.imm_value});"
     code += f"{var_part2} = __builtin_IMCE_AND({var_not_mismatch}, {var_L}, {self.imm_value});"
@@ -2660,9 +2720,127 @@ class VecOpBlock(ImceCallCodeBlock):
         operand_ops.append(gid_to_op.get(_safe_gid(a), None))
       op._internal_operand_ops = operand_ops
 
+    # Merged-converge detection (narrow gate for the block-major emission).
+    # A residual add fused in-region has TWO internal-Call operands (both inner
+    # ops of this composite). ONLY such a composite (2-producer converge) is
+    # eligible for block-major body emission; every OFF / linear composite has
+    # <=1 internal-Call operand per op -> stays stage-major (byte-identical).
+    self._is_merged_converge = any(
+        len([o for o in getattr(op, "_internal_operand_ops", []) if o is not None]) >= 2
+        for op in self.ops)
+
     # Compute edge sets
     self._compute_edges()
     self.body = self._build_structure()
+
+  def is_block_major_residual(self) -> bool:
+    """True iff this VecOpBlock should emit its body block-major.
+
+    Gated NARROWLY: only under IMCFLOW_RESIDUAL_IN_REGION AND only for the
+    2-producer converge (residual add) composite. OFF -> residual_in_region_mode()
+    False -> block-major never taken -> byte-identical to the prior emission.
+    Additionally every op in the chain must implement _render_block; chains
+    with an unsupported op (e.g. MinmaxQuantBlock in subset18's fused
+    add+minmax composite) fall back to the stage-major path, which those
+    smaller chains already fit register-wise (L2 RTL bit-exact stage-major).
+    """
+    if not (residual_in_region_mode() and getattr(self, "_is_merged_converge", False)):
+      return False
+    return all(hasattr(op, "_render_block") for op in self.block_major_op_order())
+
+  def block_major_op_order(self) -> List['ImceCallCodeBlock']:
+    """Op emission order (within a block) that MINIMISES accumulator lifespan.
+
+    The naive stack order [BN75, BN76, multl, add_c, add_resid] emits BN75
+    FIRST, so its output is live across the ENTIRE s-chain (BN76 -> multl ->
+    add_c, each an ~6-temp SW-fix), pushing peak liveness over the 30-GPR limit
+    and spilling onto the write-dropped creg/qreg (corruption). Instead emit the
+    converge op LAST and its operand producer sub-chains back-to-back, so only
+    ONE finished operand (1 reg) is carried across the next chain -- the other
+    operand feeds the converge immediately. This is a pure dependency-preserving
+    reorder (topological), identical numerics/vars; only reduces register
+    pressure. For a linear composite it returns the original order.
+    """
+    ops = self.ops
+    # Find the converge op (>=2 internal producers). If none, keep stack order.
+    converge = None
+    for op in ops:
+      if len([o for o in getattr(op, "_internal_operand_ops", []) if o is not None]) >= 2:
+        converge = op
+    if converge is None:
+      return list(ops)
+
+    op_set = set(id(o) for o in ops)
+
+    def chain_len(op, seen=None):
+      # Number of in-composite ops in op's exclusive producer cone (its own
+      # SW-fix-heavy sub-chain length). Longer chain -> emit FIRST so its output
+      # is carried the least; the SHORT chain (e.g. a bare BN) emits LAST,
+      # adjacent to the converge, minimising the carried accumulator's lifespan.
+      seen = seen or set()
+      if op is None or id(op) not in op_set or id(op) in seen:
+        return 0
+      seen.add(id(op))
+      return 1 + sum(chain_len(p, seen)
+                     for p in getattr(op, "_internal_operand_ops", []))
+
+    emitted = []
+    emitted_ids = set()
+
+    def emit_chain(op):
+      # DFS: emit an op's (internal, in-composite) producers first, then the op.
+      if op is None or id(op) not in op_set or id(op) in emitted_ids:
+        return
+      for prod in getattr(op, "_internal_operand_ops", []):
+        emit_chain(prod)
+      emitted.append(op)
+      emitted_ids.add(id(op))
+
+    # Order the converge's operand producer chains LONGEST-first, so the last
+    # (shortest) chain feeds the converge with minimal lifespan and only ONE
+    # finished operand is carried across each subsequent chain.
+    operands = [o for o in getattr(converge, "_internal_operand_ops", [])
+                if o is not None and id(o) in op_set]
+    operands.sort(key=lambda o: chain_len(o), reverse=True)
+    for prod in operands:
+      emit_chain(prod)
+    # Any ops not reachable from the converge's operands (defensive) keep order.
+    for op in ops:
+      if op is not converge:
+        emit_chain(op)
+    emit_chain(converge)
+    return emitted
+
+  def render_body_block_major(self) -> str:
+    """Render the vec-op chain BLOCK-major: for each block b, emit every op's
+    block-b compute in op order, so a whole (recv-consuming) chain completes
+    before the next block starts. This bounds peak liveness to ~one block's
+    intermediates + resident constants (<=31 GPRs) instead of the stage-major
+    peak (all BN outputs of every block live at once) that spilled onto the
+    write-dropped creg/qreg pseudo-registers and corrupted the output.
+
+    Word/NoC order is UNCHANGED: the per-block output var (UniqueVar((last_op,
+    b))) and the per-block input vars are identical to stage-major; only the
+    textual op order changes. The wrapper still RECVs (already block-interleaved)
+    and SENDs (already block-ordered) around this body.
+    """
+    # Determine the number of blocks to emit. Mirror each op's own block count
+    # (real_blocks / effective_blocks) so drain-padded blocks are still skipped.
+    n = self.num_blocks
+    code = TextBlock("")
+    for b in range(n):
+      code += f"// block-major residual vecops: block {b}"
+      for op in self.block_major_op_order():
+        # Per-op block validity: BatchNorm uses real_blocks, chained VecBlocks
+        # use effective_blocks(); ops that don't produce block b are skipped
+        # (their SEND is a dummy 0, handled by the wrapper).
+        op_n = getattr(op, "real_blocks", None)
+        if op_n is None:
+          op_n = op.effective_blocks() if hasattr(op, "effective_blocks") else n
+        if b >= op_n:
+          continue
+        code += op._render_block(b)
+    return code.render()
 
   def _compute_edges(self):
     """Classify edges as internal vs external."""
@@ -2806,6 +2984,14 @@ class VecOpBlock(ImceCallCodeBlock):
         comp.add("\n".join(post_lines))
 
   def _render(self) -> str:
+    # Narrow gate: only the in-region residual (2-producer converge) composite
+    # renders block-major, which bounds peak register liveness below the 31-GPR
+    # limit. Every other composite (OFF, linear vecops) keeps the stage-major
+    # body -> byte-identical. The block-major body is a pure textual reorder of
+    # the SAME per-block ops (identical input/output vars), so numerics and the
+    # RECV/SEND word order (owned by the wrapper) are unchanged.
+    if self.is_block_major_residual():
+      return self.render_body_block_major()
     return self.body.render()
 
 
@@ -2851,6 +3037,9 @@ class BatchNormBlock(ImceCallCodeBlock):
 
     # Compute only real_blocks; padded drain blocks (i >= real_blocks) have no
     # valid scale/bias and must not be computed (their SEND is a dummy 0).
+    # Kept as the original inline loop (NOT _render_block) so UniqueVar
+    # construction order / var numbering is byte-identical to before;
+    # _render_block is only for the gated block-major residual path.
     real_blocks = getattr(self, "real_blocks", self.num_blocks)
     print("[BatchNormBlock] num blocks:", self.num_blocks, "real:", real_blocks)
     for i in range(real_blocks):
@@ -2868,6 +3057,46 @@ class BatchNormBlock(ImceCallCodeBlock):
         # Use simple MULTL instruction
         code += f"{var_o} = __builtin_IMCE_MULTL({var_data}, {var_scale}, 15);"
         code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);"
+
+    return code.render()
+
+  def _render_block(self, i: int, data_edge=None, scale_edge=None, bias_edge=None) -> str:
+    """Render exactly ONE block (i) of the batch_norm.
+
+    Factored out of _render so a block-major driver can interleave whole
+    op-chains per block. Concatenating _render_block over range(real_blocks) is
+    byte-identical to the previous inline loop. When called from the block-major
+    driver the edges are resolved once and passed in; otherwise (default) they
+    are resolved here to keep the standalone path unchanged.
+    """
+    if data_edge is None and scale_edge is None and bias_edge is None:
+      for edge in self.in_edges:
+        if edge.dst_id.tensor_type == "fused_scale":
+          scale_edge = edge
+        elif edge.dst_id.tensor_type == "fused_bias":
+          bias_edge = edge
+        elif edge.dst_id.tensor_type == "data":
+          data_edge = edge
+      if data_edge is None and self.prev_op is not None:
+        data_edge = self.prev_op
+
+    code = TextBlock("")
+    var_data = self._make_unique_input_var_for_post_op(data_edge, i)
+    var_scale = UniqueVar((scale_edge, i)) if scale_edge else UniqueVar((self, i, "scale_placeholder"))
+    var_bias = UniqueVar((bias_edge, i)) if bias_edge else UniqueVar((self, i, "bias_placeholder"))
+    var_o = UniqueVar((self, i))
+
+    if _is_multl_swfix_enabled():
+      # Use composable MultlSWFixOp for overflow bug fix. low_pressure only in
+      # the block-major residual path (self._low_pressure set by the driver).
+      var_mult_result = UniqueVar((self, i, "mult_result"))
+      code += MultlSWFixOp(var_data, var_scale, var_mult_result, (self, i),
+                           low_pressure=getattr(self, "_low_pressure", False))
+      code += f"{var_o} = __builtin_IMCE_ADD({var_mult_result}, {var_bias}, 15);"
+    else:
+      # Use simple MULTL instruction
+      code += f"{var_o} = __builtin_IMCE_MULTL({var_data}, {var_scale}, 15);"
+      code += f"{var_o} = __builtin_IMCE_ADD({var_o}, {var_bias}, 15);"
 
     return code.render()
 
@@ -2928,6 +3157,117 @@ class RecvSendWrapper(ImceCodeBlock):
 
     return cls(body, num_blocks, num_out_blocks, send_block, in_edges, out_edges, annotation, builder=builder)
 
+  def _is_block_major_residual_wrapper(self) -> bool:
+    """True iff this wrapper wraps the in-region residual (2-producer converge)
+    VecOpBlock that must be emitted RECV+compute+SEND block-major to keep peak
+    register liveness under the 31-GPR limit. Gated NARROWLY (see
+    VecOpBlock.is_block_major_residual): OFF / non-converge -> False -> the
+    normal edge-outer RECV / block-outer SEND path is taken (byte-identical).
+
+    Additionally requires the exact BARE (no-window, no-presend) sync profile
+    this fix relies on: both residual data operands bared
+    (get_merged_residual_input_window == []) and the output SEND has no pre-send
+    STANDBY. If any windowed sync is present we fall back to the stage-major
+    path (correctness over the liveness win).
+    """
+    sb = self.send_block
+    if not (isinstance(sb, VecOpBlock) and sb.is_block_major_residual()):
+      return False
+    if not (self.builder and getattr(self.builder, "pair_manager", None)):
+      return False
+    pm = self.builder.pair_manager
+    # Require both data operands to be bared (merged window == []). None or a
+    # real window -> not the bare profile this interleave assumes.
+    win = pm.get_merged_residual_input_window(self.in_edges) if self.in_edges else None
+    if win != []:
+      return False
+    # Require a bare output SEND (no pre-send STANDBY lines).
+    if self.out_edges:
+      pre_send = pm.get_pre_send_sync(self.out_edges[0])
+      if pre_send:
+        return False
+    # Every op in the chain must support per-block rendering; a chain with an
+    # op lacking _render_block (e.g. MinmaxQuantBlock) falls back to the
+    # stage-major path -- those chains are the small ones that already fit
+    # the GPR budget (subset18 L2 passed bit-exact stage-major).
+    if any(not hasattr(op, "_render_block") for op in sb.block_major_op_order()):
+      return False
+    return True
+
+  def _render_block_major_residual(self) -> str:
+    """Emit the in-region residual vecops interleaved BLOCK-major:
+
+        for b in 0..num_blocks:
+          RECV(f2_b); RECV(f3_b)        # bare, fifo order preserved
+          <op-chain for block b>        # VecOpBlock block-b compute
+          SEND(out_b)                   # bare
+
+    vs the stage-major RECV-all / body / SEND-all. The NoC word order is
+    IDENTICAL (per-block f2,f3 RECV order and per-block SEND order are the same
+    sequence the stage-major path produced), so inode / peer nodes are
+    unaffected. The win: only ONE block's two RECVs + intermediates are live at
+    once (peak ~= 24 resident consts + 2 SW-fix consts + a few temps <= 31 GPRs)
+    instead of all 8 RECVs + every block's BN outputs live simultaneously, which
+    overflowed onto the write-dropped creg/qreg pseudo-registers and corrupted
+    the output. Only reached under the narrow gate; every other wrapper keeps
+    _render's stage-major body.
+    """
+    pm = self.builder.pair_manager
+    code = TextBlock("")
+
+    # Ordered residual data RECV edges (main from imce_3_2 fifo2, skip from the
+    # RESBUF/inode fifo3), in the SAME order the merged path emits them.
+    data_edges = pm.collect_residual_data_input_edges(self.in_edges)
+
+    # Resolve the SEND target once (single func_out edge, no split for imce_3_1).
+    out_edge_src_ids = {edge.src_id for edge in self.out_edges}
+    assert len(out_edge_src_ids) == 1, "residual block-major: one output src expected"
+    src_id = out_edge_src_ids.pop()
+    te_out_infos = DevConfig().get_tensor_edge_info_with_id_dir(src_id, "out")
+    assert te_out_infos, f"no tensor edge info for src_id {src_id}"
+    te_out_info = te_out_infos[0]
+    output_edges = self.out_edges
+
+    actual_send_block = self.send_block.get_send_block()
+
+    for b in range(self.num_blocks):
+      # --- RECV block b (bare, fifo order preserved) ---
+      for edge in data_edges:
+        te_info = DevConfig().TensorEdgetoInfo.get(edge)
+        if te_info is None or te_info.fifo_id == 0:
+          continue
+        var_i = UniqueVar((edge, b))
+        if var_i.static:
+          continue
+        code += (f"{var_i} = __builtin_IMCE_RECV({te_info.fifo_id}); "
+                 f"// {edge}, {te_info.node_info_str}")
+        add_to_map(te_info.owner, RecvSendNum("recv", 1), is_send=False)
+
+      # --- compute block b (whole op-chain, liveness-minimising order) ---
+      code += f"// block-major residual vecops: block {b}"
+      for op in self.send_block.block_major_op_order():
+        op_n = getattr(op, "real_blocks", None)
+        if op_n is None:
+          op_n = op.effective_blocks() if hasattr(op, "effective_blocks") else self.num_blocks
+        if b >= op_n:
+          continue
+        # Signal the SW-fix low-pressure schedule (shorter live ranges) -- only
+        # here, in the register-tight block-major residual path.
+        op._low_pressure = True
+        code += op._render_block(b)
+
+      # --- SEND block b (bare) ---
+      if te_out_info.fifo_id != TensorEdgeInfo.LOCAL_FIFO:
+        _real = getattr(actual_send_block, "real_blocks", None)
+        var_o = "0" if (_real is not None and b >= _real) else UniqueVar((actual_send_block, b))
+        annotation = f"{','.join(map(str, self.out_edges))}, {te_out_info.node_info_str}"
+        code += (f"__builtin_IMCE_SEND({te_out_info.policy_info[0].address}, "
+                 f"{var_o}, {te_out_info.fifo_id}, 0); // {annotation}")
+        for out_edge in output_edges:
+          add_to_map(out_edge, RecvSendNum("send", 1), is_send=True)
+
+    return code.render()
+
   def _render(self) -> str:
     """Generate RECV -> body -> SEND."""
     # BUGFIX knob: knob=on (bugfix_off_mode()==False) reproduces a8af's
@@ -2935,6 +3275,12 @@ class RecvSendWrapper(ImceCodeBlock):
     # dummy-0 SEND / burst-pad).
     if not bugfix_off_mode():
       return self._render_a8af()
+
+    # In-region residual (2-producer converge) vecops: emit RECV+compute+SEND
+    # block-major to bound peak register liveness (<=31 GPRs). Narrow gate +
+    # bare-sync check -> OFF and every other wrapper unchanged (byte-identical).
+    if self._is_block_major_residual_wrapper():
+      return self._render_block_major_residual()
 
     code = TextBlock("")
 

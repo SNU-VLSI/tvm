@@ -1915,6 +1915,92 @@ class MergeCompositer:
         return mod, changed
 
 
+class _ResidualIdentityRequantSimplifier(ExprMutator):
+    """Drop identity requant ops on the residual join: multiply(x, 1) -> x and
+    add(x, 0) -> x, for INTEGER-dtype Constant operands whose every element is
+    the identity value.
+
+    ResNet8's in-region residual join carries a requant `multiply(x, scale)`
+    followed by `add(x, bias)` on the skip/main path. For the deep residual
+    blocks (b2 32ch, b3 64ch) the trained requant collapses to scale==1 (all
+    elements) and bias==0 (all elements): clip16(clip16(x*1)+0) == x for int16 x,
+    so removing these ops is a NO-OP on the values. Removing them shrinks the
+    fused vecops composite (fewer stages) AND removes their per-channel constant
+    RECV edges, cutting the number of loop-resident constants the IMCE must pin
+    (24 -> 16 for the b3 join) so the block-major residual body fits the 30-GPR
+    budget with no creg/qreg spill.
+
+    GATED on residual_in_region_mode() at the call site: lever-OFF never runs
+    this pass -> byte-identical. Bit-exactness: the CPU golden (relay.build over
+    the SAME transformed graph) recomputes from this simplified graph, so both
+    HW and golden see the identity removed identically.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.removed_mul = 0
+        self.removed_add = 0
+
+    @staticmethod
+    def _is_int_const_all(expr, value):
+        """True iff expr is a relay Constant of an INTEGER dtype whose every
+        element equals `value`. float consts are NOT simplified (their identity
+        is not exactly representable through the int requant path we target)."""
+        if not isinstance(expr, Constant):
+            return False
+        arr = expr.data.numpy()
+        dt = str(arr.dtype)
+        if not (dt.startswith("int") or dt.startswith("uint")):
+            return False
+        import numpy as _np
+        return bool(_np.all(arr == value))
+
+    def visit_call(self, call):
+        new_call = super().visit_call(call)
+        if not isinstance(new_call, Call) or not isinstance(new_call.op, Op):
+            return new_call
+        name = new_call.op.name
+        if name == "multiply" and len(new_call.args) == 2:
+            a, b = new_call.args
+            # multiply(x, 1) or multiply(1, x) -> x (int identity)
+            if self._is_int_const_all(b, 1):
+                self.removed_mul += 1
+                return a
+            if self._is_int_const_all(a, 1):
+                self.removed_mul += 1
+                return b
+        elif name == "add" and len(new_call.args) == 2:
+            a, b = new_call.args
+            # add(x, 0) or add(0, x) -> x (int identity)
+            if self._is_int_const_all(b, 0):
+                self.removed_add += 1
+                return a
+            if self._is_int_const_all(a, 0):
+                self.removed_add += 1
+                return b
+        return new_call
+
+
+def simplify_residual_identity_requant(mod):
+    """Gated: remove identity requant multiply(x,1)/add(x,0) on the residual join.
+
+    ONLY runs under IMCFLOW_RESIDUAL_IN_REGION (residual_in_region_mode()) so
+    lever-OFF codegen is byte-identical. See _ResidualIdentityRequantSimplifier.
+    Runs early (right after bind, before any composite merge / custom_id
+    annotate) so the vecops composite is formed already-simplified and custom_id
+    numbering stays self-consistent. Re-infers types afterwards.
+    """
+    from tvm.relay.op.contrib.imcflow import residual_in_region_mode
+    if not residual_in_region_mode():
+        return mod
+    simp = _ResidualIdentityRequantSimplifier()
+    mod["main"] = simp.visit(mod["main"])
+    mod = transform.InferType()(mod)
+    print(f"[resid-simplify] removed identity requant: "
+          f"multiply(x,1)={simp.removed_mul}, add(x,0)={simp.removed_add}")
+    return mod
+
+
 def merge_composite_for_partition(mod):
     """
     Merge composite ops before partitionRound for simpler converge point detection.
