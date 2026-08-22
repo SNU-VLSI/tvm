@@ -639,6 +639,12 @@ if [[ "$SKIP_STEP6" != true ]]; then
                     "$POWER_LOCAL_DIR" --output "$POWER_LOCAL_DIR/power_trace.png" \
                     --individual-dir "$POWER_LOCAL_DIR/plots"; then
                     echo "Power plots saved to: $POWER_LOCAL_DIR/power_trace.png"
+                    if python3 "$SCRIPT_DIR/scripts/write_power_metadata.py" \
+                        "$POWER_LOCAL_DIR"; then
+                        echo "Power trace metadata saved to: $POWER_LOCAL_DIR/power_metadata.json"
+                    else
+                        echo "Warning: failed to write power trace metadata"
+                    fi
                 else
                     echo "Warning: raw samples were fetched, but power plot generation failed"
                 fi

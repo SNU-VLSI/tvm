@@ -62,6 +62,8 @@ POWER_MEASURE_ENABLED = False
 POWER_MEASURE_SCOPE = "REGION"
 POWER_MEASURE_MODE = "now"
 POWER_DMM_NAME = "DMM_GPIB3"
+POWER_DMM_NAMES = (POWER_DMM_NAME,)
+POWER_DMM_NAMES_FROM_LIST = False
 POWER_DMM_NPLC = 0.001
 POWER_DMM_INTERVAL_S = -1.0
 POWER_DMM_SAMPLE_COUNT = 50000
@@ -104,6 +106,27 @@ elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
     POWER_DMM_NAME = os.getenv("IMCFLOW_POWER_DMM_NAME", "DMM_GPIB3").strip()
     if not POWER_DMM_NAME:
       raise ValueError("IMCFLOW_POWER_DMM_NAME must not be empty")
+    power_dmm_names_raw = os.getenv("IMCFLOW_POWER_DMM_NAMES")
+    if power_dmm_names_raw is not None:
+      POWER_DMM_NAMES_FROM_LIST = True
+      POWER_DMM_NAMES = tuple(name.strip() for name in power_dmm_names_raw.split(","))
+      if not POWER_DMM_NAMES or any(not name for name in POWER_DMM_NAMES):
+        raise ValueError(
+            "IMCFLOW_POWER_DMM_NAMES must be a non-empty comma-separated list")
+      if len(POWER_DMM_NAMES) > 16:
+        raise ValueError("IMCFLOW_POWER_DMM_NAMES supports at most 16 DMMs")
+      if len(set(POWER_DMM_NAMES)) != len(POWER_DMM_NAMES):
+        raise ValueError("IMCFLOW_POWER_DMM_NAMES must not contain duplicates")
+      power_dmm_tokens = tuple(
+          re.sub(r"[^A-Za-z0-9_.-]", "_", name) for name in POWER_DMM_NAMES)
+      if len(set(power_dmm_tokens)) != len(power_dmm_tokens):
+        raise ValueError(
+            "IMCFLOW_POWER_DMM_NAMES contains names that collide after filename "
+            "sanitization")
+      if os.getenv("IMCFLOW_POWER_DMM_NAME") is not None:
+        print("IMCFLOW_POWER_DMM_NAMES is set; ignoring IMCFLOW_POWER_DMM_NAME")
+    else:
+      POWER_DMM_NAMES = (POWER_DMM_NAME,)
     POWER_DMM_NPLC = _env_float("IMCFLOW_POWER_NPLC", 0.001, 0.0)
     POWER_DMM_INTERVAL_S = _env_float("IMCFLOW_POWER_INTERVAL_S", -1.0)
     POWER_DMM_SAMPLE_COUNT = _env_int("IMCFLOW_POWER_SAMPLE_COUNT", 50000, 1)
@@ -614,19 +637,22 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 }
     """)
 
-  def _power_server_ofname(self, scope, tile_idx=None):
+  def _power_server_ofname(self, scope, tile_idx=None, dmm_name=None):
     suffix = self.func_name
     if scope == "MODEL":
       suffix = "model"
     elif tile_idx is not None:
       suffix = f"{suffix}_tile{tile_idx}"
+    # Keep legacy single-DMM paths unchanged.  A plural list, including a
+    # one-item list, is an explicit request for name-qualified artifacts.
+    if dmm_name is not None and (POWER_DMM_NAMES_FROM_LIST or len(POWER_DMM_NAMES) > 1):
+      safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", dmm_name)
+      suffix = f"{suffix}_{safe_name}"
     return f"{POWER_SERVER_OUTPUT_PREFIX}_{suffix}.txt"
 
   def generatePowerMeasureStart(self, scope, tile_idx=None):
     """Start one legacy START/STARTED DMM session."""
     assert self.os == "linux" and POWER_MEASURE_ENABLED
-    server_ofname = json.dumps(self._power_server_ofname(scope, tile_idx))
-    dmm_name = json.dumps(POWER_DMM_NAME)
     start_func = (
         "dmm_start_current_now" if POWER_MEASURE_MODE == "now"
         else "dmm_start_current")
@@ -638,22 +664,30 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"// Legacy power measurement begin ({label})\n"
     code += "{\n"
     code.nextIndent()
-    code += "dmm_config_t _power_dmm_cfg = {\n"
+    code += "dmm_config_t _power_dmm_cfgs[] = {\n"
     code.nextIndent()
-    code += f".name = {dmm_name},\n"
-    code += f".nplc = {POWER_DMM_NPLC!r},\n"
-    code += f".interval_s = {POWER_DMM_INTERVAL_S!r},\n"
-    code += f".sample_count = {POWER_DMM_SAMPLE_COUNT},\n"
-    code += f".curr_range = {POWER_DMM_CURRENT_RANGE!r},\n"
-    code += f".reset = {1 if POWER_DMM_RESET else 0},\n"
-    code += ".ofname = NULL,\n"
-    code += f".server_ofname = {server_ofname},\n"
+    for dmm_name in POWER_DMM_NAMES:
+      server_ofname = json.dumps(
+          self._power_server_ofname(scope, tile_idx, dmm_name))
+      code += "{\n"
+      code.nextIndent()
+      code += f".name = {json.dumps(dmm_name)},\n"
+      code += f".nplc = {POWER_DMM_NPLC!r},\n"
+      code += f".interval_s = {POWER_DMM_INTERVAL_S!r},\n"
+      code += f".sample_count = {POWER_DMM_SAMPLE_COUNT},\n"
+      code += f".curr_range = {POWER_DMM_CURRENT_RANGE!r},\n"
+      code += f".reset = {1 if POWER_DMM_RESET else 0},\n"
+      code += ".ofname = NULL,\n"
+      code += f".server_ofname = {server_ofname},\n"
+      code.prevIndent()
+      code += "},\n"
     code.prevIndent()
     code += "};\n"
     code += (
         f"dmm_set_timeouts({POWER_DMM_START_TIMEOUT_S}, "
         f"{POWER_DMM_RESULT_TIMEOUT_S});\n")
-    code += f"if ({start_func}(1, &_power_dmm_cfg) != 0) {{\n"
+    code += (
+        f"if ({start_func}({len(POWER_DMM_NAMES)}, _power_dmm_cfgs) != 0) {{\n")
     code.nextIndent()
     code += (
         f'fprintf(stderr, "[POWER] {label} begin failed: %s\\n", '
@@ -682,9 +716,13 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += f"// Legacy power measurement end ({label})\n"
     code += "{\n"
     code.nextIndent()
+    expected_names = ", ".join(json.dumps(name) for name in POWER_DMM_NAMES)
+    code += f"const char *_power_dmm_expected[] = {{{expected_names}}};\n"
     code += "char _power_dmm_name[64];\n"
     code += "double _power_dmm_avg = 0.0;\n"
     code += "int _power_dmm_count = 0;\n"
+    code += f"for (int _power_dmm_i = 0; _power_dmm_i < {len(POWER_DMM_NAMES)}; ++_power_dmm_i) {{\n"
+    code.nextIndent()
     code += (
         f"int _power_dmm_rc = {result_func}(_power_dmm_name, "
         "sizeof(_power_dmm_name), &_power_dmm_avg, &_power_dmm_count);\n")
@@ -699,9 +737,22 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += "return;\n"
     code.prevIndent()
     code += "}\n"
+    code += "if (strcmp(_power_dmm_name, _power_dmm_expected[_power_dmm_i]) != 0) {\n"
+    code.nextIndent()
+    code += (
+        f'fprintf(stderr, "[POWER] {label} result order mismatch: expected %s got %s\\n", '
+        "_power_dmm_expected[_power_dmm_i], _power_dmm_name);\n")
+    code += "dmm_close();\n"
+    code += self.generateDevicePointerCleanup()
+    code += "g_imcflow_kernel_failed = 1;\n"
+    code += "return;\n"
+    code.prevIndent()
+    code += "}\n"
     code += (
         f'fprintf(stderr, "[POWER] {label}: %s avg=%.9g A samples=%d\\n", '
         "_power_dmm_name, _power_dmm_avg, _power_dmm_count);\n")
+    code.prevIndent()
+    code += "}\n"
     code += "dmm_close();\n"
     code.prevIndent()
     code += "}\n"

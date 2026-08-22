@@ -468,11 +468,23 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
   # interpreted without relying on the runner's (possibly different) env.
   power_enabled = os.getenv("IMCFLOW_MEASURE_POWER", "").strip().lower() in (
       "1", "true", "yes", "on")
+  power_dmm_names_raw = os.getenv("IMCFLOW_POWER_DMM_NAMES")
+  if power_dmm_names_raw is None:
+    power_dmm_names = [os.getenv("IMCFLOW_POWER_DMM_NAME", "DMM_GPIB3").strip()]
+    power_dmm_names_source = "IMCFLOW_POWER_DMM_NAME"
+  else:
+    power_dmm_names = [name.strip() for name in power_dmm_names_raw.split(",")]
+    power_dmm_names_source = "IMCFLOW_POWER_DMM_NAMES"
+
   metadata["power_measurement"] = {
     "enabled": power_enabled,
     "scope": os.getenv("IMCFLOW_POWER_SCOPE", "REGION").strip().upper(),
     "mode": os.getenv("IMCFLOW_POWER_MODE", "now").strip().lower(),
-    "dmm_name": os.getenv("IMCFLOW_POWER_DMM_NAME", "DMM_GPIB3").strip(),
+    # dmm_name remains for old consumers; dmm_names is the authoritative
+    # ordered config list used by generated C.
+    "dmm_name": power_dmm_names[0] if len(power_dmm_names) == 1 else None,
+    "dmm_names": power_dmm_names,
+    "dmm_names_source": power_dmm_names_source,
     "nplc": float(os.getenv("IMCFLOW_POWER_NPLC", "0.001")),
     "requested_interval_s": float(os.getenv("IMCFLOW_POWER_INTERVAL_S", "-1")),
     "sample_count": int(os.getenv("IMCFLOW_POWER_SAMPLE_COUNT", "50000")),

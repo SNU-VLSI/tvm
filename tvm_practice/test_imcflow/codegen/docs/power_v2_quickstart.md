@@ -116,6 +116,25 @@ DEBUG_EXE=0 CONSOLE_LOG_LEVEL=INFO IMCFLOW_BUGFIX=off \
 `DMM_BRIDGE_PORT`를 전달한다. 전체 evaluation과 board result 수집이 끝난 다음에만
 meas-2 raw file을 master로 SCP한다.
 
+### GPIB 1, 2, 4 동시 측정
+
+meas-2에 TVM checkout을 만들 필요는 없다. master에서 아래 스크립트를 실행하면
+TVM 소유 JSON을 meas-2의 `/tmp`로 복사한 뒤, `imcflow` conda 환경의 direct bridge를
+9911 포트에 시작한다. 기존 9910 GPIB3 bridge는 건드리지 않는다.
+
+```bash
+./scripts/start_power_bridge_meas2.sh \
+  --config power_config/dmm_gpib124.json --port 9911
+
+export DMM_BRIDGE_HOST=<meas-2-board-facing-ip>
+export DMM_BRIDGE_PORT=9911
+export IMCFLOW_POWER_DMM_NAMES=DMM_GPIB1,DMM_GPIB2,DMM_GPIB4
+```
+
+이 목록은 compile-time 설정이다. 변경하면 TVM compile과 host binary build를 다시
+실행해야 한다. run 결과에는 DMM별 raw `.txt`, tag sidecar, `plots/` PNG와
+`power_metadata.json`이 저장된다.
+
 ## 5. 설정
 
 | 환경변수 | 기본값 | 의미 |
@@ -124,6 +143,7 @@ meas-2 raw file을 master로 SCP한다.
 | `IMCFLOW_POWER_SCOPE` | `REGION` | `MODEL`, `REGION`, `TILE` |
 | `IMCFLOW_POWER_MODE` | `now` | `now` 또는 `wait` |
 | `IMCFLOW_POWER_DMM_NAME` | `DMM_GPIB3` | meas-2 config의 logical DMM name |
+| `IMCFLOW_POWER_DMM_NAMES` | unset | comma-separated ordered logical DMM list; 설정 시 singular를 대체 |
 | `IMCFLOW_POWER_NPLC` | `0.001` | DMM integration time |
 | `IMCFLOW_POWER_INTERVAL_S` | `-1` | sample interval; 음수는 `MIN` |
 | `IMCFLOW_POWER_SAMPLE_COUNT` | `50000` | DMM acquisition buffer 목표 count |
