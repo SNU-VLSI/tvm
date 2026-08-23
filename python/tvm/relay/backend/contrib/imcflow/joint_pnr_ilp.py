@@ -1438,6 +1438,43 @@ class JointPnRILP:
                         f"P2c_row_cap_{r}"
                     )
 
+                # P2d (launch-aware only): HARD per-core CONV cap. The IMCE LLVM
+                # backend has no stack (no storeRegToStackSlot); a core hosting too
+                # many qconv chains blows the register budget and clang aborts with
+                # "Target didn't implement TargetInstrInfo::storeRegToStackSlot!".
+                # P2b caps call_nodes, but a qconv-with-postop is ONE call_node that
+                # expands to a register-heavy conv+requant+activation chain, so the
+                # call-node count under-counts register pressure. The P7 cycle-break
+                # (below) rebalances load and can over-concentrate convs (observed:
+                # imce_3_1/imce_1_1 got 3-4 conv chains -> spill crash). The stock
+                # (non-P7) placement's proven-compilable max is 3 conv chains/core
+                # (ResNet8 region2 imce_2_1). Cap convs/core at that; overridable via
+                # IMCFLOW_PNR_CONV_CAP. Only convs are counted (adds/vecops are light).
+                def _is_conv_node(nid):
+                    try:
+                        from tvm.relay.op.contrib.imcflow import CustomIDToNode as _C2N
+                        node = _C2N().get(getInnerNodeID(nid))
+                        if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+                            return 'qconv' in node.op.name
+                        # composite qconv2d-with-postop is a Call to a Function
+                        if isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
+                            comp = node.op.attrs.get('Composite', '') if node.op.attrs else ''
+                            return 'qconv' in str(comp)
+                    except Exception:
+                        pass
+                    return False
+                conv_calls = [n for n in real_calls if _is_conv_node(n)]
+                conv_cap = int(os.environ.get("IMCFLOW_PNR_CONV_CAP", "3"))
+                debug_print(f"[JointPnRILP] P2d per-core CONV cap = {conv_cap} "
+                            f"({len(conv_calls)}/{len(real_calls)} calls are convs)")
+                if conv_calls:
+                    for v in self.imce_nodes:
+                        self.prob += (
+                            pulp.lpSum(self.p[n][v] for n in conv_calls
+                                       if v in self.p.get(n, {})) <= conv_cap,
+                            f"P2d_conv_cap_{v.row}_{v.col}"
+                        )
+
                 # P5 (launch-aware only): a data hand-off between two DISTINCT
                 # placed nodes must NOT be co-located on one core. The codegen's
                 # SEND/LoadLB path routes every inter-op data flow over the NoC
@@ -1514,6 +1551,61 @@ class JointPnRILP:
                         )
                 debug_print(f"[JointPnRILP] P6 launch-aware fan-out anti-affinity: "
                             f"{len(sib_pairs)} consumer-sibling pairs forced off-core")
+
+                # P7 (launch-aware only): forbid a CORE-PAIR 2-CYCLE within a wave.
+                # The codegen emits every inter-core data hand-off as a bulk
+                # SEND-then-RECV (a node sends its whole output, then receives).
+                # If two same-wave data edges run in OPPOSITE directions between
+                # the same core pair -- edge e1 = a->b with a on X, b on Y, and
+                # edge e2 = c->d with c on Y, d on X -- then core X must finish
+                # SENDing e1 before it RECVs e2, while core Y must finish SENDing
+                # e2 before it RECVs e1. With depth-2 router RECV fifos neither
+                # side drains and both wedge (observed: imce_0_1<->imce_0_2 in
+                # region2, POLLING ERROR state=0x1). This is an application-level
+                # circular wait, independent of the RTL BUGFIX defines. Break the
+                # cycle at placement: forbid the exact 4-way assignment that puts
+                # {a,d} on one core and {b,c} on the other.
+                #
+                # We only consider DISTINCT data edges (e1 != e2); the P5 rule
+                # already forbids co-locating the two endpoints of ONE edge, so a
+                # single edge cannot self-cycle. Edges sharing an endpoint are
+                # skipped (they cannot form a clean 2-core cycle). Restricted to
+                # same-wave edges: nodes in different waves are never resident
+                # simultaneously, so no runtime cycle. Uses the same `placed`,
+                # `pin_pairs`, and `data_pairs` derived above (P5).
+                cyc_edges = sorted(data_pairs, key=lambda p: (str(p[0]), str(p[1])))
+                n_p7 = 0
+                for i in range(len(cyc_edges)):
+                    a, b = cyc_edges[i]
+                    wa = node_wave.get(a, 0)
+                    for j in range(i + 1, len(cyc_edges)):
+                        c, d = cyc_edges[j]
+                        # opposing pair candidate: e1=a->b, e2=c->d with the two
+                        # cores crossed (a,d) vs (b,c); require 4 distinct nodes
+                        if len({a, b, c, d}) != 4:
+                            continue
+                        # only same-wave edges can cycle at runtime
+                        if node_wave.get(c, 0) != wa or node_wave.get(b, 0) != wa \
+                                or node_wave.get(d, 0) != wa:
+                            continue
+                        for vx in self.imce_nodes:
+                            if vx not in self.p.get(a, {}) or vx not in self.p.get(d, {}):
+                                continue
+                            for vy in self.imce_nodes:
+                                if vy == vx:
+                                    continue
+                                if vy not in self.p.get(b, {}) or vy not in self.p.get(c, {}):
+                                    continue
+                                # forbid a,d -> vx AND b,c -> vy simultaneously
+                                self.prob += (
+                                    self.p[a][vx] + self.p[d][vx]
+                                    + self.p[b][vy] + self.p[c][vy] <= 3,
+                                    f"P7_no_core_cycle_{hash((a, b, c, d)) % 100000}"
+                                    f"_{vx.row}{vx.col}_{vy.row}{vy.col}"
+                                )
+                                n_p7 += 1
+                debug_print(f"[JointPnRILP] P7 launch-aware core-cycle prohibition: "
+                            f"{n_p7} constraints over {len(cyc_edges)} data edges")
 
         # P3: Split same as producer (skip pre-assigned splits with VAR producers)
         for split_id in gi.split_nodes:
@@ -1906,8 +1998,19 @@ class JointPnRILP:
         self.prob.writeLP("/tmp/joint_pnr_debug.lp")
         debug_print(f"[JointPnRILP] Dumped ILP to /tmp/joint_pnr_debug.lp")
 
-        # Solve
-        solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=120)
+        # Solve. CBC is non-deterministic by default (parallel threads + heuristic
+        # order under a time limit -> different equal-objective optima run-to-run).
+        # The codegen REQUIRES a reproducible placement (byte-det gate) and some
+        # optima overflow the per-row inode DATA_MEM budget while others fit, so a
+        # stable pick is a correctness requirement, not just tidiness. Force
+        # single-threaded + fixed random seeds so the same LP always yields the same
+        # solution. (Objective still has the spread tie-break; the seed pins the
+        # choice among remaining ties.) Overridable via IMCFLOW_PNR_CBC_THREADS.
+        _threads = int(os.environ.get("IMCFLOW_PNR_CBC_THREADS", "1"))
+        solver = pulp.PULP_CBC_CMD(
+            msg=0, timeLimit=120, threads=_threads,
+            options=["randomSeed", "42", "randomCbcSeed", "42"],
+        )
         status = self.prob.solve(solver)
 
         status_str = pulp.LpStatus[status]

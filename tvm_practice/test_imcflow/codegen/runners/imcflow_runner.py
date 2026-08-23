@@ -446,9 +446,26 @@ class RTLRunner(ImcFlowRunner):
         if override:
             return override
         imcflow_dir = os.environ.get("IMCFLOW_DIR", "/root/project/imcflow")
-        return os.path.join(
+        default_dir = os.path.join(
             imcflow_dir, "pmap", "ISA_sim", "gem5", "tests", "imcflow", "rtl_runner"
         )
+        # Guardrail (warn-only; does NOT change the selected dir): the default
+        # `rtl_runner` simv is NOT compiled with +BIG_IMEM (INODE_IMEM_SIZE=1024).
+        # If codegen is BIG_IMEM (IMCFLOW_BIG_IMEM=1) but no runner is pinned, the
+        # host's DMEM backdoor writes decode against 1024B IMEM windows and land
+        # ~0x1C00 bytes off -> uninitialized policy DMEM -> X policy -> router
+        # crossbar valid[*]=X ($fatal). Pin IMCFLOW_RTL_RUNNER_DIR at a BIG_IMEM
+        # runner (e.g. .../rtl_runner_bigimem). Lever-OFF (non-BIG_IMEM) is
+        # unaffected: the warning only fires when IMCFLOW_BIG_IMEM=1.
+        if os.environ.get("IMCFLOW_BIG_IMEM", "0") == "1":
+            print(
+                "[RTLRunner][WARN] IMCFLOW_BIG_IMEM=1 but IMCFLOW_RTL_RUNNER_DIR is "
+                f"unset; defaulting to non-BIG_IMEM runner '{default_dir}'. This "
+                "simv decodes INODE_IMEM_SIZE=1024 and will mis-place BIG_IMEM DMEM "
+                "loads (uninitialized policy -> crossbar X). Pin a +BIG_IMEM runner "
+                "(e.g. .../rtl_runner_bigimem) via IMCFLOW_RTL_RUNNER_DIR."
+            )
+        return default_dir
 
     @property
     def timeout(self) -> int:
