@@ -898,13 +898,17 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # imem write
     func_name = self.codeblocks.func_name
     if self.n_waves > 1:
-      # C1b (C) wave-launch: WR_IMEM only wave-0 cores here (INIT/PROGRAM launch);
-      # waves 1+ are re-WR_IMEM'd on the EXEC (P1 re-invoke) path in
-      # _emit_wave_launches(). Each core loads its wave-0 IMEM blob.
-      for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
-        if imce in self.wave_cores.get(0, set()):
-          block = WriteIMEMBlock(inst_edge, f"imem write w0: {imce.name}", wave=0)
-          self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+      # C1b (C) wave-launch: with >1 wave, EVERY wave's WR_IMEM+COMPUTE (including
+      # wave 0) is emitted in its own EXEC launch segment by emit_wave_launches(),
+      # NOT in INIT. Reason (RTL-proven): IMCE STOP is launch-terminal, and the INIT
+      # phase is terminated by its OWN DONE (sync_inrt_clear at INIT end) before any
+      # EXEC streaming runs. If wave-0 COMPUTE were enabled in INIT, those imces STOP
+      # at the INIT-end DONE and the wave-0 data stream (an EXEC segment = a LATER
+      # host RUN) then arrives at STOPPED cores -> they never compute -> X/wedge
+      # (region2: wave0 COMPUTE @ end of GO#1, wave0 stream in GO#2 -> imce_1_1 X).
+      # So INIT does ONLY policy + weights (WR_IMCU, resident); each wave's
+      # WR_IMEM+COMPUTE+stream stay together in one segment. No WR_IMEM here.
+      pass
     else:
       for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
         block = WriteIMEMBlock(inst_edge, f"imem write: {imce.name}")
@@ -968,10 +972,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     active_imces = DevConfig().ActiveIMCEPerFunc[func_name]
     for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
       if imce in active_imces:
-        # C1b (C) wave-launch: in INIT only enable COMPUTE for wave-0 cores;
-        # waves 1+ are COMPUTE-enabled on the EXEC path per wave. Single-wave
-        # regions enable all active cores here (stock, byte-identical).
-        if self.n_waves > 1 and imce not in self.wave_cores.get(0, set()):
+        # C1b (C) wave-launch: with >1 wave, NO COMPUTE is enabled in INIT -- every
+        # wave (incl. wave 0) enables its cores in its own EXEC launch segment so
+        # COMPUTE and the wave's data stream share ONE host RUN (STOP is
+        # launch-terminal; INIT ends with its own DONE). Single-wave regions enable
+        # all active cores here (stock, byte-identical).
+        if self.n_waves > 1:
           continue
         policy_addr = inst_edge.policy_info[0].address # get first policy address
         block = IMCEComputeBlock(policy_addr, f"{imce.name} compute")
@@ -1038,32 +1044,32 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # IMCE COMPUTE from its wave-k IMEM (STOP-terminal avoided). Policy + weights
     # loaded ONCE in the PROGRAM (INIT) launch; only WR_IMEM(wave k) re-runs here.
     #
-    # Wave 0: its WR_IMEM+COMPUTE were done in INIT (PROGRAM). Here we emit its
-    # streaming then its terminator (this RUN = wave 0). Waves 1..N-1: each emits
-    # re-WR_IMEM + COMPUTE + streaming + terminator (each its own RUN). The LAST
-    # wave's terminator is emitted by finalize() (END phase), matching the stock
-    # single-wave region's single END terminator.
-    _flush_wave_stream(0)
-    # wave-0 terminator (only when there are further waves; else finalize() ends).
-    if self.n_waves > 1:
-      self.sync_inrt_clear(CodePhase.EXEC)
-
-    for k in range(1, self.n_waves):
+    # EVERY wave (including wave 0) emits its WR_IMEM + COMPUTE-enable + streaming
+    # in ONE EXEC launch segment, so a wave's COMPUTE and the data stream it
+    # consumes share a single host RUN. This is REQUIRED because IMCE STOP is
+    # launch-terminal AND the INIT phase is closed by its own DONE before any EXEC
+    # runs: if wave-0 COMPUTE were enabled in INIT (the old code), those cores STOP
+    # at the INIT-end DONE and wave-0's stream (a later RUN) hits stopped cores -> X.
+    # INIT now does only policy + weights (WR_IMCU). Each wave segment ends with
+    # sync_inrt_clear (DONE/INTRT/HALT); the host re-invokes RUN once per wave
+    # (ext_codegen invoke count == n_waves). The LAST wave's terminator is emitted
+    # by finalize() (END phase), matching the stock single-wave region's single END.
+    for k in range(0, self.n_waves):
       wcores = self.wave_cores.get(k, set())
       if not wcores:
         _flush_wave_stream(k)
         if k != self.n_waves - 1:
           self.sync_inrt_clear(CodePhase.EXEC)
         continue
-      # re-program IMEM for this wave's cores with their wave-k blob (runs on the
-      # wave-k RUN re-invoke, after the PC resumes past wave k-1's HALT).
+      # (re-)program IMEM for this wave's cores with their wave-k blob. Runs on the
+      # wave-k RUN (PC resumes past wave k-1's HALT, or past INIT's DONE for k==0).
       for imce, inst_edge in sorted(inst_dict.items(), key=lambda x: x[0].name):
         if imce in wcores:
           self.codeblocks.append(
               imce.master(),
               WriteIMEMBlock(inst_edge, f"imem write w{k}: {imce.name}", wave=k),
               CodePhase.EXEC)
-      # sync so all inodes finish re-WR_IMEM before enabling compute.
+      # sync so all inodes finish (re-)WR_IMEM before enabling compute.
       _barrier(f"wave {k}: sync after re-WR_IMEM, before COMPUTE")
       # enable compute for this wave's active cores (fresh launch -> re-entrant).
       for imce, inst_edge in sorted(inst_dict.items(), key=lambda x: x[0].name):
@@ -2001,30 +2007,28 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     EXEC/EXEC_TILE (data-streaming) blocks are wave-deferred by their edge wave.
 
-    INIT-phase const/config SENDs are wave-split too, but asymmetrically: a const
-    SEND for a WAVE-0 node stays in the INIT preamble (its consumer imce is loaded
-    + COMPUTE-enabled by the PROGRAM launch, so it can drain the const during INIT).
-    A const SEND for a WAVE-k (k>0) node MUST be deferred into wave-k's EXEC segment
-    -- the imce codegen stamps that node's RecvConstBlock into the wave-k IMEM
-    (current_wave, visit_call), so the consumer only executes the matching RECV
-    after wave-k's re-WR_IMEM + COMPUTE. If such a SEND stayed in INIT it would
-    (for packed BN/minmax post-op consts) issue a per-word pack-const rendezvous
-    STANDBY(imce, ...) against an imce that is still running its wave-0 program and
-    will not reach the matching RecvConstBlock until wave-k -> the inode wedges at
-    the wave-0 preamble forever (region2 MERGE=2 wave-1 deadlock: inode_2_0 stuck
-    at STANDBY(11,1) for node80's wave-1 fused_scale, so it never sends node91's
-    wave-0 min/max and imce_2_2 starves at recv_cfg). Deferring the wave-k const
-    SEND to wave-k's segment (emitted as EXEC after WR_IMEM+COMPUTE by
-    _flush_wave_stream) restores the producer/consumer wave symmetry.
+    INIT-phase const/config SENDs are ALSO deferred to their edge's wave segment
+    under merge, for EVERY wave (including wave 0). Reason: with the wave-launch
+    segment structure, INIT does ONLY policy + weights (WR_IMCU) -- NO imce is
+    COMPUTE-enabled during INIT; each wave's WR_IMEM+COMPUTE+stream live together in
+    that wave's own EXEC launch segment (see initialize()/emit_wave_launches). The
+    imce codegen stamps each node's RecvConstBlock into its wave-k IMEM
+    (current_wave, visit_call), so the matching const RECV only runs after wave-k's
+    COMPUTE. A const SEND left in INIT would issue its (pack-const) rendezvous
+    STANDBY(imce, ...) against a core that is not yet enabled -> the inode wedges in
+    the WR_IMCU/INIT segment with no consumer to drain it (region2: inode_3_0/0_0
+    stuck at STANDBY(1) in GO#1 while all imces IDLE). Deferring the const SEND to
+    its wave segment (as EXEC, flushed after that wave's WR_IMEM+COMPUTE) matches the
+    imce-side RecvConstBlock, for wave 0 and wave k alike.
 
     Off merge (n_waves==1, _defer_streams False) -> immediate append =
-    byte-identical. Wave-0 INIT sends -> immediate INIT append (unchanged)."""
+    byte-identical (INIT const sends stay in the INIT preamble as before)."""
     if self._defer_streams and phase in (CodePhase.EXEC, CodePhase.EXEC_TILE):
       self._wave_streams.setdefault(wave, []).append((hid, phase, block))
-    elif self._defer_streams and phase == CodePhase.INIT and wave > 0:
-      # Wave-k (k>0) const/config SEND: emit it inside wave-k's launch segment
-      # (as EXEC) so it lands AFTER the consumer imce is re-WR_IMEM'd + COMPUTE-
-      # enabled for wave-k, matching the imce-side wave-k RecvConstBlock.
+    elif self._defer_streams and phase == CodePhase.INIT:
+      # Merged region: NO imce is COMPUTE-enabled in INIT (weights-only). Emit this
+      # const/config SEND inside its wave's launch segment (as EXEC) so it lands
+      # AFTER that wave's WR_IMEM+COMPUTE, matching the imce wave-k RecvConstBlock.
       self._wave_streams.setdefault(wave, []).append((hid, CodePhase.EXEC, block))
     else:
       self.codeblocks.append(hid, block, phase)
