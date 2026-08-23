@@ -1999,13 +1999,32 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     regions (flushed in emit_wave_launches). Off merge -> immediate append =
     byte-identical.
 
-    ONLY EXEC/EXEC_TILE (data-streaming) blocks are wave-deferred. INIT-phase
-    sends (const/config/weight setup) belong to the region preamble that runs
-    ONCE before any wave computes (config/policy is the static per-core union
-    under the wave-launch simplification), so they must append immediately in
-    INIT -- deferring them into an EXEC-time flush would move setup after compute
-    enable and corrupt the launch. So the wave split applies to data only."""
+    EXEC/EXEC_TILE (data-streaming) blocks are wave-deferred by their edge wave.
+
+    INIT-phase const/config SENDs are wave-split too, but asymmetrically: a const
+    SEND for a WAVE-0 node stays in the INIT preamble (its consumer imce is loaded
+    + COMPUTE-enabled by the PROGRAM launch, so it can drain the const during INIT).
+    A const SEND for a WAVE-k (k>0) node MUST be deferred into wave-k's EXEC segment
+    -- the imce codegen stamps that node's RecvConstBlock into the wave-k IMEM
+    (current_wave, visit_call), so the consumer only executes the matching RECV
+    after wave-k's re-WR_IMEM + COMPUTE. If such a SEND stayed in INIT it would
+    (for packed BN/minmax post-op consts) issue a per-word pack-const rendezvous
+    STANDBY(imce, ...) against an imce that is still running its wave-0 program and
+    will not reach the matching RecvConstBlock until wave-k -> the inode wedges at
+    the wave-0 preamble forever (region2 MERGE=2 wave-1 deadlock: inode_2_0 stuck
+    at STANDBY(11,1) for node80's wave-1 fused_scale, so it never sends node91's
+    wave-0 min/max and imce_2_2 starves at recv_cfg). Deferring the wave-k const
+    SEND to wave-k's segment (emitted as EXEC after WR_IMEM+COMPUTE by
+    _flush_wave_stream) restores the producer/consumer wave symmetry.
+
+    Off merge (n_waves==1, _defer_streams False) -> immediate append =
+    byte-identical. Wave-0 INIT sends -> immediate INIT append (unchanged)."""
     if self._defer_streams and phase in (CodePhase.EXEC, CodePhase.EXEC_TILE):
       self._wave_streams.setdefault(wave, []).append((hid, phase, block))
+    elif self._defer_streams and phase == CodePhase.INIT and wave > 0:
+      # Wave-k (k>0) const/config SEND: emit it inside wave-k's launch segment
+      # (as EXEC) so it lands AFTER the consumer imce is re-WR_IMEM'd + COMPUTE-
+      # enabled for wave-k, matching the imce-side wave-k RecvConstBlock.
+      self._wave_streams.setdefault(wave, []).append((hid, CodePhase.EXEC, block))
     else:
       self.codeblocks.append(hid, block, phase)
