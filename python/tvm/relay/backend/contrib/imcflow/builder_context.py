@@ -121,6 +121,16 @@ class BuilderContext:
     node_id = self.curr_composite_id or getNodeID(self.call)
     return DevConfig().get_hw_node(node_id)
 
+  def get_wave(self):
+    """C1b (C): get the launch WAVE index for this call, mirroring get_hid()'s
+    node resolution (composite context first). Reads the graph-node-keyed wave map
+    populated by joint_pnr_ilp.update_hw_node_map. Returns 0 when the map is empty
+    (every non-merged region, and any node with no recorded wave) -> wave-0 =
+    stock single-launch, so block wave-tagging is inert off merge mode."""
+    node_id = self.curr_composite_id or getNodeID(self.call)
+    gwaves = DevConfig().GraphNodeToWavePerFunc.get(self.func_name, {})
+    return gwaves.get(node_id, 0)
+
   def get_graph_node_id(self):
     """Get graph node ID for this call.
 

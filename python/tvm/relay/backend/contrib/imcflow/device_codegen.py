@@ -133,10 +133,60 @@ class DeviceCodegen:
     logging.info(
         f"Generating {self.target} code for function: {func_name} in {self.func_dir}")
 
+    # C1b (C) wave-launch: for a multi-wave IMCE region, emit + compile one
+    # program per (core, wave) so each wave has its own IMEM blob (the inode
+    # re-WR_IMEMs the core per wave under conv-cap=1, weights unchanged). The
+    # inode target is always single-program (policy/weights static), and any
+    # single-wave region (every non-merged region) takes the stock path below ->
+    # byte-identical.
+    waves = codeblock_manager.wave_indices() if self.target == "imce" else [0]
+    if self.target == "imce" and len(waves) > 1:
+      obj_map = self._handle_wave_code_generation(func_name, codeblock_manager, waves)
+      self.update_device_config_with_obj_info(func_name, obj_map, wave_aware=True)
+      return
+
     code = codeblock_manager.generate()
     cpp_name = self.save_target_code_to_file(code)
     obj_map = self.compile_target_code(cpp_name)
     self.update_device_config_with_obj_info(func_name, obj_map)
+
+  def _handle_wave_code_generation(self, func_name, codeblock_manager, waves):
+    """C1b (C): generate + compile per-(core, wave) IMCE programs. Returns
+    obj_map keyed by (NodeID, wave) -> host object file. Each wave gets its own
+    imce_wave{k}.cpp (wave-filtered body) compiled per core, so a core reused
+    across waves yields a DISTINCT IMEM blob per wave."""
+    obj_map = {}
+    for k in waves:
+      code = codeblock_manager.generate(wave=k)
+      cpp_name = f"{self.target}_wave{k}.cpp"
+      with open(os.path.join(self.func_dir, cpp_name), "w") as f:
+        f.write(code)
+      for node in NodeID.imces():
+        # Only cores that actually have wave-k code produce a blob for wave k.
+        # Detect via a nonempty per-core wave-k body (cheap: check tagged blocks).
+        if not self._core_has_wave(codeblock_manager, node, k):
+          continue
+        stem = f"{node.name}_imem_wave{k}"
+        obj_file = f"{stem}.o"
+        out_file = f"{stem}.out"
+        bin_file = f"{stem}.bin"
+        host_obj_file = f"{stem}.host.o"
+        self.compile_cpp_to_object(cpp_name, obj_file, node)
+        self.link_object_to_binary(obj_file, out_file)
+        self.extract_text_section(out_file, bin_file)
+        self.pad_imce_bin_inplace(bin_file, inst_size=4, stride=32)
+        self.flip_byte_order(bin_file)
+        self.create_host_object(bin_file, host_obj_file)
+        obj_map[(node, k)] = host_obj_file
+    return obj_map
+
+  @staticmethod
+  def _core_has_wave(codeblock_manager, node, wave):
+    for phase in codeblock_manager.blocks[node]:
+      for cb in codeblock_manager.blocks[node][phase]:
+        if getattr(cb, "_wave", 0) == wave:
+          return True
+    return False
 
   def save_target_code_to_file(self, code: str):
     cpp_name = f"{self.target}.cpp"
@@ -399,7 +449,26 @@ class DeviceCodegen:
         f"render on a separate IMCE. obj={obj_file}"
       )
 
-  def update_device_config_with_obj_info(self, func_name, obj_map: dict[NodeID, str]):
+  def update_device_config_with_obj_info(self, func_name, obj_map: dict[NodeID, str],
+                                         wave_aware: bool = False):
+    if wave_aware:
+      # C1b (C): obj_map keyed by (NodeID, wave). Allocate a DISTINCT IMEM
+      # DataBlock per (core, wave) into the owning inode's data region and record
+      # it on the core's InstEdgeInfo per-wave map. All waves' blobs coexist in
+      # the inode data region (additive) -- MERGE=2 region2 inode budget checked
+      # (~33KB << 64KB). Policy/weights stay single (loaded once).
+      for (node, wave), obj_file in obj_map.items():
+        size = self.get_object_size(obj_file, key="data")
+        self._check_imem_capacity(node, obj_file, size, func_name=func_name)
+        if size is not None:
+          db = DataBlock(f"{node.name}_imem_wave{wave}", size)
+          self.allocate_db(db, f"{node.master().name}_data", "init")
+          self.insert_wave_db_to_inst_edge_info(func_name, db, node, wave)
+        else:
+          print(f"Failed to allocate imem for {obj_file}")
+      print(DevConfig().CurrFuncMemLayout)
+      return
+
     for node, obj_file in obj_map.items():
       size = self.get_object_size(obj_file, key="data")
       self._check_imem_capacity(node, obj_file, size, func_name=func_name)
@@ -420,3 +489,13 @@ class DeviceCodegen:
   def insert_db_to_inst_edge_info(self, func_name:str , db: DataBlock, node: NodeID):
     edge_info = DevConfig().get_inst_edge_info(func_name, node)
     edge_info.set_data_block(db)
+
+  def insert_wave_db_to_inst_edge_info(self, func_name: str, db: DataBlock,
+                                       node: NodeID, wave: int):
+    """C1b (C): attach a per-wave IMEM DataBlock to the core's InstEdgeInfo.
+    Also seed the legacy single data_block from wave 0 so any un-migrated reader
+    (which expects .data_block) still sees a valid blob."""
+    edge_info = DevConfig().get_inst_edge_info(func_name, node)
+    edge_info.set_wave_data_block(wave, db)
+    if edge_info.data_block is None or wave == 0:
+      edge_info.set_data_block(db)

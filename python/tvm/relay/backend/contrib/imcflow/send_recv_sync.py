@@ -46,6 +46,17 @@ PACK_CONST_SYNC_FLAG = 253
 # collides. Lever OFF -> the window is not emitted -> byte-identical.
 PACK_BN_DATA_SYNC_FLAG = 252
 
+# C1b (C) wave-launch realization: dedicated IMCE-flag value for the per-wave
+# completion rendezvous. A core reused across launch waves SETFLAGs this as the
+# last act of its wave-(k-1) program (after its final SEND, before STOP); the
+# owning inode STANDBYs on it before re-WR_IMEM(wave k), so the previous wave's
+# program has fully run before its IMEM is overwritten (WR_IMEM-vs-in-flight-
+# fetch race fix). Reserved like 252/253/254/255: under REGION_MERGE (the only
+# path that uses waves) the pair-UUID cap drops to 249 so no data pair aliases
+# it. Set on the IMCE flag register (distinct from the INODE 254/255 barrier
+# senses). Off merge -> never emitted -> byte-identical.
+WAVE_DONE_FLAG = 250
+
 
 class SendRecvPair:
     """Represents a send-recv pair with multicast support"""
@@ -231,8 +242,13 @@ class SendRecvPairManager:
         # rendezvous (PACK_CONST_SYNC_FLAG), and 252 is reserved for the de-fused
         # standalone-BN data rendezvous (PACK_BN_DATA_SYNC_FLAG), so pair UUIDs
         # must stay <= 251. residual_in_region keeps its prior <= 253 cap (no
-        # pack-const pacing).
-        if pack_bn_minmax_mode():
+        # pack-const pacing). Under REGION_MERGE (wave-launch), 250 is additionally
+        # reserved for the per-wave completion rendezvous (WAVE_DONE_FLAG), so the
+        # pair cap drops one further to 249. Merge mode implies pack+resid+
+        # inode_buffer, so this branch must be checked BEFORE pack_bn_minmax_mode.
+        if region_merge_mode():
+            _uuid_max = 249
+        elif pack_bn_minmax_mode():
             _uuid_max = 251
         elif residual_in_region_mode():
             _uuid_max = 253

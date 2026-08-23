@@ -62,13 +62,19 @@ class PolicyUpdateBlock(InodeCodeBlock):
 class WriteIMEMBlock(InodeCodeBlock):
   """ Code block for writing IMEM given InstEdgeInfo """
 
-  def __init__(self, edge_info: InstEdgeInfo, annotation: str = ""):
+  def __init__(self, edge_info: InstEdgeInfo, annotation: str = "", wave: int = None):
     super().__init__(annotation)
     self.edge_info = edge_info
+    # C1b (C): when wave is given, load THAT wave's IMEM blob (per-(core,wave)
+    # program). wave=None -> the single/legacy .data_block (byte-identical stock).
+    self.wave = wave
     self._build()
 
   def _build(self):
-    db = self.edge_info.data_block
+    if self.wave is not None:
+      db = self.edge_info.get_wave_data_block(self.wave)
+    else:
+      db = self.edge_info.data_block
     policy_addr = self.edge_info.policy_info[0].address
 
     var = UniqueVar("imem_start_address", dtype="int")
@@ -1622,14 +1628,17 @@ class SyncAllINodes(InodeCodeBlock):
       self.body.add(TextBlock(f"__asm__ volatile({nops});"))
 
 class Standby(InodeCodeBlock):
-  def __init__(self, node_ids: List[NodeID], annotation: str = ""):
+  def __init__(self, node_ids: List[NodeID], annotation: str = "", uuid: int = None):
     super().__init__(annotation)
     self.node_ids = node_ids
+    # uuid=None -> stock 255 (byte-identical for all existing callers). C1b (C)
+    # wave-launch passes WAVE_DONE_UUID to wait on a specific imce completion flag.
+    self.uuid = uuid
     self._build()
 
   def _build(self):
     # Use UUID=255 for INODE-to-INODE sync to avoid conflict with SendRecvPairManager UUIDs (1-254)
-    INODE_SYNC_UUID = 255
+    INODE_SYNC_UUID = 255 if self.uuid is None else self.uuid
     for node in self.node_ids:
       self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {INODE_SYNC_UUID});"))
 
@@ -1736,7 +1745,10 @@ class InodeCodeBlockManager(NodeCodeBlockManager):
 
     return code
 
-  def generate_body(self) -> str:
+  def generate_body(self, wave=None) -> str:
+    # C1b (C): inode programs are single (policy/weights static; per-wave IMEM
+    # swapping is IMCE-only), so `wave` is accepted for signature parity with the
+    # base manager but ignored -- the inode body is always emitted whole.
     code = ""
     first = True
     for node in self.nodes:

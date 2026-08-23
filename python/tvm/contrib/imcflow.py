@@ -1084,8 +1084,29 @@ class EdgeInfo:
 
 
 class InstEdgeInfo(EdgeInfo):
+  # C1b (C) wave-launch: a core reused across launch waves needs a DISTINCT IMEM
+  # program per wave (weights/policy stay single -- conv-cap=1 keeps weights
+  # resident, policy is the per-core static union). `wave_data_blocks[k]` = the
+  # IMEM DataBlock for wave k; `.data_block` (base) remains the wave-0 blob for
+  # any un-migrated reader. Empty in every single-launch region -> those readers
+  # keep using `.data_block` exactly as before (byte-identical).
+  def set_wave_data_block(self, wave: int, db: "DataBlock"):
+    if not hasattr(self, "wave_data_blocks") or self.wave_data_blocks is None:
+      self.wave_data_blocks = {}
+    self.wave_data_blocks[wave] = db
+
+  def get_wave_data_block(self, wave: int):
+    wdb = getattr(self, "wave_data_blocks", None)
+    if wdb is not None and wave in wdb:
+      return wdb[wave]
+    # Fall back to the single (wave-0) blob for single-launch regions.
+    return self.data_block
+
   def __str__(self):
     policy_info_str = ", ".join(str(entry) for entry in self.policy_info)
+    wdb = getattr(self, "wave_data_blocks", None)
+    if wdb:
+      return f"InstEdgeInfo([{policy_info_str}], waves={{{', '.join(f'{k}:{v}' for k,v in sorted(wdb.items()))}}})"
     return f"InstEdgeInfo([{policy_info_str}], {self.data_block})"
 
   def __repr__(self):
@@ -1384,6 +1405,16 @@ class ImcflowDeviceConfig:
         MemoryRegionEntry("inode_3_0_data", ImcflowDeviceConfig.INODE_DATA_MEM_SIZE),
     )
     self.ActiveIMCEPerFunc = {}
+    # C1b (C) wave-launch realization: {func_name: {physical NodeID -> set(wave)}}.
+    # Populated by joint_pnr_ilp.update_hw_node_map from the ILP node_to_wave. Empty
+    # / single-wave (all {0}) when the region-merge lever is off, so it is inert on
+    # non-merged paths. Codegen reads it to split the region into per-wave launches.
+    self.NodeToWavePerFunc = {}
+    # C1b (C): graph-node-keyed wave map {func_name: {graph_node_id -> wave int}}
+    # (inner_id + outer_id dual key, same convention as HWNodeMap). The IMCE
+    # codeblock builder resolves each node's launch wave from this to tag blocks
+    # for per-(core,wave) IMEM splitting. Empty / all-0 off merge -> inert.
+    self.GraphNodeToWavePerFunc = {}
     self.NoCPaths = {}
     self.DataBlocks = {}
     self.ImcflowFuncMap = {}  # {func_name: FunctionInfo}
@@ -1818,6 +1849,8 @@ class ImcflowDeviceConfig:
         'InstEdgeInfoDict': self.InstEdgeInfoDict,
         'MemLayout': self.MemLayout,
         'ActiveIMCEPerFunc': self.ActiveIMCEPerFunc,
+        'NodeToWavePerFunc': self.NodeToWavePerFunc,
+        'GraphNodeToWavePerFunc': self.GraphNodeToWavePerFunc,
         'NoCPaths': self.NoCPaths,
         'DataBlocks': self.DataBlocks,
         'ImcflowFuncMap': self.ImcflowFuncMap,
@@ -1869,6 +1902,9 @@ class ImcflowDeviceConfig:
     self.InstEdgeInfoDict = state['InstEdgeInfoDict']
     self.MemLayout = state['MemLayout']
     self.ActiveIMCEPerFunc = state['ActiveIMCEPerFunc']
+    # Backward-compatible: older pickles predate the wave maps.
+    self.NodeToWavePerFunc = state.get('NodeToWavePerFunc', {})
+    self.GraphNodeToWavePerFunc = state.get('GraphNodeToWavePerFunc', {})
     self.NoCPaths = state['NoCPaths']
     self.DataBlocks = state['DataBlocks']
     self.ImcflowFuncMap = state['ImcflowFuncMap']

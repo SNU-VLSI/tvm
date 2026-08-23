@@ -37,6 +37,32 @@ from tvm.relay.backend.contrib.imcflow.transform_utils import *
 
 logger = logging.getLogger(__name__)
 
+
+def _effective_conv_cap() -> int:
+    """Per-core conv (qconv) placement cap used by BOTH wave coalescing and the
+    ILP P2d constraint.
+
+    C1b (C) wave-launch realization: the wave-launch codegen loads each core's
+    IMCU weights ONCE (region preamble) and swaps only the IMEM program per wave.
+    That is correct iff no physical core hosts more than ONE conv across all
+    waves (a 2nd conv on the same core would need a mid-region weight reload the
+    preamble-once WR_IMCU does not do). Capping convs at 1 per core guarantees
+    it. So in region-merge mode the DEFAULT cap is 1 (was 3); an explicit
+    IMCFLOW_PNR_CONV_CAP always wins. Non-merge paths keep the stock default 3
+    (byte-identical -- they never take the wave path and cap only fires under the
+    launch-aware relax branch, which is merge-only anyway).
+    """
+    env = os.environ.get("IMCFLOW_PNR_CONV_CAP")
+    if env is not None:
+        return int(env)
+    try:
+        from tvm.relay.op.contrib.imcflow import region_merge_mode
+        if region_merge_mode():
+            return 1
+    except Exception:
+        pass
+    return 3
+
 # ============================================================
 # Data Structures
 # ============================================================
@@ -305,6 +331,12 @@ class GraphInfo:
     # lever is off every placeable node is wave 0 -> the P2 exclusivity below is
     # identical to the stock "1 call per IMCE" (byte-identical placement).
     node_to_wave: Dict[Any, int] = None
+    # C1b (C): the RAW mm_quant longest-path waves BEFORE footprint coalescing.
+    # `node_to_wave` above is the coalesced (minimal) launch grouping; the raw map
+    # is retained so an infeasible coalesced grouping can be RE-SPLIT one mm_quant
+    # boundary at a time (finer granularity) until the ILP is feasible -- i.e.
+    # "cut only when forced", with the forcing constraint identified by the retry.
+    raw_node_to_wave: Dict[Any, int] = None
 
 
 @dataclass
@@ -322,6 +354,12 @@ class JointPnRResult:
     const_to_inode: Dict[Any, Coord] = None    # const node_id -> INODE Coord
     tensor_edge_to_commodity_id: Dict[Any, int] = None  # TensorEdge -> commodity_id
     inodebuf_to_inode: Dict[Any, Coord] = None # Task #10: RESBUF node_id -> INODE Coord
+    # C1b (C) wave-launch realization: per-node wave (round) index derived by
+    # GraphExtractor._compute_node_waves. Keyed by graph_node_id (same key space
+    # as `mapping`). All-0 when the region-merge lever is off, so carrying it is
+    # byte-safe for non-merged paths. update_hw_node_map() translates this into a
+    # per-function {physical NodeID -> wave} map on the DevConfig for codegen.
+    node_to_wave: Dict[Any, int] = None
 
 
 # ============================================================
@@ -582,6 +620,7 @@ class GraphExtractor:
             inodebuf_nodes=inodebuf_nodes,
             inodebuf_to_inode=self.inodebuf_to_inode.copy(),
             node_to_wave=node_to_wave,
+            raw_node_to_wave=dict(getattr(self, "_raw_node_to_wave", {}) or {}),
         )
 
     def _register_resbuf_nodes(self, func_name):
@@ -881,7 +920,147 @@ class GraphExtractor:
                 if wave.get(nid, -1) != best:
                     wave[nid] = best
                     changed = True
-        return wave
+
+        # ---- WAVE COALESCING (minimize wave count) ---------------------------
+        # Per the wave-launch design correction: a wave split is only NECESSARY
+        # when the resident footprint would otherwise exceed the core budget.
+        # mm_quant boundaries are merely CANDIDATE cut points (their boundary
+        # tensors are post-quant/small and func_out-bufferable), NOT mandatory
+        # ones -- quant->conv streaming runs fine within one launch. So after the
+        # raw mm_quant longest-path labelling above, greedily COALESCE consecutive
+        # raw waves as long as the merged group still fits: <= n_slots real calls
+        # per wave AND <= conv_cap*n_slots convs per wave (conv_cap=1 target =>
+        # <= n_slots convs). This yields the FEWEST launches (each as long a
+        # pipeline as the footprint permits) and thus the fewest boundary buffers
+        # / barriers. If all placeable nodes fit one wave, we emit a single wave
+        # (zero boundaries) -- the ideal. Cuts, when needed, fall exactly on the
+        # mm_quant candidate boundaries (raw-wave edges), never mid-pipeline.
+        # Preserve the raw map so an infeasible coalesced grouping can be re-split
+        # at raw boundaries by _run_for_function ("cut only when forced").
+        self._raw_node_to_wave = dict(wave)
+        return self._coalesce_waves(wave, placeable, min_waves=1)
+
+    def _is_conv_placeable(self, nid) -> bool:
+        """True if the placeable node is a (register-heavy) qconv call. Mirrors
+        JointPnRILP._is_conv_node so wave coalescing and the P2d conv cap agree."""
+        try:
+            from tvm.relay.op.contrib.imcflow import CustomIDToNode as _C2N
+            node = _C2N().get(getInnerNodeID(nid))
+            if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+                return 'qconv' in node.op.name
+            if isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
+                comp = node.op.attrs.get('Composite', '') if node.op.attrs else ''
+                return 'qconv' in str(comp)
+        except Exception:
+            pass
+        return False
+
+    def _coalesce_waves(self, raw_wave: Dict[Any, int], placeable,
+                        min_waves: int = 1) -> Dict[Any, int]:
+        """Greedily merge consecutive raw (mm_quant-delimited) waves while the
+        merged footprint fits the per-launch core budget, returning a compacted
+        {node -> wave} map with the minimum number of waves >= min_waves.
+
+        Footprint budget (the F1/F-condition the greedy enforces up front; the
+        finer F2..F5 constraints are enforced by the ILP itself and, if a
+        coalesced grouping proves infeasible there, _run_for_function re-invokes
+        this with a larger min_waves to force a finer split -- "cut only when
+        forced", each cut TAGGED with the forcing condition):
+          - F1 core slots : real (CALL) nodes in a merged wave <= n_slots (16,
+                            with conv-cap=1 folded in via the conv budget below)
+          - conv budget   : conv nodes in a merged wave <= conv_cap * n_slots
+
+        Only CALL nodes consume a core slot; split/concat are pre-assigned /
+        light, so they never block coalescing (they ride along with whatever
+        wave their data lands in).
+
+        min_waves: the caller's floor on the number of output launch waves. The
+        greedy naturally yields the fewest waves the footprint allows; when the
+        ILP was infeasible at that granularity the caller re-runs with
+        min_waves+1 so exactly ONE more mm_quant boundary becomes a real cut.
+        """
+        # Mesh IMCE slot count (4x5 mesh -> 4 rows x 4 imce cols = 16). Kept in
+        # sync with JointPnRILP's MeshTopology(4, 5) / get_imce_nodes().
+        n_slots = 4 * (5 - 1)
+        conv_cap = _effective_conv_cap()
+        conv_budget = conv_cap * n_slots
+
+        # Only CALL nodes count toward the footprint; classify each placeable.
+        is_call = {nid: (self.nodes[nid].node_type == NodeType.CALL)
+                   for nid in placeable}
+        is_conv = {nid: (is_call[nid] and self._is_conv_placeable(nid))
+                   for nid in placeable}
+
+        raw_waves = sorted({raw_wave.get(nid, 0) for nid in placeable})
+        # nodes grouped by raw wave (each entry keeps its raw-wave id so a re-split
+        # can only cut on a raw/mm_quant boundary, never mid-group).
+        by_raw = {w: [nid for nid in placeable if raw_wave.get(nid, 0) == w]
+                  for w in raw_waves}
+
+        def _grp_calls(w):
+            return sum(1 for n in by_raw[w] if is_call[n])
+        def _grp_convs(w):
+            return sum(1 for n in by_raw[w] if is_conv[n])
+
+        # Greedy left-to-right coalescing into merged buckets of consecutive raw
+        # waves, capped by the footprint budget AND by min_waves. To honor
+        # min_waves we bound the max raw-waves per bucket so the run cannot merge
+        # everything into <min_waves buckets: with R raw waves and a target of
+        # >=min_waves buckets, no bucket may absorb more than R-(min_waves-1)
+        # raw waves (each remaining bucket needs >=1 raw wave). The footprint
+        # budget still applies, so the result is the *coarsest* grouping that is
+        # both budget-legal and has >=min_waves buckets.
+        R = len(raw_waves)
+        max_raws_per_bucket = max(1, R - (max(1, min_waves) - 1))
+
+        merged = []  # {'raws': [...], 'nodes': [...], 'calls': int, 'convs': int}
+        for w in raw_waves:
+            grp = by_raw[w]
+            g_calls = _grp_calls(w)
+            g_convs = _grp_convs(w)
+            if merged:
+                cur = merged[-1]
+                if (cur['calls'] + g_calls <= n_slots and
+                        cur['convs'] + g_convs <= conv_budget and
+                        len(cur['raws']) < max_raws_per_bucket):
+                    cur['raws'].append(w)
+                    cur['nodes'].extend(grp)
+                    cur['calls'] += g_calls
+                    cur['convs'] += g_convs
+                    continue
+            merged.append({'raws': [w], 'nodes': list(grp),
+                           'calls': g_calls, 'convs': g_convs})
+
+        # Tag each cut (boundary between bucket k and k+1) with the condition that
+        # FORCED it, for the required per-cut justification report:
+        #   F1  = would exceed core slots (calls > n_slots)
+        #   CONV= would exceed conv budget (convs > conv_cap*n_slots)
+        #   ILP = min_waves floor from a prior infeasible solve (finer F2..F5)
+        cut_reasons = []
+        for k in range(len(merged) - 1):
+            a, b = merged[k], merged[k + 1]
+            nxt_calls = a['calls'] + _grp_calls(b['raws'][0])
+            nxt_convs = a['convs'] + _grp_convs(b['raws'][0])
+            if nxt_calls > n_slots:
+                cut_reasons.append("F1(core-slots)")
+            elif nxt_convs > conv_budget:
+                cut_reasons.append(f"CONV(cap={conv_cap})")
+            elif len(a['raws']) >= max_raws_per_bucket:
+                cut_reasons.append("ILP(min_waves floor from prior infeasible)")
+            else:
+                cut_reasons.append("?")
+
+        out: Dict[Any, int] = {}
+        for k, bucket in enumerate(merged):
+            for nid in bucket['nodes']:
+                out[nid] = k
+        debug_print(f"[GraphExtractor] wave coalescing: {R} raw mm_quant waves "
+                    f"-> {len(merged)} launch wave(s) (min_waves={min_waves}; "
+                    f"budget {n_slots} calls / {conv_budget} convs per wave; "
+                    f"per-wave calls={[b['calls'] for b in merged]}, "
+                    f"convs={[b['convs'] for b in merged]}; "
+                    f"cut reasons={cut_reasons})")
+        return out
 
     def _extract_graph_commodities_from_tensor_edge_list(self, tensor_edge_list: List, func_name: str):
         """Extract commodities from TensorEdgeList.
@@ -1177,11 +1356,40 @@ class JointPnRILP:
                 tensor_edge_to_commodity_id=self.graph_info.tensor_edge_to_commodity_id,
             )
 
-        # Phase 2: Build ILP model
-        self._build_model()
+        # Phase 2+3: Build + solve, with adaptive wave re-split. The coalesced
+        # (minimal-wave) grouping maximizes the pipeline but may be infeasible
+        # under the finer ILP constraints (F2 policy table, F3 inode row budget,
+        # F4 imce imem/GPR, F5 P7 no-cycle). Per the wave-design rule "cut only
+        # when forced", we do NOT pre-cut for those: we try the coarsest grouping
+        # first and, ONLY if the ILP reports infeasible, re-split by exactly one
+        # more mm_quant boundary (min_waves += 1) and retry. Each forced cut is
+        # thus attributable to a concrete infeasibility, reported below. Bounded
+        # by the raw wave count (the finest possible = the stock mm_quant rounds).
+        gi = self.graph_info
+        raw = gi.raw_node_to_wave or {}
+        max_waves = (max(raw.values()) + 1) if raw else 1
+        placeable_ids = [nid for nid, n in gi.nodes.items()
+                         if n.node_type in (NodeType.CALL, NodeType.SPLIT, NodeType.CONCAT)]
 
-        # Phase 3: Solve
-        return self._solve()
+        min_waves = (max(gi.node_to_wave.values()) + 1) if gi.node_to_wave else 1
+        result = None
+        while True:
+            self._build_model()
+            result = self._solve()
+            if result.success or min_waves >= max_waves:
+                break
+            # Infeasible AND a finer split is still possible: re-split one more
+            # mm_quant boundary and rebuild. Re-coalesce the RAW map with the
+            # higher floor so the extra cut lands on an mm_quant candidate.
+            min_waves += 1
+            new_wave = extractor._coalesce_waves(raw, placeable_ids, min_waves=min_waves)
+            gi.node_to_wave = new_wave
+            _nw = (max(new_wave.values()) + 1) if new_wave else 1
+            debug_print(f"[JointPnRILP] {func_name}: ILP infeasible at coarser "
+                        f"grouping -> RE-SPLIT to {_nw} wave(s) (min_waves="
+                        f"{min_waves}/{max_waves}) and retry [forced cut: "
+                        f"F2..F5 finer constraint]")
+        return result
 
     def _build_model(self):
         """Build complete ILP model"""
@@ -1464,7 +1672,7 @@ class JointPnRILP:
                         pass
                     return False
                 conv_calls = [n for n in real_calls if _is_conv_node(n)]
-                conv_cap = int(os.environ.get("IMCFLOW_PNR_CONV_CAP", "3"))
+                conv_cap = _effective_conv_cap()
                 debug_print(f"[JointPnRILP] P2d per-core CONV cap = {conv_cap} "
                             f"({len(conv_calls)}/{len(real_calls)} calls are convs)")
                 if conv_calls:
@@ -2088,6 +2296,7 @@ class JointPnRILP:
             const_to_inode=const_to_inode,
             tensor_edge_to_commodity_id=gi.tensor_edge_to_commodity_id,
             inodebuf_to_inode=gi.inodebuf_to_inode,
+            node_to_wave=gi.node_to_wave,
         )
 
         # Dump result for debugging
@@ -2164,6 +2373,8 @@ def update_hw_node_map(
     results: Dict[str, JointPnRResult],
     hw_node_map: Dict,
     tensor_edge_list_dict: Dict[str, List],
+    node_to_wave_per_func: Dict = None,
+    graph_node_wave_per_func: Dict = None,
 ):
     """
     Update HWNodeMap with placement results.
@@ -2200,6 +2411,25 @@ def update_hw_node_map(
                         # Inner call inside composite (not constant)
                         outer_to_inner_call[outer_id] = inner_id
 
+        # C1b (C) wave-launch realization: record the wave (round) index for each
+        # placed IMCE core in THIS function, keyed by physical NodeID. Same key
+        # space (graph_node_id) as `result.mapping`, so we translate alongside the
+        # HWNodeMap update below. All-0 (single-launch) when merge lever is off, so
+        # this is recording-only and byte-safe for non-merged paths.
+        this_func_waves = None
+        if node_to_wave_per_func is not None:
+            this_func_waves = {}
+            node_to_wave_per_func[func_name] = this_func_waves
+        # Graph-node-keyed wave map (inner_id / outer_id -> wave int), the SAME
+        # key convention as HWNodeMap. The IMCE codeblock builder resolves a node's
+        # wave via this (get_wave() mirrors get_hid()), so it can tag each block
+        # with the launch wave it belongs to for per-(core,wave) IMEM splitting.
+        this_func_gwaves = None
+        if graph_node_wave_per_func is not None:
+            this_func_gwaves = {}
+            graph_node_wave_per_func[func_name] = this_func_gwaves
+        n2w = result.node_to_wave or {}
+
         # IMCE mappings (call/split/concat nodes)
         for graph_node_id, coord in result.mapping.items():
             # For composite nodes, use inner_call_id as key
@@ -2210,6 +2440,19 @@ def update_hw_node_map(
             # Also store outer_id -> NodeID for composite nodes (so other inner nodes can find IMCE)
             if graph_node_id in outer_to_inner_call:
                 hw_node_map[graph_node_id] = node_id
+            # Record this core's wave (max over any node mapped to it, though in a
+            # correct wave-aware placement two nodes on one core have distinct waves
+            # and only differ across launches; take the set for launch enumeration).
+            if this_func_waves is not None and graph_node_id in n2w:
+                w = n2w[graph_node_id]
+                this_func_waves.setdefault(node_id, set()).add(w)
+            # Graph-node-keyed wave (dual key: inner_id + outer_id), mirroring the
+            # HWNodeMap dual-key write above so get_wave() finds it either way.
+            if this_func_gwaves is not None and graph_node_id in n2w:
+                w = n2w[graph_node_id]
+                this_func_gwaves[inner_id] = w
+                if graph_node_id in outer_to_inner_call:
+                    this_func_gwaves[graph_node_id] = w
 
         # INODE mappings (input vars)
         if result.var_to_inode:
@@ -2791,7 +3034,17 @@ def run_joint_pnr_and_update_config(
     results = run_joint_pnr(mod, tensor_edge_list_dict, preassigned_placements)
 
     # Update HWNodeMap (pass tensor_edge_list_dict for outer->inner id conversion)
-    update_hw_node_map(results, config.HWNodeMap, tensor_edge_list_dict)
+    # C1b (C): also capture the per-function {physical NodeID -> set(wave)} map so
+    # codegen can realize each wave as its own HALT-delimited compute launch.
+    update_hw_node_map(
+        results, config.HWNodeMap, tensor_edge_list_dict,
+        node_to_wave_per_func=config.NodeToWavePerFunc,
+        graph_node_wave_per_func=config.GraphNodeToWavePerFunc,
+    )
+    for _fn, _wm in config.NodeToWavePerFunc.items():
+        _all_waves = sorted({w for ws in _wm.values() for w in ws})
+        debug_print(f"[NodeToWavePerFunc] {_fn}: {len(_wm)} cores, "
+                    f"waves={_all_waves}")
 
     # dump hardware node map
     for k, v in config.HWNodeMap.items():

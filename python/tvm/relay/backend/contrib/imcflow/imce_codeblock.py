@@ -166,6 +166,25 @@ class SyncPairIMCE(ImceCodeBlock):
     return code.render()
 
 
+class ImceWaveDoneBlock(ImceCodeBlock):
+  """C1b (C) wave-launch completion rendezvous. A core reused across waves sets
+  this flag as the LAST act of its wave-(k-1) program (after its final SEND,
+  before STOP). The owning inode STANDBYs on it before issuing WR_IMEM(wave k),
+  guaranteeing the previous wave's program has run to completion so the IMEM
+  re-write cannot corrupt an in-flight fetch. Uses the dedicated reserved
+  IMCE-flag value WAVE_DONE_FLAG (send_recv_sync, =250) that does not collide
+  with pair sync (pair-UUID cap drops to 249 under REGION_MERGE) or the inode-side
+  254/255 barrier senses (those live on the INODE flag register, not the IMCE's).
+  """
+  from tvm.relay.backend.contrib.imcflow.send_recv_sync import WAVE_DONE_FLAG as WAVE_DONE_UUID
+
+  def __init__(self, annotation: str = ""):
+    super().__init__(annotation)
+
+  def _render(self) -> str:
+    return f"__builtin_IMCE_SETFLAG({self.WAVE_DONE_UUID});"
+
+
 class ImceCallCodeBlock(ImceCodeBlock):
   num_in_edges = None
 

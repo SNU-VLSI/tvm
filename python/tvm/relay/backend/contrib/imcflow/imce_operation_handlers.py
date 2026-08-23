@@ -155,6 +155,9 @@ class VecOpCompositeHandler(OperationHandler):
     # Set composite context
     call.curr_composite_id = composite_id
     self.builder.curr_composite_id = composite_id
+    # C1b (C) wave-launch: tag subsequent block appends with this composite's
+    # launch wave (0 off merge -> inert). get_wave() uses curr_composite_id.
+    call.codeblocks.current_wave = call.get_wave()
 
     # Initialize vec_op_stack for this composite
     call.vec_op_stack = []
@@ -224,7 +227,10 @@ class CompositeHandler(OperationHandler):
     composite_id = getNodeID(call.call)
     call.curr_composite_id = composite_id
     self.builder.curr_composite_id = composite_id
-    
+    # C1b (C) wave-launch: tag this conv-composite's block appends with its
+    # launch wave (0 off merge -> inert). get_wave() uses curr_composite_id.
+    call.codeblocks.current_wave = call.get_wave()
+
     # Initialize stack and pending info
     call.post_op_stack = []
     call.conv_pending_info = {}

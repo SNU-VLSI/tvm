@@ -317,9 +317,35 @@ class CodegenSuite:
     imce_builder.visit(func)
 
     # add stop block for active imces
+    # C1b (C) wave-launch: each per-(core,wave) program needs its OWN terminator.
+    # For a core reused across waves, its non-final wave program ends with a
+    # completion SETFLAG (ImceWaveDoneBlock) THEN STOP -- the inode STANDBYs on
+    # that flag before re-WR_IMEM (emit_wave_launches) so the previous wave has
+    # fully run before its IMEM is overwritten (fixes the WR_IMEM-vs-in-flight-
+    # fetch race). The final wave (and every single-wave core) ends with a bare
+    # STOP == the stock behavior (byte-identical off merge).
+    wave_map = DevConfig().NodeToWavePerFunc.get(func_name, {}) or {}
+    all_waves = sorted({w for ws in wave_map.values() for w in ws})
+    n_waves = (max(all_waves) + 1) if all_waves else 1
     for hid in DevConfig().ActiveIMCEPerFunc[func_name]:
-      block = CtrlBlock("STOP")
-      imce_builder.codeblocks.append(hid, block, CodePhase.END)
+      core_waves = sorted(wave_map.get(hid, {0}))
+      if n_waves <= 1 or len(core_waves) <= 1:
+        # single-wave core: bare STOP in its (only) wave -> stock byte-identical
+        block = CtrlBlock("STOP")
+        imce_builder.codeblocks.current_wave = core_waves[0] if core_waves else 0
+        imce_builder.codeblocks.append(hid, block, CodePhase.END)
+      else:
+        # reused core: per-wave terminator. Non-final waves: SETFLAG(done)+STOP;
+        # final wave: bare STOP.
+        last_wave = core_waves[-1]
+        for w in core_waves:
+          if w != last_wave:
+            imce_builder.codeblocks.current_wave = w
+            imce_builder.codeblocks.append(
+                hid, ImceWaveDoneBlock(f"{hid.name} wave{w} done"), CodePhase.END)
+          imce_builder.codeblocks.current_wave = w
+          imce_builder.codeblocks.append(hid, CtrlBlock("STOP"), CodePhase.END)
+    imce_builder.codeblocks.current_wave = 0
     
     # dump block structures
     imce_builder.dump_block_structure(self.model_dir, func_name)
@@ -342,6 +368,10 @@ class CodegenSuite:
     inode_builder.pair_manager = pair_manager  # Add pair manager for sync support
     inode_builder.initialize()
     inode_builder.visit(func)
+    # C1b (C) wave-launch: after wave-0 streaming, emit waves 1+ launch segments
+    # (re-WR_IMEM + COMPUTE-enable + per-wave streaming) on the EXEC path. No-op
+    # for single-wave regions -> byte-identical.
+    inode_builder.emit_wave_launches()
     inode_builder.finalize()
 
     # add sync logic after INIT Phase
@@ -681,6 +711,14 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     for idx, a in enumerate(call.args):
       self.visit(a)
 
+    # C1b (C) wave-launch: stamp the manager's current launch wave for this call
+    # so blocks appended by the handler are tagged with the right wave (for
+    # per-(core,wave) IMEM). Composite handlers refine this from curr_composite_id
+    # once they enter the composite; here we set the standalone-call default.
+    # Wave 0 for every non-merged region -> inert (byte-identical).
+    self.codeblocks.current_wave = DevConfig().GraphNodeToWavePerFunc.get(
+        self.func_name, {}).get(getNodeID(call), 0)
+
     # Dispatch to handler registry (automatically wraps call in BuilderContext)
     print("[IMCE CODE BUILDER] Visit call:", getNodeID(call), getNodeDebugID(call))
     handled = self._handler_registry.handle(call, self)
@@ -752,12 +790,53 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.is_tiled = (DevConfig().ImcflowFuncMap[func_name].tiling_factor > 1)
     self.edges = edges
     self.codeblocks = InodeCodeBlockManager(func_name)
+    # C1b (C) wave-launch realization: derive this region's wave (launch-round)
+    # structure from the PnR wave map. `n_waves`==1 for every non-merged region
+    # (and the un-merged region1 under MERGE=2), so all wave-branching below is a
+    # no-op there -> byte-identical. `wave_cores[k]` = physical IMCE NodeIDs whose
+    # program runs in wave k; a core may appear in >1 wave (it is re-WR_IMEM'd per
+    # wave, weights unchanged under conv-cap=1). `core_first_wave[core]` = the
+    # earliest wave a core is used (its WR_IMEM lands there; later waves reuse the
+    # resident program only if the SAME node -- but co-placed nodes differ per
+    # wave, so each wave re-writes that core's IMEM).
+    self._init_wave_structure(func_name)
     # Track which hardware nodes already have an IMCE compute block added
     self._imce_compute_added = set()
     self.send_map = {}
     self.recv_map = {}
     self.curr_composite_id = None
-  
+
+  def _init_wave_structure(self, func_name):
+    """Derive per-wave launch structure for this region from the PnR wave map.
+
+    Sets:
+      self.n_waves        : number of launch waves (1 for every non-merged region)
+      self.wave_cores     : {wave_k: set(imce NodeID)} cores active in wave k
+      self.core_waves     : {imce NodeID: sorted[waves]} inverse
+    Only populated (>1 wave) under region_merge_mode(); otherwise n_waves==1 and
+    every wave-branch downstream collapses to the stock single-launch path.
+
+    STOP-REPORT guard: wave-launch (P1 re-invoke as the wave axis) reuses the
+    tiling re-invoke machinery, so a region that is BOTH wave-split (>1 wave) AND
+    spatially tiled (tiling_factor>1) would need nested wave x tile loops, which
+    is explicitly OUT of scope. Assert it cannot happen (subset31: the merged
+    region2 has tiling_factor==1; the tiled region1 has 1 wave).
+    """
+    wave_map = DevConfig().NodeToWavePerFunc.get(func_name, {}) or {}
+    self.core_waves = {core: sorted(ws) for core, ws in wave_map.items()}
+    all_waves = sorted({w for ws in wave_map.values() for w in ws})
+    self.n_waves = (max(all_waves) + 1) if all_waves else 1
+    self.wave_cores = {k: set() for k in range(self.n_waves)}
+    for core, ws in wave_map.items():
+      for w in ws:
+        self.wave_cores[w].add(core)
+    if self.n_waves > 1 and self.is_tiled:
+      raise NotImplementedError(
+        f"[wave-launch] region {func_name} is BOTH wave-split (n_waves="
+        f"{self.n_waves}) AND spatially tiled (tiling_factor="
+        f"{DevConfig().ImcflowFuncMap[func_name].tiling_factor}). Nested "
+        f"wave x tile launch is out of scope for C1b (C). STOP-REPORT.")
+
   def sync_inrt_clear(self, codephase: CodePhase):
     inode_master = NodeID.inode_3_0
     inode_slaves = [node for node in NodeID.inodes() if node != inode_master]
@@ -803,9 +882,18 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     # imem write
     func_name = self.codeblocks.func_name
-    for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
-      block = WriteIMEMBlock(inst_edge, f"imem write: {imce.name}")
-      self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+    if self.n_waves > 1:
+      # C1b (C) wave-launch: WR_IMEM only wave-0 cores here (INIT/PROGRAM launch);
+      # waves 1+ are re-WR_IMEM'd on the EXEC (P1 re-invoke) path in
+      # _emit_wave_launches(). Each core loads its wave-0 IMEM blob.
+      for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
+        if imce in self.wave_cores.get(0, set()):
+          block = WriteIMEMBlock(inst_edge, f"imem write w0: {imce.name}", wave=0)
+          self.codeblocks.append(imce.master(), block, CodePhase.INIT)
+    else:
+      for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
+        block = WriteIMEMBlock(inst_edge, f"imem write: {imce.name}")
+        self.codeblocks.append(imce.master(), block, CodePhase.INIT)
 
     # imcu write
     # Silicon-SAFE serialization lever (IMCFLOW_SERIALIZE_IMCU, default OFF):
@@ -865,6 +953,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     active_imces = DevConfig().ActiveIMCEPerFunc[func_name]
     for imce, inst_edge in sorted(DevConfig().InstEdgeInfoDict[func_name].items(), key=lambda x: x[0].name):
       if imce in active_imces:
+        # C1b (C) wave-launch: in INIT only enable COMPUTE for wave-0 cores;
+        # waves 1+ are COMPUTE-enabled on the EXEC path per wave. Single-wave
+        # regions enable all active cores here (stock, byte-identical).
+        if self.n_waves > 1 and imce not in self.wave_cores.get(0, set()):
+          continue
         policy_addr = inst_edge.policy_info[0].address # get first policy address
         block = IMCEComputeBlock(policy_addr, f"{imce.name} compute")
         self.codeblocks.append(imce.master(), block, CodePhase.INIT)
@@ -885,6 +978,69 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     
     # send constant goes is taken care of by graph traverse
 
+  def emit_wave_launches(self):
+    """C1b (C) wave-launch: emit waves 1..N-1 as EXEC-phase launch segments.
+
+    Structure per wave k>=1 (inode-internal, sequenced after wave k-1's stream
+    drains): all-inode barrier -> WR_IMEM(wave-k cores, the core's wave-k IMEM
+    blob) -> barrier -> IMCE_COMPUTE(wave-k cores) -> barrier. Wave-0's WR_IMEM/
+    COMPUTE were emitted in initialize() (INIT). Per-wave data STREAMING is
+    partitioned in the next stage; here we lay down the re-program + compute
+    enable so each wave's IMEM is loaded onto its (possibly reused) cores.
+
+    No-op for single-wave regions (n_waves==1) -> byte-identical.
+    """
+    if self.n_waves <= 1:
+      return
+    func_name = self.codeblocks.func_name
+    inst_dict = DevConfig().InstEdgeInfoDict[func_name]
+    active_imces = DevConfig().ActiveIMCEPerFunc[func_name]
+
+    def _barrier(annot):
+      _sense = SyncAllINodes.next_sense() if (pack_bn_minmax_mode() or residual_in_region_mode()) else None
+      for inode in NodeID.inodes():
+        self.codeblocks.append(inode, SyncAllINodes(inode, annot, sense=_sense), CodePhase.EXEC)
+
+    for k in range(1, self.n_waves):
+      wcores = self.wave_cores.get(k, set())
+      if not wcores:
+        continue
+      _barrier(f"wave {k}: gate before re-WR_IMEM")
+      # COMPLETION RENDEZVOUS (fixes WR_IMEM-vs-in-flight-fetch race): before
+      # overwriting a REUSED core's IMEM, the owning inode STANDBYs on that core's
+      # wave-done flag (ImceWaveDoneBlock.WAVE_DONE_UUID, set as the core's last
+      # act before STOP). The all-inode barrier only syncs inodes; most reused
+      # cores' prior-wave outputs go to OTHER imces (region2 has 1 func_out / 18
+      # nodes), so the barrier alone does NOT prove those cores finished. This
+      # per-core flag wait does. A reused core = one present in an EARLIER wave.
+      reused = sorted(
+          [c for c in wcores if any(c in self.wave_cores.get(j, set())
+                                    for j in range(k))],
+          key=lambda x: x.name)
+      for core in reused:
+        inode = core.master()
+        self.codeblocks.append(
+            inode,
+            Standby(node_ids=[core], annotation=f"wave {k}: wait {core.name} wave{k-1} done",
+                    uuid=ImceWaveDoneBlock.WAVE_DONE_UUID),
+            CodePhase.EXEC)
+      # re-program IMEM for this wave's cores with their wave-k blob
+      for imce, inst_edge in sorted(inst_dict.items(), key=lambda x: x[0].name):
+        if imce in wcores:
+          self.codeblocks.append(
+              imce.master(),
+              WriteIMEMBlock(inst_edge, f"imem write w{k}: {imce.name}", wave=k),
+              CodePhase.EXEC)
+      _barrier(f"wave {k}: gate before COMPUTE enable")
+      # enable compute for this wave's active cores
+      for imce, inst_edge in sorted(inst_dict.items(), key=lambda x: x[0].name):
+        if imce in wcores and imce in active_imces:
+          policy_addr = inst_edge.policy_info[0].address
+          self.codeblocks.append(
+              imce.master(),
+              IMCEComputeBlock(policy_addr, f"{imce.name} compute w{k}"),
+              CodePhase.EXEC)
+      _barrier(f"wave {k}: gate after COMPUTE enable")
 
   def finalize(self):
     self.sync_inrt_clear(CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)

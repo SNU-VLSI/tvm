@@ -289,9 +289,21 @@ class NodeCodeBlockManager:
 
   def append(self, hid, block, block_type: CodePhase = CodePhase.EXEC):
     print(f"[IMCE CODE BLOCK MANAGER] append block to hid={hid}, type={block_type}, block={type(block).__name__}")
+    # C1b (C) wave-launch: stamp each block with the launch wave the builder is
+    # currently emitting (default 0 = single-launch, so this is inert unless the
+    # builder sets current_wave under merge mode). Used by generate_body(wave=k)
+    # to emit only wave-k blocks into that wave's imce.cpp for per-(core,wave)
+    # IMEM. `_wave` is advisory metadata on the block; renderers ignore it.
+    try:
+      block._wave = getattr(self, "current_wave", 0)
+    except Exception:
+      pass
     self.blocks[hid][block_type].append(block)
 
-  def generate_body(self) -> str:
+  def generate_body(self, wave=None) -> str:
+    """Render the per-core body. When wave is None (default) emit ALL blocks
+    (stock single-launch / non-merged path, byte-identical). When wave=k, emit
+    ONLY blocks tagged with that wave -> the wave-k IMEM program per core."""
     code = ""
     first = True
     for node in self.nodes:
@@ -299,17 +311,32 @@ class NodeCodeBlockManager:
       code += f"{condition} (hid == {node.to_coord(0)} && wid == {node.to_coord(1)}) {{ // {node.name}\n"
       for phase in [CodePhase.INIT, CodePhase.EXEC, CodePhase.END]:
         for codeblock in self.blocks[node][phase]:
+          if wave is not None and getattr(codeblock, "_wave", 0) != wave:
+            continue
           code += f"{indent(codeblock.render(), '  ')}\n"
       code += "}\n"
       first = False
     return code
 
-  def generate(self) -> str:
-    body = self.generate_body()
+  def generate(self, wave=None) -> str:
+    body = self.generate_body(wave=wave)
     start = self.start_block()
     end = self.end_block()
     return start + indent(body, '  ') + end
-  
+
+  def wave_indices(self) -> List[int]:
+    """C1b (C): the distinct launch waves present across all appended blocks.
+    Returns [0] when nothing is wave-tagged (every non-merged region) so callers
+    that iterate waves collapse to the single stock program -> byte-identical."""
+    waves = set()
+    for node in self.nodes:
+      # Iterate only the phases this manager actually holds (IMCE managers have
+      # no EXEC_TILE bucket, so key off the node's own phase dict).
+      for phase, blks in self.blocks[node].items():
+        for cb in blks:
+          waves.add(getattr(cb, "_wave", 0))
+    return sorted(waves) if waves else [0]
+
   def get_blocks(self, phase :List[CodePhase] = None , nodes : List[NodeID] = None) -> List[CodeBlock]:
     if nodes is None:
       nodes = self.nodes
