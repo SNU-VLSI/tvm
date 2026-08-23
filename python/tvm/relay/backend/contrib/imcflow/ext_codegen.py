@@ -1034,19 +1034,37 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
     code += _hb("after policy_update")
     code += self.generateRetryCheck("policy_update")
+    # C1b (C) (A) per-wave HOST RE-INVOKE: a merged region split into N launch
+    # waves needs N RUN invocations (IMCE STOP = launch-terminal, so each wave is
+    # a fresh RUN that re-enters the inode EXEC via PC_INCR at the next wave
+    # segment). The first RUN below is wave 0; N-1 MORE RUN invokes follow for
+    # waves 1..N-1. Each is a bare GO+poll (no reprogram -- the inode's per-wave
+    # EXEC segment does its own WR_IMEM(k)+COMPUTE(k)+stream(k)).
+    # n_waves==1 for every non-merged region -> stock single-invoke + tile loop
+    # below -> byte-identical.
+    _n_waves = self._region_wave_count()
+
+    if _n_waves > 1:
+      # Merged region: the WAVE segments' input-data SENDs execute in the wave RUNs
+      # (generateInvokeCode + wave loop below) and read the per-tile cnt_base_addr
+      # AND stream the region inputs. Those MUST be staged into NPU DMEM BEFORE the
+      # wave GOs -- else the wave-0 input SEND loads an uninitialized cnt (X) and
+      # streams garbage (v10 X-prop: inode_0_0 BLT on X cnt -> NoC X -> $fatal).
+      # A merged region is single-tile (n_waves>1 && tiling>1 asserted out in
+      # _init_wave_structure), so this is a ONE-TIME stage at tile 0. The GO
+      # SEQUENCE and COUNT are UNCHANGED vs the stock path (generateInvokeCode +
+      # wave loop + one tile-GO): we only relocate the tile-0 transfer to before
+      # the invokes. The stock (non-merged) path keeps the transfer inside the tile
+      # loop -> byte-identical.
+      code += _hb("merged: stage per-tile cnt + inputs BEFORE the wave GOs")
+      code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, 0)  # cnt_base_addr
+      code += self.generateToNpuTransferCode(self.input_blocks, 0)              # region inputs
+
     code += _hb("before invoke")
     code += self.generateInvokeCode() # proceed up to halt  (== wave 0 RUN)
     code += _hb("after invoke / before poll")
     code += self.generateRetryCheck("invoke")
 
-    # C1b (C) (A) per-wave HOST RE-INVOKE: a merged region split into N launch
-    # waves needs N RUN invocations (IMCE STOP = launch-terminal, so each wave is
-    # a fresh RUN that re-enters the inode EXEC via PC_INCR at the next wave
-    # segment). The first RUN above is wave 0; emit N-1 MORE RUN invokes for
-    # waves 1..N-1. Each is a bare GO+poll (no data transfer, no reprogram -- the
-    # inode's per-wave EXEC segment does its own WR_IMEM(k)+COMPUTE(k)+stream(k)).
-    # n_waves==1 for every non-merged region -> no extra invokes -> byte-identical.
-    _n_waves = self._region_wave_count()
     for _w in range(1, _n_waves):
       code += _hb(f"before wave {_w} invoke")
       code += self.generateInvokeCode()  # wave _w RUN (PC resumes past wave _w-1 HALT)
@@ -1058,8 +1076,15 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
     code += f"fprintf(stderr,\"Starting tiled execution with factor {tile_factor}\\n\");\n"
     for t_idx in range(tile_factor):
       code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
-      code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
-      code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
+      if _n_waves > 1:
+        # Merged: cnt + inputs ALREADY staged above (before the wave GOs); do NOT
+        # re-transfer (would clobber / re-issue). This tile pass supplies the FINAL
+        # GO of the region's fixed GO sequence (matching the inode's last EXEC-DONE
+        # segment) plus the output collection. tile_factor==1 for merged regions.
+        pass
+      else:
+        code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
+        code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
       code += self.generateInvokeCode() # end of exec
       code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output

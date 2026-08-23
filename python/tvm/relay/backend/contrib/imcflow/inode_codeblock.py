@@ -1596,16 +1596,52 @@ class SyncAllINodes(InodeCodeBlock):
   def reset_sense(cls):
     cls._sense_counter = 0
 
-  def __init__(self, node_id : NodeID, annotation: str = "", sense: int = None):
+  def __init__(self, node_id : NodeID, annotation: str = "", sense: int = None,
+               two_phase: bool = False):
     super().__init__(annotation)
     self.node_id = node_id
     # sense=None -> stock behavior (255 + clear-to-0), byte-identical to before.
-    # sense=254/255 -> sense-reversing barrier (no clear), used under packing.
+    # sense=254/255 -> single-phase sense-reversing barrier (no clear), packing.
+    # two_phase=True -> skew-ROBUST two-phase barrier (arrive 254 / release 255),
+    #   used ONLY by the wave-launch per-wave barriers (merge mode). See _build.
     self.sense = sense
+    self.two_phase = two_phase
     self._build()
 
   def _build(self):
-    if self.sense is None:
+    if self.two_phase:
+      # Two-phase (skew-robust) all-inode barrier. REQUIRED for the wave-launch
+      # per-wave barriers: those introduce a NEW pattern (re-WR_IMEM barrier then
+      # COMPUTE barrier within ONE host RUN, with asymmetric per-inode WR_IMEM
+      # between them) that the single-phase sense-reversing barrier CANNOT survive.
+      # RTL fact (controller.sv:148,63 + hazard_control.sv:97): sync_reg is ONE
+      # scalar per inode, overwritten by SET_FLAG, and STANDBY stalls on strict
+      # `!=`. So a fast inode that SET_FLAG(arrive) then SET_FLAG(next) ERASES the
+      # arrive value a lagging peer is still `==`-waiting on -> lost wakeup (the v9
+      # wedge: inode_2_0 raced re-WR_IMEM(255)->COMPUTE(254), erasing 255 before
+      # slow peers sampled it; peers STANDBY(inode_2_0,255) forever).
+      #
+      # Textbook two-phase barrier: (1) ARRIVE = SET_FLAG(A); STANDBY(all peers,A)
+      # -> everyone has arrived. (2) RELEASE = SET_FLAG(R); STANDBY(all peers,R)
+      # -> everyone has ACKNOWLEDGED phase 1. No inode overwrites A with R until it
+      # passed its own phase-1 STANDBY (saw all A's); it overwrites R only at the
+      # NEXT barrier's phase 1, by which point every inode has passed phase 2 (saw
+      # all R's) and no one is still reading R. Hence a FIXED (A,R)=(254,255) pair
+      # is safe for EVERY barrier regardless of arrival skew -- no counter needed.
+      A, R = 254, 255
+      peers = [n for n in NodeID.inodes() if n != self.node_id]
+      nops = " ".join([f"\"nop\\n\"" for _ in range(len(NodeID.inodes()))])
+      # Phase 1: arrive.
+      self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({A});"))
+      for node in peers:
+        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {A});"))
+      self.body.add(TextBlock(f"__asm__ volatile({nops});"))
+      # Phase 2: release (acknowledge everyone saw phase 1 before A can be reused).
+      self.body.add(TextBlock(f"__builtin_INODE_SET_FLAG({R});"))
+      for node in peers:
+        self.body.add(TextBlock(f"__builtin_INODE_STANDBY({node.value}, {R});"))
+      self.body.add(TextBlock(f"__asm__ volatile({nops});"))
+    elif self.sense is None:
       # Stock barrier: reused UUID=255 + clear-to-0. Byte-identical to the
       # pre-fix codegen (lever OFF / non-packing path).
       INODE_SYNC_UUID = 255

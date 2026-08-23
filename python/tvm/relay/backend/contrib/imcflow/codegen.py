@@ -860,9 +860,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # Under packing, use a sense-reversing barrier (alternating 254/255, no
     # clear) so inode arrival skew can't cause a lost-wakeup (see SyncAllINodes).
     # One sense per logical barrier -> all 4 per-inode instances share it.
+    # Under MERGE (n_waves>1) use the skew-ROBUST two-phase barrier instead: the
+    # per-wave re-WR_IMEM/COMPUTE barrier pairs break the single-phase barrier's
+    # <=1-skew assumption (v9 wedge). merge-gated -> non-merged byte-identical.
+    _tp = self.n_waves > 1
     _sense = SyncAllINodes.next_sense() if (pack_bn_minmax_mode() or residual_in_region_mode()) else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync all inodes", sense=_sense)
+      block = SyncAllINodes(inode, "sync all inodes", sense=_sense, two_phase=_tp)
       self.codeblocks.append(inode, block, codephase)
     
     # halt for slave inodes
@@ -953,7 +957,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         # step-6 "sync before compute enable" barrier).
         _sense = SyncAllINodes.next_sense() if (pack_bn_minmax_mode() or residual_in_region_mode()) else None
         for inode in NodeID.inodes():
-          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}", sense=_sense)
+          bar = SyncAllINodes(inode, f"serialize imcu: gate before {node.name}", sense=_sense,
+                              two_phase=(self.n_waves > 1))
           self.codeblocks.append(inode, bar, CodePhase.INIT)
         block = WriteIMCUBlock(node, "imcu write")
         self.codeblocks.append(node, block, CodePhase.INIT)
@@ -965,7 +970,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # # sync before imce compute
     _sense = SyncAllINodes.next_sense() if (pack_bn_minmax_mode() or residual_in_region_mode()) else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "sync before compute enable", sense=_sense)
+      block = SyncAllINodes(inode, "sync before compute enable", sense=_sense,
+                            two_phase=(self.n_waves > 1))
       self.codeblocks.append(inode, block, CodePhase.INIT)
 
     # imce compute
@@ -986,7 +992,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # wait all enable of imce
     _sense = SyncAllINodes.next_sense() if (pack_bn_minmax_mode() or residual_in_region_mode()) else None
     for inode in NodeID.inodes():
-      block = SyncAllINodes(inode, "wait all imce compute enable", sense=_sense)
+      block = SyncAllINodes(inode, "wait all imce compute enable", sense=_sense,
+                            two_phase=(self.n_waves > 1))
       self.codeblocks.append(inode, block, CodePhase.INIT)
       # block = SetFlag()
       # self.codeblocks.append(inode, block, CodePhase.INIT)
@@ -1021,9 +1028,12 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
           f"inode cross-wave edges = {len(self._cross_wave_edges)}")
 
     def _barrier(annot):
+      # emit_wave_launches only runs for merge (n_waves>1) -> always the skew-robust
+      # two-phase barrier (the per-wave re-WR_IMEM/COMPUTE seams need it).
       _sense = SyncAllINodes.next_sense() if (pack_bn_minmax_mode() or residual_in_region_mode()) else None
       for inode in NodeID.inodes():
-        self.codeblocks.append(inode, SyncAllINodes(inode, annot, sense=_sense), CodePhase.EXEC)
+        self.codeblocks.append(inode, SyncAllINodes(inode, annot, sense=_sense,
+                               two_phase=(self.n_waves > 1)), CodePhase.EXEC)
 
     def _flush_wave_stream(w):
       # C1b (C) Stage 4: append wave-w's deferred streaming blocks to EXEC, in
