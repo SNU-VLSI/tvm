@@ -5457,6 +5457,243 @@ def splitResidualSkipThroughInodeBuffer(mod):
                 f"{len(cfg.ResidBufferInfo)} skip edge(s); routed as INODE_BUFFER")
 
 
+def splitCrossWaveEdgesThroughInodeBuffer(mod):
+  """C1b (C) Stage 3: reroute every DIRECT imce->imce data edge that crosses a
+  launch-wave boundary (producer wave != consumer wave) through an inode-DMEM
+  RESBUF waypoint, reusing the residual-skip INODE_BUFFER machinery.
+
+  WHY: under wave-launch, a wave-k+1 consumer's RECV lives in its wave-k+1 IMCE
+  program, which is not loaded until wave k finishes. A wave-k producer that SENDs
+  directly to that not-yet-programmed core would stall -> deadlock. Rerouting to
+  inode DMEM (producer SEND -> inode collector in wave k; inode resend -> consumer
+  in wave k+1) breaks the dependency: the inode buffer is always available, and
+  Stage-4 wave placement puts hop A in the producer wave and hop B in the
+  consumer wave.
+
+  Called AFTER splitResidualSkipThroughInodeBuffer and BEFORE Joint PnR (so the
+  ILP routes the two hops and places the RESBUF, exactly like residual skips).
+  Wave detection is PLACEMENT-FREE (compute_graph_node_waves_from_edges), so it is
+  valid pre-PnR. Gated on region_merge_mode(); OFF -> no-op -> byte-identical.
+  """
+  from tvm.relay.op.contrib.imcflow import region_merge_mode, residual_inode_buffer_mode
+  if not region_merge_mode():
+    return
+  # RESBUF reuse requires the inode-buffer sub-lever machinery (codegen
+  # _add_resid_buffer_blocks / allocateResidBufferDataBlocks are gated on it);
+  # merge mode implies it, but assert to fail loud if that ever changes.
+  assert residual_inode_buffer_mode(), \
+      "region_merge requires residual_inode_buffer for cross-wave RESBUF reroute"
+  from tvm.relay.backend.contrib.imcflow.joint_pnr_ilp import (
+      compute_graph_node_waves_from_edges)
+  debug_print("[wave-xreroute] splitCrossWaveEdgesThroughInodeBuffer called")
+  cfg = ImcflowDeviceConfig()
+  if not hasattr(cfg, "ResidBufferPreassign"):
+    cfg.ResidBufferPreassign = {}
+  if not hasattr(cfg, "ResidBufferInfo"):
+    cfg.ResidBufferInfo = {}
+  if not hasattr(cfg, "CrossWaveResbufGids"):
+    cfg.CrossWaveResbufGids = set()
+  id_to_node = CustomIDToNode()
+
+  def _outer(gid):
+    return gid[0] if isinstance(gid, tuple) else gid
+
+  def _is_imce_call(tid):
+    """endpoint is placed on an on-chip IMCE core: a compute Call OR a split/
+    concat op (both are IMCE-placed and carry a wave). NOT var/const/func_out.
+    A split pinned to a w0 producer still SENDs its output over the NoC to w1
+    consumers, so a split->call cross-wave edge is a real transfer to reroute."""
+    node = id_to_node.get(getInnerNodeID(tid.graph_node_id))
+    if isinstance(node, relay.Call):
+      op_ = node.op
+      # exclude nothing extra: qconv/composite/split/concat are all Calls; a
+      # split is a Call to the 'split' op, concat to 'concatenate'.
+      return True
+    return False
+
+  _DATA_TT = ("data", "odata", "lhs", "rhs")
+  # continue the RESBUF synthetic-id band below whatever residual split used.
+  existing = [g for g in cfg.ResidBufferInfo.keys() if isinstance(g, int)]
+  next_id = [min(existing) - 1 if existing else -100000]
+
+  func_map = cfg.ImcflowFuncMap
+  n_rerouted = 0
+  for func_name in list(cfg.TensorEdgeListDict.keys()):
+    edge_list = cfg.TensorEdgeListDict[func_name]
+    _fi = func_map.get(func_name)
+    _func = getattr(_fi, "func_node", None) if _fi is not None else None
+    waves = compute_graph_node_waves_from_edges(func_name, edge_list, func=_func)
+    if not waves or max(waves.values(), default=0) == 0:
+      continue  # single-wave region -> nothing to reroute
+
+    def _wave_of(tid):
+      # dual-key lookup: try outer graph id then inner id (matches the dual-keyed
+      # map from compute_graph_node_waves_from_edges).
+      g = tid.graph_node_id
+      if g in waves:
+        return waves[g]
+      og = _outer(g)
+      if og in waves:
+        return waves[og]
+      try:
+        ig = getInnerNodeID(g)
+        if ig in waves:
+          return waves[ig]
+      except Exception:
+        pass
+      return None
+
+    def _dst_is_split(e):
+      n = id_to_node.get(getInnerNodeID(e.dst_id.graph_node_id))
+      return isinstance(n, relay.Call) and getattr(n.op, "name", "") == "split"
+
+    # find direct imce->imce data edges spanning waves
+    to_reroute = []
+    for e in edge_list:
+      # data edge, both endpoints IMCE compute nodes
+      if e.src_id.tensor_type not in _DATA_TT and e.dst_id.tensor_type not in _DATA_TT:
+        continue
+      if not (_is_imce_call(e.src_id) and _is_imce_call(e.dst_id)):
+        continue
+      # SAME-CORE skip: a producer->SPLIT edge is co-located (P3 pins the split to
+      # its producer's core), so it is a LOCAL hand-off, NOT a NoC transfer -- even
+      # if the split is wave-labelled a wave later than the producer. Rerouting it
+      # through a REMOTE inode RESBUF sends data off-core and back to the SAME core
+      # (imce_1_1 -> inode_0_0 -> imce_1_1), creating a routing cycle + a crossbar
+      # X (RTL router_flow_tx valid=X). The split's OUTPUT edges to its (different-
+      # core) consumers are the real transfers; under the consumers-unanimous wave
+      # rule the split and those consumers share a wave, so no cross-wave reroute
+      # is needed there either -- the whole split fan-out stays intra-launch.
+      if _dst_is_split(e):
+        continue
+      ws = _wave_of(e.src_id)
+      wd = _wave_of(e.dst_id)
+      if ws is None or wd is None or ws == wd:
+        continue
+      to_reroute.append((e, ws, wd))
+
+    if not to_reroute:
+      continue
+    # GROUP cross-wave edges that share the same MULTICAST split producer + slice.
+    # A multicast split (SplitInfo.is_multi_cast) broadcasts ONE stream that the
+    # policy table fans out; rerouting each consumer edge into its own collector
+    # would demand N copies of a stream the producer sends ONCE (send 256 vs
+    # recv 128 x3 deadlock). Instead: ONE RESBUF per (multicast-split src, slice)
+    # collects the stream ONCE (single hopA) and re-sends it UNICAST to each
+    # cross-wave consumer (N hopB). Unicast producers (dwconv split / plain conv)
+    # keep one RESBUF per edge (group key includes the dst so they stay separate).
+    split_info = cfg.SplitInfo.get(func_name, {})
+    def _group_key(e):
+      s_outer = _outer(e.src_id.graph_node_id)
+      si = split_info.get(s_outer, {})
+      if si.get("is_multi_cast", False):
+        # MULTICAST split: every consumer gets the SAME full stream (split_idx is
+        # irrelevant for data content). Group ALL cross-wave consumers of this
+        # multicast src into ONE RESBUF -> collect the full stream ONCE, resend
+        # (unicast) the full stream to each consumer. (Do NOT key on split_idx.)
+        return ("mc", s_outer, e.src_id.tensor_type)
+      # unicast: unique per edge (own RESBUF)
+      return ("uni", id(e))
+    from collections import OrderedDict as _OD
+    groups = _OD()
+    for skip_edge, ws, wd in to_reroute:
+      groups.setdefault(_group_key(skip_edge), []).append((skip_edge, ws, wd))
+
+    # SIZE-AWARE anchor: each inode data region is a fixed 64KB shared by imem +
+    # weights + config + func_out/RESBUF buffers. A blind round-robin overflowed
+    # inode_1_0 (a 32KB cross-wave RESBUF landed on an already-full row). Pick the
+    # LEAST-LOADED row, charging BOTH residual RESBUFs already anchored (known from
+    # ResidBufferInfo -- e.g. inode_3_0 carries 40KB of them) AND a per-row imem/
+    # weight baseline estimate (rows hosting more convs stage more imem+weights).
+    # PnR spreads convs by P2c (row cap), and the model input vars pin to rows
+    # 0/1 (get_var_inodes) while func_out pins to rows 2/3 -- rows 0/1 therefore
+    # also carry the large input/param staging, so bias large RESBUFs toward the
+    # func_out rows (2/3) EXCEPT where residual RESBUFs already sit (3). Seed the
+    # tracker so the min-load pick naturally avoids the baseline-heavy rows.
+    _row_load = {r: 0 for r in range(4)}
+    # charge residual RESBUFs already anchored this func.
+    for _g, _info in cfg.ResidBufferInfo.items():
+      if _info.get("func_name") == func_name and _g not in cfg.CrossWaveResbufGids:
+        _ridx = _info["inode"].to_coord()[0]
+        _row_load[_ridx] = _row_load.get(_ridx, 0) + int(_info.get("size", 0) or 0)
+    # seed input-staging bias: rows 0/1 host model-input var staging (32KB each
+    # for region2's two inputs) -> they are the tightest. Add a baseline so the
+    # min-load pick prefers rows 2 then (residual-charged) 3 for large buffers.
+    _row_load[0] += 32768
+    _row_load[1] += 32768
+    def _est_resbuf_bytes(producer_tid, split_idx):
+      # NoC-word sizing (32B/word), mirroring allocateResidBufferDataBlocks.
+      try:
+        src_node = transform_utils.getNodeFromTensorID(producer_tid)
+        ttype = transform_utils.get_type(mod, src_node)
+        if isinstance(ttype, TupleType):
+          ttype = ttype.fields[split_idx if split_idx is not None else 0]
+        dims = [int(d) for d in ttype.shape]
+        ch = dims[1]; npx = 1
+        for d in dims[2:]:
+          npx *= d
+        blocks = max(math.ceil(ch / 16), 4)
+        return ((npx * blocks * 32 + 31) // 32) * 32
+      except Exception:
+        return 8192  # conservative default
+
+    new_list = list(edge_list)
+    # BEST-FIT-DECREASING: place the LARGEST RESBUFs first so a big 32KB buffer
+    # claims the emptiest row before small ones fragment it (round-robin/in-order
+    # let an 8KB buffer take the one row with 32KB free, then the 32KB overflowed).
+    _ordered = sorted(
+        groups.items(),
+        key=lambda kv: _est_resbuf_bytes(kv[1][0][0].src_id, kv[1][0][0].split_idx),
+        reverse=True)
+    for gkey, members in _ordered:
+      resbuf_gid = next_id[0]
+      next_id[0] -= 1
+      rep_edge, ws, wd = members[0]
+      _sz = _est_resbuf_bytes(rep_edge.src_id, rep_edge.split_idx)
+      # choose the currently-least-loaded row, then charge it.
+      row = min(range(4), key=lambda r: _row_load[r])
+      _row_load[row] += _sz
+      row_inode = NodeID.from_inode_coord(row)
+      # ONE collector (hopA) from the shared producer; N unicast resends (hopB).
+      hopA = TensorEdge(rep_edge.src_id, TensorID(resbuf_gid, "resbuf"),
+                        rep_edge.split_idx)
+      hopBs = [TensorEdge(TensorID(resbuf_gid, "resbuf_out"), m[0].dst_id,
+                          m[0].split_idx) for m in members]
+      spliced = []
+      for e in new_list:
+        matched = next((i for i, m in enumerate(members) if e is m[0]), None)
+        if matched is not None:
+          if matched == 0:
+            spliced.append(hopA)  # collector inserted once, at the first member
+          spliced.append(hopBs[matched])
+        else:
+          spliced.append(e)
+      new_list = spliced
+      cfg.HWNodeMap[resbuf_gid] = row_inode
+      cfg.ResidBufferPreassign.setdefault(func_name, {})[resbuf_gid] = row_inode
+      cfg.ResidBufferInfo[resbuf_gid] = dict(
+          func_name=func_name, hopA=hopA, hopB=hopBs[0], hopBs=hopBs,
+          producer=rep_edge.src_id, add=rep_edge.dst_id,
+          recv_outer=_outer(rep_edge.dst_id.graph_node_id),
+          inode=row_inode, orig_skip=rep_edge,
+          cross_wave=(ws, wd))
+      cfg.CrossWaveResbufGids.add(resbuf_gid)
+      n_rerouted += len(members)
+      debug_print(f"[wave-xreroute] {func_name}: RESBUF {resbuf_gid} @ {row_inode} "
+                  f"reroutes {len(members)} cross-wave edge(s) from "
+                  f"{rep_edge.src_id} (w{ws}->w{wd}); 1 collect + "
+                  f"{len(hopBs)} resend(s)")
+    cfg.TensorEdgeListDict[func_name] = new_list
+
+  # rebuild flat list
+  cfg.TensorEdgeList = []
+  for _fn, lst in cfg.TensorEdgeListDict.items():
+    cfg.TensorEdgeList.extend(lst)
+  if n_rerouted:
+    print(f"[wave-xreroute] rerouted {n_rerouted} cross-wave direct edge(s) "
+          f"through inode DMEM (RESBUF)")
+
+
 def allocateResidBufferDataBlocks(mod):
   """Task #10: allocate the whole residual-skip tensor as a DataBlock in the
   assigned inode's dmem, keyed by BOTH hop edges so get_data_block_by_edge()
@@ -5489,10 +5726,19 @@ def allocateResidBufferDataBlocks(mod):
   MIN_STREAM_GRANULARITY = 4  # MinmaxQuantBlock hard-codes 4 blocks/pixel minimum
   LANES = 16
 
-  def _skip_tensor_bytes(producer_tid):
-    """Streamed size in bytes for the skip producer's odata (granularity-padded)."""
+  def _skip_tensor_bytes(producer_tid, split_idx=None):
+    """Streamed size in bytes for the skip producer's odata (granularity-padded).
+
+    C1b (C) Stage 3: a cross-wave RESBUF's producer may be a SPLIT, whose output
+    type is a TupleType (one TensorType per split slice). Index it by the hop's
+    split_idx to size the specific slice; a plain conv producer is a TensorType
+    (split_idx None)."""
     src_node = transform_utils.getNodeFromTensorID(producer_tid)
     ttype = transform_utils.get_type(mod, src_node)
+    if isinstance(ttype, TupleType):
+      # split producer: pick the slice this hop carries (default slice 0).
+      idx = split_idx if split_idx is not None else 0
+      ttype = ttype.fields[idx]
     shape, dtype = ttype.shape, ttype.dtype
     dims = [int(d) for d in shape]  # NCHW
     channels = dims[1]
@@ -5501,7 +5747,19 @@ def allocateResidBufferDataBlocks(mod):
       n_pixels *= d
     blocks = max(math.ceil(channels / LANES), MIN_STREAM_GRANULARITY)
     words = n_pixels * blocks
-    return words * LANES * np.dtype(dtype).itemsize
+    # C1b (C) Stage 3: size by NoC WORDS, not logical tensor bytes. The RESBUF
+    # collector/resend loop counts 32-byte NoC packet-words (db.size/32); a NoC
+    # word is 32B on the wire (16 lanes x int16) REGARDLESS of the tensor's
+    # logical dtype. The residual path used LANES*itemsize which equals 32 only
+    # for int16 producers; a uint8-typed producer (e.g. a post-requant split
+    # feeder, node 80 = uint8 [1,64,8,8]) then sized HALF (4096B=128w) while the
+    # producer actually streams 256 words -> collector recv 128 vs send 256
+    # deadlock. Fixed 32B/word makes the buffer hold exactly `words` NoC words.
+    NOC_WORD_BYTES = 32
+    _b = words * NOC_WORD_BYTES
+    debug_print(f"[wave-xreroute] _skip_tensor_bytes producer={producer_tid} "
+                f"shape={dims} dtype={dtype} -> {words}w {_b}B")
+    return _b
 
   for resbuf_gid, info in resid_info.items():
     func_name = info["func_name"]
@@ -5510,7 +5768,9 @@ def allocateResidBufferDataBlocks(mod):
     inode_nid = info["inode"]
     inode_name = inode_nid.name  # e.g. inode_3_0
 
-    size = _skip_tensor_bytes(info["producer"])
+    # hopA carries the split_idx for a split-sourced (cross-wave) RESBUF; None
+    # for a plain conv-sourced residual skip.
+    size = _skip_tensor_bytes(info["producer"], getattr(hopA, "split_idx", None))
     # round up to a NoC packet (32B) multiple
     size = ((size + 31) // 32) * 32
 
@@ -5529,7 +5789,11 @@ def allocateResidBufferDataBlocks(mod):
     layout.allocate(datablock, phase="exec")
     # Now that the block is keyed by hopA, register hopB as a second resolvable
     # edge pointing at the SAME buffer (same offset/base_address).
-    datablock.edges.append(hopB)
+    # C1b (C) Stage 3: a multicast cross-wave RESBUF has MANY resend hops (hopBs);
+    # register EACH so get_data_block_by_edge resolves for every unicast resend.
+    for _hb in info.get("hopBs", [hopB]):
+      if _hb not in datablock.edges:
+        datablock.edges.append(_hb)
     # register a TensorEdgeInfo so downstream (recv/send blocks) can resolve it;
     # the policy builder already added routing TensorEdgeInfo for both hops, so
     # DO NOT overwrite those -- just attach the DataBlock reference used by the

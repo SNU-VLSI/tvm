@@ -214,6 +214,10 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     # Task #5: reroute in-region residual SKIP through an inode dmem buffer.
     # No-op unless IMCFLOW_RESID_INODE_BUFFER is on -> byte-identical otherwise.
     imcflow_transform.splitResidualSkipThroughInodeBuffer(mod)
+    # C1b (C) Stage 3: reroute cross-wave direct imce->imce edges through inode
+    # DMEM (placement-free wave detection; pre-PnR so the ILP routes both hops).
+    # No-op unless IMCFLOW_REGION_MERGE is on -> byte-identical otherwise.
+    imcflow_transform.splitCrossWaveEdgesThroughInodeBuffer(mod)
     if save_intermediate:
         with open(f"{output_dir}/tensor_edge_list.txt", "w") as f:
             for key, paths in DevConfig().TensorEdgeListDict.items():
@@ -784,6 +788,10 @@ def transform_model_single_qconv(mod, param_dict, output_dir, placements, top_ou
     # Task #5: reroute in-region residual SKIP through an inode dmem buffer.
     # No-op unless IMCFLOW_RESID_INODE_BUFFER is on -> byte-identical otherwise.
     imcflow_transform.splitResidualSkipThroughInodeBuffer(mod)
+    # C1b (C) Stage 3: reroute cross-wave direct imce->imce edges through inode
+    # DMEM (placement-free wave detection; pre-PnR so the ILP routes both hops).
+    # No-op unless IMCFLOW_REGION_MERGE is on -> byte-identical otherwise.
+    imcflow_transform.splitCrossWaveEdgesThroughInodeBuffer(mod)
     if save_intermediate:
         with open(f"{output_dir}/tensor_edge_list_p2.txt", "w") as f:
             for key, paths in DevConfig().TensorEdgeListDict.items():

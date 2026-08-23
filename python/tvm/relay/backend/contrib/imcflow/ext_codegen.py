@@ -707,6 +707,14 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
     ]
     return "\n".join(out) + "\n"
 
+  def _region_wave_count(self):
+    """C1b (C) (A): number of launch waves for THIS region (1 for every
+    non-merged region). From DevConfig().NodeToWavePerFunc; the host issues one
+    RUN invoke per wave. Empty/absent -> 1 (single launch, byte-identical)."""
+    wm = DevConfig().NodeToWavePerFunc.get(self.func_name, {}) or {}
+    all_w = {w for ws in wm.values() for w in ws}
+    return (max(all_w) + 1) if all_w else 1
+
   def generateInvokeCode(self):
     """Generate NPU invoke code."""
     # STEP_FREERUN (power measurement): the RUN wait must HOLD for the whole bounded
@@ -1027,9 +1035,22 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
     code += _hb("after policy_update")
     code += self.generateRetryCheck("policy_update")
     code += _hb("before invoke")
-    code += self.generateInvokeCode() # proceed up to halt
+    code += self.generateInvokeCode() # proceed up to halt  (== wave 0 RUN)
     code += _hb("after invoke / before poll")
     code += self.generateRetryCheck("invoke")
+
+    # C1b (C) (A) per-wave HOST RE-INVOKE: a merged region split into N launch
+    # waves needs N RUN invocations (IMCE STOP = launch-terminal, so each wave is
+    # a fresh RUN that re-enters the inode EXEC via PC_INCR at the next wave
+    # segment). The first RUN above is wave 0; emit N-1 MORE RUN invokes for
+    # waves 1..N-1. Each is a bare GO+poll (no data transfer, no reprogram -- the
+    # inode's per-wave EXEC segment does its own WR_IMEM(k)+COMPUTE(k)+stream(k)).
+    # n_waves==1 for every non-merged region -> no extra invokes -> byte-identical.
+    _n_waves = self._region_wave_count()
+    for _w in range(1, _n_waves):
+      code += _hb(f"before wave {_w} invoke")
+      code += self.generateInvokeCode()  # wave _w RUN (PC resumes past wave _w-1 HALT)
+      code += self.generateRetryCheck(f"wave_{_w}_invoke")
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor

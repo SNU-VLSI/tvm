@@ -805,6 +805,21 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     self.send_map = {}
     self.recv_map = {}
     self.curr_composite_id = None
+    # C1b (C) Stage 4 -- streaming wave partition. In a multi-wave region we DEFER
+    # every inode Send/RecvBlock into a per-wave bucket instead of appending it to
+    # EXEC immediately; emit_wave_launches() then flushes each wave's streaming
+    # AFTER that wave's WR_IMEM+COMPUTE segment, giving the correct EXEC order
+    # [wave0 stream] -> [wave1 program+compute -> wave1 stream] -> ... A SEND is
+    # never placed before its wave's cores are programmed (would corrupt); a RECV
+    # placed at its consumer wave only stalls until its data arrives. Off merge
+    # (n_waves==1) _defer_streams is False -> blocks append immediately, exactly
+    # as before -> byte-identical.
+    self._defer_streams = (self.n_waves > 1)
+    self._wave_streams = {k: [] for k in range(self.n_waves)}
+    # Direct edges whose producer wave != consumer wave (Stage 3 will reroute
+    # these through inode DMEM via func_out/func_in). Recorded here for diagnosis;
+    # Stage 4 places them at the consumer (later) wave conservatively.
+    self._cross_wave_edges = []
 
   def _init_wave_structure(self, func_name):
     """Derive per-wave launch structure for this region from the PnR wave map.
@@ -995,44 +1010,62 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     func_name = self.codeblocks.func_name
     inst_dict = DevConfig().InstEdgeInfoDict[func_name]
     active_imces = DevConfig().ActiveIMCEPerFunc[func_name]
+    print(f"[wave-stream] {func_name}: per-wave deferred stream counts = "
+          f"{ {k: len(v) for k, v in self._wave_streams.items()} }; "
+          f"inode cross-wave edges = {len(self._cross_wave_edges)}")
 
     def _barrier(annot):
       _sense = SyncAllINodes.next_sense() if (pack_bn_minmax_mode() or residual_in_region_mode()) else None
       for inode in NodeID.inodes():
         self.codeblocks.append(inode, SyncAllINodes(inode, annot, sense=_sense), CodePhase.EXEC)
 
+    def _flush_wave_stream(w):
+      # C1b (C) Stage 4: append wave-w's deferred streaming blocks to EXEC, in
+      # their original per-wave emission order (already the correct producer/
+      # consumer order within a wave). These were collected by _emit_stream during
+      # visit_function; flushing here places them AFTER wave-w's WR_IMEM+COMPUTE.
+      for hid, phase, block in self._wave_streams.get(w, []):
+        self.codeblocks.append(hid, block, phase)
+
+    # ===== (A) per-wave HOST RE-INVOKE model (IMCE STOP = launch-terminal) =====
+    # RTL proved an IMCE will NOT re-enter compute after OP_STOP within one P1
+    # launch, so (B) in-launch wave sequencing wedged. (A): each wave is its own
+    # host RUN (P1) invocation. The inode PC uses PC_INCR on RUN, so it RESUMES at
+    # the instruction after each wave's DONE/INTRT/HALT -> the next wave's segment.
+    # Thus the inode EXEC phase is a linear sequence of wave segments, each ending
+    # with sync_inrt_clear (DONE/INTRT/HALT); the host re-invokes RUN once per wave
+    # (ext_codegen invoke count = n_waves). A fresh RUN re-launches the wave-k
+    # IMCE COMPUTE from its wave-k IMEM (STOP-terminal avoided). Policy + weights
+    # loaded ONCE in the PROGRAM (INIT) launch; only WR_IMEM(wave k) re-runs here.
+    #
+    # Wave 0: its WR_IMEM+COMPUTE were done in INIT (PROGRAM). Here we emit its
+    # streaming then its terminator (this RUN = wave 0). Waves 1..N-1: each emits
+    # re-WR_IMEM + COMPUTE + streaming + terminator (each its own RUN). The LAST
+    # wave's terminator is emitted by finalize() (END phase), matching the stock
+    # single-wave region's single END terminator.
+    _flush_wave_stream(0)
+    # wave-0 terminator (only when there are further waves; else finalize() ends).
+    if self.n_waves > 1:
+      self.sync_inrt_clear(CodePhase.EXEC)
+
     for k in range(1, self.n_waves):
       wcores = self.wave_cores.get(k, set())
       if not wcores:
+        _flush_wave_stream(k)
+        if k != self.n_waves - 1:
+          self.sync_inrt_clear(CodePhase.EXEC)
         continue
-      _barrier(f"wave {k}: gate before re-WR_IMEM")
-      # COMPLETION RENDEZVOUS (fixes WR_IMEM-vs-in-flight-fetch race): before
-      # overwriting a REUSED core's IMEM, the owning inode STANDBYs on that core's
-      # wave-done flag (ImceWaveDoneBlock.WAVE_DONE_UUID, set as the core's last
-      # act before STOP). The all-inode barrier only syncs inodes; most reused
-      # cores' prior-wave outputs go to OTHER imces (region2 has 1 func_out / 18
-      # nodes), so the barrier alone does NOT prove those cores finished. This
-      # per-core flag wait does. A reused core = one present in an EARLIER wave.
-      reused = sorted(
-          [c for c in wcores if any(c in self.wave_cores.get(j, set())
-                                    for j in range(k))],
-          key=lambda x: x.name)
-      for core in reused:
-        inode = core.master()
-        self.codeblocks.append(
-            inode,
-            Standby(node_ids=[core], annotation=f"wave {k}: wait {core.name} wave{k-1} done",
-                    uuid=ImceWaveDoneBlock.WAVE_DONE_UUID),
-            CodePhase.EXEC)
-      # re-program IMEM for this wave's cores with their wave-k blob
+      # re-program IMEM for this wave's cores with their wave-k blob (runs on the
+      # wave-k RUN re-invoke, after the PC resumes past wave k-1's HALT).
       for imce, inst_edge in sorted(inst_dict.items(), key=lambda x: x[0].name):
         if imce in wcores:
           self.codeblocks.append(
               imce.master(),
               WriteIMEMBlock(inst_edge, f"imem write w{k}: {imce.name}", wave=k),
               CodePhase.EXEC)
-      _barrier(f"wave {k}: gate before COMPUTE enable")
-      # enable compute for this wave's active cores
+      # sync so all inodes finish re-WR_IMEM before enabling compute.
+      _barrier(f"wave {k}: sync after re-WR_IMEM, before COMPUTE")
+      # enable compute for this wave's active cores (fresh launch -> re-entrant).
       for imce, inst_edge in sorted(inst_dict.items(), key=lambda x: x[0].name):
         if imce in wcores and imce in active_imces:
           policy_addr = inst_edge.policy_info[0].address
@@ -1040,7 +1073,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
               imce.master(),
               IMCEComputeBlock(policy_addr, f"{imce.name} compute w{k}"),
               CodePhase.EXEC)
-      _barrier(f"wave {k}: gate after COMPUTE enable")
+      _barrier(f"wave {k}: sync after COMPUTE enable")
+      # wave-k streaming.
+      _flush_wave_stream(k)
+      # wave-k terminator (DONE/INTRT/HALT) so the host RUN returns and can
+      # re-invoke for wave k+1; the final wave is terminated by finalize().
+      if k != self.n_waves - 1:
+        self.sync_inrt_clear(CodePhase.EXEC)
 
   def finalize(self):
     self.sync_inrt_clear(CodePhase.EXEC_TILE if self.is_tiled else CodePhase.END)
@@ -1331,8 +1370,29 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       return gid[0] if isinstance(gid, tuple) else gid
 
     resbuf_gid = _outer(hopA.dst_id.graph_node_id)
-    in_edges = {}
+    # C1b (C) Stage 3: OTHER cross-wave RESBUFs may have spliced (producer ->
+    # RESBUF -> consumer) hops into this edge list. The residual fill-lead
+    # receptive-field walk must see the ORIGINAL producer->consumer edge (a
+    # synthetic RESBUF node has no relay op -> _conv_of returns None -> walk
+    # aborts). Collapse each cross-wave RESBUF's two hops back into one transparent
+    # producer->consumer edge for this walk only (does not mutate the real list).
+    _xw_gids = getattr(DevConfig(), "CrossWaveResbufGids", set())
+    _xw_src = {}   # xw resbuf gid -> its producer src TensorID
     for e in edges:
+      if _outer(e.dst_id.graph_node_id) in _xw_gids:
+        _xw_src[_outer(e.dst_id.graph_node_id)] = e.src_id
+    _collapsed = []
+    for e in edges:
+      sg = _outer(e.src_id.graph_node_id)
+      if sg in _xw_gids and sg != resbuf_gid and sg in _xw_src:
+        # resbuf_out -> consumer : rewrite src to the RESBUF's real producer
+        _collapsed.append(TensorEdge(_xw_src[sg], e.dst_id, e.split_idx))
+      elif _outer(e.dst_id.graph_node_id) in _xw_gids:
+        continue  # drop producer -> RESBUF hop (folded into the collapsed edge)
+      else:
+        _collapsed.append(e)
+    in_edges = {}
+    for e in _collapsed:
       if getattr(e.dst_id, "tensor_type", None) not in ("data", "rhs"):
         continue
       if _outer(e.src_id.graph_node_id) == resbuf_gid:
@@ -1479,6 +1539,13 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       send_info = DevConfig().get_tensor_edge_info(hopB)
       send_hid = self.get_hid(hopB.src_id)
       fout_edge = interleave_by_gid.get(resbuf_gid)
+      # C1b (C) Stage 3: a CROSS-WAVE RESBUF is a plain store-and-forward across a
+      # launch boundary, NOT a residual-add convergence -- it has no fill-lead
+      # pixel-timing (its consumer is a next-wave conv, not an add fed by two
+      # in-flight branches). Force the plain in-order resend path (fout_edge=None)
+      # so the residual-only _auto_fill_lead_groups geometry walk is skipped.
+      if resbuf_gid in getattr(DevConfig(), "CrossWaveResbufGids", set()):
+        fout_edge = None
       # Task #8 iter3: fold the collector fill (hop A) into the per-group interleave
       # only when it is co-located on the SAME inode as the resend (hop B) -- i.e.
       # the resend/funcout interleave path fires. A standalone 256-word collector
@@ -1486,11 +1553,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # input streams; demanding all 256 up-front starves the fed add and
       # backpressures the region -- iter2 stalled at collector word 64/256).
       fold_fill = fout_edge is not None and recv_hid == send_hid
+      # Stage 4 wave placement: collector RECV (hop A) belongs to the PRODUCER's
+      # wave (it drains that producer's skip output); resend/interleave (hop B)
+      # belongs to the fed add-imce's (CONSUMER) wave. If they differ this RESBUF
+      # bridges waves -> a Stage-3 cross-wave case; a RECV placed at the later
+      # wave only stalls (safe), so we place the collector at the producer wave
+      # and the resend at the consumer wave, and flag the mismatch.
+      _wA = self._tensor_wave(hopA.src_id)
+      _wB = self._tensor_wave(hopB.dst_id)
+      _wA = _wA if _wA is not None else 0
+      _wB = _wB if _wB is not None else 0
+      if _wA != _wB:
+        self._cross_wave_edges.append((hopA, _wA, _wB))
       if not fold_fill:
         # collector: standalone INODE_RECV hop A into the buffer (plain-resend path).
         recv_block = RecvBlock(self, db, recv_info.fifo_id,
                                f"resbuf collector recv: {hopA}")
-        self.codeblocks.append(recv_hid, recv_block, phase)
+        self._emit_stream(recv_hid, recv_block, phase, _wA)
       if fout_edge is not None:
         # Task #8: interleave the resend with the add's func_out collector, and
         # (iter3) fold the collector fill in per-group when co-located.
@@ -1509,21 +1588,33 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         il_block._resbuf_resend_edge = hopB
         il_block._funcout_edge = fout_edge
         il_block._resbuf_collector_edge = hopA if fold_fill else None
-        self.codeblocks.append(send_hid, il_block, phase)
+        # resend/funcout interleave runs in the fed add-imce's (consumer) wave.
+        self._emit_stream(send_hid, il_block, phase, _wB)
         print(f"[resid-inode-buffer] codegen RESBUF {resbuf_gid}: "
               f"{'fill+' if fold_fill else 'standalone-collector RECV @ %s + ' % recv_hid}"
               f"resend/funcout INTERLEAVE @ {send_hid} "
               f"(collector fifo {recv_info.fifo_id}, funcout fifo {fout_info.fifo_id})")
         continue
       # plain in-order resend (no co-located func_out collector on this inode).
-      send_block = SendBlock(self, db, send_info,
-                             f"resbuf resend send: {hopB}, "
-                             f"{send_info.policy_info[0].router_id.name} -> "
-                             f"{send_info.policy_info[-1].router_id.name}")
-      self.codeblocks.append(send_hid, send_block, phase)
+      # C1b (C) Stage 3: a MULTICAST cross-wave RESBUF collects the shared stream
+      # ONCE (hopA above) and re-sends it UNICAST to EACH cross-wave consumer;
+      # info["hopBs"] holds all resend edges (>=1). A residual / unicast RESBUF
+      # has a single hopB. Emit one SendBlock per resend, each billed to its own
+      # edge for consistency; the collector RECV (hopA) already emitted once above.
+      hopBs = info.get("hopBs", [hopB])
+      for _hb in hopBs:
+        _send_info = DevConfig().get_tensor_edge_info(_hb)
+        _send_hid = self.get_hid(_hb.src_id)
+        _wBk = self._tensor_wave(_hb.dst_id)
+        _wBk = _wBk if _wBk is not None else _wB
+        send_block = SendBlock(self, db, _send_info,
+                               f"resbuf resend send: {_hb}, "
+                               f"{_send_info.policy_info[0].router_id.name} -> "
+                               f"{_send_info.policy_info[-1].router_id.name}")
+        self._emit_stream(_send_hid, send_block, phase, _wBk)
       print(f"[resid-inode-buffer] codegen RESBUF {resbuf_gid}: "
             f"collector RECV @ {recv_hid} (fifo {recv_info.fifo_id}) + "
-            f"resend SEND @ {send_hid}")
+            f"{len(hopBs)} resend SEND(s)")
 
   def construct_recv_send_map(self):
     """
@@ -1734,8 +1825,8 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
 
     annotation = f"send - {edge}, {out_edge_info.policy_info[0].router_id.name} -> {out_edge_info.policy_info[-1].router_id.name}"
     block = SendBlock(self, db, out_edge_info, annotation)
-    self.codeblocks.append(hid, block, phase)
-  
+    self._emit_stream(hid, block, phase, self._edge_wave(edge))
+
   def add_send_block_interleaved(self, edge_list, phase: CodePhase):
     dbs = []
     edge_infos = []
@@ -1776,7 +1867,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         annotation += append_edgeinfo_and_db(edge, edge_infos, dbs)
 
     block = SendBlockInterleaved(self, dbs, edge_infos, annotation)
-    self.codeblocks.append(hid, block, phase)
+    # Stage 4: a multicast/interleaved SEND must not precede ANY consumer's wave;
+    # place at the latest consumer wave (conservative, deadlock-safe).
+    _w = max((self._edge_wave(e) for e in edge_list), default=0)
+    self._emit_stream(hid, block, phase, _w)
 
   def add_send_block_residual_fanout_interleaved(self, edge_list, phase: CodePhase):
     """IMCFLOW_RESIDUAL_IN_REGION: emit the model-input residual fan-out (one inode
@@ -1805,7 +1899,11 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
                      f"{out_edge_info.policy_info[-1].router_id.name}, ")
 
     block = SendBlockResidualFanoutInterleaved(self, dbs, edge_infos, annotation)
-    self.codeblocks.append(hid, block, phase)
+    # Stage 4: residual fan-out feeds two converging consumers (possibly in
+    # different waves); place at the later consumer wave (SEND never before a
+    # consumer's cores are enabled). If they differ it is a cross-wave case.
+    _w = max((self._edge_wave(e) for e in edge_list), default=0)
+    self._emit_stream(hid, block, phase, _w)
 
   def add_recv_block(self, edge, phase: CodePhase):
     in_edge_info = DevConfig().get_tensor_edge_info(edge)
@@ -1814,7 +1912,7 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(edge)
 
     block = RecvBlock(self, db, in_edge_info.fifo_id, f"recv: {in_tid}")
-    self.codeblocks.append(hid, block, phase)
+    self._emit_stream(hid, block, phase, self._edge_wave(edge))
   
   def add_recv_block_interleaved(self, edge_list, phase: CodePhase):
     dbs = []
@@ -1834,7 +1932,10 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       annotation += f"recv - {edge}, {in_edge_info.fifo_id}, "
 
     block = RecvBlockInterleaved(self, dbs, fifo_ids, annotation)
-    self.codeblocks.append(hid, block, phase)
+    # Stage 4: collector RECV over several producers; place at the latest wave so
+    # the inode has been (re)programmed for all of them. A RECV only stalls.
+    _w = max((self._edge_wave(e) for e in edge_list), default=0)
+    self._emit_stream(hid, block, phase, _w)
 
   def get_graph_node_id(self, call):
     if self.curr_composite_id:
@@ -1857,3 +1958,54 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       assert tuple_idx is not None, f"tuple index must be provided for tuple hw node id: {hid}"
       hid = hid[tuple_idx]
     return hid
+
+  # ---- C1b (C) Stage 4: streaming wave resolution & deferral --------------
+  def _tensor_wave(self, tensor_id):
+    """Wave of a tensor endpoint via GraphNodeToWavePerFunc (IMCE nodes only).
+    Returns None for inode endpoints (var/const/func_out/RESBUF -- not in the
+    wave map) so the caller falls back to the other (IMCE) endpoint. Mirrors
+    get_hid's tuple(composite) fallback."""
+    gmap = DevConfig().GraphNodeToWavePerFunc.get(self.func_name, {})
+    gid = tensor_id.graph_node_id
+    if gid in gmap:
+      return gmap[gid]
+    if isinstance(gid, tuple):
+      if gid[-1] in gmap:
+        return gmap[gid[-1]]
+      if gid[0] in gmap:
+        return gmap[gid[0]]
+    return None
+
+  def _edge_wave(self, edge):
+    """Launch wave for a data edge = its IMCE endpoint's wave. Consumer (recv)
+    wave takes priority (const/param inode->imce, and the general case); producer
+    wave is the fallback (func_out imce->inode). A direct edge whose producer and
+    consumer waves DIFFER is a cross-wave edge (Stage 3 reroutes it); Stage 4
+    classifies it by the CONSUMER (later) wave so a SEND is never placed before
+    its consumer's cores are enabled. Defaults to 0 (single-wave / unmapped)."""
+    w_dst = self._tensor_wave(edge.dst_id)
+    w_src = self._tensor_wave(edge.src_id)
+    if w_dst is not None and w_src is not None and w_dst != w_src:
+      self._cross_wave_edges.append((edge, w_src, w_dst))
+      return max(w_src, w_dst)
+    if w_dst is not None:
+      return w_dst
+    if w_src is not None:
+      return w_src
+    return 0
+
+  def _emit_stream(self, hid, block, phase, wave):
+    """Append a streaming block, deferring it to its wave bucket in multi-wave
+    regions (flushed in emit_wave_launches). Off merge -> immediate append =
+    byte-identical.
+
+    ONLY EXEC/EXEC_TILE (data-streaming) blocks are wave-deferred. INIT-phase
+    sends (const/config/weight setup) belong to the region preamble that runs
+    ONCE before any wave computes (config/policy is the static per-core union
+    under the wave-launch simplification), so they must append immediately in
+    INIT -- deferring them into an EXEC-time flush would move setup after compute
+    enable and corrupt the launch. So the wave split applies to data only."""
+    if self._defer_streams and phase in (CodePhase.EXEC, CodePhase.EXEC_TILE):
+      self._wave_streams.setdefault(wave, []).append((hid, phase, block))
+    else:
+      self.codeblocks.append(hid, block, phase)

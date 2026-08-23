@@ -1027,7 +1027,9 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     assert len(self.out_edges) == 1, "Only one output edge is expected"
     out_edge = self.out_edges[0]
     dst_gid = out_edge.dst_id.graph_node_id
-    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    # C1b (C) Stage 3: a cross-wave-rerouted producer's dst is a synthetic RESBUF
+    # gid (absent from CustomIDToNode) -> not a split. Use .get() -> False.
+    dst_node = CustomIDToNode().get(getInnerNodeID(dst_gid))
     if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
       split_info = DevConfig().SplitInfo[self.call.func_name][getNodeID(dst_node)]
       is_multicast = split_info["is_multi_cast"]

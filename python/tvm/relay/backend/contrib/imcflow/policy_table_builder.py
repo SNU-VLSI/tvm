@@ -859,7 +859,14 @@ class PolicyTableGenerator:
                     edge = info['edge']
                     mapping_info = info.get('mapping_info')
                     if mapping_info and mapping_info[2] is not None:
-                        dst_graph_node = CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
+                        # C1b (C) Stage 3: a cross-wave RESBUF hop A is (split,
+                        # odata)->(RESBUF, resbuf). The RESBUF dst is a synthetic
+                        # gid absent from CustomIDToNode -> use .get() and treat a
+                        # non-conv / synthetic dst as ksel 0 (a buffer hop applies
+                        # no kernel chunk-selection). Guards the split-source path
+                        # the residual (conv-source) RESBUFs never exercised.
+                        dst_graph_node = CustomIDToNode().get(
+                            getInnerNodeID(edge.dst_id.graph_node_id))
                         if isinstance(dst_graph_node, relay.expr.Call) and isinstance(dst_graph_node.op, tvm.ir.Op) and \
                            "conv" in dst_graph_node.op.name:
                           kernel_size = dst_graph_node.attrs['kernel_size'][0].value

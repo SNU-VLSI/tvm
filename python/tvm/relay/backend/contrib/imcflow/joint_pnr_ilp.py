@@ -63,6 +63,76 @@ def _effective_conv_cap() -> int:
         pass
     return 3
 
+
+def _mmquant_of_id(gid) -> bool:
+    """Placement-free mm_quant test on an outer/inner graph_node_id, mirroring
+    GraphExtractor._is_mmquant_node (which reads relay_expr). Uses CustomIDToNode.
+    """
+    try:
+        node = CustomIDToNode().get(getInnerNodeID(gid))
+    except Exception:
+        node = None
+    if not isinstance(node, relay.Call):
+        return False
+    op_ = node.op
+    if isinstance(op_, tvm.ir.Op) and op_.name == "qnn.imcflow_min_max_quantize":
+        return True
+    if isinstance(op_, relay.Function) and op_.attrs and "Composite" in op_.attrs:
+        body = op_.body
+        if isinstance(body, relay.Call) and isinstance(body.op, tvm.ir.Op):
+            return body.op.name == "qnn.imcflow_min_max_quantize"
+    return False
+
+
+def _conv_of_id(gid) -> bool:
+    """Placement-free qconv test (mirrors GraphExtractor._is_conv_placeable)."""
+    try:
+        node = CustomIDToNode().get(getInnerNodeID(gid))
+    except Exception:
+        node = None
+    if isinstance(node, relay.Call) and isinstance(node.op, tvm.ir.Op):
+        return 'qconv' in node.op.name
+    if isinstance(node, relay.Call) and isinstance(node.op, relay.Function):
+        comp = node.op.attrs.get('Composite', '') if node.op.attrs else ''
+        return 'qconv' in str(comp)
+    return False
+
+
+def compute_graph_node_waves_from_edges(func_name, tensor_edge_list, func=None):
+    """C1b (C) Stage 3: PLACEMENT-FREE wave map for a region, computed BEFORE Joint
+    PnR. To avoid any drift from the ILP's own wave logic, this runs the SAME
+    GraphExtractor.extract() the ILP uses and returns its `node_to_wave` (the
+    coalesced launch grouping), plus a dual-keyed variant (outer + inner ids) so
+    callers can look up by either. All-0 when region_merge is off.
+
+    `func` (the relay Function for func_name, from ImcflowFuncMap.func_node) is
+    required for the authoritative extraction; without it we cannot reproduce the
+    exact node identity the ILP uses, so we return {} (caller skips reroute and
+    the driver's post-PnR RE-SPLIT DEFENSE assert still guards correctness).
+
+    Determinism vs re-split: GraphExtractor gives the COALESCED map (min_waves=1);
+    PnR may re-split on infeasibility. Under conv-cap=1 (merge default) region2 is
+    feasible without re-split so this == the final map. The driver asserts no
+    cross-wave direct edge survives, catching any re-split mismatch.
+    """
+    from tvm.relay.op.contrib.imcflow import region_merge_mode
+    if not region_merge_mode() or func is None:
+        return {}
+    extractor = GraphExtractor()
+    gi = extractor.extract(func, func_name, tensor_edge_list)
+    n2w = gi.node_to_wave or {}
+    # dual-key: node_to_wave is keyed by the extractor's node ids (outer graph id
+    # for composites). Add inner-id keys too so edge endpoints resolve either way.
+    out = dict(n2w)
+    for gid, w in list(n2w.items()):
+        try:
+            inner = getInnerNodeID(gid)
+            if inner not in out:
+                out[inner] = w
+        except Exception:
+            pass
+    return out
+
 # ============================================================
 # Data Structures
 # ============================================================
@@ -895,10 +965,32 @@ class GraphExtractor:
         # data-dependency edges between placeable nodes (skip const/weight feeds)
 
         producers = {nid: [] for nid in placeable}  # node -> [placeable producers]
+        # RESBUF (INODE_BUFFER) waypoints are TRANSPARENT for wave purposes: a
+        # rerouted edge producer->RESBUF->consumer must preserve the ORIGINAL
+        # producer->consumer wave dependency, else rerouting a cross-wave edge
+        # would itself change the wave map (the consumer loses its producer ->
+        # its longest-path shifts -> the reroute becomes inconsistent with the
+        # post-reroute extract). Build resbuf feed-through: for each INODE_BUFFER
+        # R, remember its producer(s); when a placeable consumer receives from R,
+        # attribute R's producer(s) as the consumer's producer.
+        _resbuf_src = {}  # RESBUF nid -> [placeable producer nids]
         for comm in self.commodities:
             s, d = comm.source_node_id, comm.dest_node_id
-            if s in placeable and d in placeable and comm.get_congestion_group() == 'data':
+            dn = self.nodes.get(d)
+            if dn is not None and dn.node_type == NodeType.INODE_BUFFER \
+                    and s in placeable and comm.get_congestion_group() == 'data':
+                _resbuf_src.setdefault(d, []).append(s)
+        for comm in self.commodities:
+            s, d = comm.source_node_id, comm.dest_node_id
+            if d not in placeable or comm.get_congestion_group() != 'data':
+                continue
+            if s in placeable:
                 producers[d].append(s)
+            else:
+                sn = self.nodes.get(s)
+                if sn is not None and sn.node_type == NodeType.INODE_BUFFER:
+                    # transparent: consumer inherits the RESBUF's real producer(s)
+                    producers[d].extend(_resbuf_src.get(s, []))
 
         mmq = {nid for nid in placeable if self._is_mmquant_node(self.nodes[nid])}
 
@@ -920,6 +1012,72 @@ class GraphExtractor:
                 if wave.get(nid, -1) != best:
                     wave[nid] = best
                     changed = True
+
+        # ---- SPLIT/CONCAT wave INHERITANCE (producer wave -- CLUSTER ATOMIC) --
+        # A SPLIT is pinned (P3) to its PRODUCER's core; a CONCAT (P4) to its last
+        # producer's core. They are transparent, co-located pass-throughs and
+        # EXECUTE in their producer's launch (the RTL proved: a split labelled a
+        # LATER wave than its producer computes on X -- its input, the producer's
+        # output, is a same-core hand-off that does NOT survive the wave re-launch;
+        # router crossbar X). So the split MUST take its producer's wave. Its
+        # OUTPUT edges to next-wave consumers are then the real cross-wave transfers
+        # (different cores) -- but the boundary-selection rule below only cuts on
+        # mm_quant edges and keeps the whole split cluster (producer + split + all
+        # direct consumers) atomic in ONE wave, so those output edges never span a
+        # wave in practice. Iterate to a fixed point for chained split->concat.
+        _split_concat = {nid for nid in placeable
+                         if self.nodes[nid].node_type in (NodeType.SPLIT, NodeType.CONCAT)}
+        if _split_concat:
+            for _ in range(len(order) + 2):
+                _ch = False
+                for nid in order:
+                    if nid not in _split_concat:
+                        continue
+                    node = self.nodes[nid]
+                    pinned = getattr(node, "producer", None)
+                    if pinned is None:
+                        pinned = getattr(node, "last_producer", None)
+                    if pinned is not None and pinned in wave:
+                        if wave.get(nid) != wave[pinned]:
+                            wave[nid] = wave[pinned]
+                            _ch = True
+                if not _ch:
+                    break
+
+        # ---- CLUSTER-ATOMIC BOUNDARY CORRECTION ------------------------------
+        # Coordinator rule: a wave cut may fall ONLY on an mm_quant node's output
+        # edge. A split CLUSTER -- the split, its (same-core) producer, and ALL its
+        # direct consumers -- must stay in ONE wave (cutting through it strands the
+        # same-core producer->split hand-off across a re-launch -> crossbar X). The
+        # mm_quant longest-path above can place a split's consumers a wave AHEAD of
+        # the split (they sit past the split but BEFORE the next mm_quant), which
+        # would put a non-mm_quant cut inside the cluster. Pull every direct
+        # consumer of a split/concat back to the split's wave, and iterate so the
+        # whole fan-out (and any chained split) collapses to the producer's wave.
+        # This enforces "cut only on mm_quant edges" structurally: cluster-internal
+        # edges (producer->split, split->consumer) can never be a wave boundary.
+        if _split_concat:
+            consumers = {nid: [] for nid in placeable}
+            for comm in self.commodities:
+                s, d = comm.source_node_id, comm.dest_node_id
+                if s in placeable and d in placeable and s != d \
+                        and comm.get_congestion_group() == 'data':
+                    consumers[s].append(d)
+            for _ in range(len(order) + 2):
+                _ch = False
+                for sc in order:
+                    if sc not in _split_concat:
+                        continue
+                    w_split = wave.get(sc, 0)
+                    for c in consumers.get(sc, []):
+                        # a direct consumer that the longest-path pushed to a LATER
+                        # wave (but no mm_quant sits between split and it) is inside
+                        # the cluster -> pull it back to the split's wave.
+                        if wave.get(c, 0) > w_split and sc not in mmq:
+                            wave[c] = w_split
+                            _ch = True
+                if not _ch:
+                    break
 
         # ---- WAVE COALESCING (minimize wave count) ---------------------------
         # Per the wave-launch design correction: a wave split is only NECESSARY
@@ -3052,6 +3210,53 @@ def run_joint_pnr_and_update_config(
 
     debug_print(f"[run_joint_pnr_and_update_config] Updated HWNodeMap with "
                f"{len(config.HWNodeMap)} mappings")
+
+    # C1b (C) Stage 3 RE-SPLIT DEFENSE: the cross-wave reroute (Stage 3) ran
+    # PRE-PnR using placement-free waves; it is only sound if PnR's final
+    # node_to_wave matches those pre-PnR waves. Under conv-cap=1 (the merge
+    # default) region2 is feasible at the coalesced grouping with NO re-split, so
+    # they match. But if PnR re-split (finer waves than the pre-PnR map), a NEW
+    # cross-wave direct imce->imce edge may now exist that was NOT rerouted ->
+    # deadlock risk. Verify ZERO un-rerouted cross-wave direct data edges remain.
+    from tvm.relay.op.contrib.imcflow import region_merge_mode as _rmm
+    if _rmm():
+        _DATA = ("data", "odata", "lhs", "rhs")
+        _c2n = CustomIDToNode()
+        for func_name, result in results.items():
+            gw = config.GraphNodeToWavePerFunc.get(func_name, {})
+            if not gw or max(gw.values(), default=0) == 0:
+                continue
+            tel = tensor_edge_list_dict.get(func_name, [])
+            bad = []
+            for e in tel:
+                if e.src_id.tensor_type not in _DATA and e.dst_id.tensor_type not in _DATA:
+                    continue
+                sg, dg = e.src_id.graph_node_id, e.dst_id.graph_node_id
+                sn = _c2n.get(getInnerNodeID(sg))
+                dn = _c2n.get(getInnerNodeID(dg))
+                # only DIRECT imce->imce (both Call); RESBUF hops have TensorID
+                # gids that are not Calls -> skipped (already rerouted).
+                if not (isinstance(sn, relay.Call) and isinstance(dn, relay.Call)):
+                    continue
+                # SAME-CORE exemption: a producer->SPLIT edge is co-located (P3
+                # pins the split to its producer's core), so it is a LOCAL hand-off
+                # -- NOT a NoC transfer, no crossbar, no deadlock -- even across a
+                # wave label boundary. splitCrossWaveEdgesThroughInodeBuffer skips
+                # it on purpose (rerouting it through a remote inode caused a
+                # routing cycle + crossbar X). Exempt it from the survivor check.
+                if getattr(dn.op, "name", "") == "split":
+                    continue
+                so = sg[0] if isinstance(sg, tuple) else sg
+                do = dg[0] if isinstance(dg, tuple) else dg
+                ws, wd = gw.get(so), gw.get(do)
+                if ws is not None and wd is not None and ws != wd:
+                    bad.append((e, ws, wd))
+            assert not bad, (
+                f"[wave-xreroute] RE-SPLIT DEFENSE FAILED for {func_name}: "
+                f"{len(bad)} cross-wave DIRECT imce->imce edge(s) survived the "
+                f"pre-PnR reroute (PnR final waves differ from pre-PnR waves -- "
+                f"likely a re-split). First: {bad[0]}. Fix: make the reroute "
+                f"re-run post-PnR, or pin conv-cap so no re-split occurs.")
 
     # Visualize PnR mapping
     visualize_all_pnr_results(results, os.environ.get("IMCFLOW_EVAL_DIR", "/tmp/imcflow"))

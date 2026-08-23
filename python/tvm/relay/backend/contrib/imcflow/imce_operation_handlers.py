@@ -538,7 +538,10 @@ class MinMaxQuantizeHandler(OperationHandler):
     assert len(out_edges) == 1, "Only one output edge is expected"
     out_edge = out_edges[0]
     dst_gid = out_edge.dst_id.graph_node_id
-    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
+    # C1b (C) Stage 3: when this producer's output was rerouted through a cross-
+    # wave RESBUF, its dst is now the synthetic RESBUF gid (absent from
+    # CustomIDToNode). A RESBUF is not a split -> return False. Use .get().
+    dst_node = CustomIDToNode().get(getInnerNodeID(dst_gid))
     if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
       split_info = DevConfig().SplitInfo[call.func_name][getNodeID(dst_node)]
       is_multicast = split_info["is_multi_cast"]
