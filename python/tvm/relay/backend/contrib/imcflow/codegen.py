@@ -745,8 +745,26 @@ class ImceCodeBlockBuilder(tvm.relay.ExprVisitor):
     # per-(core,wave) IMEM). Composite handlers refine this from curr_composite_id
     # once they enter the composite; here we set the standalone-call default.
     # Wave 0 for every non-merged region -> inert (byte-identical).
-    self.codeblocks.current_wave = DevConfig().GraphNodeToWavePerFunc.get(
-        self.func_name, {}).get(getNodeID(call), 0)
+    #
+    # COMPOSITE FIX: when visiting the INNER calls of a composite (e.g. a conv's
+    # BN/mult post-op), curr_composite_id is already set; the inner call's own
+    # graph_node_id is NOT in the wave map (only the composite OUTER id is), so a
+    # plain lookup returns 0 and CLOBBERS the composite's correct wave -> the
+    # post-op's RecvConstBlock (created in _process_const_edges before the handler
+    # re-sets get_wave()) lands in the WRONG wave (region2: node92 conv is wave 1
+    # but its fused_scale/bias consts stamped wave 0 -> imce waits them in wave0
+    # while the inode sends in wave1 -> deadlock). Resolve via the composite id
+    # first (mirrors builder_context.get_wave()), and fall back through a
+    # tuple(outer,inner) graph id. Off merge / no composite -> same value (0 or the
+    # standalone node's wave) -> byte-identical.
+    _wmap = DevConfig().GraphNodeToWavePerFunc.get(self.func_name, {}) or {}
+    _wgid = self.curr_composite_id if self.curr_composite_id is not None else getNodeID(call)
+    if _wgid in _wmap:
+      self.codeblocks.current_wave = _wmap[_wgid]
+    elif isinstance(_wgid, tuple) and _wgid[0] in _wmap:
+      self.codeblocks.current_wave = _wmap[_wgid[0]]
+    else:
+      self.codeblocks.current_wave = _wmap.get(getNodeID(call), 0)
 
     # Dispatch to handler registry (automatically wraps call in BuilderContext)
     print("[IMCE CODE BUILDER] Visit call:", getNodeID(call), getNodeDebugID(call))
@@ -1598,23 +1616,69 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
       # input streams; demanding all 256 up-front starves the fed add and
       # backpressures the region -- iter2 stalled at collector word 64/256).
       fold_fill = fout_edge is not None and recv_hid == send_hid
-      # Stage 4 wave placement: collector RECV (hop A) belongs to the PRODUCER's
-      # wave (it drains that producer's skip output); resend/interleave (hop B)
-      # belongs to the fed add-imce's (CONSUMER) wave. If they differ this RESBUF
-      # bridges waves -> a Stage-3 cross-wave case; a RECV placed at the later
-      # wave only stalls (safe), so we place the collector at the producer wave
-      # and the resend at the consumer wave, and flag the mismatch.
+      # Stage 4 wave placement: collector RECV (hop A) drains the producer's skip
+      # output; resend/interleave (hop B) belongs to the fed add-imce's (CONSUMER)
+      # wave. If they differ this RESBUF bridges launch waves (Stage-3 cross-wave).
+      #
+      # C1b (C) cross-wave COLLECTOR-WAVE FIX: for a cross-wave RESBUF the collector
+      # RECV must be emitted in the CONSUMER wave (_wB), NOT the producer wave (_wA).
+      # WHY (fsim-proven, v16 region2 deadlock): the collector RECV is a BLOCKING
+      # full-size (e.g. 32768B) INODE_RECV. Placing it in the producer wave (wave-0)
+      # segment makes the inode block on a full drain of a tail producer during the
+      # wave-0 gap -- BEFORE it writes the wave-1 IMEM blobs / enables wave-1 COMPUTE.
+      # But the tail producer only trickles its skip output as the wave-0 pipeline
+      # streams, and the words needed to complete it depend on wave-1 consumers that
+      # never launch (the inode is stuck on this very RECV) => circular wait / hard
+      # deadlock (inode_2_0 froze at pc217 OP_RECV fifo2 = -100002 collector, never
+      # reached WAVE1-IMEM-start). Deferring the collector to the CONSUMER wave lets
+      # all wave-0 cores launch+stream first (their skip SENDs the inode services
+      # lazily via NoC backpressure), then the inode drains the accumulated skip
+      # output in the wave-1 segment where the consumer is also live -- co-locating
+      # both hops in wave-1, mirroring the working same-wave RESBUF shape. This only
+      # changes which _wave_streams[wave] bucket the existing RecvBlock lands in; it
+      # adds/renumbers no flags (pack_const_go_flag band / reserved 249-255 untouched).
       _wA = self._tensor_wave(hopA.src_id)
       _wB = self._tensor_wave(hopB.dst_id)
       _wA = _wA if _wA is not None else 0
       _wB = _wB if _wB is not None else 0
+      _collector_wave = _wB if _wA != _wB else _wA
       if _wA != _wB:
         self._cross_wave_edges.append((hopA, _wA, _wB))
-      if not fold_fill:
+      # C1b (C) v18: a SAME-WAVE, SAME-INODE, single-consumer residual RESBUF with
+      # NO co-collected func_out (add output stays in-region, e.g. -> quantize)
+      # must NOT use a standalone full-buffer collector drain -> that starves the
+      # fed add (the skip producer only trickles words; demanding all N up-front
+      # backpressures the region and never reaches the next wave barrier -- v17
+      # -100001 deadlock at collector word 64/1024). Interleave collect+resend
+      # per group instead (fill-lead), mirroring the func_out interleave. Only for
+      # the func_out-less, same-inode, unicast, same-wave case; every other shape
+      # (cross-wave -> wave-shifted collector; multicast; func_out interleave;
+      # remote resend) keeps its existing path so this is byte-identical there.
+      _hopBs_pre = info.get("hopBs", [hopB])
+      _use_collect_interleave = (
+          not fold_fill and fout_edge is None and _wA == _wB
+          and recv_hid == send_hid and len(_hopBs_pre) == 1
+          and self.get_hid(_hopBs_pre[0].src_id) == recv_hid)
+      if not fold_fill and not _use_collect_interleave:
         # collector: standalone INODE_RECV hop A into the buffer (plain-resend path).
         recv_block = RecvBlock(self, db, recv_info.fifo_id,
                                f"resbuf collector recv: {hopA}")
-        self._emit_stream(recv_hid, recv_block, phase, _wA)
+        self._emit_stream(recv_hid, recv_block, phase, _collector_wave)
+      if _use_collect_interleave:
+        # func_out-less same-inode residual: fill-lead collect+resend interleave.
+        _total = -(-db.size // 32)
+        _auto_lag = self._auto_fill_lead_groups(hopA, hopB, _total, 4, _total // 4)
+        ci_block = ResidCollectResendInterleavedBlock(
+            self, db, send_info, recv_info.fifo_id, group=4, auto_lag=_auto_lag,
+            annotation=f"resbuf collect+resend interleave: {hopA} || {hopB}")
+        # bill both hops for consistency (collector hopA RECV + resend hopB SEND).
+        ci_block._resbuf_resend_edge = hopB
+        ci_block._resbuf_collector_edge = hopA
+        self._emit_stream(send_hid, ci_block, phase, _collector_wave)
+        print(f"[resid-inode-buffer] codegen RESBUF {resbuf_gid}: "
+              f"collect+resend INTERLEAVE @ {send_hid} "
+              f"(collector fifo {recv_info.fifo_id}, resend fifo {send_info.fifo_id})")
+        continue
       if fout_edge is not None:
         # Task #8: interleave the resend with the add's func_out collector, and
         # (iter3) fold the collector fill in per-group when co-located.
@@ -1793,6 +1857,20 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
         # (co-located inode), bill its RECV here (the standalone RecvBlock that used
         # to bill it is suppressed). Count = resbuf word count. When NOT folded, hop
         # A is billed by the standalone RecvBlock as usual (byte-identical).
+        if _coll_e is not None:
+          _cc = math.ceil(block.resbuf_db.size / 32)
+          add_to_map(self.recv_map, _coll_e, _cc)
+      elif isinstance(block, ResidCollectResendInterleavedBlock):
+        # C1b (C) v18: func_out-less same-inode residual RESBUF, collect+resend
+        # interleaved. Bill BOTH hops exactly once at the RESBUF word count: the
+        # collector edge (hop A) as a RECV (mirrors the suppressed standalone
+        # RecvBlock) and the resend edge (hop B) as a SEND (mirrors the plain
+        # SendBlock resbuf_out branch). Lever OFF -> class never constructed ->
+        # byte-identical.
+        _resend_e = getattr(block, "_resbuf_resend_edge", None)
+        _coll_e = getattr(block, "_resbuf_collector_edge", None)
+        if _resend_e is not None:
+          _add_send_map(self.send_map, block.resbuf_db, _resend_e)
         if _coll_e is not None:
           _cc = math.ceil(block.resbuf_db.size / 32)
           add_to_map(self.recv_map, _coll_e, _cc)

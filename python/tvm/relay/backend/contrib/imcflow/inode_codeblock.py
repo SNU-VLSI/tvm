@@ -847,7 +847,11 @@ class SendBlock(InodeCodeBlock):
         # wedge). A distinct value per consumer makes the pulse unambiguous. The
         # imce still raises its OWN flag=1 and the inode waits for it. Lockstep
         # with RecvConstBlock's window (both read pack_const_go_flag()).
-        pc_flag = pm.pack_const_go_flag(inode_hw, imce_hw)
+        # Wave-aware: the same (inode, imce) pair may pace pack-const in >1 wave
+        # (merge core reuse); pass THIS edge's consumer wave so inode & imce derive
+        # the SAME distinct flag per wave (v14 cross-wave alias fix). Non-merged ->
+        # wave 0 -> byte-identical.
+        pc_flag = pm.pack_const_go_flag(inode_hw, imce_hw, pm._edge_dst_wave(e))
         return (
           f"__builtin_INODE_STANDBY({imce_hw.value}, 1); // pack-const sync with {imce_hw.name}\n"
           f"__builtin_INODE_SET_FLAG({pc_flag});\n"
@@ -1431,6 +1435,141 @@ class ResidResendFuncoutInterleavedBlock(InodeCodeBlock):
           f"{resend_policy}, {resend_fifo});"))
       self.body.add(TextBlock(
           f"__builtin_INODE_RECV({funcout_base} + {r}*32, 0, 0, {fout_fifo});"))
+
+
+class ResidCollectResendInterleavedBlock(InodeCodeBlock):
+  """RESBUF collector-fill + resend, interleaved on the owning inode -- for a
+  SAME-WAVE residual RESBUF whose add consumer does NOT feed a func_out this
+  inode collects (i.e. the add output stays in-region, e.g. -> quantize).
+
+  WHY (fsim-proven, v17 region2 deadlock): the plain path emits a STANDALONE
+  full-buffer collector RECV (all N words up-front) THEN the resend SEND. The
+  skip producer (an imce conv/bn) only TRICKLES its output words as the region
+  streams, so demanding all N words before ANY resend starves the fed add:
+  the add's rhs never arrives, so it never consumes -> its input backpressures
+  -> the producer can't emit the remaining skip words -> the collector never
+  completes -> the inode never reaches the next wave barrier -> global barrier
+  desync (inode_3_0 stuck at -100001 collector word 64/1024 while inode_2_0
+  already ARRIVEd at the wave-1 barrier). This is the exact hazard the plain
+  path's own comment warns about; the func_out case already avoids it via
+  ResidResendFuncoutInterleavedBlock. This block gives the func_out-less
+  residual RESBUF the same non-blocking treatment: FILL-LEAD group interleave
+  of collector-RECV(g) -> resend-SEND(g), so each group flows to the consumer
+  immediately, un-backpressuring the producer.
+
+  Two streams only (no func_out): prime LAG groups of collector-fill ahead
+  (the whole buffer is allocated, so fill-ahead is safe), then per group
+  resend(g) -> fill(g+LAG), then drain the resend tail. Mirrors the proven
+  FILL-LEAD schedule of ResidResendFuncoutInterleavedBlock with the func_out
+  third stream removed. BARE sends/recvs (NoC valid/ready paced; the add-side
+  window dropped its matching STANDBY). Adds/renumbers no flags. Gated by
+  residual_inode_buffer_mode() at the call site -> OFF -> never constructed ->
+  byte-identical.
+  """
+
+  def __init__(self, builder, resbuf_db: DataBlock, resend_info: TensorEdgeInfo,
+               collector_fifo_id: int, group: int = 4, auto_lag: int = None,
+               annotation: str = ""):
+    super().__init__(annotation)
+    self.builder = builder
+    self.resbuf_db = resbuf_db
+    self.resend_info = resend_info
+    self.collector_fifo_id = collector_fifo_id
+    self.group = group
+    self.auto_lag = auto_lag
+    self._build()
+
+  def _build(self):
+    total = math.ceil(self.resbuf_db.size / 32)
+    g = self.group
+    ngroups = total // g
+    tail = total - ngroups * g
+
+    resend_policy = self.resend_info.policy_info[0].address
+    resend_fifo = self.resend_info.fifo_id
+    coll_fifo = self.collector_fifo_id
+
+    # FILL-LEAD LAG resolution: env override > geometry-derived auto. No magic
+    # fallback (a silently-wrong LAG costs a 20000-poll RTL wedge). Same policy
+    # as ResidResendFuncoutInterleavedBlock.
+    _env = resid_fill_lead_groups()
+    if _env is not None:
+      lag = _env
+    elif self.auto_lag is not None:
+      lag = self.auto_lag
+    else:
+      raise RuntimeError(
+          "RESBUF fill-lead LAG could not be auto-derived from graph geometry "
+          "(codegen._auto_fill_lead_groups returned None) and "
+          "IMCFLOW_RESID_FILL_LEAD is unset. Fix the geometry walk for this "
+          "graph pattern or set the env override explicitly.")
+    lag = min(max(lag, 0), ngroups)
+
+    # CURSOR addressing only (cur += 32): the INODE ISA has no reg-reg
+    # arithmetic (mirrors the func_out block's cursor rationale).
+    cur_fill = UniqueVar("resid_coll_fill_cursor", dtype="int")
+    cur_resend = UniqueVar("resid_coll_resend_cursor", dtype="int")
+    self.body.add(TextBlock(f"{cur_fill} = {self.resbuf_db.offset};"))
+    self.body.add(TextBlock(f"{cur_resend} = {self.resbuf_db.offset};"))
+
+    def _step(cur, op):
+      return f"{op}\n{cur} = {cur} + 32;\n"
+
+    if lag > 0:
+      lead_w = lag * g
+      self.body.add(SimpleFor(
+          lead_w,
+          lambda iter: _step(cur_fill,
+                             f"__builtin_INODE_RECV({cur_fill}, 0, 0, {coll_fifo});"),
+          annotation="resid-collect fill prime (fill-lead)"))
+
+      def steady_body(iter, g=g):
+        code = ""
+        for _ in range(g):
+          code += _step(cur_resend,
+                        f"__builtin_INODE_SEND({cur_resend}, 0, {resend_policy}, {resend_fifo});")
+        for _ in range(g):
+          code += _step(cur_fill,
+                        f"__builtin_INODE_RECV({cur_fill}, 0, 0, {coll_fifo});")
+        return code
+
+      self.body.add(SimpleFor(
+          ngroups - lag, steady_body,
+          annotation="resid-collect fill-lead steady: resend + fill-ahead groups"))
+
+      def drain_body(iter, g=g):
+        code = ""
+        for _ in range(g):
+          code += _step(cur_resend,
+                        f"__builtin_INODE_SEND({cur_resend}, 0, {resend_policy}, {resend_fifo});")
+        return code
+
+      self.body.add(SimpleFor(
+          lag, drain_body,
+          annotation="resid-collect fill-lead drain: resend tail groups"))
+    else:
+      # LAG==0: strict per-group lockstep collect(g) -> resend(g).
+      def group_body(iter, g=g):
+        code = ""
+        for _ in range(g):
+          code += _step(cur_fill,
+                        f"__builtin_INODE_RECV({cur_fill}, 0, 0, {coll_fifo});")
+        for _ in range(g):
+          code += _step(cur_resend,
+                        f"__builtin_INODE_SEND({cur_resend}, 0, {resend_policy}, {resend_fifo});")
+        return code
+
+      self.body.add(SimpleFor(ngroups, group_body,
+                              annotation="resid-collect lockstep: collect + resend"))
+
+    # Word tail (ResNet8 group|total, so tail==0 emits nothing): collect then
+    # resend each remaining word, keeping the two cursors in step.
+    for _r in range(tail):
+      self.body.add(TextBlock(
+          _step(cur_fill, f"__builtin_INODE_RECV({cur_fill}, 0, 0, {coll_fifo});")))
+      self.body.add(TextBlock(
+          _step(cur_resend,
+                f"__builtin_INODE_SEND({cur_resend}, 0, {resend_policy}, {resend_fifo});")))
 
 
 class SendBlockInterleaved(InodeCodeBlock):

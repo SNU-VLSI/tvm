@@ -595,7 +595,12 @@ class RecvConstBlock(ImceCodeBlock):
         # the inode SendBlock (both read pack_const_go_flag()).
         pm = getattr(self.builder, "pair_manager", None) if self.builder is not None else None
         if pm is not None:
-          pc_flag = pm.pack_const_go_flag(pace_eps[0], pace_eps[1])
+          # Wave-aware: pass THIS const edge's consumer wave so the imce RECV
+          # window flag matches the inode SEND flag per wave (merge core reuse can
+          # put 2 pack-const consumers of the same core in different waves on one
+          # inode -- v14 cross-wave alias fix). Non-merged -> wave 0 -> unchanged.
+          pc_flag = pm.pack_const_go_flag(pace_eps[0], pace_eps[1],
+                                          pm._edge_dst_wave(self.in_edge))
         else:
           pc_flag = 1
         code += "__builtin_IMCE_SETFLAG(1);"

@@ -12,6 +12,7 @@ from typing import List, Dict, Set, Tuple
 from tvm.contrib.imcflow import TensorEdge, NodeID, TensorEdgeInfo
 from tvm.contrib.imcflow import ImcflowDeviceConfig as DevConfig
 from tvm.contrib.imcflow import bugfix_off_mode
+from tvm.contrib.imcflow import CodegenContext
 from tvm.relay.op.contrib.imcflow import CustomIDToNode
 from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode, residual_in_region_mode, residual_inode_buffer_mode
 from tvm.relay.op.contrib.imcflow import region_merge_mode
@@ -758,56 +759,92 @@ class SendRecvPairManager:
         self._pack_const_flag_cache = flag
         return flag
 
-    def _pack_const_multi_consumer_inodes(self) -> Dict[int, List[int]]:
-        """{inode_value: sorted[imce_value,...]} for inodes that pace >=2 DISTINCT
-        imce consumers via packed-postop const pacing.
+    def _edge_dst_wave(self, edge) -> int:
+        """Launch wave of a pack-const edge = its IMCE (dst) endpoint's wave.
+
+        Under IMCFLOW_REGION_MERGE a core is reused across waves; two pack-const
+        consumers on the SAME (inode, imce) but DIFFERENT waves (e.g. region2
+        node64 residual-add mult-const in wave 0 AND node92 conv config in wave 1,
+        both imce_0_1 <- inode_0_0) would otherwise share one go-flag and alias
+        across the wave boundary (v14 wedge: imce_0_1 waits the wave-0 mult-const
+        flag 200 forever while the inode's flag-200 sends are node92's wave-1
+        consts). So the go-flag must be per-(inode, imce, WAVE). Returns 0 for
+        non-merged / single-wave / unmapped -> the (imce, 0) key collapses to the
+        old (imce)-only behavior -> byte-identical."""
+        try:
+            fn = CodegenContext().func_name
+            wm = DevConfig().GraphNodeToWavePerFunc.get(fn, {}) or {}
+            gid = edge.dst_id.graph_node_id
+            if gid in wm:
+                return wm[gid]
+            if isinstance(gid, tuple):
+                if gid[-1] in wm:
+                    return wm[gid[-1]]
+                if gid[0] in wm:
+                    return wm[gid[0]]
+        except Exception:
+            pass
+        return 0
+
+    def _pack_const_multi_consumer_inodes(self) -> Dict[int, List[tuple]]:
+        """{inode_value: sorted[(imce_value, wave),...]} for inodes that pace >=2
+        DISTINCT (imce, wave) pack-const consumers.
 
         The pack-const go-pulse (inode SET_FLAG(pack_const_sync_flag)) is a SHARED
         scalar flag on the inode; every consumer of that inode does
-        STANDBY(inode, flag). When ONE inode paces two consumers (e.g. region3
-        inode_2_0 -> the de-fused standalone BN imce_2_1 AND the fused conv
-        imce_2_2), the pulse meant for consumer A is also visible to consumer B,
-        which steals it -> A's inode-side STANDBY(A, 0) never clears -> wedge.
-        Only arises once a de-fused standalone BN adds a SECOND pack-const
-        consumer to an inode. Cached (pair set fixed post-construction).
+        STANDBY(inode, flag). When ONE inode paces two consumers -- either two
+        DIFFERENT imce cores (region3 inode_2_0 -> de-fused BN imce_2_1 AND fused
+        conv imce_2_2) OR the SAME core in TWO WAVES (region2 merge: imce_0_1
+        wave0 node64 mult-const AND wave1 node92 config, both from inode_0_0) --
+        the pulse for consumer A is also visible to B -> theft -> wedge. Keying on
+        (imce_value, WAVE) makes both the multi-core and the cross-wave cases
+        distinct. Cached (pair set fixed post-construction). Non-merged: every
+        wave==0 -> (imce, 0) == the old imce-only set -> byte-identical.
         """
         cached = getattr(self, "_pack_const_multi_cache", None)
         if cached is not None:
             return cached
-        inode_consumers: Dict[int, Set[int]] = {}
+        inode_consumers: Dict[int, Set[tuple]] = {}
         if pack_bn_minmax_mode():
             for e in self._iter_all_edges():
                 eps = self.packed_postop_const_endpoints(e)
                 if eps is None:
                     continue
                 inode_hw, imce_hw = eps
-                inode_consumers.setdefault(inode_hw.value, set()).add(imce_hw.value)
+                w = self._edge_dst_wave(e)
+                inode_consumers.setdefault(inode_hw.value, set()).add((imce_hw.value, w))
         result = {k: sorted(v) for k, v in inode_consumers.items() if len(v) >= 2}
         self._pack_const_multi_cache = result
         return result
 
-    def pack_const_go_flag(self, inode_hw, imce_hw) -> int:
-        """Per-consumer go-pulse value for packed-postop const pacing.
+    def pack_const_go_flag(self, inode_hw, imce_hw, wave: int = 0) -> int:
+        """Per-(consumer, wave) go-pulse value for packed-postop const pacing.
 
         Default = pack_const_sync_flag() (1 or 253), byte-identical to the
-        single-consumer form. When `inode_hw` paces >=2 distinct consumers, each
-        consumer gets a DISTINCT value drawn from a safe band (>=4 below the
-        reserved 251..255 and above the <=4 emitted data/barrier values), so a
-        SET_FLAG for one consumer cannot be sampled by another. Both the inode
-        SendBlock and the imce RecvConstBlock call this with the SAME
-        (inode, imce) pair, so they agree on the value.
+        single-consumer form. When `inode_hw` paces >=2 distinct (imce, wave)
+        consumers, each gets a DISTINCT value in a safe band, so a SET_FLAG for
+        one consumer cannot be sampled by another -- INCLUDING the same core in a
+        different wave (v14 cross-wave alias fix). Both the inode SendBlock and the
+        imce RecvConstBlock call this with the SAME (inode, imce, wave) so they
+        agree. Non-merged -> wave==0 for all -> byte-identical to the prior form.
         """
         base = self.pack_const_sync_flag()
         multi = self._pack_const_multi_consumer_inodes()
         consumers = multi.get(inode_hw.value)
         if not consumers:
             return base
-        # Distinct value per consumer within a safe band [200, 250]. The band
-        # avoids emitted data/barrier values (<=4), the pair-UUID cap (251), and
-        # 252/253/254/255. Index by position in the sorted consumer list so the
-        # inode and imce sides derive the same value deterministically.
-        idx = consumers.index(imce_hw.value)
-        return 200 + idx
+        # Distinct value per (imce, wave) consumer within a safe band. The band
+        # base is 200; the cap must stay below the reserved 249 (pair-UUID cap),
+        # 250 (WAVE_DONE), 251, 252/253, 254/255. Index by position in the sorted
+        # (imce, wave) list so inode and imce sides derive the same value.
+        key = (imce_hw.value, wave)
+        idx = consumers.index(key) if key in consumers else consumers.index(
+            next((c for c in consumers if c[0] == imce_hw.value), key))
+        flag = 200 + idx
+        assert flag < 249, (
+            f"pack_const_go_flag {flag} >= 249 reserved band; inode {inode_hw} "
+            f"paces {len(consumers)} (imce,wave) consumers -- exceeds [200,248].")
+        return flag
 
     def _iter_all_edges(self):
         """Yield every TensorEdge seen during construction (paired + const).

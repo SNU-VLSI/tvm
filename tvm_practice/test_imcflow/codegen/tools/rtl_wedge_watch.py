@@ -58,12 +58,20 @@ def main():
                     help="ticks with zero vcs+fsdb growth before assuming the sim ended")
     ap.add_argument("--keep-going", action="store_true",
                     help="do not exit on wedge detection; keep logging")
+    ap.add_argument("--kill", action="store_true",
+                    help="on wedge detection, kill the simv/gem5 processes so the "
+                         "run fails fast (fsim/fsdb logs are already flushed; saves "
+                         "the remaining poll budget, typically 15+ min)")
+    ap.add_argument("--max-polls", type=int, default=8000,
+                    help="declare a wedge when a single span's poll count exceeds "
+                         "this (healthy spans stay well under; default 8000)")
     args = ap.parse_args()
 
     rtl_dir = os.path.join(os.path.abspath(args.eval_dir), "logs", "rtl_runner")
     flag_path = os.path.join(rtl_dir, "WEDGE_DETECTED")
 
     vcs_off = 0          # bytes of vcs_sim.log already scanned
+    span_polls = 0       # polls accumulated since the design last made progress
     fsdb_size = 0
     total_polls = 0
     quiet = 0            # consecutive polling-but-no-waveform ticks
@@ -115,8 +123,14 @@ def main():
 
         if polling and not computing:
             quiet += 1
+            span_polls += new_polls
         elif computing or new_polls > 0:
             quiet = 0
+            # fsdb grew -> the design made progress; restart the span counter
+            if computing:
+                span_polls = 0
+            else:
+                span_polls += new_polls
 
         if new_polls == 0 and d_fsdb == 0:
             idle += 1
@@ -133,6 +147,22 @@ def main():
         print(f"[watch] t={now}s polls+={new_polls} (total {total_polls}) "
               f"fsdb+={d_fsdb/1e6:.2f}MB (total {fsdb_mb:.1f}MB) {verdict}", flush=True)
 
+        if span_polls > args.max_polls and not alerted:
+            alerted = True
+            msg = (f"WEDGE (poll-budget) at t={now}s: {span_polls} polls since last "
+                   f"fsdb progress (> --max-polls {args.max_polls}). total_polls={total_polls}\n"
+                   f"Next: python tools/fsim_stall_report.py {args.eval_dir}\n")
+            print("=" * 70 + f"\n[watch] *** {msg}" + "=" * 70, flush=True)
+            try:
+                with open(flag_path, "w") as f:
+                    f.write(msg)
+            except OSError as e:
+                print(f"[watch] could not write {flag_path}: {e}", flush=True)
+            if args.kill:
+                _kill_sim()
+            if not args.keep_going:
+                return 2
+
         if quiet >= args.patience and not alerted:
             alerted = True
             msg = (f"WEDGE SUSPECTED at t={now}s: host polled {new_polls}/tick for "
@@ -146,8 +176,22 @@ def main():
                     f.write(msg)
             except OSError as e:
                 print(f"[watch] could not write {flag_path}: {e}", flush=True)
+            if args.kill:
+                _kill_sim()
             if not args.keep_going:
                 return 2
+
+
+def _kill_sim():
+    """Kill the simv/gem5 pair so the wedged run fails fast. fsim logs and the
+    fsdb are flushed continuously, so post-mortem diagnosis loses nothing."""
+    import subprocess
+    for pat in ("simv_imcflow_gem5", "gem5.opt"):
+        try:
+            out = subprocess.run(["pkill", "-f", pat], capture_output=True)
+            print(f"[watch] pkill -f {pat} -> rc={out.returncode}", flush=True)
+        except OSError as e:
+            print(f"[watch] pkill {pat} failed: {e}", flush=True)
 
 
 if __name__ == "__main__":
