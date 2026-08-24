@@ -35,6 +35,8 @@ from models import real_model, real_model2, test_models
 from models import resnet8_cifar, mobilenet_imcflow, deep_autoencoder_imcflow, ds_cnn_imcflow
 from models import resnet8_subset_models
 from models import ds_cnn_subset_models
+# chip_acc_measure: additional networks for chip-accuracy / utilization measurement.
+from models import vgg11_cifar_imcflow, resnet50_imagenet_imcflow
 from models import mobilenet_subset_models
 from models import models_for_test
 
@@ -82,6 +84,16 @@ print(f"Environment: IMCFLOW_RUNNER={os.getenv('IMCFLOW_RUNNER', 'py')}, IMCFLOW
 # NOTE: it is recommended to not include the input pattern strings in the test_name
 # NOTE: e.g. one_relu_random is discouraged, as it makes harder to collect pytest patterns
 MODEL_REGISTRY = {
+    # chip_acc_measure: extra full networks for chip-accuracy / IMC-utilization
+    # measurement. Random int8 weights (no imcflow-quantized checkpoint exists
+    # for these), hand-built relay mirroring resnet8_cifar / ds_cnn_imcflow.
+    #   VGG-11 (Verma JSSC'22 Table V, CIFAR-10 32x32x3)
+    "vgg11_cifar_rnd": (lambda: vgg11_cifar_imcflow.getModel(), "ones"),
+    "vgg11_cifar_rnd_small": (lambda: vgg11_cifar_imcflow.getModel(small_debug=True), "ones"),
+    #   ResNet-50 (torchvision topology, ImageNet 224x224x3) -- expected to hit
+    #   PnR/ConfigData blockers; kept for debugging (see model docstring).
+    "resnet50_imagenet_rnd": (lambda: resnet50_imagenet_imcflow.getModel(), "ones"),
+    "resnet50_imagenet_rnd_small": (lambda: resnet50_imagenet_imcflow.getModel(small_debug=True), "ones"),
     # Simple test models
     "one_relu": (models_for_test.getOneReluModel, "linear"),
     "one_conv_small": (lambda: models_for_test.getOneConvModel(iH=4,iW=4), "random"),
