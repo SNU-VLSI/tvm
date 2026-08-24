@@ -394,6 +394,28 @@ class SendRecvPairManager:
                 # gid), NOT a fused conv/BN composite (tuple src gid). The
                 # producer's own split gid is a plain int in all cases, so test
                 # the gid of the node FEEDING the producer.
+                #
+                # C1b (C) MERGE FIX: this "feeder must be plain-int" test is a
+                # PRE-MERGE assumption. It was tuned to fire Marker B' only for the
+                # non-merged region3 shape (a standalone min_max_quantize fed by a
+                # standalone add) and to reject a fused conv/BN composite feeder.
+                # Under REGION_MERGE=2 the SAME diamond (one imce multicast SEND ->
+                # {fused-add consumer, rhs sibling}) reappears but the multicast
+                # producer is a fused conv+bn+minmax COMPOSITE (e.g. node67 imce_0_2
+                # in resnet8 subset31). With the composite excluded, get_pre_send_sync
+                # falls through to Marker B and emits STANDBY(rhs-sibling, 1) ONLY --
+                # the multicast's SECOND receiver (the fused consumer) gets NO
+                # producer-side rendezvous. Since the multicast is ONE physical NoC
+                # stream into shallow (depth-2) recv fifos, the un-gated receiver's
+                # fifo backs up, the SEND wedges mid-stream (fsim: node67 sent 16,
+                # consumers stalled at pc5 having taken 13-15), the fused add never
+                # gets its data, and OP_STOP never fires -> wave0 pipeline deadlock.
+                # The multicast-into-diamond TOPOLOGY (len(imce_recvs)>=2 above + the
+                # exact {sibling,consumer} H3 guard below) is what Marker B' actually
+                # needs; the feeder's plain-vs-composite nature is irrelevant to the
+                # fifo-lockstep requirement. So only apply the composite-feeder
+                # exclusion PRE-MERGE (keeps non-merged .packresid byte-identical);
+                # under region_merge keep the composite-fed multicast producer.
                 producer_gid = data_edge.src_id.graph_node_id
                 if isinstance(producer_gid, tuple):
                     producer_gid = producer_gid[-1]
@@ -404,7 +426,7 @@ class SendRecvPairManager:
                     and isinstance(e.src_id.graph_node_id, tuple)
                     for e in edges
                 )
-                if feeder_is_composite:
+                if feeder_is_composite and not region_merge_mode():
                     continue  # fused conv/BN producer -> not the region3 quantize
 
                 # H3 (hardening): the multicast receiver set must be exactly

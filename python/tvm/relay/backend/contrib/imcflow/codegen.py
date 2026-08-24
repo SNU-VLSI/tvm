@@ -1665,11 +1665,23 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
                                f"resbuf collector recv: {hopA}")
         self._emit_stream(recv_hid, recv_block, phase, _collector_wave)
       if _use_collect_interleave:
-        # func_out-less same-inode residual: fill-lead collect+resend interleave.
-        _total = -(-db.size // 32)
-        _auto_lag = self._auto_fill_lead_groups(hopA, hopB, _total, 4, _total // 4)
+        # func_out-less same-inode residual: EAGER (lag=0) collect+resend
+        # interleave. LAG=0 == lockstep collect(g)->resend(g): forward each
+        # collected group to the consumer immediately. Do NOT use the func_out
+        # fill-lead LAG here (_auto_fill_lead_groups): that geometry models the
+        # 3-stream func_out add-skew (prime rhs ahead of the lagging main lhs),
+        # and for THIS 2-stream case it returns a large lead (v19: lag=33 ->
+        # 132 collect-only prime) that RE-STARVES the trickling skip producer
+        # (node74) exactly like the standalone drain we replaced -- fsim showed
+        # RECV=129/SEND=0 stuck in prime. With no func_out to keep balanced, the
+        # only requirement is "don't demand more than the producer has yet", which
+        # lag=0 satisfies: collect g -> resend g -> block until the consumer takes
+        # them (NoC valid/ready), never running the producer ahead. The consumer
+        # add takes rhs at its own pace once its main lhs arrives; a stalled
+        # consumer just backpressures the resend, never the whole collector.
+        # IMCFLOW_RESID_FILL_LEAD still overrides (escape hatch).
         ci_block = ResidCollectResendInterleavedBlock(
-            self, db, send_info, recv_info.fifo_id, group=4, auto_lag=_auto_lag,
+            self, db, send_info, recv_info.fifo_id, group=4, auto_lag=0,
             annotation=f"resbuf collect+resend interleave: {hopA} || {hopB}")
         # bill both hops for consistency (collector hopA RECV + resend hopB SEND).
         ci_block._resbuf_resend_edge = hopB
