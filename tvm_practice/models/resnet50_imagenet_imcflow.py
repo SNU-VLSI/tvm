@@ -20,16 +20,18 @@ Each bottleneck: 1x1 reduce -> 3x3 -> 1x1 expand, with a residual add (and a
 1x1 downsample conv on the first block of each stage). All conv weights are
 random int8 (no imcflow-quantized ResNet-50 checkpoint exists).
 
-WARNING -- this model is expected to hit compile blockers (that is the point;
-the user wants to debug them). See module docstring notes below and the
-handoff report:
-  * ConfigData asserts H,W <= 128 (acim_util.py). ResNet-50 stem input is
-    224x224, so building the *relay graph* works but constructing ConfigData for
-    the early convs raises AssertionError. To let the relay graph / partition
-    pass be inspected without tripping that assert, the ConfigData spatial dims
-    are clamped to <=128 via _cfg() (config values only affect the ACIM control
-    register, not the conv's logical shape). The real fix (tiling large spatial
-    maps) is left for the debugging pass.
+Mapping boundary (H,W <= 128 ACIM limit): only the raw 224x224 input conv (the
+conv7x7 stem) exceeds the ACIM H,W<=128 limit. From 112x112 -- i.e. the SECOND
+conv onward -- every feature map fits (112 -> 56 -> 28 -> 14 -> 7), so all of
+layer1..layer4 are mappable. In THIS build the whole float stem (conv7x7 +
+maxpool s2) is kept on CPU, so the first quantized conv that reaches ConfigData
+sees 56x56; but the config-limit invariant is simply H,W<=128, which 112 also
+satisfies. _cfg() asserts H,W<=128 so pushing the boundary back onto the raw
+224x224 input fails loudly rather than silently mis-mapping ("map from where it
+fits within config").
+
+WARNING -- this model is still expected to hit compile blockers (that is the
+point; the user wants to debug them):
   * 3x3 conv with IC>=256 needs an IC-split chain of ceil(IC*9/256) atoms; e.g.
     layer4 3x3 512ch -> ceil(512/28)=19 atoms > 16 IMCEs, which will break PnR.
   * dense 2048->1000 and the ImageNet classifier are large; they run on CPU.
@@ -63,17 +65,30 @@ class _NameGen:
 
 
 def _cfg(N, IC, H, W, OC, KH, KW, pad, stride):
-  """Build a ConfigData, clamping H/W to the ACIM 128-limit.
+  """Build a ConfigData for an ACIM-mapped conv.
 
-  ConfigData asserts H,W <= 128 (acim_util.py). The config tensor only encodes
-  the ACIM control register (ksel/pad/stride/H/W/adcmode/...); the conv's real
-  logical shape comes from the imcflow_qconv2d channels/kernel args, not this
-  tensor. Clamping the H/W fields lets the >128 early-stage relay graph be
-  constructed and partitioned for debugging without tripping the assert. The
-  correct handling (spatial tiling) is a known follow-up.
+  ConfigData asserts H,W <= 128 (acim_util.py). The ACIM-mapped region of
+  ResNet-50 begins only where the feature map ALREADY fits that limit. The
+  stem conv7x7 s2 maps 224->112 and only that raw 224x224 input conv exceeds
+  128; from 112x112 onward (i.e. the second conv onward) every map is <=128
+  (112 -> 56 -> 28 -> 14 -> 7), so all of layer1..layer4 are within the config
+  limit. In THIS build the float stem (conv7x7 + maxpool) is kept on CPU and
+  the first quantized conv sees 56x56 -- comfortably within range -- but the
+  invariant we actually enforce is the hardware one: H,W <= 128. Asserting it
+  here means that if the mapping boundary is pushed all the way back to the raw
+  224x224 input it fails loudly with a clear message instead of silently
+  clamping -- "map from where it fits within config", per design.
   """
+  h, w = int(H), int(W)
+  assert h <= 128 and w <= 128, (
+      f"ResNet-50 imcflow mapping must start where the feature map already "
+      f"fits the ACIM H,W<=128 limit; got {h}x{w}. Only the raw 224x224 input "
+      f"conv (the conv7x7 stem) exceeds 128 -- from 112x112 (the 2nd conv) "
+      f"onward it fits. Map from that point, or add spatial tiling to cover "
+      f"the >128 stem."
+  )
   return ConfigData(
-      (N, IC, min(int(H), 128), min(int(W), 128)),
+      (N, IC, h, w),
       (OC, IC, KH, KW),
       padding=pad, stride=stride,
   ).get_as_const_tensor()
