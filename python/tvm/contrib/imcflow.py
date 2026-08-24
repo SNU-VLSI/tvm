@@ -912,9 +912,40 @@ class MemoryRegion(UserDict):
         aggregated.update(region.blocks)
     return aggregated
   
+  def _merge_disjoint_phases(self) -> bool:
+    """Under IMCFLOW_REGION_MERGE, phases in the SAME physical DMEM region must be
+    allocated into DISJOINT byte ranges. Each (phase, i) entry is a template copy
+    with the SAME base_address and its own _last_offset=0, so blocks of DIFFERENT
+    phases (init-phase per-(core,wave) IMEM blobs vs exec-phase 32KB region input /
+    cnt_base_addr) both start at offset 0 and OVERLAP in physical DMEM. Non-merged
+    regions have a small single-blob IMEM so the exec blocks land beyond them by
+    luck (no overlap) and are byte-identical -- so this disjoint-ing is MERGE-GATED.
+    Root cause of the region2 wave X: the region input (exec) written into the same
+    DMEM as the wave IMEM blobs (init) clobbers imce_1_2's IMEM -> garbage -> X."""
+    try:
+      from tvm.relay.op.contrib.imcflow import region_merge_mode
+      return region_merge_mode() > 1
+    except Exception:
+      return False
+
   def allocate(self, block: DataBlock, phase: str):
-    """Allocate block by finding first region of the phase with available space."""
+    """Allocate block by finding first region of the phase with available space.
+
+    Merge mode: route EVERY block (any phase) through a SINGLE shared entry so all
+    blocks of the physical DMEM region are placed by ONE sequential allocator and
+    thus occupy DISJOINT byte ranges regardless of phase or interleaved allocation
+    order (init/exec are interleaved in transform.py; device_codegen adds more init
+    IMEM blobs afterwards). Off merge -> per-phase entries from offset 0 (unchanged,
+    byte-identical). The single shared entry keeps each entry's own base fixed, so
+    no already-placed block's rel_address is disturbed."""
     i = 0
+    if self._merge_disjoint_phases():
+      # One shared allocator per physical region -> phases cannot overlap.
+      if not self[("_merged", 0)].allocate(block):
+        raise RuntimeError(
+            f"Failed to allocate block {block} in region "
+            f"{self._template_region.name} (merge single-arena)")
+      return
     while not self[(phase, i)].allocate(block):
       raise RuntimeError(f"Failed to allocate block {block} in region {self._template_region.name} for phase {phase}")
       i += 1
@@ -1332,15 +1363,20 @@ class ImcflowDeviceConfig:
 
   IMCU_ROW_NUM = 256
   INODE_MMREG_SIZE = 128
-  INODE_DATA_MEM_SIZE = 65536
-  INODE_MAX_TILING_SIZE = 65536 # should be smaller than INODE_DATA_MEM_SIZE  
-  # INODE_DATA_MEM_SIZE = 65536
-  # INODE_DATA_MEM_SIZE = 131072
-
   # BIG_IMEM (sim-only, must match the RTL params.svh BIG_IMEM ifdef):
-  # inode imem 2048 words (8192B), imce imem 1024 words (4096B). The whole
-  # address map (bases below + IMCFLOW_ADDR_SIZE + RESET_GEN) derives from
-  # these, so RTL and codegen shift together.
+  # inode imem 2048 words (8192B), imce imem 1024 words (4096B), AND inode DMEM
+  # 4096 words (131072B = INODE_DMEM_DEPTH 4096 / INODE_DMEM_SIZE 131072 in
+  # params.svh). The bigger DMEM is needed for MERGE=2/1 wave regions where the
+  # per-(core,wave) IMEM blobs (init) and the region input/RESBUF/cnt (exec) must
+  # be allocated DISJOINT (single-arena allocator) -> 64KB overflowed by 672B.
+  # The whole address map (bases below + IMCFLOW_ADDR_SIZE + RESET_GEN + the RTL
+  # runner imc_size) derives from these, so RTL and codegen shift together.
+  if not BIG_IMEM:
+    INODE_DATA_MEM_SIZE = 65536
+  else:
+    INODE_DATA_MEM_SIZE = 131072
+  INODE_MAX_TILING_SIZE = 65536 # should be smaller than INODE_DATA_MEM_SIZE
+
   if not BIG_IMEM:
     INODE_INST_MEM_SIZE = 1024
   else:

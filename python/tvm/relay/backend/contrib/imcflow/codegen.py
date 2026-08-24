@@ -409,6 +409,35 @@ class CodegenSuite:
       for key, value in DevConfig().MemLayout.items():
         pprint.pprint(f"{key} : {value}", stream=f)
 
+    # Merge-mode DMEM alias guard: under IMCFLOW_REGION_MERGE the per-(core,wave)
+    # IMEM blobs (init) and the region input / cnt_base_addr (exec) share the inode
+    # DMEM; a phase-overlap silently CLOBBERS a wave IMEM blob at runtime (garbage
+    # IMEM -> imce X). The single-arena allocator (imcflow.MemoryRegion.allocate)
+    # prevents it; this assert catches any regression at compile time. Per physical
+    # DMEM region, no two DISTINCT DataBlocks may share a byte. Gated to merge so
+    # the non-merged (phase-overlapping-by-luck) layout is untouched/byte-identical.
+    from tvm.relay.op.contrib.imcflow import region_merge_mode as _rmm
+    if _rmm() > 1:
+      for _fn, _mmap in DevConfig().MemLayout.items():
+        for _rname, _region in _mmap.data.items():
+          spans = []  # (lo, hi, name)
+          for _entry in _region.data.values():
+            for _b in _entry.blocks.values():
+              a = _b.base_address
+              if a is None or a < 0:
+                continue
+              spans.append((a, a + _b.size, str(_b.id)))
+          spans.sort()
+          for _i in range(len(spans) - 1):
+            lo0, hi0, n0 = spans[_i]
+            lo1, hi1, n1 = spans[_i + 1]
+            if hi0 > lo1 and n0 != n1:
+              raise RuntimeError(
+                  f"[merge DMEM alias] region '{_rname}' (func {_fn}): blocks "
+                  f"OVERLAP -> {n0} [{lo0},{hi0}) & {n1} [{lo1},{hi1}). A staged "
+                  f"block would clobber another (e.g. input/cnt over a wave IMEM "
+                  f"blob). Fix the allocator arena.")
+
     return func
 
 
