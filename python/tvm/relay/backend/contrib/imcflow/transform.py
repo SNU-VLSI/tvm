@@ -3505,6 +3505,10 @@ class AnnotGenerator:
           from tvm.relay.op.contrib.imcflow import region_merge_mode as _rmm
           self.merge_target = _rmm()
           self.forced_split_budget = (self.merge_target - 1) if self.merge_target else None
+          # Chosen balanced cut converge nodes (id()-set), filled by
+          # _select_merge_cut pre-pass in run(). Replaces the old topo-first
+          # greedy consumption of forced_split_budget. Empty until run().
+          self.merge_cut_ids = set()
 
         def createRegion(self):
           Region = []
@@ -3983,10 +3987,14 @@ class AnnotGenerator:
               # cost is not the real limit -- but we still assert it below to
               # fail loud if a future model would exceed the array.
               if self.merge_target:
-                if self.forced_split_budget is not None and self.forced_split_budget > 0:
-                  self.forced_split_budget -= 1
-                  debug_print(f"[ConvergeCheck] REGION_MERGE: allowing forced split "
-                              f"(remaining budget {self.forced_split_budget}) to keep "
+                # Balanced cut selection: split ONLY at the converge(s) chosen by
+                # the _select_merge_cut pre-pass (which minimizes the max region
+                # size), rather than the old "first N-1 converges in BFS order"
+                # greedy budget. merge_cut_ids is the id()-set of chosen cuts.
+                _is_cut = id(node) in getattr(self, "merge_cut_ids", set())
+                if _is_cut:
+                  debug_print(f"[ConvergeCheck] REGION_MERGE: forced split at chosen "
+                              f"balanced cut {getNodeDebugID(node)} to keep "
                               f"{self.merge_target}-region target")
                   # fall through to the normal forced-split path below
                 else:
@@ -4269,12 +4277,126 @@ class AnnotGenerator:
 
           return force_new_region, needs_split
 
+        def _select_merge_cut(self, order, rev_edges, branch_analyzer, lat_calc):
+          """Region-merge cut selection (IMCFLOW_REGION_MERGE=N).
+
+          Pre-pass over the SAME topo `order` the main BFS consumes. Identifies
+          the ordered list of unbalanced converge candidates (the residual `add`
+          boundaries -- b1.res / b2.res / b3.res in ResNet8) using the identical
+          detection pipeline the main loop uses (_is_converge_point + branch
+          metrics + _branches_unbalanced), and for each computes the region sizes
+          that a cut there would produce (cumulative getCost prefix vs remainder).
+
+          It then spends the forced-split budget (N-1 cuts) on the candidate(s)
+          that MINIMIZE the maximum resulting region size (ties -> earliest /
+          graph front), instead of the old "first converge in BFS order" greedy
+          behavior. This lets MERGE=2 cut at b2.res (balanced ~13/~13) rather than
+          b1.res (4/21), so both regions fit <=16 nodes and each is single-wave.
+
+          Populates self.merge_cut_ids = set(id(node)) of chosen cut converges.
+          OFF (merge_target falsy) -> no-op. Result is logged as
+          [region-merge] cut@... sizes A/B for the operator.
+          """
+          import os as _os
+          self.merge_cut_ids = set()
+          if not self.merge_target:
+            return
+
+          # Walk the topo order, tracking cumulative getCost of supported nodes so
+          # a cut before candidate C gives sizeA=cost_before(C), sizeB=total-sizeA.
+          candidates = []  # list of dicts: node, idx, cost_before
+          cost_before = 0
+          for node in order:
+            if isinstance(node, Call):
+              is_supported = (self.isComposite(node) or self.isSupportedOp(node)
+                              or self.isSuperNode(node))
+              if is_supported and self._is_converge_point(node, rev_edges):
+                # Mirror the main-loop converge classification.
+                diverge_node = branch_analyzer.find_diverge_point(node)
+                if diverge_node is None and not self.handle_branch_from_var_converge:
+                  pass  # not a handled converge
+                else:
+                  branches, from_var_flags = self._extract_branches_for_converge(
+                      node, rev_edges, branch_analyzer, diverge_node)
+                  handled = True
+                  if diverge_node is None:
+                    handled = any(from_var_flags)
+                  if handled:
+                    metrics = self._calculate_branch_metrics(branches, lat_calc)
+                    if self._branches_unbalanced(metrics):
+                      candidates.append({
+                          "node": node,
+                          "idx": len(candidates),
+                          "cost_before": cost_before,
+                      })
+              # accumulate AFTER the converge test so a cut "before C" excludes C.
+              if is_supported:
+                cost_before += self.getCost(node)
+
+          total = cost_before
+          if not candidates:
+            debug_print("[region-merge] no unbalanced-converge candidates found")
+            return
+
+          # Env override: IMCFLOW_REGION_MERGE_CUT = comma list of candidate
+          # indices (0-based topo order of the candidates) to force as cuts.
+          override = _os.environ.get("IMCFLOW_REGION_MERGE_CUT", "").strip()
+          budget = self.merge_target - 1
+          chosen = []
+          if override:
+            want = {int(s) for s in override.split(",") if s.strip().isdigit()}
+            chosen = [c for c in candidates if c["idx"] in want][:budget]
+            debug_print(f"[region-merge] cut override {sorted(want)} -> "
+                        f"chose candidate idx {[c['idx'] for c in chosen]}")
+          else:
+            # Greedy balanced selection: repeatedly pick the cut that minimizes
+            # the max resulting segment. For N=2 (budget=1) this is a single
+            # argmin over candidates of max(cost_before, total-cost_before).
+            # For N>2 we place cuts one at a time, minimizing the current worst
+            # segment; candidates are ordered by topo position so "graph front"
+            # breaks ties (min idx). This is a size estimate (getCost over-counts
+            # physical IMCEs), used only to balance -- PnR is the true arbiter.
+            remaining = list(candidates)
+            cut_points = [0, total]  # sorted segment boundaries (cumulative cost)
+            for _ in range(min(budget, len(remaining))):
+              best = None
+              for c in remaining:
+                # segment boundaries after adding this cut
+                pts = sorted(cut_points + [c["cost_before"]])
+                worst = max(pts[i + 1] - pts[i] for i in range(len(pts) - 1))
+                key = (worst, c["idx"])  # tie -> earliest candidate
+                if best is None or key < best[0]:
+                  best = (key, c)
+              _, pick = best
+              chosen.append(pick)
+              cut_points = sorted(cut_points + [pick["cost_before"]])
+              remaining = [c for c in remaining if c is not pick]
+
+          self.merge_cut_ids = {id(c["node"]) for c in chosen}
+          # Log the decision (sizes of the resulting segments).
+          cand_desc = ", ".join(
+              f"#{c['idx']}({getNodeDebugID(c['node'])})@{c['cost_before']}"
+              for c in candidates)
+          debug_print(f"[region-merge] {len(candidates)} candidates: {cand_desc}; "
+                      f"total_cost={total}, budget={budget}")
+          bounds = sorted([0, total] + [c["cost_before"] for c in chosen])
+          seg_sizes = [bounds[i + 1] - bounds[i] for i in range(len(bounds) - 1)]
+          for c in chosen:
+            a = c["cost_before"]
+            debug_print(f"[region-merge] cut@{getNodeDebugID(c['node'])} "
+                        f"(candidate #{c['idx']}) sizes A/B = {a}/{total - a}")
+          debug_print(f"[region-merge] segment sizes {seg_sizes} "
+                      f"(max={max(seg_sizes)}), regions={len(seg_sizes)}")
+
         def run(self, fn):
           order, edges, rev_edges = self._topo_bfs_order(fn)
 
           # Initialize branch analyzer for converge point detection
           branch_analyzer = BranchAnalyzer(edges, rev_edges)
           lat_calc = LatencyThroughputCalculator(self.target_mod)
+
+          # Region-merge cut selection (balanced) -- see _select_merge_cut.
+          self._select_merge_cut(order, rev_edges, branch_analyzer, lat_calc)
 
           debug_print(f"\n{'='*70}")
           debug_print(f"[AnnotatorBFS] Starting BFS traversal with {len(order)} nodes")
