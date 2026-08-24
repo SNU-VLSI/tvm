@@ -1374,8 +1374,23 @@ class ImcflowDeviceConfig:
   if not BIG_IMEM:
     INODE_DATA_MEM_SIZE = 65536
   else:
-    INODE_DATA_MEM_SIZE = 131072
-  INODE_MAX_TILING_SIZE = 65536 # should be smaller than INODE_DATA_MEM_SIZE
+    # (C-lite-2) sim-only 256KB inode DMEM (RTL params.svh BIG_IMEM ifdef:
+    # INODE_DMEM_DEPTH 8192 / INODE_DMEM_SIZE 262144, ADDR_BW 18). Enables a
+    # merged region (MERGE=2/1) to run factor-1 (single tile): region1's 32x32
+    # multicast input needs ~131KB staging + ~9KB program in ONE inode DMEM
+    # (~140KB > 128KB), so the previous 128KB forced spatial tiling (factor 4)
+    # that dragged the factor-1-native b2 into b1's tile loop -> cross-tile recv
+    # deadlock. 256KB fits factor-1 with headroom (and MERGE=1's larger staging).
+    INODE_DATA_MEM_SIZE = 262144
+  # Per-tile staging budget the tiling-factor search targets. Must stay below
+  # INODE_DATA_MEM_SIZE to reserve room for the program (IMEM/policy) that shares
+  # the same DMEM arena. Non-BIG keeps the original 64KB (half of 128KB). BIG_IMEM
+  # (256KB) reserves 64KB for program + margin -> 196608, which admits region1's
+  # factor-1 staging (~131KB) while the bump allocator still guards true overflow.
+  if not BIG_IMEM:
+    INODE_MAX_TILING_SIZE = 65536 # should be smaller than INODE_DATA_MEM_SIZE
+  else:
+    INODE_MAX_TILING_SIZE = INODE_DATA_MEM_SIZE - 65536  # 196608 (64KB program reserve)
 
   if not BIG_IMEM:
     INODE_INST_MEM_SIZE = 1024
