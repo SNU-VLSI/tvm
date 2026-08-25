@@ -1,0 +1,13 @@
+{
+  "DEVICE": {
+    "dmm_gpib1": { "VISA_ADDR": "GPIB1::1::INSTR" },
+    "dmm_gpib2": { "VISA_ADDR": "GPIB1::2::INSTR" },
+    "dmm_gpib4": { "VISA_ADDR": "GPIB1::4::INSTR" }
+  },
+  "POWER": {
+    "DMM_GPIB1": { "DEVICE": "dmm_gpib1" },
+    "DMM_GPIB2": { "DEVICE": "dmm_gpib2" },
+    "DMM_GPIB4": { "DEVICE": "dmm_gpib4" }
+  },
+  "PRESET": {}
+}

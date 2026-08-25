@@ -71,6 +71,9 @@ show_help() {
     echo "  CKPT           Checkpoint alias for debug dump subdir (debugging/fpga/<CKPT>)"
     echo "  DEBUG_EXE=1    Enable debug node dump fetch from remote"
     echo "  PRESERVE_DEBUG_DUMPS=1  Keep existing local sample_* and remote debug_nodes after fetch"
+    echo "  IMCFLOW_POWER_RUN_ID    Override the generated power result run ID"
+    echo "  IMCFLOW_POWER_LOCAL_RESULT_DIR  Override the complete local power result directory"
+    echo "  DMM_BRIDGE_LOG_PATH    direct bridge/DMM log to capture (default: /tmp/power_v2_bridge.log)"
     echo ""
     echo "Remote configuration is loaded from .env file."
     exit 0
@@ -90,6 +93,26 @@ SAMPLE_INDICES=""
 CONSOLE_LOG_LEVEL="${CONSOLE_LOG_LEVEL:-DEBUG}"
 MODEL_EVL_DIR="resnet8_subset31_pretrained_orig_evl.linux"
 CKPT="${CKPT:-}"
+
+POWER_RUNTIME_ENV=""
+case "${IMCFLOW_MEASURE_POWER:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        if [[ -z "${DMM_BRIDGE_HOST:-}" ]]; then
+            echo "Error: DMM_BRIDGE_HOST is required when IMCFLOW_MEASURE_POWER is enabled"
+            exit 1
+        fi
+        if [[ ! "$DMM_BRIDGE_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            echo "Error: DMM_BRIDGE_HOST contains unsupported characters"
+            exit 1
+        fi
+        DMM_BRIDGE_PORT="${DMM_BRIDGE_PORT:-9900}"
+        if [[ ! "$DMM_BRIDGE_PORT" =~ ^[0-9]+$ ]]; then
+            echo "Error: DMM_BRIDGE_PORT must be numeric"
+            exit 1
+        fi
+        POWER_RUNTIME_ENV="DMM_BRIDGE_HOST=$DMM_BRIDGE_HOST DMM_BRIDGE_PORT=$DMM_BRIDGE_PORT "
+        ;;
+esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -216,6 +239,84 @@ else
     BINARY_TAG=""
 fi
 
+# Allocate the local power artifact directory at invocation time. Measurement
+# remains board/meas-2 only; this path is used after the full evaluation ends.
+POWER_LOCAL_DIR=""
+POWER_BRIDGE_LOG_START_LINE=""
+MEASUREMENT_SSH_HOST="${DMM_MEASUREMENT_SSH_HOST:-meas-2}"
+POWER_BRIDGE_LOG_PATH="${DMM_BRIDGE_LOG_PATH:-/tmp/power_v2_bridge.log}"
+case "${IMCFLOW_MEASURE_POWER:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        POWER_RUN_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+        POWER_SAFE_MODEL="${MODEL_EVL_DIR//[^A-Za-z0-9_.-]/_}"
+        POWER_TVM_REV="$(git -C "$SCRIPT_DIR" rev-parse --short=8 HEAD 2>/dev/null || printf unknown)"
+        POWER_RUN_ID="${IMCFLOW_POWER_RUN_ID:-${POWER_RUN_TIMESTAMP}_${POWER_SAFE_MODEL}_${POWER_TVM_REV}_$$}"
+        if [[ ! "$POWER_RUN_ID" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "Error: IMCFLOW_POWER_RUN_ID contains unsupported characters"
+            exit 1
+        fi
+        POWER_LOCAL_DIR="${IMCFLOW_POWER_LOCAL_RESULT_DIR:-$SCRIPT_DIR/eval_dir/$MODEL_EVL_DIR/power/$POWER_RUN_ID}"
+        ;;
+esac
+
+remote_log_next_line() {
+    local log_path="$1"
+    if [[ ! "$log_path" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
+        return 1
+    fi
+    local current_lines
+    current_lines="$(ssh "$MEASUREMENT_SSH_HOST" \
+        "if [ -f '$log_path' ]; then wc -l < '$log_path'; else printf 0; fi" \
+        2>/dev/null)" || true
+    current_lines="${current_lines//[[:space:]]/}"
+    if [[ "$current_lines" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$((current_lines + 1))"
+        return 0
+    fi
+    return 1
+}
+
+capture_power_log_start() {
+    [[ -n "$POWER_LOCAL_DIR" ]] || return 0
+    POWER_BRIDGE_LOG_START_LINE="$(remote_log_next_line "$POWER_BRIDGE_LOG_PATH")" || {
+        POWER_BRIDGE_LOG_START_LINE=""
+        echo "Warning: could not determine DMM bridge log position"
+    }
+}
+
+fetch_remote_log_slice() {
+    local log_path="$1"
+    local start_line="$2"
+    local local_name="$3"
+    [[ -n "$start_line" ]] || return 0
+    if ssh "$MEASUREMENT_SSH_HOST" "tail -n +$start_line '$log_path'" \
+        > "$POWER_LOCAL_DIR/$local_name"; then
+        echo "Measurement-server log saved to: $POWER_LOCAL_DIR/$local_name"
+    else
+        echo "Warning: failed to fetch $log_path"
+    fi
+}
+
+fetch_power_debug_artifacts() {
+    [[ -n "$POWER_LOCAL_DIR" ]] || return 0
+    mkdir -p "$POWER_LOCAL_DIR"
+
+    fetch_remote_log_slice \
+        "$POWER_BRIDGE_LOG_PATH" "$POWER_BRIDGE_LOG_START_LINE" "measurement_bridge.log"
+
+    if [[ -z "$POWER_BRIDGE_LOG_START_LINE" ]]; then
+        echo "Warning: could not determine measurement-server log position"
+    fi
+
+    local build_metadata="$SCRIPT_DIR/eval_dir/$MODEL_EVL_DIR/build_metadata.json"
+    if [[ -f "$build_metadata" ]]; then
+        cp "$build_metadata" "$POWER_LOCAL_DIR/build_metadata.json"
+        echo "Power build metadata saved to: $POWER_LOCAL_DIR/build_metadata.json"
+    else
+        echo "Warning: build metadata is unavailable for this power run"
+    fi
+}
+
 # Determine the samples argument for the binary
 if [[ -n "$SAMPLE_INDICES" ]]; then
     # Ensure comma is present so C parser detects indices mode (vs num_samples)
@@ -275,6 +376,9 @@ echo "Quiet mode: $QUIET_MODE"
 echo "Preserve debug dumps: ${PRESERVE_DEBUG_DUMPS:-0}"
 echo "Result file (remote): $REMOTE_RESULT_PATH"
 echo "Result dir (local):   $LOCAL_RESULT_DIR/"
+if [[ -n "$POWER_LOCAL_DIR" ]]; then
+    echo "Power run dir:       $POWER_LOCAL_DIR"
+fi
 echo "=========================================="
 echo ""
 
@@ -341,6 +445,7 @@ if [[ "$SKIP_STEP6" == true ]]; then
 else
     echo "Step 6: Executing on remote chip..."
     echo ""
+    capture_power_log_start
     # Write per-node debug dumps + heartbeat to tmpfs (RAM), NOT the SD card.
     # A deep model (VWW: ~900 tiny .npy per sample × 100 samples ≈ 90k files)
     # of create/unlink churn on the SD ext4 was corrupting its directory htree
@@ -364,7 +469,7 @@ else
     if [ -n "${IMCFLOW_TIMING:-}" ]; then
         TIMING_ENV="IMCFLOW_TIMING=$IMCFLOW_TIMING "
     fi
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${POWER_RUNTIME_ENV}${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
@@ -396,6 +501,7 @@ cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > 
         echo "=========================================="
         echo "Dataset evaluation failed!"
         echo "=========================================="
+        fetch_power_debug_artifacts
         exit 1
     fi
 fi
@@ -511,4 +617,41 @@ for k, v in m.items():
         echo "Warning: Failed to fetch result file from remote"
         echo "=========================================="
     fi
+fi
+
+# Fetch and plot raw DMM samples only after all board-side work and result collection.
+# This deliberately stays outside generated kernels and POWER end calls so SCP
+# latency is never included in the measured interval.
+if [[ "$SKIP_STEP6" != true ]]; then
+    case "${IMCFLOW_MEASURE_POWER:-0}" in
+        1|true|TRUE|yes|YES|on|ON)
+            POWER_SERVER_OUTPUT_PREFIX="${IMCFLOW_POWER_SERVER_OUTPUT_PREFIX:-/tmp/imcflow_power}"
+            mkdir -p "$POWER_LOCAL_DIR"
+            echo "Fetching raw DMM samples from $MEASUREMENT_SSH_HOST after evaluation..."
+            if scp "${MEASUREMENT_SSH_HOST}:${POWER_SERVER_OUTPUT_PREFIX}_*.txt" "$POWER_LOCAL_DIR/"; then
+                echo "Raw DMM samples saved to: $POWER_LOCAL_DIR"
+                if scp "${MEASUREMENT_SSH_HOST}:${POWER_SERVER_OUTPUT_PREFIX}_*.txt.tags.json" "$POWER_LOCAL_DIR/"; then
+                    echo "Power tag metadata saved to: $POWER_LOCAL_DIR"
+                else
+                    echo "Warning: raw samples were fetched, but no power tag metadata was fetched"
+                fi
+                if python3 "$SCRIPT_DIR/scripts/plot_legacy_power.py" \
+                    "$POWER_LOCAL_DIR" --output "$POWER_LOCAL_DIR/power_trace.png" \
+                    --individual-dir "$POWER_LOCAL_DIR/plots"; then
+                    echo "Power plots saved to: $POWER_LOCAL_DIR/power_trace.png"
+                    if python3 "$SCRIPT_DIR/scripts/write_power_metadata.py" \
+                        "$POWER_LOCAL_DIR"; then
+                        echo "Power trace metadata saved to: $POWER_LOCAL_DIR/power_metadata.json"
+                    else
+                        echo "Warning: failed to write power trace metadata"
+                    fi
+                else
+                    echo "Warning: raw samples were fetched, but power plot generation failed"
+                fi
+            else
+                echo "Warning: failed to fetch raw DMM samples; files remain on $MEASUREMENT_SSH_HOST"
+            fi
+            fetch_power_debug_artifacts
+            ;;
+    esac
 fi

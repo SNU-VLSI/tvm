@@ -152,6 +152,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/scan_steps.sh"
 load_env
 
+POWER_RUNTIME_ENV=""
+case "${IMCFLOW_MEASURE_POWER:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        if [[ -z "${DMM_BRIDGE_HOST:-}" ]]; then
+            echo "Error: DMM_BRIDGE_HOST is required when IMCFLOW_MEASURE_POWER is enabled"
+            exit 1
+        fi
+        if [[ ! "$DMM_BRIDGE_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            echo "Error: DMM_BRIDGE_HOST contains unsupported characters"
+            exit 1
+        fi
+        DMM_BRIDGE_PORT="${DMM_BRIDGE_PORT:-9900}"
+        if [[ ! "$DMM_BRIDGE_PORT" =~ ^[0-9]+$ ]]; then
+            echo "Error: DMM_BRIDGE_PORT must be numeric"
+            exit 1
+        fi
+        POWER_RUNTIME_ENV="DMM_BRIDGE_HOST=$DMM_BRIDGE_HOST DMM_BRIDGE_PORT=$DMM_BRIDGE_PORT "
+        ;;
+esac
+
 echo "=========================================="
 echo "Running chip test for: $TEST_NAME"
 echo "Test folder: $TEST_FOLDER"
@@ -208,7 +228,7 @@ else
     echo "Step 6: Executing on remote chip (timeout: 300s)..."
     echo ""
     scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
-                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && timeout 300 ./$EXEC_NAME \
+                cd $REMOTE_BASE_PATH/eval_dir/$TEST_FOLDER/host_binary_make/build && ${POWER_RUNTIME_ENV}timeout 300 ./$EXEC_NAME \
                 eval_dir/$TEST_FOLDER $REMOTE_BASE_PATH $DEFAULT_GRAPH_PATH $DEFAULT_PARAMS_PATH $DEFAULT_RUNNER_NAME $REMOTE_BASE_PATH/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \
                 tvm_status=\$?; exit \$tvm_status"

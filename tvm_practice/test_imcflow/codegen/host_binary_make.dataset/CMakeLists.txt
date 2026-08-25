@@ -85,19 +85,6 @@ if(NOT EXISTS "${CRT_LIB_BASE}")
   message(FATAL_ERROR "TVM CRT directory not found at: ${CRT_LIB_BASE}\nSet -DTVM_ROOT=/path/to/tvm")
 endif()
 
-# --- DMM in-kernel power measurement (IMCFLOW_MEASURE_POWER=1, linux only) ---
-set(IMCFLOW_MEASURE_POWER_BUILD "$ENV{IMCFLOW_MEASURE_POWER}")
-if("${IMCFLOW_MEASURE_POWER_BUILD}" STREQUAL "1")
-  set(DMM_CAPI_DIR "${TVM_ROOT}/3rdparty/measurement_utils/capi")
-  if(NOT EXISTS "${DMM_CAPI_DIR}/dmm_measure.c")
-    message(FATAL_ERROR "IMCFLOW_MEASURE_POWER=1 but ${DMM_CAPI_DIR}/dmm_measure.c not found -- run: git submodule update --init 3rdparty/measurement_utils")
-  endif()
-  set(IMCFLOW_DMM_ENABLE ON)
-  message(STATUS "IMCFLOW_MEASURE_POWER=1: linking dmm_measure.c from ${DMM_CAPI_DIR}")
-else()
-  set(IMCFLOW_DMM_ENABLE OFF)
-endif()
-
 # ============================================================================
 # Extract MLF
 # ============================================================================
@@ -158,12 +145,6 @@ endforeach()
 # Build Model Library
 # ============================================================================
 add_library(tvm_model STATIC)
-if(IMCFLOW_DMM_ENABLE)
-  # dmm_measure.c compiled as C into the same lib as the generated kernel that calls it
-  target_sources(tvm_model PRIVATE "${DMM_CAPI_DIR}/dmm_measure.c")
-  set_source_files_properties("${DMM_CAPI_DIR}/dmm_measure.c" PROPERTIES LANGUAGE C)
-  target_include_directories(tvm_model PRIVATE "${DMM_CAPI_DIR}")
-endif()
 set_source_files_properties(${TVM_MODEL_SRCS} PROPERTIES LANGUAGE CXX)
 target_sources(tvm_model PRIVATE ${TVM_MODEL_SRCS} ${TVM_MODEL_OBJS} ${HOST_OBJ_FILES})
 
@@ -175,6 +156,19 @@ target_include_directories(tvm_model PRIVATE
   "${TVM_ROOT}/3rdparty/dlpack/include"
   "${TVM_ROOT}/3rdparty/dmlc-core/include"
 )
+
+# The generated Linux kernels include dmm_measure.h only when power measurement
+# is enabled. Build the socket-only C client once and expose it transitively from
+# tvm_model; the board does not need Python, PyVISA, or measurement-server code.
+if("$ENV{IMCFLOW_HOST_OS}" STREQUAL "linux")
+  set(DMM_CAPI_DIR "${TVM_ROOT}/3rdparty/measurement_utils/capi")
+  if(NOT EXISTS "${DMM_CAPI_DIR}/dmm_measure.c")
+    message(FATAL_ERROR "DMM C API not found: ${DMM_CAPI_DIR}/dmm_measure.c")
+  endif()
+  add_library(imcflow_dmm_measure STATIC "${DMM_CAPI_DIR}/dmm_measure.c")
+  target_include_directories(imcflow_dmm_measure PUBLIC "${DMM_CAPI_DIR}")
+  target_link_libraries(tvm_model PUBLIC imcflow_dmm_measure)
+endif()
 
 # Retry control options
 option(RETRY_DISABLE "Disable retry on timeout (exit on failure)" OFF)
@@ -224,9 +218,6 @@ add_executable(${DATASET_EXEC_NAME}
 target_link_libraries(${DATASET_EXEC_NAME} PRIVATE
   tvm_model ${CRT_LIBS} m stdc++
 )
-if(IMCFLOW_DMM_ENABLE)
-  target_include_directories(${DATASET_EXEC_NAME} PRIVATE "${DMM_CAPI_DIR}")
-endif()
 
 target_include_directories(${DATASET_EXEC_NAME} PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/src"

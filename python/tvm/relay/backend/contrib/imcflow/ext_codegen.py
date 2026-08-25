@@ -16,7 +16,67 @@ from tvm.relay.expr import (Var, Constant)
 from tvm.runtime import String
 import math
 import os
-from enum import Enum
+import json
+import re
+
+
+def _env_flag(name, default=False):
+  value = os.getenv(name)
+  if value is None:
+    return default
+  normalized = value.strip().lower()
+  if normalized in ("1", "true", "yes", "on"):
+    return True
+  if normalized in ("0", "false", "no", "off", ""):
+    return False
+  raise ValueError(f"{name} must be a boolean value, got {value!r}")
+
+
+def _env_int(name, default, minimum=None):
+  value = int(os.getenv(name, str(default)))
+  if minimum is not None and value < minimum:
+    raise ValueError(f"{name} must be >= {minimum}, got {value}")
+  return value
+
+
+def _env_float(name, default, minimum=None):
+  value = float(os.getenv(name, str(default)))
+  if minimum is not None and value < minimum:
+    raise ValueError(f"{name} must be >= {minimum}, got {value}")
+  return value
+
+
+def _power_function_order_key(func_name):
+  """Return the Relay graph order encoded in an IMCFLOW function name.
+
+  ``ImcflowFuncMap`` is populated from IRModule iteration and is not an
+  execution-order contract.  The final ``main_<custom_id>`` component is the
+  graph node id assigned while traversing the Relay program, so it provides a
+  stable boundary for MODEL-scoped measurement.
+  """
+  match = re.search(r"_main_(\d+)$", func_name)
+  if match:
+    return (0, int(match.group(1)), func_name)
+  # Keep code generation usable for hand-written names while making their
+  # ordering deterministic.
+  return (1, 0, func_name)
+
+
+POWER_MEASURE_ENABLED = False
+POWER_MEASURE_SCOPE = "REGION"
+POWER_MEASURE_MODE = "now"
+POWER_DMM_NAME = "DMM_GPIB3"
+POWER_DMM_NAMES = (POWER_DMM_NAME,)
+POWER_DMM_NAMES_FROM_LIST = False
+POWER_DMM_NPLC = 0.001
+POWER_DMM_INTERVAL_S = -1.0
+POWER_DMM_SAMPLE_COUNT = 50000
+POWER_DMM_CURRENT_RANGE = 0.1
+POWER_DMM_RESET = True
+POWER_DMM_START_TIMEOUT_S = 30
+POWER_DMM_RESULT_TIMEOUT_S = 300
+POWER_SERVER_OUTPUT_PREFIX = "/tmp/imcflow_power"
+REGION_TIMING_ENABLED = _env_flag("IMCFLOW_REGION_TIMING", False)
 
 if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   print("IMCFLOW_HOST_OS: baremetal")
@@ -26,72 +86,66 @@ if (os.getenv("IMCFLOW_HOST_OS") == "baremetal"):
   INT_ACK_GEN_LEN = 0
   big_imem = os.getenv("IMCFLOW_BIG_IMEM", "").lower() in ("1", "true", "yes")
   if big_imem:
-    RESET_GEN_ADDR = 0x80000000 + 270464 + 4
+    RESET_GEN_ADDR = 0x80000000 + 270464 + 4 
   else:
-    RESET_GEN_ADDR = 0x80000000 + 266368 + 4
-  MEASURE_POWER = False
+    RESET_GEN_ADDR = 0x80000000 + 266368 + 4 
 elif (os.getenv("IMCFLOW_HOST_OS") == "linux"):
   print("IMCFLOW_HOST_OS: linux")
   IMCFLOW_ADDR = os.environ["IMCFLOW_ADDR"]
   IMCFLOW_LEN = os.environ["IMCFLOW_LEN"]
   INT_ACK_GEN_ADDR = os.environ["INT_ACK_GEN_ADDR"]
   INT_ACK_GEN_LEN = os.environ["INT_ACK_GEN_LEN"]
-  RESET_GEN_ADDR = 0xa0130000
+  RESET_GEN_ADDR = 0xa0130000 
+  POWER_MEASURE_ENABLED = _env_flag("IMCFLOW_MEASURE_POWER", False)
+  if POWER_MEASURE_ENABLED:
+    POWER_MEASURE_SCOPE = os.getenv("IMCFLOW_POWER_SCOPE", "REGION").strip().upper()
+    if POWER_MEASURE_SCOPE not in ("MODEL", "REGION", "TILE"):
+      raise ValueError(
+          "IMCFLOW_POWER_SCOPE must be MODEL, REGION, or TILE, "
+          f"got {POWER_MEASURE_SCOPE!r}")
+    POWER_MEASURE_MODE = os.getenv("IMCFLOW_POWER_MODE", "now").strip().lower()
+    if POWER_MEASURE_MODE not in ("now", "wait"):
+      raise ValueError(
+          f"IMCFLOW_POWER_MODE must be now or wait, got {POWER_MEASURE_MODE!r}")
+    POWER_DMM_NAME = os.getenv("IMCFLOW_POWER_DMM_NAME", "DMM_GPIB3").strip()
+    if not POWER_DMM_NAME:
+      raise ValueError("IMCFLOW_POWER_DMM_NAME must not be empty")
+    power_dmm_names_raw = os.getenv("IMCFLOW_POWER_DMM_NAMES")
+    if power_dmm_names_raw is not None:
+      POWER_DMM_NAMES_FROM_LIST = True
+      POWER_DMM_NAMES = tuple(name.strip() for name in power_dmm_names_raw.split(","))
+      if not POWER_DMM_NAMES or any(not name for name in POWER_DMM_NAMES):
+        raise ValueError(
+            "IMCFLOW_POWER_DMM_NAMES must be a non-empty comma-separated list")
+      if len(POWER_DMM_NAMES) > 16:
+        raise ValueError("IMCFLOW_POWER_DMM_NAMES supports at most 16 DMMs")
+      if len(set(POWER_DMM_NAMES)) != len(POWER_DMM_NAMES):
+        raise ValueError("IMCFLOW_POWER_DMM_NAMES must not contain duplicates")
+      power_dmm_tokens = tuple(
+          re.sub(r"[^A-Za-z0-9_.-]", "_", name) for name in POWER_DMM_NAMES)
+      if len(set(power_dmm_tokens)) != len(power_dmm_tokens):
+        raise ValueError(
+            "IMCFLOW_POWER_DMM_NAMES contains names that collide after filename "
+            "sanitization")
+      if os.getenv("IMCFLOW_POWER_DMM_NAME") is not None:
+        print("IMCFLOW_POWER_DMM_NAMES is set; ignoring IMCFLOW_POWER_DMM_NAME")
+    else:
+      POWER_DMM_NAMES = (POWER_DMM_NAME,)
+    POWER_DMM_NPLC = _env_float("IMCFLOW_POWER_NPLC", 0.001, 0.0)
+    POWER_DMM_INTERVAL_S = _env_float("IMCFLOW_POWER_INTERVAL_S", -1.0)
+    POWER_DMM_SAMPLE_COUNT = _env_int("IMCFLOW_POWER_SAMPLE_COUNT", 50000, 1)
+    POWER_DMM_CURRENT_RANGE = _env_float("IMCFLOW_POWER_CURRENT_RANGE", 0.1)
+    POWER_DMM_RESET = _env_flag("IMCFLOW_POWER_RESET", True)
+    POWER_DMM_START_TIMEOUT_S = _env_int(
+        "IMCFLOW_POWER_START_TIMEOUT_S", 30, 0)
+    POWER_DMM_RESULT_TIMEOUT_S = _env_int(
+        "IMCFLOW_POWER_RESULT_TIMEOUT_S", 300, 0)
+    POWER_SERVER_OUTPUT_PREFIX = os.getenv(
+        "IMCFLOW_POWER_SERVER_OUTPUT_PREFIX", "/tmp/imcflow_power").strip()
+    if not POWER_SERVER_OUTPUT_PREFIX:
+      raise ValueError("IMCFLOW_POWER_SERVER_OUTPUT_PREFIX must not be empty")
 else:
   raise ValueError(f"Unsupported IMCFLOW_HOST_OS: {os.getenv('IMCFLOW_HOST_OS')}")
-
-# --- DMM in-kernel power measurement (IMCFLOW_MEASURE_POWER, default OFF) ---
-# Ported from origin/power. When OFF (default) NO dmm_* code is emitted so the
-# generated C is byte-identical to stock. When ON (linux only) the kernel brackets
-# EXACTLY its own SET_RUN compute invoke with a non-blocking dmm_start_current_now()
-# right before SET_RUN and a blocking dmm_get_result_now()x N + dmm_close() right
-# after wait_for_freerun_done()/wait_imcflow_interrupt() returns. Because the kernel
-# itself brackets the array-active window there is no host<->DMM clock-sync problem.
-MEASURE_POWER = os.getenv("IMCFLOW_MEASURE_POWER", "0").lower() in ("1", "true", "yes")
-
-class PowerMeasurePhase(Enum):
-  MODEL = 0    # one Start at region1 entry .. one End at last-region exit (whole model)
-  REGION = 1   # one Start/End pair per region kernel, bracketing its single SET_RUN exec
-  TILE = 2     # one Start/End pair per tile invoke
-
-# Which granularity to bracket. REGION is the right choice for the STEP_FREERUN
-# single-conv power sweep: each region kernel has exactly ONE SET_RUN compute invoke
-# (our tree's generateInvokeCode; the program-load uses SET_PROGRAM_CODE via
-# generatePolicyUpdateCode and is intentionally NOT bracketed), so REGION yields
-# exactly ONE dmm_start/dmm_get pair around the real compute.
-POWER_MEASURE_PHASE = PowerMeasurePhase.REGION
-
-# Per-DMM config. DMM_NAMES selects which supply rails to sample. For the imcflow
-# board: VDD = digital core, DDA = analog/ADC rail (rises only when STEPs actually
-# retire -> the discriminator for "crossbar converting"), DDC = crossbar rail.
-#
-# KNOBS (must be tuned so the DMM window ~= the compute window):
-#   nplc          integration time per sample in power-line-cycles. 0.001 = ~fastest
-#                 (~a few us/sample on a 34410A-class DMM).
-#   interval_s    inter-sample interval; -1 == MIN (back-to-back, fastest sampling).
-#   sample_count  how many samples dmm_get_result_now() BLOCKS for. dmm_start is
-#                 NON-blocking; dmm_get returns only after this many samples land.
-#                 So (sample_count * per_sample_time) must be >= the compute window,
-#                 otherwise dmm_get returns before compute finishes and you clip the
-#                 window; if it is much larger, dmm_get blocks after compute ends and
-#                 you integrate idle current. origin/power default = 50000 samples,
-#                 which at nplc=0.001 spans ~a large fraction of a 1s STEP_FREERUN
-#                 burst. With STEP_FREERUN_HOLD_SEC the compute busy-holds a fixed
-#                 wall time, so size sample_count to match that hold (raise it if the
-#                 hold is long; lower it if the fed conv is short).
-#   curr_range    ammeter range in Amps (0.1 A here).
-#   reset         1 -> reset the DMM before this measurement.
-if POWER_MEASURE_PHASE in (PowerMeasurePhase.REGION, PowerMeasurePhase.TILE,
-                           PowerMeasurePhase.MODEL):
-  DMM_NAMES       = ["VDD", "DDA", "DDC"]
-  NPLCs           = [0.001, 0.001, 0.001]
-  INTERVALs       = [-1, -1, -1]
-  SAMPLE_COUNTs   = [50000, 50000, 50000]
-  CURR_RANGEs     = [0.1, 0.1, 0.1]
-  RESETs          = [1, 1, 1]
-  OFNAME_POSTFIXs = ["vdd", "dda", "ddc"]
-else:
-  raise ValueError(f"Unsupported POWER_MEASURE_PHASE: {POWER_MEASURE_PHASE}")
 
 # Device paths
 IMCFLOW_DEVICE = "/dev/uio5"
@@ -356,7 +410,7 @@ class KernelCodeGenerator:
 #endif
 """)
 
-  def generateRetryCheck(self, location_label):
+  def generateRetryCheck(self, location_label, power_session_active=False):
     """Generate retry check code after a wait call.
     On failure: cleanup device pointers, increment retry count, continue loop.
     With RETRY_DISABLE: exit(1) on failure (original behavior).
@@ -376,6 +430,8 @@ class KernelCodeGenerator:
       # still valid, i.e. before generateDevicePointerCleanup() munmaps them.
       code += "generate_ack(int_ack_gen_pointer);\n"
       code += "npu_pointer[INTR_DONE_REG_IDX] = 1;\n"
+    if power_session_active:
+      code += "dmm_close();\n"
     code += self.generateDevicePointerCleanup()
     code += f"_retry_count++;\n"
     code += f"continue;\n"
@@ -384,6 +440,8 @@ class KernelCodeGenerator:
     code += f"#else\n"
     code += f"if (_wait_rc != 0) {{\n"
     code += f'  fprintf(stderr, "[TIMEOUT] {location_label} failed (retry disabled)\\n");\n'
+    if power_session_active:
+      code += "  dmm_close();\n"
     code += self.generateDevicePointerCleanup()
     code += f"  g_imcflow_kernel_failed = 1;\n"
     code += f"  return;\n"
@@ -414,7 +472,7 @@ class KernelCodeGenerator:
   } \\
 } while (0)
 """) if os.environ.get("IMCFLOW_STAGE_HB", "") not in ("", "0") else ""
-    return ("""
+    code = ("""
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -429,10 +487,15 @@ class KernelCodeGenerator:
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <unistd.h>
-""" + stage_hb_macro + ('#include "dmm_measure.h"\n' if (self.os == "linux" and MEASURE_POWER) else "") + """
+""" + stage_hb_macro + """
 // Global failure flag: set by kernel on timeout, checked by host loop
 extern volatile int g_imcflow_kernel_failed;
 """)
+    if self.os == "linux" and POWER_MEASURE_ENABLED:
+      code += '#include "dmm_measure.h"\n'
+    if REGION_TIMING_ENABLED:
+      code += "#include <time.h>\n"
+    return code
 
   def generateInterruptUtilities(self):
     """Generate interrupt handling utility functions."""
@@ -664,116 +727,162 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
 }
     """)
 
-  def generatePowerMeasureStart(self, t_idx=None):
-    """Generate C code to start DMM current measurement (NON-blocking).
+  def _power_server_ofname(self, scope, tile_idx=None, dmm_name=None):
+    suffix = self.func_name
+    if scope == "MODEL":
+      suffix = "model"
+    elif tile_idx is not None:
+      suffix = f"{suffix}_tile{tile_idx}"
+    # Keep legacy single-DMM paths unchanged.  A plural list, including a
+    # one-item list, is an explicit request for name-qualified artifacts.
+    if dmm_name is not None and (POWER_DMM_NAMES_FROM_LIST or len(POWER_DMM_NAMES) > 1):
+      safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", dmm_name)
+      suffix = f"{suffix}_{safe_name}"
+    return f"{POWER_SERVER_OUTPUT_PREFIX}_{suffix}.txt"
 
-    Ported verbatim from origin/power. Emits a dmm_config_t array and a single
-    dmm_start_current_now() call that returns immediately; the DMM then samples in
-    the background while the accelerator runs the SET_RUN compute. Paired with
-    generatePowerMeasureEnd() which blocks on dmm_get_result_now(). Only ever
-    called when self.os == 'linux' and MEASURE_POWER is set."""
-    assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
+  def generatePowerMeasureStart(self, scope, tile_idx=None):
+    """Start one legacy START/STARTED DMM session."""
+    assert self.os == "linux" and POWER_MEASURE_ENABLED
+    start_func = (
+        "dmm_start_current_now" if POWER_MEASURE_MODE == "now"
+        else "dmm_start_current")
+    label = scope.lower()
+    if tile_idx is not None:
+      label += f" tile {tile_idx}"
 
-    n_dmms = len(DMM_NAMES)
     code = CodeWriter()
-
-    if t_idx is not None:
-      code += f"// --- Power measurement start (tile {t_idx}) ---\n"
-    else:
-      code += f"// --- Power measurement start ---\n"
-
-    code += f"fprintf(stderr, \"[DMM] starting measurement...\\n\");\n"
-
+    code += f"// Legacy power measurement begin ({label})\n"
     code += "{\n"
     code.nextIndent()
-    code += f"dmm_config_t dmm_cfgs[{n_dmms}] = {{\n"
+    code += "dmm_config_t _power_dmm_cfgs[] = {\n"
     code.nextIndent()
-
-    for i in range(n_dmms):
-      interval_val = -1 if INTERVALs[i] == "MIN" else INTERVALs[i]
-
-      if t_idx is not None:
-        ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}.txt"
-        server_ofname = f"{self.func_name}_tile{t_idx}_{OFNAME_POSTFIXs[i]}_server.txt"
-      else:
-        ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}.txt"
-        server_ofname = f"{self.func_name}_{OFNAME_POSTFIXs[i]}_server.txt"
-
-      trailing = "," if i < n_dmms - 1 else ""
+    for dmm_name in POWER_DMM_NAMES:
+      server_ofname = json.dumps(
+          self._power_server_ofname(scope, tile_idx, dmm_name))
       code += "{\n"
       code.nextIndent()
-      code += f".name = \"{DMM_NAMES[i]}\",\n"
-      code += f".nplc = {NPLCs[i]},\n"
-      code += f".interval_s = {interval_val},\n"
-      code += f".sample_count = {SAMPLE_COUNTs[i]},\n"
-      code += f".curr_range = {CURR_RANGEs[i]},\n"
-      code += f".reset = {RESETs[i]},\n"
-      code += f".ofname = \"{ofname}\",\n"
-      code += f".server_ofname = \"{server_ofname}\",\n"
+      code += f".name = {json.dumps(dmm_name)},\n"
+      code += f".nplc = {POWER_DMM_NPLC!r},\n"
+      code += f".interval_s = {POWER_DMM_INTERVAL_S!r},\n"
+      code += f".sample_count = {POWER_DMM_SAMPLE_COUNT},\n"
+      code += f".curr_range = {POWER_DMM_CURRENT_RANGE!r},\n"
+      code += f".reset = {1 if POWER_DMM_RESET else 0},\n"
+      code += ".ofname = NULL,\n"
+      code += f".server_ofname = {server_ofname},\n"
       code.prevIndent()
-      code += "}" + trailing + "\n"
+      code += "},\n"
     code.prevIndent()
     code += "};\n"
-    code += f"if (dmm_start_current_now({n_dmms}, dmm_cfgs) != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_start_current_now failed: %s\\n\", dmm_last_error());\n"
-    code += f"  exit(1);\n"
-    code += f"}}\n"
-
-    if t_idx is not None:
-      code += f"fprintf(stderr, \"[DMM] measurement started (tile {t_idx})\\n\");\n"
-    else:
-      code += f"fprintf(stderr, \"[DMM] measurement started \\n\");\n"
-
+    code += (
+        f"dmm_set_timeouts({POWER_DMM_START_TIMEOUT_S}, "
+        f"{POWER_DMM_RESULT_TIMEOUT_S});\n")
+    code += (
+        f"if ({start_func}({len(POWER_DMM_NAMES)}, _power_dmm_cfgs) != 0) {{\n")
+    code.nextIndent()
+    code += (
+        f'fprintf(stderr, "[POWER] {label} begin failed: %s\\n", '
+        "dmm_last_error());\n")
+    code += "dmm_close();\n"
+    code += self.generateDevicePointerCleanup()
+    code += "g_imcflow_kernel_failed = 1;\n"
+    code += "return;\n"
+    code.prevIndent()
+    code += "}\n"
     code.prevIndent()
     code += "}\n"
     return code
 
-  def generatePowerMeasureEnd(self, t_idx=None):
-    """Generate C code to wait for DMM results and close (BLOCKING).
+  def generatePowerMeasureEnd(self, scope, tile_idx=None):
+    """Send legacy GO, receive RESULT, and close the DMM session."""
+    assert self.os == "linux" and POWER_MEASURE_ENABLED
+    result_func = (
+        "dmm_get_result_now" if POWER_MEASURE_MODE == "now"
+        else "dmm_wait_result")
+    label = scope.lower()
+    if tile_idx is not None:
+      label += f" tile {tile_idx}"
 
-    Ported verbatim from origin/power. Calls dmm_get_result_now() once per DMM
-    (each blocks until its configured sample_count samples arrive), prints the
-    per-rail average current, then dmm_close(). Placed immediately after the
-    SET_RUN compute wait returns so the sampled window spans exactly the compute."""
-    assert self.os == "linux" and MEASURE_POWER, "Power measurement code should only be generated for Linux with MEASURE_POWER enabled"
-
-    n_dmms = len(DMM_NAMES)
     code = CodeWriter()
-    if t_idx is not None:
-      code += f"// --- Power measurement end (tile {t_idx}) ---\n"
-    else:
-      code += f"// --- Power measurement end ---\n"
-    if t_idx is not None:
-      code += f"fprintf(stderr, \"[DMM] getting measurement result... (tile {t_idx})\\n\");\n"
-    else:
-      code += f"fprintf(stderr, \"[DMM] getting measurement result... \\n\");\n"
+    code += f"// Legacy power measurement end ({label})\n"
     code += "{\n"
     code.nextIndent()
-    code += f"char dmm_name[64];\n"
-    code += f"double dmm_avg;\n"
-    code += f"int dmm_count;\n"
-    code += f"for (int dmm_i = 0; dmm_i < {n_dmms}; dmm_i++) {{\n"
+    expected_names = ", ".join(json.dumps(name) for name in POWER_DMM_NAMES)
+    code += f"const char *_power_dmm_expected[] = {{{expected_names}}};\n"
+    code += "char _power_dmm_name[64];\n"
+    code += "double _power_dmm_avg = 0.0;\n"
+    code += "int _power_dmm_count = 0;\n"
+    code += f"for (int _power_dmm_i = 0; _power_dmm_i < {len(POWER_DMM_NAMES)}; ++_power_dmm_i) {{\n"
     code.nextIndent()
-    code += f"int rc = dmm_get_result_now(dmm_name, sizeof(dmm_name), &dmm_avg, &dmm_count);\n"
-    code += f"if (rc == -2) {{\n"
-    code += f"  fprintf(stderr, \"DMM ERROR [%s]: %s\\n\", dmm_name, dmm_last_error());\n"
-    code += f"  continue;\n"
-    code += f"}} else if (rc != 0) {{\n"
-    code += f"  fprintf(stderr, \"ERROR: dmm_get_result_now failed: %s\\n\", dmm_last_error());\n"
-    code += f"  dmm_close();\n"
-    code += f"  exit(1);\n"
-    code += f"}}\n"
-    code += f"fprintf(stderr, \"[DMM] [%s] avg = %.9g A  (%d samples)\\n\", dmm_name, dmm_avg, dmm_count);\n"
+    code += (
+        f"int _power_dmm_rc = {result_func}(_power_dmm_name, "
+        "sizeof(_power_dmm_name), &_power_dmm_avg, &_power_dmm_count);\n")
+    code += "if (_power_dmm_rc != 0) {\n"
+    code.nextIndent()
+    code += (
+        f'fprintf(stderr, "[POWER] {label} result failed: %s\\n", '
+        "dmm_last_error());\n")
+    code += "dmm_close();\n"
+    code += self.generateDevicePointerCleanup()
+    code += "g_imcflow_kernel_failed = 1;\n"
+    code += "return;\n"
     code.prevIndent()
-    code += f"}}\n"
-    code += f"dmm_close();\n"
-    if t_idx is not None:
-      code += f"fprintf(stderr, \"[DMM] measurement ended (tile {t_idx})\\n\");\n"
-    else:
-      code += f"fprintf(stderr, \"[DMM] measurement ended \\n\");\n"
+    code += "}\n"
+    code += "if (strcmp(_power_dmm_name, _power_dmm_expected[_power_dmm_i]) != 0) {\n"
+    code.nextIndent()
+    code += (
+        f'fprintf(stderr, "[POWER] {label} result order mismatch: expected %s got %s\\n", '
+        "_power_dmm_expected[_power_dmm_i], _power_dmm_name);\n")
+    code += "dmm_close();\n"
+    code += self.generateDevicePointerCleanup()
+    code += "g_imcflow_kernel_failed = 1;\n"
+    code += "return;\n"
+    code.prevIndent()
+    code += "}\n"
+    code += (
+        f'fprintf(stderr, "[POWER] {label}: %s avg=%.9g A samples=%d\\n", '
+        "_power_dmm_name, _power_dmm_avg, _power_dmm_count);\n")
+    code.prevIndent()
+    code += "}\n"
+    code += "dmm_close();\n"
     code.prevIndent()
     code += "}\n"
     return code
+
+  def generatePowerRegionTag(self, region_number, boundary):
+    """Record a region boundary inside one MODEL-scoped DMM trace.
+
+    Even IDs identify region starts and the following odd IDs identify ends:
+    region N start = 2*N, region N end = 2*N+1.
+    """
+    assert boundary in ("start", "end")
+    tag_id = 2 * region_number + (1 if boundary == "end" else 0)
+    return (
+        f"// MODEL trace: region {region_number} {boundary} "
+        f"(tag {tag_id})\n"
+        f"(void)set_tag({tag_id});\n")
+
+  def generateRegionTimingStart(self, region_number):
+    """Start opt-in elapsed timing at the MODEL tag-start boundary."""
+    return (
+        f"// Region {region_number} timing start (MODEL tag boundary)\n"
+        "struct timespec _imcflow_region_time_start;\n"
+        "clock_gettime(CLOCK_MONOTONIC, &_imcflow_region_time_start);\n")
+
+  def generateRegionTimingEnd(self, region_number):
+    """Report elapsed timing at the MODEL tag-end boundary."""
+    return (
+        f"// Region {region_number} timing end (MODEL tag boundary)\n"
+        "struct timespec _imcflow_region_time_end;\n"
+        "clock_gettime(CLOCK_MONOTONIC, &_imcflow_region_time_end);\n"
+        "unsigned long long _imcflow_region_elapsed_ns =\n"
+        "    ((unsigned long long)_imcflow_region_time_end.tv_sec * 1000000000ull +\n"
+        "     (unsigned long long)_imcflow_region_time_end.tv_nsec) -\n"
+        "    ((unsigned long long)_imcflow_region_time_start.tv_sec * 1000000000ull +\n"
+        "     (unsigned long long)_imcflow_region_time_start.tv_nsec);\n"
+        f'fprintf(stderr, "[REGION_TIMING] region={region_number} '
+        f'function={self.func_name} elapsed_ns=%llu elapsed_ms=%.6f\\n",\n'
+        "        _imcflow_region_elapsed_ns,\n"
+        "        (double)_imcflow_region_elapsed_ns / 1000000.0);\n")
 
   def generateDevicePointerSetup(self):
     """Generate device pointer setup code based on OS."""
@@ -1109,6 +1218,17 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
 
     args_proto_type = ", ".join(proto_list)
 
+    power_measure_active = self.os == "linux" and POWER_MEASURE_ENABLED
+    power_func_names = sorted(
+        DevConfig().ImcflowFuncMap.keys(), key=_power_function_order_key)
+    first_power_func = bool(power_func_names) and self.func_name == power_func_names[0]
+    last_power_func = bool(power_func_names) and self.func_name == power_func_names[-1]
+    region_match = re.search(r"_region(\d+)_", self.func_name)
+    region_number = (
+        int(region_match.group(1)) if region_match
+        else (power_func_names.index(self.func_name) + 1
+              if self.func_name in power_func_names else 1))
+
     code = CodeWriter()
     code += self.generateHeader()
     code += self.generateRetryMacros()
@@ -1170,6 +1290,16 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
         code += _hb("before warmup")
         code += self.emitWarmup()
         code += _hb("after warmup")
+    if power_measure_active:
+      if POWER_MEASURE_SCOPE == "MODEL" and first_power_func:
+        code += self.generatePowerMeasureStart("MODEL")
+      elif POWER_MEASURE_SCOPE == "REGION":
+        code += self.generatePowerMeasureStart("REGION")
+    if REGION_TIMING_ENABLED:
+      code += self.generateRegionTimingStart(region_number)
+    if power_measure_active:
+      if POWER_MEASURE_SCOPE == "MODEL":
+        code += self.generatePowerRegionTag(region_number, "start")
     code += _hb("before compiled_blocks transfer")
     code += self.generateToNpuTransferCode(self.compiled_blocks) # inode instrunction + policy
     code += _hb("after compiled_blocks transfer / before const_blocks transfer")
@@ -1177,28 +1307,17 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
     code += _hb("after const_blocks transfer / before policy_update")
     code += self.generatePolicyUpdateCode() # start from pc 0, up to halt
     code += _hb("after policy_update")
-    code += self.generateRetryCheck("policy_update")
-
-    # Power measurement (IMCFLOW_MEASURE_POWER, default OFF -> nothing emitted ->
-    # byte-identical). CRITICAL PLACEMENT: bracket ONLY the SET_RUN compute invoke
-    # below -- NOT generatePolicyUpdateCode() above (that is the SET_PROGRAM_CODE
-    # program/policy load, not the array compute). generateInvokeCode() emits the
-    # single SET_RUN exec (busy-holds for the whole STEP_FREERUN burst when active),
-    # so dmm_start() fires immediately before SET_RUN and dmm_get()/dmm_close() fire
-    # immediately after the compute wait returns -> the DMM window == the compute.
-    # NOTE: the FIRST invoke below (right after policy_update, BEFORE any input
-    # transfer) runs with the array effectively idle -- STATE stays 0x0 and NO real
-    # crossbar compute happens (chip-observed: bracketing here gave DDA==idle). The
-    # REAL array-active compute is the per-tile invoke inside the tile loop, which
-    # fires AFTER generateToNpuTransferCode(input_blocks). So power measurement must
-    # bracket the TILE invoke, not this one.
-    power_measure_active = self.os == "linux" and MEASURE_POWER
-
+    code += self.generateRetryCheck(
+        "policy_update",
+        power_session_active=(
+            power_measure_active and POWER_MEASURE_SCOPE == "REGION"))
     code += _hb("before invoke")
-    code += self.generateInvokeCode() # proceed up to halt (pre-input SET_RUN)
+    code += self.generateInvokeCode() # proceed up to halt
     code += _hb("after invoke / before poll")
-
-    code += self.generateRetryCheck("invoke")
+    code += self.generateRetryCheck(
+        "invoke",
+        power_session_active=(
+            power_measure_active and POWER_MEASURE_SCOPE == "REGION"))
 
     # kernel tiling factor
     tile_factor = self.target_func_info.tiling_factor
@@ -1208,18 +1327,27 @@ static int wait_for_freerun_done(volatile uint32_t* npu_pointer) {
       code += f"fprintf(stderr,\"-- Tiled execution: TILE {t_idx} / {tile_factor} --\\n\");\n"
       code += self.generateToNpuTransferCode(self.compiled_per_tile_blocks, t_idx) # per-tile: cnt_base_addr
       code += self.generateToNpuTransferCode(self.input_blocks, t_idx) # input
-      # Power measurement (IMCFLOW_MEASURE_POWER, default OFF -> byte-identical):
-      # bracket the ACTUAL array-active compute -- this per-tile invoke fires with
-      # input present so the crossbar really runs. dmm_start non-blocking right
-      # before SET_RUN; dmm_get/close blocking right after the compute wait returns
-      # -> the DMM window == the real compute window.
-      if power_measure_active:
-        code += self.generatePowerMeasureStart(t_idx)
-      code += self.generateInvokeCode() # end of exec (SET_RUN compute, array active)
-      if power_measure_active:
-        code += self.generatePowerMeasureEnd(t_idx)
-      code += self.generateRetryCheck(f"tile_{t_idx}_invoke")
+      if power_measure_active and POWER_MEASURE_SCOPE == "TILE":
+        code += self.generatePowerMeasureStart("TILE", t_idx)
+      code += self.generateInvokeCode() # end of exec
+      code += self.generateRetryCheck(
+          f"tile_{t_idx}_invoke",
+          power_session_active=(
+              power_measure_active and POWER_MEASURE_SCOPE == "TILE"))
+      if power_measure_active and POWER_MEASURE_SCOPE == "TILE":
+        code += self.generatePowerMeasureEnd("TILE", t_idx)
       code += self.generateFromNpuTransferCode(self.output_blocks, t_idx) # output
+
+    if power_measure_active:
+      if POWER_MEASURE_SCOPE == "MODEL":
+        code += self.generatePowerRegionTag(region_number, "end")
+    if REGION_TIMING_ENABLED:
+      code += self.generateRegionTimingEnd(region_number)
+    if power_measure_active:
+      if POWER_MEASURE_SCOPE == "REGION":
+        code += self.generatePowerMeasureEnd("REGION")
+      elif POWER_MEASURE_SCOPE == "MODEL" and last_power_func:
+        code += self.generatePowerMeasureEnd("MODEL")
 
     # Retry loop end + cleanup
     code += self.generateDevicePointerCleanup()
