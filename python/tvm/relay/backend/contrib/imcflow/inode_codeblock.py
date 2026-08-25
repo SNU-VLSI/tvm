@@ -577,6 +577,33 @@ class SendBlock(InodeCodeBlock):
           f"for (int {safe_iv} = 0; {safe_iv} < {recv_count}; "
           f"{safe_iv} += {nb}) {{ // SAFE fused-add step-by-{nb} loop\n{inner}}}"))
       return
+    # Option A (paced multicast, non-tiled path): step-by-(K*W) token unroll, same
+    # as _build_tiled but recv_count is a Python int here. Only fires for a paced
+    # region-input multicast SEND (merged region1); else -> byte-identical loop.
+    # W = PACED_MULTICAST_WORDS_PER_WINDOW: each token-block window wraps W SENDs
+    # (the W bitplanes of ONE pixel) to MATCH the consumer's W-RECV window; a
+    # 1-SEND-per-window unroll advances the inode token W times faster than the
+    # consumer -> block-boundary desync wedge. K blocks x W words = K*W step.
+    if self.is_paced_multicast_send() and eff == 1:
+      from tvm.relay.backend.contrib.imcflow.send_recv_sync import (
+          PACED_MULTICAST_NUM_BLOCKS, PACED_MULTICAST_WORDS_PER_WINDOW)
+      K = PACED_MULTICAST_NUM_BLOCKS
+      W = PACED_MULTICAST_WORDS_PER_WINDOW
+      pmc_iv = UniqueVar(f"send_pmc_iv_{fifo_id}", dtype="int")
+      inner = ""
+      for b in range(K):
+        pre = self._get_presend_sync_code_str(token_block=b)
+        if pre:
+          inner += indent(pre.rstrip("\n"), "  ") + "\n"
+        for w in range(W):
+          inner += (f"  __builtin_INODE_SEND({var} + ({pmc_iv} + {b}*{W} + {w})*32, "
+                    f"0, {next_policy_addr}, {fifo_id});\n")
+          if nop_delay:
+            inner += indent(nop_delay.rstrip("\n"), "  ") + "\n"
+      self.body.add(TextBlock(
+          f"for (int {pmc_iv} = 0; {pmc_iv} < {recv_count}; "
+          f"{pmc_iv} += {K*W}) {{ // paced-mc token step-by-{K}x{W} loop\n{inner}}}"))
+      return
     self.body.add(SimpleFor(recv_count, send_body_with_sync))
 
   def _build_tiled(self):
@@ -714,6 +741,36 @@ class SendBlock(InodeCodeBlock):
           f"{safe_iv} += {nb}) {{ // SAFE fused-add step-by-{nb} loop\n{inner}}}"))
       return
 
+    # Option A (paced region-input multicast, merged region1): UNROLL the tiled
+    # SEND loop by K = PACED_MULTICAST_NUM_BLOCKS with a LITERAL phase-token per
+    # block, exactly mirroring the SAFE fused-add unroll above AND the consumer's
+    # per-block unroll (imce create_loop_from_call). Each unrolled body b emits the
+    # interlocked window paced_multicast_token(b) then the SEND, so consecutive
+    # packets carry DISTINCT tokens (no repeated-flag re-arm race). loop_cnt_var
+    # (var6) is a whole-pixel multiple and K|count (K=4) so the step divides
+    # evenly. eff==1 always here (the `-11` multicast input isn't feed-spread).
+    if self.is_paced_multicast_send() and eff == 1:
+      from tvm.relay.backend.contrib.imcflow.send_recv_sync import (
+          PACED_MULTICAST_NUM_BLOCKS, PACED_MULTICAST_WORDS_PER_WINDOW)
+      K = PACED_MULTICAST_NUM_BLOCKS
+      W = PACED_MULTICAST_WORDS_PER_WINDOW  # SENDs per token-window = consumer's
+                                            # W-RECV window (bitplanes of one pixel)
+      pmc_iv = UniqueVar(f"{target_edge.simple_name()}_pmc_iv", dtype="int")
+      inner = ""
+      for b in range(K):
+        pre = self._get_presend_sync_code_str(token_block=b)
+        if pre:
+          inner += indent(pre.rstrip("\n"), "  ") + "\n"
+        for w in range(W):
+          inner += (f"  __builtin_INODE_SEND({base_var} + ({pmc_iv} + {b}*{W} + {w})*32, "
+                    f"0, {next_policy_addr}, {fifo_id});\n")
+          if nop_delay:
+            inner += indent(nop_delay.rstrip("\n"), "  ") + "\n"
+      self.body.add(TextBlock(
+          f"for (int {pmc_iv} = 0; {pmc_iv} < {loop_cnt_var}; "
+          f"{pmc_iv} += {K*W}) {{ // paced-mc token step-by-{K}x{W} loop\n{inner}}}"))
+      return
+
     if eff > 1:
       inner = ""
       for j in range(eff):
@@ -752,7 +809,25 @@ class SendBlock(InodeCodeBlock):
         return nb  # (consumer_value, num_blocks)
     return None
 
-  def _get_presend_sync_code_str(self, iter_var=None, safe_block=None):
+  def is_paced_multicast_send(self):
+    """Option A: True iff THIS SendBlock's data edge(s) form a paced region-input
+    MULTICAST (the `-11` input feeding BOTH imce_0_2 and imce_1_2 in merged
+    region1). The per-packet SEND loop must then be UNROLLED by
+    PACED_MULTICAST_NUM_BLOCKS with a LITERAL phase-token per block (INODE cannot
+    lower a runtime `iter % K` flag value). Mirrors is_safe_fusedadd_send. Gated
+    (via the predicates) on residual_in_region_mode() AND region_merge_mode() ->
+    non-merged / OFF / region2 -> False -> the flat SEND loop below (byte-id)."""
+    if not hasattr(self.builder, 'pair_manager') or self.builder.pair_manager is None:
+      return False
+    edge_or_edges = self._get_edge()
+    if residual_in_region_mode() and isinstance(self.block.id, list):
+      edge_or_edges = self.block.id
+    if edge_or_edges is None:
+      return False
+    edges = edge_or_edges if isinstance(edge_or_edges, list) else [edge_or_edges]
+    return self.builder.pair_manager.has_paced_multicast_edge(edges)
+
+  def _get_presend_sync_code_str(self, iter_var=None, safe_block=None, token_block=None):
     """Get PRE-send rendezvous code (handcraft, SENDER side for data input).
 
     handcraft inode_0_0 data-input SEND (per-packet):
@@ -894,14 +969,24 @@ class SendBlock(InodeCodeBlock):
     residual_target = False
     if residual_in_region_mode():
       for e in edges:
-        if not pm.is_residual_data_input_recv(e):
+        # Option A (merged region1): a region-input skip landing on a composite
+        # `data` operand (b1.res add / vecops, imce_1_2) is NOT classified as
+        # is_residual_data_input_recv (its sibling operand is `lhs`, not `data`,
+        # so _residual_data_producers finds 1). When it is co-MULTICAST with a
+        # handshake-gated conv-head consumer, it MUST be paced -> admit it here so
+        # the inode STANDBYs it too (merged 2-target window below). LOCKSTEP with
+        # get_recv_window_sync (imce side gives it the matching flag-1 window
+        # under the SAME predicate). Narrow-gated -> OFF / region2 unaffected.
+        _paced_skip = pm.is_paced_region_input_residual_skip(e)
+        if not pm.is_residual_data_input_recv(e) and not _paced_skip:
           continue
         # Bare identity rhs: a REGION-INPUT operand (identity skip, src gid <
         # 0) is paced by rhs-fifo backpressure + fanout-lead, not flags.
         # LOCKSTEP: the add-side window drops this sender too
-        # (get_merged_residual_input_window, same predicate).
+        # (get_merged_residual_input_window, same predicate). EXCEPTION: a
+        # paced skip (above) KEEPS the receiver as a rendezvous target.
         _sgid = getattr(e.src_id, "graph_node_id", None)
-        if isinstance(_sgid, int) and _sgid < 0:
+        if isinstance(_sgid, int) and _sgid < 0 and not _paced_skip:
           continue
         rnode = pm._get_hw_node(e.dst_id)
         if isinstance(rnode, tuple):
@@ -914,6 +999,45 @@ class SendBlock(InodeCodeBlock):
       return ""
 
     target_imces.sort(key=lambda x: x.value)
+
+    # Option A (merged region1): if ANY edge of this SEND is a paced region-input
+    # MULTICAST (skip OR its handshake-gated co-consumer), the merged window uses
+    # a MONOTONIC PHASE-TOKEN pair (t1, t2) from paced_multicast_token(token_block)
+    # -- NOT a single repeated flag. The old single flag (249) re-armed the SAME
+    # value every packet iteration -> a consumer passed its STANDBY on a STALE
+    # token and ran an iteration ahead -> data-stream re-arm wedge. The caller
+    # (SendBlock._build_tiled) UNROLLS this SEND loop by K and passes token_block=b
+    # per block so consecutive iterations carry DISTINCT tokens. Lockstep with both
+    # consumers' recv windows (get_recv_window_sync, same paced_multicast_token).
+    # Non-paced multicasts keep flag 1 (byte-identical).
+    from tvm.relay.backend.contrib.imcflow.send_recv_sync import paced_multicast_token
+    _is_paced_mc = any(
+        pm.is_paced_region_input_residual_skip(e)
+        or pm.is_paced_multicast_handshake_consumer(e)
+        for e in edges)
+
+    # Paced-multicast interlocked window (RECV-as-ack, order-independent). Per
+    # block b, tokens (t1=base+2b READY, t2=base+2b+1 GO):
+    #   STANDBY(rnode, t1) for each consumer  -- wait each consumer's READY (t1
+    #                                            raised on the consumer's own flag)
+    #   SET_FLAG(t2)                          -- producer GO on the inode flag
+    #   STANDBY(rnode, 0) for each            -- wait each consumer clear
+    #   SET_FLAG(0)                           -- clear the inode flag, then SEND
+    # Matches the consumer `SETFLAG(t1); STANDBY(inode, t2); SETFLAG(0); RECV`.
+    # Distinct tokens per consecutive block (no collapsible repeated edge) + RECV
+    # as ack bound the skew to < 1 iter. token_block is the LITERAL block index
+    # from the unrolled caller (INODE requires a literal flag value -- backend
+    # cannot lower a runtime `iter % K`).
+    if _is_paced_mc and len(target_imces) >= 2:
+      t1, t2 = paced_multicast_token(token_block or 0)
+      sync_lines = []
+      for rnode in target_imces:
+        sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, {t1}); // paced-mc READY {rnode.name} (block {int(token_block or 0)})")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG({t2}); // paced-mc GO")
+      for rnode in target_imces:
+        sync_lines.append(f"__builtin_INODE_STANDBY({rnode.value}, 0);")
+      sync_lines.append(f"__builtin_INODE_SET_FLAG(0);")
+      return "\n".join(sync_lines) + "\n"
 
     # When a residual add receiver joins the target set the SEND is a single
     # MIXED multicast to >=2 imces: emit ONE merged window (single scalar inode

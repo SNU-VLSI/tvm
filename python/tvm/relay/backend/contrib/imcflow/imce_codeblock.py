@@ -3113,7 +3113,11 @@ class VecOpBlock(ImceCallCodeBlock):
 
       pre_lines, post_lines = (None, None)
       if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
-        pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(edge)
+        # Option A: forward the phase-token block (set on this send_block by the
+        # consumer-loop unroller when a paced multicast consumer renders
+        # block-major). None -> block 0 -> byte-identical for non-paced edges.
+        pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(
+            edge, token_block=getattr(self, "token_block", None))
 
       if pre_lines:
         comp.add("\n".join(pre_lines))
@@ -3276,6 +3280,13 @@ class RecvSendWrapper(ImceCodeBlock):
     self.builder = builder
     self.skip_presend = skip_presend
     self.suppress_presend_only = suppress_presend_only
+    # Option A (paced region-input multicast): the per-iteration phase-token block
+    # index b (0..PACED_MULTICAST_NUM_BLOCKS-1) for THIS unrolled body. Set by the
+    # consumer-loop unroller in create_loop_from_call; forwarded to
+    # get_recv_window_sync so consecutive unrolled bodies carry DISTINCT tokens.
+    # None -> block 0 (single-shot / non-paced -> byte-identical, never read for a
+    # non-paced edge).
+    self.token_block = None
     # Fix G producer side: SETFLAG(uuid) emitted AFTER the SEND loop, notifying the
     # sibling consumer (imce_3_2) that this node's psum for the boundary iteration
     # has been sent, so the consumer's boundary STEP may proceed. None -> no notify.
@@ -3590,7 +3601,12 @@ class RecvSendWrapper(ImceCodeBlock):
 
         pre_lines, post_lines = (None, None)
         if self.builder and hasattr(self.builder, 'pair_manager') and self.builder.pair_manager:
-          pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(edge)
+          # Option A: forward THIS unrolled body's phase-token block so a paced
+          # region-input multicast consumer cycles distinct tokens per block
+          # (self.token_block set by create_loop_from_call's unroller; None ->
+          # block 0 -> byte-identical for every non-paced edge).
+          pre_lines, post_lines = self.builder.pair_manager.get_recv_window_sync(
+              edge, token_block=getattr(self, "token_block", None))
 
         if pre_lines:
           code += "\n".join(pre_lines)
@@ -4196,6 +4212,47 @@ class RecvSendWrapper(ImceCodeBlock):
     # Create a new RecvSendWrapper that represents the inner logic
     inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks,
                             self.send_block, self.in_edges, self.out_edges, self.annotation, builder=self.builder)
+
+    # Option A (paced region-input multicast, merged region1): UNROLL this
+    # per-packet loop by K = PACED_MULTICAST_NUM_BLOCKS so each of the K unrolled
+    # bodies carries a DISTINCT phase-token block (paced_multicast_token(b)). The
+    # single repeated flag toggled once per iteration re-armed the SAME value and
+    # let this consumer pass its STANDBY on a STALE token from a prior iteration
+    # (data-stream re-arm wedge). Distinct tokens per consecutive iteration + the
+    # RECV-as-ack interlock (see get_recv_window_sync) bound the producer/consumer
+    # skew to < 1 iteration -> no cross-iteration self-alias. Mirrors the producer
+    # inode's step-by-K SEND unroll (SendBlock._build_tiled). `count` is a
+    # whole-pixel multiple and K|count (K=4, count=1024) so the step divides
+    # evenly. Gated on has_paced_multicast_edge -> non-merged / OFF / region2 ->
+    # the plain single-body SimpleFor below (byte-identical).
+    pm = getattr(self.builder, "pair_manager", None) if self.builder else None
+    if pm is not None and pm.has_paced_multicast_edge(self.in_edges):
+      from tvm.relay.backend.contrib.imcflow.send_recv_sync import (
+          PACED_MULTICAST_NUM_BLOCKS, PACED_MULTICAST_WORDS_PER_WINDOW)
+      K = PACED_MULTICAST_NUM_BLOCKS
+      assert count % K == 0, (
+          f"paced multicast loop count {count} not divisible by K={K}")
+      # Fail-loud lockstep tie: this consumer RECVs `num_blocks` words per token
+      # window; the producer inode unroll (SendBlock) wraps
+      # PACED_MULTICAST_WORDS_PER_WINDOW SENDs per token window. They MUST be
+      # equal or the two token cycles desync (the block-boundary wedge we fixed).
+      assert num_blocks == PACED_MULTICAST_WORDS_PER_WINDOW, (
+          f"paced multicast words/window mismatch: consumer num_blocks={num_blocks} "
+          f"!= PACED_MULTICAST_WORDS_PER_WINDOW={PACED_MULTICAST_WORDS_PER_WINDOW}")
+      # Build K wrappers, one per phase-token block, sharing the SAME send_block /
+      # edges (UniqueVar reuses var names -> the K bodies are sequential pixels
+      # reassigning the same transient RECV/SEND vars, exactly like K loop iters).
+      block_wrappers = []
+      for b in range(K):
+        w = RecvSendWrapper(self.body, num_blocks, num_out_blocks,
+                            self.send_block, self.in_edges, self.out_edges,
+                            self.annotation, builder=self.builder)
+        w.token_block = b
+        block_wrappers.append(w)
+      unrolled = SequentialBlock(block_wrappers, annotation="paced_mc_token_unroll")
+      # count//K outer trips * K bodies = count pixels; accounting (add_to_map,
+      # scaled by the enclosing SimpleFor trip) matches the single-body baseline.
+      return SimpleFor(count // K, unrolled, f"call_created_loop")
 
     return SimpleFor(count, inner, f"call_created_loop")
 

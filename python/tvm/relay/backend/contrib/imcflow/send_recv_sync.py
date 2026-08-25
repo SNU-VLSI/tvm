@@ -58,6 +58,70 @@ PACK_BN_DATA_SYNC_FLAG = 252
 # senses). Off merge -> never emitted -> byte-identical.
 WAVE_DONE_FLAG = 250
 
+# Option A (merged region1): MONOTONIC PHASE-TOKEN CYCLE for the paced region-
+# input MULTICAST rendezvous (the `-11` model input reaching BOTH a handshake-
+# gated conv-head consumer imce_0_2 AND the in-region residual add's skip operand
+# imce_1_2). This REPLACES the earlier single repeated flag 249 (retired): a
+# single value toggling 249->0->249->0 each of the ~1024 packet iterations is a
+# REPEATED edge that collapses/ambiguates across iterations -- a consumer passed
+# its STANDBY(inode,249) on a STALE 249 from the previous iteration and ran one
+# iteration ahead of the producer -> data-stream re-arm wedge (RTL region1, fsim:
+# inode_0_0 stuck at STANDBY(2,249) while imce_0_2 already past its window at
+# RECV). This is exactly the "1->0->1->0 toggle race" the Fix-D / SAFE_TOKEN
+# comments warn about.
+#
+# Fix (mirrors IMCFLOW_MULTIBLOCK_FUSEDADD_SAFE / SAFE_TOKEN_BASE, imcflow.py:504-
+# 550, adapted to 1-producer -> 2-consumer per-packet multicast): cycle K distinct
+# token BLOCKS; iteration i uses block b = i % K with a token PAIR
+#   T1 = base + 2b   (consumer READY invite, raised on the consumer's own flag)
+#   T2 = base + 2b + 1 (producer GO release, raised on the inode's flag)
+# Consecutive iterations use DIFFERENT tokens (no collapsible repeated edge), and
+# the RECV is the ACK: a consumer cannot loop to block b+1 (raise its next T1)
+# until the producer SENT block b (which required it observed the consumer's clear
+# after T2) -> skew bounded to < 1 iteration -> a token cannot go stale by a full
+# K-cycle. K=4 (=> 8 token values) gives ample margin.
+#
+# Token base space: values occupy [PACED_MULTICAST_TOKEN_BASE ..
+# +2*PACED_MULTICAST_NUM_BLOCKS-1] = 241..248, placed JUST under 249 and BELOW the
+# 250-255 reserved senses; the merge pair-UUID cap drops to 240 (below 241) so no
+# data pair aliases any token. All THREE sites (both consumer recv windows + the
+# inode merged presend) derive their tokens from paced_multicast_token(block) --
+# the single source -- and unroll the per-packet loop by K with LITERAL tokens per
+# block (INODE cannot lower a runtime `iter % K` flag value: backend 'Cannot
+# select and'; and no generated code has ever used a runtime-variable flag value,
+# so we stay on the proven literal path). Merge-gated -> non-merged / OFF never
+# emit any token -> byte-identical.
+PACED_MULTICAST_TOKEN_BASE = 241
+PACED_MULTICAST_NUM_BLOCKS = 4  # K: cycles blocks 0..K-1; tokens 241..248
+
+# Words per token WINDOW. One paced-multicast token-block covers ONE PIXEL of the
+# `-11` model input, whose min_max_quantize consumer RECVs it as a group of 4
+# BITPLANES (MinmaxQuantBlock._num_blocks == 4). So each consumer token-window
+# wraps 4 RECVs, and -- to stay lockstep -- each producer (inode) token-window MUST
+# wrap the SAME 4 SENDs (NOT 1). The earlier 1-SEND-per-window inode unroll made
+# the inode advance its token 4x faster than the consumer: block b's window
+# released only 1 of the 4 words the consumer awaited, so the consumer stalled on
+# its 2nd RECV while the inode had already moved to block b+1's READY token ->
+# wedge (inode STANDBY(243) vs consumer stuck at 2 of 4 RECVs). This constant is
+# the SINGLE SOURCE for that group size; a codegen assert ties it to the consumer
+# block's num_blocks so a future bitplane-count change fails loud rather than
+# silently desyncing the two unrolls.
+PACED_MULTICAST_WORDS_PER_WINDOW = 4
+
+
+def paced_multicast_token(block):
+    """SINGLE SOURCE for the paced region-input multicast phase-token pair.
+
+    Given the per-iteration block index b (0..PACED_MULTICAST_NUM_BLOCKS-1),
+    return (t1, t2) = (base+2b, base+2b+1). t1 is the consumer READY invite
+    (consumer's own flag); t2 is the producer GO release (inode's flag). ALL
+    three emission sites (inode merged presend + both imce consumer recv windows)
+    MUST call this -- no hardcoded token values anywhere. See the
+    PACED_MULTICAST_TOKEN_BASE block above for the interlock rationale.
+    """
+    b = int(block) % PACED_MULTICAST_NUM_BLOCKS
+    return PACED_MULTICAST_TOKEN_BASE + 2 * b, PACED_MULTICAST_TOKEN_BASE + 2 * b + 1
+
 
 class SendRecvPair:
     """Represents a send-recv pair with multicast support"""
@@ -248,7 +312,11 @@ class SendRecvPairManager:
         # pair cap drops one further to 249. Merge mode implies pack+resid+
         # inode_buffer, so this branch must be checked BEFORE pack_bn_minmax_mode.
         if region_merge_mode():
-            _uuid_max = 249
+            # 241..248 reserved for the paced region-input multicast phase-token
+            # cycle (PACED_MULTICAST_TOKEN_BASE .. +2K-1, K=4, Option A) in
+            # addition to 250-255 and 249 (now unused/retired), so the pair cap
+            # drops to 240 (below the token base) -- no data pair aliases a token.
+            _uuid_max = 240
         elif pack_bn_minmax_mode():
             _uuid_max = 251
         elif residual_in_region_mode():
@@ -1167,11 +1235,18 @@ class SendRecvPairManager:
         multicast-barrier edge, 1 otherwise."""
         return 2 if self._is_fixb_multicast_edge(edge) else 1
 
-    def get_recv_window_sync(self, edge: TensorEdge):
+    def get_recv_window_sync(self, edge: TensorEdge, token_block=None):
         """Return (pre_lines, post_lines) to wrap a receiver's RECV/LOAD_LB burst.
 
         pre_lines are emitted before the burst, post_lines after. Returns
         (None, None) if this edge needs no receiver-side window (bare).
+
+        `token_block` (Option A paced multicast only): the LITERAL per-iteration
+        block index b in 0..PACED_MULTICAST_NUM_BLOCKS-1. The paced-multicast
+        consumer window (below) uses paced_multicast_token(b) so consecutive
+        unrolled iterations carry DISTINCT tokens (no repeated-edge re-arm race).
+        None -> block 0 (single-shot / non-unrolled callers stay byte-identical
+        for every NON-paced edge, which never reads token_block).
         """
         pair = self.get_pair(edge)
         if pair is None:
@@ -1255,6 +1330,46 @@ class SendRecvPairManager:
             # Lever OFF -> predicate False -> the normal window below (unchanged).
             if self.is_residual_multicast_conv_input_recv(edge):
                 return None, None
+            # Option A (merged region1): a region-input skip that lands on a
+            # composite `data` operand AND is co-multicast with a handshake-gated
+            # conv-head consumer must NOT be bare -- pace it in the SAME per-packet
+            # inode window as its co-consumer (and the inode merged presend,
+            # inode_codeblock._get_presend_sync_code_str). BOTH multicast consumers
+            # (the paced skip AND its handshake-gated co-consumer) use a DISTINCT
+            # flag PACED_MULTICAST_SYNC_FLAG (249), NOT 1: the inode CONFIG phase
+            # raises flag 1 for packed-postop const pacing, and an EXEC data window
+            # on flag 1 aliases those stale pulses (one consumer passes STANDBY on
+            # a config-stage 1 before the inode reaches the data rendezvous ->
+            # config-stage mutual-wait wedge, the PACK_BN_DATA_SYNC_FLAG 252 class).
+            # Window is pre-only (closes before the RECV) -> adds pacing only, does
+            # NOT reorder the RECVs. Narrow-gated -> region2 / non-merged / OFF bare
+            # or the plain flag-1 path.
+            _paced_mc = (self.is_paced_region_input_residual_skip(edge)
+                         or self.is_paced_multicast_handshake_consumer(edge))
+            if _paced_mc:
+                # MONOTONIC PHASE-TOKEN, interlocked, RECV-as-ack (mirrors SAFE,
+                # adapted to 1-producer -> this-consumer per-packet). Block b's
+                # token pair (t1, t2) comes from paced_multicast_token(b) -- the
+                # SINGLE source shared with the inode presend. Per iteration:
+                #   SETFLAG(t1);          announce READY on THIS consumer's flag
+                #   STANDBY(inode, t2);   wait producer GO on the inode's flag
+                #   SETFLAG(0);           clear (producer STANDBYs this)
+                #   RECV(2)x4             the RECV is the ACK (cannot complete
+                #                         until the inode SENT -> C can't re-arm
+                #                         t1 for block b+1 before the producer
+                #                         consumed block b).
+                # The unrolled caller (RecvSendWrapper) passes token_block=b for
+                # each of the K bodies; consecutive blocks use DISTINCT tokens so
+                # there is no repeated-edge cross-iteration self-alias. Window is
+                # PRE-only (closes before the RECV) -> pacing only, RECV order
+                # unchanged. Non-paced edges never reach here -> byte-identical.
+                t1, t2 = paced_multicast_token(token_block or 0)
+                pre = [
+                    f"__builtin_IMCE_SETFLAG({t1});",
+                    f"__builtin_IMCE_STANDBY({pair.sender_node.value}, {t2});",
+                    "__builtin_IMCE_SETFLAG(0);",
+                ]
+                return pre, []
             if self.is_inode_data_input_recv(edge):
                 pre = [
                     "__builtin_IMCE_SETFLAG(1);",
@@ -1463,6 +1578,125 @@ class SendRecvPairManager:
         if not residual_in_region_mode():
             return []
         return [e for e in edges if self.is_residual_data_input_recv(e)]
+
+    def is_paced_region_input_residual_skip(self, edge: TensorEdge) -> bool:
+        """IMCFLOW_RESIDUAL_IN_REGION (merged region1): True iff `edge` is a
+        REGION-INPUT (identity fanout, src gid < 0) that lands on a COMPOSITE
+        (tuple-dst) `data` operand of an in-region op (e.g. b1.res add / vecops on
+        imce_1_2), AND the SAME source TensorID is ALSO multicast to a HANDSHAKE-
+        GATED conv-head consumer (a plain-int-dst inode data input,
+        is_inode_data_input_recv True) in the same func.
+
+        NOTE: this composite consumer's OTHER operand is a `lhs` (not `data`), so
+        _residual_data_producers() (which counts only `data` dsts) finds ONE
+        producer -> is_residual_data_input_recv() is False for it. Hence this
+        predicate is defined STRUCTURALLY (gid<0 + composite `data` dst + imce
+        receiver + a handshake-gated multicast sibling), NOT via
+        is_residual_data_input_recv.
+
+        Why it exists: normally a region-input fanout to a composite `data` dst is
+        BARE (get_recv_window_sync -> inode branch -> neither
+        is_residual_multicast_conv_input_recv nor is_inode_data_input_recv ->
+        None). That's fine when it drains via fanout-lead. But merged region1
+        makes `-11` a MULTICAST to BOTH imce_0_2 (handshake-gated b1 conv-head)
+        AND imce_1_2 (bare vecops add). imce_1_2's bare `-11` RECV is INTERLEAVED
+        with a flagged lhs RECV; when the lhs producer lags, imce_1_2 stalls
+        mid-loop and stops draining the shared multicast -> the handshake-gated
+        co-consumer imce_0_2 starves -> the inode's per-packet rendezvous never
+        re-arms -> the all-inode barrier hangs (RTL region1 factor-1 wedge). Fix
+        (Option A): pace this skip in the SAME per-packet inode flag-1 window as
+        its handshake-gated co-consumer.
+
+        Gate is DELIBERATELY narrow (lever-OFF / non-merged / region2 -> False):
+          * residual_in_region_mode() ON
+          * edge is an inode->imce paired `data` RECV with a COMPOSITE tuple dst
+            whose receiver is an imce
+          * its src is a region input (graph_node_id < 0)
+          * some sibling edge sharing this src TensorID is a handshake-gated
+            plain-int-dst inode data input (is_inode_data_input_recv True).
+        region2's residual add (node 77) takes TWO SEPARATE region inputs into
+        one add via lhs/rhs (no shared multicast, no is_inode_data_input_recv
+        sibling) -> False.
+
+        ALSO gated on region_merge_mode(): the NON-merged combined region1
+        contains a structurally matching multicast (input -> quant + the
+        b1.res skip-scale producer) that is PROVEN bit-exact with bare
+        pacing -- pacing it would change a verified program, so this
+        predicate only fires for merged regions (where the bare co-consumer
+        is the interleaved-RECV residual vecops that actually deadlocks).
+        """
+        if not (residual_in_region_mode() and region_merge_mode()):
+            return False
+        pair = self.get_pair(edge)
+        if pair is None:
+            return False
+        if not pair.sender_node.is_inode():
+            return False
+        if edge.dst_id.tensor_type != "data":
+            return False
+        if not isinstance(edge.dst_id.graph_node_id, tuple):
+            return False
+        recv_hw = self._get_hw_node(edge.dst_id)
+        if isinstance(recv_hw, tuple):
+            recv_hw = recv_hw[0]
+        if recv_hw is None or not recv_hw.is_imce():
+            return False
+        _sgid = getattr(edge.src_id, "graph_node_id", None)
+        if not (isinstance(_sgid, int) and _sgid < 0):
+            return False
+        src_id = edge.src_id
+        for p in self.pairs.values():
+            for e in p.edges:
+                if e is edge:
+                    continue
+                if e.src_id is not src_id:
+                    continue
+                if self.is_inode_data_input_recv(e):
+                    return True
+        return False
+
+    def is_paced_multicast_handshake_consumer(self, edge: TensorEdge) -> bool:
+        """Option A (merged region1): True iff `edge` is the HANDSHAKE-GATED
+        conv-head consumer (is_inode_data_input_recv, plain-int dst, e.g. imce_0_2)
+        of a region-input MULTICAST whose SAME source TensorID ALSO feeds a paced
+        residual skip (is_paced_region_input_residual_skip True, e.g. imce_1_2).
+
+        This is the SIBLING of is_paced_region_input_residual_skip. Both consumers
+        of the paced multicast must use the SAME distinct rendezvous flag
+        (PACED_MULTICAST_SYNC_FLAG) so the inode's single merged window paces them
+        in lockstep without aliasing the CONFIG-phase flag 1. Merge-gated ->
+        non-merged / region2 / OFF -> False (no paced skip sibling).
+        """
+        if not (residual_in_region_mode() and region_merge_mode()):
+            return False
+        if not self.is_inode_data_input_recv(edge):
+            return False
+        src_id = edge.src_id
+        for p in self.pairs.values():
+            for e in p.edges:
+                if e is edge:
+                    continue
+                if e.src_id is not src_id:
+                    continue
+                if self.is_paced_region_input_residual_skip(e):
+                    return True
+        return False
+
+    def edge_is_paced_multicast(self, edge: TensorEdge) -> bool:
+        """Option A convenience: True iff `edge` is EITHER paced-multicast side
+        (the residual skip OR its handshake-gated conv-head co-consumer). Used by
+        the consumer-loop unroller (create_loop_from_call) to decide whether to
+        cycle the phase-token by PACED_MULTICAST_NUM_BLOCKS. Merge-gated via both
+        predicates -> non-merged / OFF -> False."""
+        return (self.is_paced_region_input_residual_skip(edge)
+                or self.is_paced_multicast_handshake_consumer(edge))
+
+    def has_paced_multicast_edge(self, edges) -> bool:
+        """True iff ANY edge in `edges` is a paced region-input multicast
+        consumer edge (see edge_is_paced_multicast). Lets a RecvSendWrapper /
+        create_loop_from_call detect a paced-multicast consumer node so its
+        per-packet loop is unrolled by K with a distinct phase-token per block."""
+        return any(self.edge_is_paced_multicast(e) for e in (edges or []))
 
     def get_merged_residual_input_window(self, edges: List[TensorEdge]):
         """IMCFLOW_RESIDUAL_IN_REGION: ONE merged input window for the in-region
