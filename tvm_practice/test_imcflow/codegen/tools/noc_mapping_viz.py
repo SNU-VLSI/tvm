@@ -64,6 +64,72 @@ def parse_custom_id_to_name(eval_dir):
             d[int(m.group(1))] = m.group(2)
         return d
 
+# op-name token -> compact tag, in relay-op granularity (used to expand a
+# composite's PartitionedFromPattern into its fused chain, e.g.
+# "nn.imcflow_qconv_imcflow.fused_batch_norm_qnn.imcflow_min_max_quantize_"
+# -> "qconv+bn+mm" -- the mesh otherwise under-reports fusion as bare "qconv").
+_PATTERN_TOKENS = [
+    ("nn.imcflow_qdwconv", "dwconv"), ("nn.imcflow_qconv", "qconv"),
+    ("imcflow.fused_batch_norm", "bn"), ("qnn.imcflow_min_max_quantize", "mm"),
+    ("nn.relu", "relu"), ("multiply", "mul"), ("add", "add"),
+]
+
+def _pattern_chain(pat):
+    toks, rest = [], pat
+    while rest:
+        for key, tag in _PATTERN_TOKENS:
+            if rest.startswith(key + "_") or rest == key or rest.startswith(key):
+                toks.append(tag)
+                rest = rest[len(key):].lstrip("_")
+                break
+        else:
+            rest = rest[1:]  # skip unrecognized char (defensive)
+    return toks
+
+def parse_composite_patterns(eval_dir):
+    """{composite custom_id: [fused op tags]} from 15_with_mappings.txt --
+    each composite fn line carries PartitionedFromPattern= and custom_id=."""
+    txt = _read(eval_dir, "15_with_mappings.txt") or ""
+    out = {}
+    for line in txt.splitlines():
+        pm = re.search(r'PartitionedFromPattern="([^"]+)"', line)
+        cm = re.search(r"custom_id=(\d+)", line)
+        if pm and cm:
+            out[int(cm.group(1))] = _pattern_chain(pm.group(1))
+    return out
+
+def parse_impl_ops(eval_dir):
+    """{region_func: {node: [op tags]}} from the GENERATED build imce.cpp --
+    the definitive fused-chain ground truth (the '// generate:' markers inside
+    each hid/wid section). Avoids any custom-id guessing for composites."""
+    import glob as _glob
+    out = {}
+    for cpp in _glob.glob(os.path.join(eval_dir, "build", "*", "imce.cpp")):
+        reg_func = os.path.basename(os.path.dirname(cpp))
+        try:
+            body = open(cpp).read()
+        except OSError:
+            continue
+        secs = re.split(r"(?:else )?if \(hid == (\d+) && wid == (\d+)\)", body)
+        nodes = {}
+        for i in range(1, len(secs) - 2, 3):
+            h, w, sec = secs[i], secs[i + 1], secs[i + 2]
+            tags = []
+            for m in re.finditer(r"// generate: ([a-z_A-Z.]+)", sec):
+                g = m.group(1)
+                tag = ("qconv" if g.startswith("conv") else
+                       "dwconv" if "dwconv" in g else
+                       "bn" if g.startswith("batch_norm") else
+                       "mm" if g.startswith("min_max") else
+                       "add" if g.startswith("add") else
+                       "mul" if g.startswith("multl") else None)
+                if tag and tag not in tags:
+                    tags.append(tag)
+            if tags:
+                nodes[f"imce_{h}_{w}"] = tags
+        out[reg_func] = nodes
+    return out
+
 def parse_split_info(eval_dir):
     """{ region_func: { custom_id(int): num_splits } }"""
     txt = _read(eval_dir, "split_info.txt") or "{}"
@@ -218,6 +284,8 @@ def extract(eval_dir, model):
     active = parse_active_imce(eval_dir)
     hwmap = parse_hwnodemap(eval_dir)         # cid -> [nodes]
     id2name = parse_custom_id_to_name(eval_dir)
+    composite_patterns = parse_composite_patterns(eval_dir)
+    impl_ops = parse_impl_ops(eval_dir)
     splits = parse_split_info(eval_dir)
     bodies = parse_region_bodies(eval_dir)
     fam = _family(model)
@@ -238,11 +306,18 @@ def extract(eval_dir, model):
         # node -> list of (cid, optype) for cids that belong to THIS region
         node_ops = {n: [] for n in imce_set}
         for cid, nodes in hwmap.items():
+            nm = id2name.get(cid, "")
             if cid not in reg_cids:
-                continue
+                # composite CALL cids never print a custom_id= in the relay text,
+                # so they miss reg_cids; admit them when their pattern-carrying
+                # fn-defn cid (nearest below) IS in this region.
+                is_comp = ("with-postop" in nm or "vecops" in nm or "preop" in nm)
+                below = [k for k in composite_patterns if k < cid] if is_comp else []
+                if not (below and max(below) in reg_cids):
+                    continue
             for n in nodes:
                 if n in node_ops:
-                    node_ops[n].append((cid, id2name.get(cid, "")))
+                    node_ops[n].append((cid, nm))
 
         # conv cid -> human layer name (family heuristic; else op label)
         conv_layer = {}
@@ -283,9 +358,24 @@ def extract(eval_dir, model):
             layer = None; split_part = None
             conv_cids_here = [c for c, nm in ops_cids if _optag(nm) in ("qconv", "dwconv")]
             for cid, nm in sorted(ops_cids):
-                tags.append(_optag(nm))
+                # composite CALL cids differ from the pattern-carrying fn-defn
+                # cids (the defn prints just before its call), so match a
+                # composite call to the nearest pattern cid below it.
+                chain = composite_patterns.get(cid)
+                if chain is None and ("with-postop" in nm or "vecops" in nm or "preop" in nm):
+                    below = [k for k in composite_patterns if k < cid]
+                    if below:
+                        chain = composite_patterns[max(below)]
+                if chain:
+                    tags.extend(chain)  # fused composite -> full op chain
+                else:
+                    tags.append(_optag(nm))
             # dedup tags preserving order
             seen = set(); tags = [t for t in tags if not (t in seen or seen.add(t))]
+            # generated-code ground truth overrides (keeps routing-only 'split')
+            impl = impl_ops.get(reg_func, {}).get(node)
+            if impl:
+                tags = impl + (["split"] if "split" in tags else [])
             if conv_cids_here:
                 ccid = conv_cids_here[0]
                 layer = conv_layer.get(ccid, default_layer)
