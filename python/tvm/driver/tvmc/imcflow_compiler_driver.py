@@ -214,6 +214,10 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     # Task #5: reroute in-region residual SKIP through an inode dmem buffer.
     # No-op unless IMCFLOW_RESID_INODE_BUFFER is on -> byte-identical otherwise.
     imcflow_transform.splitResidualSkipThroughInodeBuffer(mod)
+    # DECOUPLE the circular region-input residual multicast via SECOND-SOURCE REPLAY:
+    # host also stages the region input into the skip-consumer row inode, which bare-
+    # sends it. Splits the multicast into two unicasts. Merged-only -> byte-identical.
+    imcflow_transform.splitRegionInputResidualSkipSecondSource(mod)
     # C1b (C) Stage 3: reroute cross-wave direct imce->imce edges through inode
     # DMEM (placement-free wave detection; pre-PnR so the ILP routes both hops).
     # No-op unless IMCFLOW_REGION_MERGE is on -> byte-identical otherwise.
@@ -278,6 +282,9 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
     # Task #5/#10: allocate the whole residual-skip tensor as an inode-dmem
     # DataBlock (keyed by both RESBUF hops). No-op unless the sub-lever fired.
     imcflow_transform.allocateResidBufferDataBlocks(mod)
+    # Second-source host-replay buffer: allocate the whole region-input tensor in
+    # the 2nd inode's dmem + register it for host staging. Merged-only -> no-op OFF.
+    imcflow_transform.allocateSecondSourceDataBlocks(mod)
     if save_intermediate:
         with open(f"{output_dir}/mem_layout.txt", "w") as f:
             pprint.pprint(DevConfig().MemLayout, stream=f)
@@ -381,6 +388,9 @@ def run_imcflow_codegen(mod, output_dir, save_intermediate=True, rebuild_cpp_onl
         return {"status": "codegen_complete"}
 
     imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=rebuild_cpp_only)
+    # Second-source host staging: append the 2nd-inode replay buffers to the input
+    # transfer set (AFTER constructDataBlockDict rebuilt "input"). Merged-only.
+    imcflow_transform.registerSecondSourceHostTransfers(mod)
     print(f"data_blocks: {config.DataBlocks}")
 
     # Update the DevConfig's DataBlocks state after codegen

@@ -517,6 +517,9 @@ def compile_for_imcflow_v2(
     # Task #5: reroute in-region residual SKIP through an inode dmem buffer
     # (whole-tensor DataBlock). No-op unless IMCFLOW_RESID_INODE_BUFFER is on.
     imcflow_transform.splitResidualSkipThroughInodeBuffer(mod)
+    # DECOUPLE the circular region-input residual multicast via SECOND-SOURCE REPLAY
+    # (merged-only -> byte-identical OFF). Must precede constructTensorIDToTensorEdge.
+    imcflow_transform.splitRegionInputResidualSkipSecondSource(mod)
     imcflow_transform.constructTensorIDToTensorEdgeDict()
 
     if save_intermediate:
@@ -558,6 +561,8 @@ def compile_for_imcflow_v2(
                     print(k, v, file=f)
 
     imcflow_transform.MemoryAllocator().run(mod, ttype_map)
+    # Second-source host-replay buffer allocation (merged-only -> no-op OFF).
+    imcflow_transform.allocateSecondSourceDataBlocks(mod)
 
     for func_name, pnr_result in pnr_results.items():
         if not pnr_result.success:
@@ -620,6 +625,8 @@ def compile_for_imcflow_v2(
     )
     codegen_suite(mod)
     imcflow_transform.constructDataBlockDict(mod, update_compiled_blocks_only=False)
+    # Second-source host staging (AFTER constructDataBlockDict; merged-only).
+    imcflow_transform.registerSecondSourceHostTransfers(mod)
     config.update_datablocks_state(devconfig_state_path)
 
     # Saturating arithmetic for CPU-side int16 ops

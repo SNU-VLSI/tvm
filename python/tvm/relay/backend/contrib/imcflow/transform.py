@@ -5579,6 +5579,249 @@ def splitResidualSkipThroughInodeBuffer(mod):
                 f"{len(cfg.ResidBufferInfo)} skip edge(s); routed as INODE_BUFFER")
 
 
+def splitRegionInputResidualSkipSecondSource(mod):
+  """MERGE-only: DECOUPLE a CIRCULAR region-input multicast by SECOND-SOURCE REPLAY.
+
+  In merged region1 a region input `-11` (src gid < 0) is MULTICAST from inode_0_0
+  to BOTH:
+    (a) a handshake-gated conv-head consumer (e.g. imce_0_2, the b1 min_max_quantize
+        that feeds the b1 conv chain), and
+    (b) the b1.res residual-add SKIP operand (composite `data` dst, e.g. imce_1_2).
+  The add's LHS transitively depends -- THROUGH the conv chain fed by (a) -- on the
+  SAME `-11`. Any lockstep pacing of the skip vs the conv-head (Option A tokens
+  241-248) forbids `-11` from running ahead of the skip, so the conv chain starves
+  -> circular wait -> region wedge; a bare skip backpressures instead. Both are the
+  two horns of the same dilemma (see is_paced_region_input_residual_skip docstring).
+
+  FIX (cheaper than a RESBUF collect): `-11` is a region input ALREADY host-staged
+  in inode_0_0 DMEM (factor-1, whole tensor). The host ALSO stages the SAME `-11`
+  input into a SECOND inode's DMEM -- inode_1_0, the SKIP-consumer (add) ROW inode --
+  and inode_1_0 BARE-sends it to the skip. This SPLITS the multicast into TWO
+  UNICASTS:
+    inode_0_0 -> conv-head   (keeps its ORIGINAL handshake pacing; now single-consumer
+                              so the plain flag-1 data-input window suffices)
+    inode_1_0 -> skip        (BARE send loop from the 2nd staging buffer)
+  No cycle: inode_0_0 independently feeds the conv chain so lhs flows; inode_1_0
+  streams the skip bare; if inode_1_0 blocks on its fifo it is harmless (the add
+  drains it, then inode_1_0 finishes and reaches the barrier).
+
+  Mechanism (mirror the RESBUF split, but fill = HOST-STAGING, NO collect hop):
+  reroute the SKIP edge `(-11,odata)->(add,data)` so its SOURCE becomes a NEW
+  synthetic INODE_BUFFER (SECOND_BUF) anchored to inode_1_0. Only a SINGLE outgoing
+  hop `(SECOND_BUF,resbuf_out)->(add,data)` is minted (the PnR routes it, the policy
+  builder gives it a fifo on the add imce, and codegen emits the inode_1_0 bare
+  send). The whole-tensor DataBlock is allocated in inode_1_0's dmem
+  (allocateSecondSourceDataBlocks) and host-filled with the SAME `-11` data
+  (ext_codegen). Once the skip's src is no longer the shared `-11` TensorID, both
+  paced-multicast predicates (is_paced_region_input_residual_skip /
+  is_paced_multicast_handshake_consumer) return False for THIS edge -> the 241-248
+  token windows disappear and the conv-head reverts to the plain flag-1 window.
+
+  Gated STRICTLY on region_merge_mode(): non-merged / region2 / OFF -> no-op ->
+  byte-identical. Reuses the RESBUF INODE_BUFFER routing/allocation infrastructure
+  but a SEPARATE SecondSourceInfo dict (so ResidBufferInfo stays untouched)."""
+  from tvm.relay.op.contrib.imcflow import region_merge_mode
+  if not region_merge_mode():
+    return
+  cfg = ImcflowDeviceConfig()
+  if not hasattr(cfg, "SecondSourceInfo"):
+    cfg.SecondSourceInfo = {}
+  if not hasattr(cfg, "ResidBufferPreassign"):
+    cfg.ResidBufferPreassign = {}
+  id_to_node = CustomIDToNode()
+
+  def _outer(gid):
+    return gid[0] if isinstance(gid, tuple) else gid
+
+  def _is_inode_data_input_conv_head(e, src_id):
+    """True iff sibling edge `e` (sharing region-input `src_id`) is a HANDSHAKE-
+    gated conv-head data input: an inode->imce `data` RECV whose receiver is a
+    plain-int-dst (non-composite) main-pipeline imce. This is the co-consumer that
+    the paced multicast was serving; structurally it is the b1 min_max_quantize /
+    conv-entry that consumes `-11` directly (dst tensor_type "data", plain int
+    graph_node_id -- NOT a composite tuple)."""
+    if e.src_id is not src_id:
+      return False
+    if e.dst_id.tensor_type != "data":
+      return False
+    # conv-head consumer lands as a PLAIN-int dst (contrast the residual skip's
+    # COMPOSITE tuple dst). This mirrors is_inode_data_input_recv's plain-dst arm.
+    if isinstance(e.dst_id.graph_node_id, tuple):
+      return False
+    inner = getInnerNodeID(e.dst_id.graph_node_id)
+    node = id_to_node.get(inner)
+    return isinstance(node, relay.Call)
+
+  # synthetic SECOND_BUF ids continue the RESBUF high-negative band, BELOW whatever
+  # residual/cross-wave split already used, so they never collide.
+  _existing = [g for g in getattr(cfg, "ResidBufferInfo", {}) if isinstance(g, int)]
+  _existing += [g for g in cfg.SecondSourceInfo if isinstance(g, int)]
+  next_id = [min(_existing) - 1 if _existing else -200000]
+
+  n_split = 0
+  for func_name in list(cfg.TensorEdgeListDict.keys()):
+    edge_list = cfg.TensorEdgeListDict[func_name]
+    # candidate SKIP edges: region-input (src gid < 0) landing on a COMPOSITE
+    # `data` operand of an in-region op whose receiver is an imce (the residual
+    # add's skip). Same structural gate as is_paced_region_input_residual_skip,
+    # but PLACEMENT-FREE (PnR has not run): we key on the edge topology only.
+    for skip_edge in list(edge_list):
+      _sgid = getattr(skip_edge.src_id, "graph_node_id", None)
+      if not (isinstance(_sgid, int) and _sgid < 0):
+        continue
+      if skip_edge.src_id.tensor_type != "odata":
+        continue
+      if skip_edge.dst_id.tensor_type != "data":
+        continue
+      if not isinstance(skip_edge.dst_id.graph_node_id, tuple):
+        continue  # residual skip lands as a composite tuple `data`
+      # the add receiver must be an imce compute op (a vecops / qconv composite),
+      # not a boundary func_out.
+      _add_inner = getInnerNodeID(skip_edge.dst_id.graph_node_id)
+      _add_node = id_to_node.get(_add_inner)
+      if not isinstance(_add_node, relay.Call):
+        continue
+      src_id = skip_edge.src_id
+      # the SAME region-input src must ALSO multicast to a handshake-gated conv-head
+      # consumer (the co-consumer that made this a paced multicast).
+      has_conv_head = any(
+          _is_inode_data_input_conv_head(e, src_id)
+          for e in edge_list if e is not skip_edge)
+      if not has_conv_head:
+        continue
+      # -- CIRCULAR condition confirmed: reroute this SKIP through a 2nd source. --
+      buf_gid = next_id[0]
+      next_id[0] -= 1
+      # anchor the 2nd buffer to the ADD's ROW inode. Placement-free: the add's
+      # row is fixed by the merge cut to row 1 (imce_1_2). We mirror the RESBUF
+      # residual anchor convention (add-imce row inode); the merge partition puts
+      # the b1.res add on row 1, so the skip-consumer row inode is inode_1_0.
+      row = 1
+      row_inode = NodeID.from_inode_coord(row)
+      # single OUTGOING hop only (NO producer->buffer collect hop; host-filled).
+      # src tensor_type "resbuf_out" reuses the RESBUF policy/codegen/consistency
+      # machinery (fifo on the add imce; bare resend SEND; resbuf_out billing).
+      hopB = TensorEdge(TensorID(buf_gid, "resbuf_out"), skip_edge.dst_id,
+                        skip_edge.split_idx)
+      # splice: replace the skip edge with hopB in the per-func edge list.
+      new_list = [hopB if e is skip_edge else e for e in edge_list]
+      cfg.TensorEdgeListDict[func_name] = new_list
+      edge_list = new_list
+      # anchor SECOND_BUF to inode_1_0 in HWNodeMap + PnR preassign (INODE_BUFFER).
+      cfg.HWNodeMap[buf_gid] = row_inode
+      cfg.ResidBufferPreassign.setdefault(func_name, {})[buf_gid] = row_inode
+      cfg.SecondSourceInfo[buf_gid] = dict(
+          func_name=func_name, hopB=hopB, inode=row_inode,
+          host_src=src_id, orig_skip=skip_edge, add=skip_edge.dst_id)
+      n_split += 1
+      debug_print(f"[second-source] {func_name}: SECOND_BUF {buf_gid} @ {row_inode} "
+                  f"host-replays region input {src_id} -> skip {skip_edge.dst_id} "
+                  f"(bare unicast; multicast decoupled)")
+  # rebuild flat list
+  cfg.TensorEdgeList = []
+  for _fn, lst in cfg.TensorEdgeListDict.items():
+    cfg.TensorEdgeList.extend(lst)
+  if n_split:
+    print(f"[second-source] decoupled {n_split} circular region-input residual "
+          f"multicast(s) via host second-source replay (bare inode_1_0 unicast)")
+
+
+def allocateSecondSourceDataBlocks(mod):
+  """Allocate the whole region-input tensor as a host-filled DataBlock in the 2nd
+  inode's dmem for each SecondSourceInfo entry, keyed by the outgoing hopB so
+  get_data_block_by_edge() resolves for the bare resend SEND (inode_1_0) and the
+  add imce's skip RECV. A leading HOST-STAGE edge (src = the region-input Var) is
+  ALSO registered so ext_codegen stages the SAME input data into this block.
+
+  Called AFTER MemoryAllocator.run (per-func MemLayout regions exist). No-op unless
+  splitRegionInputResidualSkipSecondSource fired -> byte-identical when OFF /
+  non-merged."""
+  from tvm.relay.op.contrib.imcflow import region_merge_mode
+  if not region_merge_mode():
+    return
+  cfg = ImcflowDeviceConfig()
+  ss_info = getattr(cfg, "SecondSourceInfo", None)
+  if not ss_info:
+    return
+
+  def _region_input_bytes(host_src):
+    """Whole-tensor byte size of the region input (host stages the whole tensor,
+    factor-1). Sized by the NoC WORD stream the add imce consumes so the resend
+    SEND count == the skip RECV count (mirrors allocateResidBufferDataBlocks'
+    granularity-padded NoC-word sizing: max(ceil(C/16),4) blocks/pixel x 32B)."""
+    node = transform_utils.getNodeFromTensorID(host_src)
+    ttype = transform_utils.get_type(mod, node)
+    if isinstance(ttype, TupleType):
+      ttype = ttype.fields[0]
+    dims = [int(d) for d in ttype.shape]  # NCHW
+    channels = dims[1]
+    npx = 1
+    for d in dims[2:]:
+      npx *= d
+    blocks = max(math.ceil(channels / 16), 4)
+    words = npx * blocks
+    return ((words * 32 + 31) // 32) * 32
+
+  for buf_gid, info in ss_info.items():
+    func_name = info["func_name"]
+    hopB = info["hopB"]        # (SECOND_BUF,resbuf_out) -> (add,data)   resend SEND
+    host_src = info["host_src"]  # (region-input, odata)  host-stage source
+    inode_name = info["inode"].name  # e.g. inode_1_0
+    size = _region_input_bytes(host_src)
+
+    # HOST-STAGE edge: src = the region-input Var (so getCInputVarName resolves the
+    # SAME C var as the original -11 input, and update-time input classification
+    # recognizes it), dst = the SECOND_BUF (tensor_type "resbuf"). It carries NO
+    # routing (no TensorEdgeInfo) -- it exists only to (1) name the host source var
+    # and (2) let the block resolve for BOTH the host xfer and the resend SEND.
+    host_edge = TensorEdge(host_src, TensorID(buf_gid, "resbuf"),
+                           getattr(hopB, "split_idx", None))
+    # Key the DataBlock by the host_edge FIRST so DataBlock.edges[0] is the
+    # var-sourced edge (getCInputVarName uses edges[0]). Allocating into the
+    # inode_1_0 region means _already_exists() only scans THAT region's blocks --
+    # the original -11 input block lives in inode_0_0's region, so no merge.
+    datablock = DataBlock(host_edge, None)
+    datablock.set_size(size)
+    layout = cfg.MemLayout[func_name][f"{inode_name}_data"]
+    layout.allocate(datablock, phase="exec")
+    # register hopB as a second resolvable edge (same buffer) for the resend SEND.
+    if hopB not in datablock.edges:
+      datablock.edges.append(hopB)
+    cfg.SecondSourceInfo[buf_gid]["data_block"] = datablock
+    cfg.SecondSourceInfo[buf_gid]["size"] = size
+    debug_print(f"[second-source] allocated SECOND_BUF {buf_gid} DataBlock "
+                f"size={size}B on {inode_name} @ addr={datablock.base_address} "
+                f"(host-staged from {host_src}; resend {hopB})")
+
+
+def registerSecondSourceHostTransfers(mod):
+  """Append each second-source DataBlock to DataBlocks[func_name]["input"] so
+  ext_codegen's generateToNpuTransferCode(self.input_blocks) stages the SAME
+  region-input data into the 2nd inode's dmem (IN ADDITION to the original inode_0_0
+  input transfer). MUST run AFTER constructDataBlockDict (which REBUILDS the "input"
+  list from MemLayout and would otherwise drop the LIST-keyed second buffer -- its
+  block.id is a list, which update_data_blocks does not classify). Merged-only ->
+  no-op OFF -> byte-identical."""
+  from tvm.relay.op.contrib.imcflow import region_merge_mode
+  if not region_merge_mode():
+    return
+  cfg = ImcflowDeviceConfig()
+  ss_info = getattr(cfg, "SecondSourceInfo", None)
+  if not ss_info:
+    return
+  for buf_gid, info in ss_info.items():
+    datablock = info.get("data_block")
+    if datablock is None:
+      continue
+    func_name = info["func_name"]
+    dbdict = cfg.DataBlocks.setdefault(func_name, {})
+    inputs = dbdict.setdefault("input", [])
+    if datablock not in inputs:
+      inputs.append(datablock)
+      debug_print(f"[second-source] registered SECOND_BUF {buf_gid} host transfer "
+                  f"(input DataBlock @ addr={datablock.base_address})")
+
+
 def splitCrossWaveEdgesThroughInodeBuffer(mod):
   """C1b (C) Stage 3: reroute every DIRECT imce->imce data edge that crosses a
   launch-wave boundary (producer wave != consumer wave) through an inode-DMEM

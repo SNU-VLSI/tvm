@@ -2233,7 +2233,7 @@ class ConvBlock(ImceCallCodeBlock):
       feeds_fused_operand = ((residual_in_region_mode() or pack_bn_minmax_mode())
           and (not self.post_ops) and any(
           isinstance(e.dst_id.graph_node_id, tuple)
-          and getattr(e.dst_id, "tensor_type", None) in ("data", "rhs")
+          and getattr(e.dst_id, "tensor_type", None) in ("data", "rhs", "lhs")
           for e in external_out_edges))
       # PACKING analog (IMCFLOW_PACK_BN_MINMAX): a PACKED conv (conv+BN[+minmax],
       # so self.post_ops is non-empty) whose fused local post-ops do NOT take an
@@ -2251,7 +2251,7 @@ class ConvBlock(ImceCallCodeBlock):
       feeds_fused_operand_packed = (pack_bn_minmax_mode()
           and bool(self.post_ops) and (not self.has_noc_rhs) and any(
           isinstance(e.dst_id.graph_node_id, tuple)
-          and getattr(e.dst_id, "tensor_type", None) in ("data", "rhs")
+          and getattr(e.dst_id, "tensor_type", None) in ("data", "rhs", "lhs")
           for e in external_out_edges))
       skip_row_presend = (row_is_padding and feeds_fused_consumer
                           and not feeds_fused_operand

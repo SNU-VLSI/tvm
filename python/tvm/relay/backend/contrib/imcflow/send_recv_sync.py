@@ -731,6 +731,25 @@ class SendRecvPairManager:
                     continue
                 if self.is_residual_data_input_recv(e):
                     return True
+        # SECOND-SOURCE decouple (merged region1): the residual-add skip that USED
+        # to co-multicast this `-11` was REROUTED to a 2nd host-staged inode buffer
+        # (splitRegionInputResidualSkipSecondSource), so the sibling scan above no
+        # longer finds it (the skip's src is now `resbuf_out`, not this `-11`). But
+        # THIS conv-head consumer is now the sole `-11` consumer and STILL RECVs at
+        # the 4-word MinmaxQuant granularity while the inode SENDs per-word -> a
+        # windowed (flag-1) RECV wrapping 4 RECVs desyncs the per-word SEND and
+        # wedges region1 (the conv chain never primes). Mirror the OFF baseline:
+        # make this head BARE (drain via NoC backpressure), matching the plain
+        # per-word inode SEND with no window. Detect the decouple by: this edge's
+        # region-input src is the host_src of a SecondSourceInfo entry in this func.
+        try:
+            from tvm.contrib.imcflow import ImcflowDeviceConfig as _Dev
+            ss = getattr(_Dev(), "SecondSourceInfo", None) or {}
+            for _info in ss.values():
+                if _info.get("host_src") is src_id:
+                    return True
+        except Exception:
+            pass
         return False
 
     def is_packed_postop_const_edge(self, edge: TensorEdge) -> bool:

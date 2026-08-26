@@ -701,10 +701,19 @@ class GraphExtractor:
         empty) -> byte-identical when OFF."""
         from tvm.contrib.imcflow import ImcflowDeviceConfig
         cfg = ImcflowDeviceConfig()
-        resid_info = getattr(cfg, "ResidBufferInfo", None)
-        if not resid_info:
+        # Second-source (host-replay) INODE_BUFFERs mint a single OUTGOING hop only
+        # (no producer->buffer collect); they reuse the same INODE_BUFFER routing
+        # as RESBUFs and must be registered here too. Merged-only -> byte-identical
+        # OFF. Merge both info dicts (disjoint gid bands: RESBUF -100000-, second-
+        # source -200000-) into one registration loop.
+        resid_info = getattr(cfg, "ResidBufferInfo", None) or {}
+        ss_info = getattr(cfg, "SecondSourceInfo", None) or {}
+        if not resid_info and not ss_info:
             return
-        for resbuf_gid, info in resid_info.items():
+        _all = {}
+        _all.update(resid_info)
+        _all.update(ss_info)
+        for resbuf_gid, info in _all.items():
             if info.get("func_name") != func_name:
                 continue
             if resbuf_gid in self.nodes:

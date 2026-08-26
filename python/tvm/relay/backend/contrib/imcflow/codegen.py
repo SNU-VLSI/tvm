@@ -1356,6 +1356,42 @@ class InodeCodeBlockBuilder(tvm.relay.ExprVisitor):
     # the imce codegen (unchanged in shape). Mirrors the func_out collector +
     # a simple in-order resend loop (pixel-timing is task #9).
     self._add_resid_buffer_blocks()
+    # Second-source (host-replay) buffers: emit the BARE resend SEND on the 2nd
+    # inode (inode_1_0 -> add skip). No collector (host-filled). Merged-only.
+    self._add_second_source_blocks()
+
+  def _add_second_source_blocks(self):
+    """MERGE-only: emit the BARE resend SEND for each SecondSourceInfo buffer on
+    THIS inode. The buffer is HOST-FILLED (no collector RECV), so ONLY the outgoing
+    hopB SEND is emitted: a plain SendBlock over the buffer DataBlock, on the buffer
+    inode (inode_1_0). Its src tensor_type "resbuf_out" makes is_paced_multicast_send
+    False (single edge, not a list) and gives it no presend rendezvous -> a BARE
+    per-word SEND loop (like func_in streaming). No-op unless the second-source split
+    fired -> byte-identical OFF / non-merged."""
+    from tvm.relay.op.contrib.imcflow import region_merge_mode
+    if not region_merge_mode():
+      return
+    ss_info = getattr(DevConfig(), "SecondSourceInfo", None)
+    if not ss_info:
+      return
+    phase = CodePhase.EXEC_TILE if self.is_tiled else CodePhase.EXEC
+    for buf_gid, info in ss_info.items():
+      if info.get("func_name") != self.func_name:
+        continue
+      hopB = info["hopB"]  # (SECOND_BUF,resbuf_out) -> (add,data)   bare resend SEND
+      db = DevConfig().CurrFuncMemLayout.get_data_block_by_edge(hopB)
+      assert db is not None, f"second-source DataBlock not found for {hopB}"
+      send_info = DevConfig().get_tensor_edge_info(hopB)
+      send_hid = self.get_hid(hopB.src_id)  # HWNodeMap[SECOND_BUF] = inode_1_0
+      _w = self._tensor_wave(hopB.dst_id)
+      _w = _w if _w is not None else 0
+      send_block = SendBlock(self, db, send_info,
+                             f"second-source bare resend send: {hopB}, "
+                             f"{send_info.policy_info[0].router_id.name} -> "
+                             f"{send_info.policy_info[-1].router_id.name}")
+      self._emit_stream(send_hid, send_block, phase, _w)
+      print(f"[second-source] codegen SECOND_BUF {buf_gid}: bare resend SEND @ "
+            f"{send_hid} (fifo {send_info.fifo_id})")
 
   def _resbuf_funcout_interleave_edges(self):
     """Task #8: return {func_out_edge: resbuf_gid} for every RESBUF on THIS inode
