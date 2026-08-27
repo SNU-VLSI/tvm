@@ -53,6 +53,42 @@ class RegionMerger : public MixedModeVisitor {
  public:
   explicit RegionMerger(AnnotatedRegionSet regions) : regions_(regions) {}
 
+  // Collect the transitive parent regions reachable through REGION-LESS glue
+  // nodes (Tuple / TupleGetItem / calls outside any region, e.g. the
+  // split->TupleGetItem producers of a model-level IC-split conv). Upstream
+  // only handled the If case (#15211); for other glue the parents were simply
+  // ignored, so a merge could span the gap and create a cyclic region graph
+  // (region <-> glue <-> region), which sends the parent-walk recursion into
+  // an infinite loop and later crashes PartitionGraph.
+  void find_gap_parent_regions(
+      const Expr& op,
+      std::unordered_set<AnnotatedRegion, ObjectPtrHash, ObjectPtrEqual>& out,
+      std::unordered_set<const Object*>& visited) {
+    if (!op.defined() || !visited.insert(op.get()).second) {
+      return;
+    }
+    auto region = regions_->GetRegion(op);
+    if (region.defined()) {
+      out.insert(region);
+      return;
+    }
+    if (const auto* call = op.as<CallNode>()) {
+      for (const auto& a : call->args) {
+        find_gap_parent_regions(a, out, visited);
+      }
+    } else if (const auto* tup = op.as<TupleNode>()) {
+      for (const auto& f : tup->fields) {
+        find_gap_parent_regions(f, out, visited);
+      }
+    } else if (const auto* tgi = op.as<TupleGetItemNode>()) {
+      find_gap_parent_regions(tgi->tuple, out, visited);
+    } else if (const auto* if_node = op.as<IfNode>()) {
+      find_gap_parent_regions(if_node->cond, out, visited);
+      find_gap_parent_regions(if_node->true_branch, out, visited);
+      find_gap_parent_regions(if_node->false_branch, out, visited);
+    }
+  }
+
   void find_control_flow_regions(
       const Expr op,
       std::unordered_set<AnnotatedRegion, ObjectPtrHash, ObjectPtrEqual>& correlative_regions) {
@@ -86,10 +122,31 @@ class RegionMerger : public MixedModeVisitor {
     if (call->op == CompilerEndOp()) {
       auto region = regions_->GetRegion(GetRef<Call>(call));
 
+      // Defensive: an end annotation with no region (observed on large
+      // OC/IC-split ResNet-50 graphs once the re-entrancy guard below lets the
+      // traversal complete) has nothing to merge -- skip instead of
+      // null-dereferencing.
+      if (!region.defined()) {
+        return;
+      }
+
       // Skip this region if it has been merged to the other region.
       if (merged_regions_.find(region->GetID()) != merged_regions_.end()) {
         return;
       }
+
+      // Re-entrancy guard: as regions are merged WHILE this recursion walks
+      // unmerged parents (line ~110), the evolving region graph can become
+      // cyclic (region A's inputs reach region B and vice versa, e.g. through
+      // tuple/split producers on a deep residual network). Without this guard
+      // the A->B->A->... mutual descent recurses forever (observed: ResNet-50
+      // OC/IC-split graph, 16.5M frames -> stack-overflow SIGSEGV). Treating a
+      // re-entered region as not-currently-mergeable simply breaks the cycle;
+      // acyclic graphs never hit this (each parent completes before return).
+      if (visiting_regions_.find(region->GetID()) != visiting_regions_.end()) {
+        return;
+      }
+      visiting_regions_.insert(region->GetID());
 
       // Check the region target.
       auto compiler_attrs = call->attrs.as<CompilerAttrs>();
@@ -123,7 +180,19 @@ class RegionMerger : public MixedModeVisitor {
           mergeable_regions.insert(parent_region);
           correlative_regions.insert(parent_region);
         } else {
-          find_control_flow_regions(begin->args[0], correlative_regions);
+          // Parent(s) behind region-less glue (Tuple/TupleGetItem/If/...):
+          // they can never merge into this region -- the glue node itself
+          // stays outside any region, so such a merge would make the region
+          // graph cyclic. Record them as restrictions (and correlative, so
+          // their own restrictions still propagate).
+          std::unordered_set<AnnotatedRegion, ObjectPtrHash, ObjectPtrEqual> gap_regions;
+          std::unordered_set<const Object*> gap_visited;
+          find_gap_parent_regions(begin->args[0], gap_regions, gap_visited);
+          auto& restrictions = region_restrictions_[region->GetID()];
+          for (const auto& gr : gap_regions) {
+            restrictions.insert(gr->GetID());
+            correlative_regions.insert(gr);
+          }
         }
       }
 
@@ -160,12 +229,14 @@ class RegionMerger : public MixedModeVisitor {
         }
       }
       merged_regions_.insert(region->GetID());
+      visiting_regions_.erase(region->GetID());
     }
   }
 
  private:
   AnnotatedRegionSet regions_;
   std::unordered_set<int> merged_regions_;
+  std::unordered_set<int> visiting_regions_;
   std::unordered_map<int, std::unordered_set<int>> region_restrictions_;
 };
 
