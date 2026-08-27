@@ -122,6 +122,10 @@ def transform_model_for_imcflow(mod, param_dict, output_dir, save_intermediate=T
 
     # Step 4: Partition into rounds (with merged composites)
     mod = imcflow_transform.partitionRound(mod)
+    # Drop identity region funcs (body == param) that PartitionGraph leaves
+    # around a NO_COST-only region (host concat of OC-split chunk outputs);
+    # they have nothing for PnR to place and break NoC path construction.
+    mod = imcflow_transform.prune_identity_region_funcs(mod)
     _print("4_after_partition_round")
 
     # Step 5: Flatten top-level functions

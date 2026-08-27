@@ -1,3 +1,4 @@
+import os
 import pickle
 import tvm
 from tvm import relay
@@ -3543,7 +3544,13 @@ class AnnotGenerator:
             return finder.conv_call
 
           if IsNoCostCall:
-            return 0
+            # split/concatenate are free for the annotator, but the Joint PnR
+            # ILP still places them (IMCE slot + routing), so packed regions
+            # that look <= cap can be infeasible (R50: 9 atoms + 2 bn + 1 mm
+            # + 4 concats -> 16 placeables). IMCFLOW_NOCOST_OP_COST=1 makes
+            # the estimate honest for deep models; default 0 keeps existing
+            # models' partitioning byte-identical.
+            return int(os.environ.get("IMCFLOW_NOCOST_OP_COST", 0))
 
           # Handle composite functions
           if IsComposite:
@@ -4039,10 +4046,16 @@ class AnnotGenerator:
                         candidate_regions.remove(in_region)
                         debug_print(f"cycle detected. current node {node}. cycle region : {in_region}")
 
-                # Capacity check
+                # Capacity check. IMCFLOW_REGION_CAP (default IMCE_NUM=16)
+                # bounds PACKING only -- a single oversized node still gets its
+                # own region. The Joint PnR ILP is typically infeasible for
+                # regions filled to 15-16 (postop/routing IMCEs need slack), so
+                # deep models (ResNet-50) set this to ~13.
+                region_cap = int(os.environ.get("IMCFLOW_REGION_CAP",
+                                                ImcflowDeviceConfig.IMCE_NUM))
                 deletes = []
                 for cand in candidate_regions:
-                  if self.getRegionSize(cand) + self.getCost(node) > ImcflowDeviceConfig.IMCE_NUM:
+                  if self.getRegionSize(cand) + self.getCost(node) > region_cap:
                     deletes.append(cand)
                     debug_print(f"candidate size : {self.getRegionSize(cand)}. current node size : {self.getCost(node)}. too big node!!")
                 for d in deletes:
@@ -4110,7 +4123,10 @@ class AnnotGenerator:
                     Region = None
                     if self.last_assigned_region is not None:
                       # Capacity gate when attaching to previous region
-                      if self.getRegionSize(self.last_assigned_region) + self.getCost(node) <= ImcflowDeviceConfig.IMCE_NUM:
+                      # (same IMCFLOW_REGION_CAP knob as the candidate check)
+                      _cap = int(os.environ.get("IMCFLOW_REGION_CAP",
+                                                ImcflowDeviceConfig.IMCE_NUM))
+                      if self.getRegionSize(self.last_assigned_region) + self.getCost(node) <= _cap:
                         Region = self.last_assigned_region
                     if Region is None:
                       Region = self.createRegion()
@@ -4520,6 +4536,51 @@ def partitionRound(mod, handle_branch_from_var_converge=True):
           mod[new_gv] = new_func
 
   return mod
+
+def prune_identity_region_funcs(mod):
+  """Remove partitioned region functions whose body is just their parameter.
+
+  partitionRound assigns NO_COST ops (e.g. the host-side concatenate joining an
+  OC-split layer's chunk outputs) to their own region; PartitionGraph then
+  leaves behind identity functions (body == param) on every edge crossing into
+  that region. They have nothing to place, so Joint PnR produces no mapping for
+  them and construct_noc_paths_from_pnr_results dies with
+  "src_graph_id ... not found in mapping". Inline them away: replace each call
+  with its argument and drop the global definition.
+  """
+  identity_funcs = {}
+  for gv, func in mod.functions.items():
+    if gv.name_hint == "main" or not isinstance(func, relay.Function):
+      continue
+    if isinstance(func.body, relay.Var) and func.body in list(func.params):
+      identity_funcs[gv.name_hint] = list(func.params).index(func.body)
+
+  if not identity_funcs:
+    return mod
+
+  debug_print(f"[prune_identity_region_funcs] inlining {len(identity_funcs)} "
+              f"identity region funcs: {sorted(identity_funcs)}")
+
+  class _Inliner(tvm.relay.ExprMutator):
+    def visit_call(self, call):
+      new_call = super().visit_call(call)
+      if isinstance(new_call.op, relay.GlobalVar) and new_call.op.name_hint in identity_funcs:
+        return new_call.args[identity_funcs[new_call.op.name_hint]]
+      return new_call
+
+  new_funcs = {}
+  for gv, func in mod.functions.items():
+    if gv.name_hint in identity_funcs:
+      continue
+    if isinstance(func, relay.Function):
+      new_body = _Inliner().visit(func.body)
+      func = relay.Function(func.params, new_body, func.ret_type,
+                            func.type_params, func.attrs)
+    new_funcs[gv] = func
+
+  new_mod = tvm.IRModule(new_funcs)
+  new_mod = transform.InferType()(new_mod)
+  return new_mod
 
 class ConcatDistributor:
   """

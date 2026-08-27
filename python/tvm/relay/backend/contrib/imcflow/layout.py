@@ -401,13 +401,13 @@ CPU_REQUIRED_OP_LAYOUTS = {
       LayoutType.MK,
     ),
   ],
+  # Host-side split must operate on raw NCHW: its indices_or_sections are raw
+  # channel counts, which are meaningless on a bitpacked QCONV_INPUT tensor
+  # (axis 1 becomes the 64-ch group dim -> SplitRel "sum of sections" error;
+  # hit by ResNet-50's model-level IC-split whose split lands on the host
+  # between the shared-minmax region and the chunk-conv regions). The packed
+  # form is re-created at the next imcflow function boundary anyway.
   "split": [
-    (
-      [
-        [LayoutType.QCONV_INPUT],
-      ],
-      LayoutType.QCONV_INPUT,
-    ),
     (
       [
         [LayoutType.NCHW],
@@ -544,6 +544,16 @@ CPU_REQUIRED_OP_LAYOUTS = {
     )
   ],
   "nn.avg_pool2d": [
+    (
+      [
+        [LayoutType.NCHW],
+      ],
+      LayoutType.NCHW
+    )
+  ],
+  # host-side max pooling (VGG-11 inter-block 2x2 maxpool runs on CPU, like
+  # resnet8's avg_pool2d)
+  "nn.max_pool2d": [
     (
       [
         [LayoutType.NCHW],
@@ -2005,12 +2015,27 @@ class ImcflowLayoutLegalizer:
           self.layout_map[new_expr] = target_layout
           return new_expr, target_layout
 
+        if curr_layout in block_layouts and target_layout == LayoutType.QCONV_INPUT:
+          # Blocked -> QCONV_INPUT has no direct packer; compose the two
+          # existing conversions (blocked->NCHW, then NCHW->QCONV_INPUT).
+          # Arises when an OC-split layer's host-side concatenate output
+          # (NHWC64C per the concatenate rule) feeds the next round function
+          # whose parameter is a qconv input (VGG-11 model-level OC split).
+          expr, _ = self._convert_layout(expr, curr_layout, LayoutType.NCHW, channel_hint)
+          return self._convert_layout(expr, LayoutType.NCHW, target_layout, channel_hint)
+
         if curr_layout == LayoutType.QCONV_INPUT and target_layout == LayoutType.NCHW:
           channels = channel_hint if channel_hint is not None else self._channels_from_expr(expr)
           channels = channels if channels is not None else 0
           new_expr = imcflow_mmquant_out_to_4d(expr, channels)
           self.layout_map[new_expr] = target_layout
           return new_expr, target_layout
+
+        if curr_layout == LayoutType.QCONV_INPUT and target_layout in block_layouts:
+          # Reverse bridge of the blocked->QCONV_INPUT case above: unpack to
+          # NCHW first, then re-block to the requested layout.
+          expr, _ = self._convert_layout(expr, curr_layout, LayoutType.NCHW, channel_hint)
+          return self._convert_layout(expr, LayoutType.NCHW, target_layout, channel_hint)
 
         if curr_layout == LayoutType.NCHW16C and target_layout == LayoutType.NCHW64C:
           expr = relay.op.layout_transform(expr, "NCHW16c", "NCHW64c")
@@ -2111,7 +2136,13 @@ class ImcflowLayoutLegalizer:
             base_layout in blocked_layouts
             or (isinstance(base_layout, (tuple, list))
                 and len(base_layout) > 0
-                and all(l in blocked_layouts for l in base_layout))
+                # A tuple mixing blocked and plain-NCHW fields (e.g. an OC-split
+                # layer whose chunk regions return NCHW and NHWC64C outputs
+                # feeding the host-side concatenate) must also prefer the NCHW
+                # option: every field is 4D-convertible, and the fallback
+                # (concatenate's [QCONV_INPUT] rule) would bitpack int16 psums.
+                and all(l in blocked_layouts or l == LayoutType.NCHW
+                        for l in base_layout))
           )
           if base_is_blocked:
             for rule in rules:

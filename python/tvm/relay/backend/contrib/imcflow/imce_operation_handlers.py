@@ -529,7 +529,11 @@ class MinMaxQuantizeHandler(OperationHandler):
 
   def consumer_is_non_multicast_split(self, call:'BuilderContext') -> tuple[bool, int, int]:
     out_edges = call.get_output_edges()
-    assert len(out_edges) == 1, "Only one output edge is expected"
+    if len(out_edges) != 1:
+      # Multicast minmax output (e.g. an OC-split layer whose shared quantized
+      # input fans out to several chunk consumers/regions): the single-split
+      # dwconv optimization below cannot apply, take the standalone path.
+      return False, None, None
     out_edge = out_edges[0]
     dst_gid = out_edge.dst_id.graph_node_id
     dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]

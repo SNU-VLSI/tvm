@@ -679,6 +679,17 @@ class VecBlock(ImceCallCodeBlock):
         return [const_var, non_const_var]
       else:
         return [non_const_var, const_var]
+    if not var_ins_from_edges:
+      # Intra-composite UNARY op with a single internal producer (e.g. a
+      # standalone bn -> relu chain in imcflow.vecops, as produced by an
+      # OC-split VGG layer's per-chunk bn+relu): the Call->Call link has no
+      # TensorEdge and no const, and the internal-converge path above needs
+      # >= 2 producers, so the operand list would render empty -> MAXI(, 0).
+      # Fall back to the resolved internal producer, else the linear prev_op.
+      if internal_ops is not None and any(op is not None for op in internal_ops):
+        return [UniqueVar((op, i)) for op in internal_ops if op is not None]
+      if self.prev_op is not None:
+        return [UniqueVar((self.prev_op, i))]
     return var_ins_from_edges
 
   def _render(self) -> str:
@@ -858,7 +869,11 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     return 4  # FIXED in MinmaxQuantBlock
 
   def consumer_is_non_multicast_split(self):
-    assert len(self.out_edges) == 1, "Only one output edge is expected"
+    if len(self.out_edges) != 1:
+      # Multicast minmax output (OC-split layer: shared quantized input fans
+      # out to several chunk consumers) -- the single-split optimization
+      # cannot apply.
+      return False, None, None
     out_edge = self.out_edges[0]
     dst_gid = out_edge.dst_id.graph_node_id
     dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
@@ -3316,11 +3331,19 @@ class RecvSendWrapper(ImceCodeBlock):
         te_out_info = te_out_infos[0]
       else:
         if len(te_out_infos) > 1:
-          addresses = {info.policy_info[0].address for info in te_out_infos}
-          assert len(addresses) == 1, "In split case, all output addresses must be identical"
-          fifo_ids = {info.fifo_id for info in te_out_infos}
-          assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
-          te_out_info = te_out_infos[0]
+          # Local (same-IMCE / LOCAL_FIFO) consumers carry no policy entry and
+          # need no NoC SEND (their RECV side is skipped for fifo_id 0 too);
+          # dedupe the multicast address only over ROUTED outputs. Arises for an
+          # OC-split layer's shared minmax whose output fans out to in-region
+          # atoms AND a func_out toward the sibling chunk region.
+          routed = [info for info in te_out_infos if info.policy_info]
+          infos = routed if routed else te_out_infos
+          if len(infos) > 1:
+            addresses = {info.policy_info[0].address for info in infos}
+            assert len(addresses) == 1, "multicast outputs must share one address"
+            fifo_ids = {info.fifo_id for info in infos}
+            assert len(fifo_ids) == 1, "When merging same-address outputs, fifo_id must be identical"
+          te_out_info = infos[0]
         else:
           te_out_info = te_out_infos[0]
 

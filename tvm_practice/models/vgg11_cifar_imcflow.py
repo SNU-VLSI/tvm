@@ -27,6 +27,8 @@ Registry entry (see codegen/test.py MODEL_REGISTRY):
     "vgg11_cifar_rnd": (lambda: vgg11_cifar_imcflow.getModel(), "ones")
 """
 
+import math
+
 import numpy as np
 
 import tvm
@@ -56,10 +58,42 @@ class _NameGen:
     return self.n
 
 
+def _oc_chunks(IC, OC, KH, KW, imce_num=16):
+  """Split OC so each chunk conv fits a single partition region.
+
+  partitionRound requires every node's cost = ceil(IC/atom_IC) * ceil(OC/64)
+  to be <= IMCE_NUM (16); a 256->256 3x3 conv costs 40 and hard-fails
+  ("Cost of node is too high"). The compiler has no automatic pre-partition
+  split, but the BYOC patterns / real_model.py support model-level OC-split
+  convs joined by concatenate. Chunk OC greedily: each chunk gets the max
+  number of 64-wide OC groups whose IC-chain still fits in one region.
+  """
+  atom_ic = max(1, 256 // (KH * KW))
+  ic_chain = math.ceil(IC / atom_ic)
+  # Leave headroom below IMCE_NUM: a chunk that exactly fills the 16-IMCE mesh
+  # (e.g. 15 atoms + 1 minmax) makes the Joint PnR ILP infeasible once the
+  # standalone bn/minmax nodes and psum-chain routing constraints are added
+  # (observed: 15-atom chunk -> "Infeasible: Not Solved"; 10-atom chunks pass).
+  budget = imce_num - 3
+  max_groups = max(1, budget // ic_chain)
+  chunk = max_groups * 64
+  chunks = []
+  rem = OC
+  while rem > 0:
+    chunks.append(min(chunk, rem))
+    rem -= chunks[-1]
+  return chunks
+
+
 def _qconv_block(y, ng, N, IC, H, W, OC, KH=3, KW=3, pad=1, stride=1,
                  relu=True):
   """One (min_max_quantize -> imcflow_qconv2d -> imcflow_batch_norm [-> relu])
   block, exactly mirroring the per-conv pattern in resnet8_cifar.getModel_.
+
+  When the conv is too big for one partition region (cost > 16 IMCEs), the
+  conv is split along OC into chunks (qconv -> bn [-> relu] per chunk) whose
+  outputs are concatenated on axis 1 — the model-level split idiom from
+  real_model.py that the imcflow patterns/partitioner already understand.
 
   Returns (y, OC, OH, OW) so the caller can keep shape bookkeeping like the
   reference model does.
@@ -71,29 +105,40 @@ def _qconv_block(y, ng, N, IC, H, W, OC, KH=3, KW=3, pad=1, stride=1,
       relay.var(f"quant_max_{idx}", shape=(), dtype="int16"),
       axis=1, out_dtype="uint8", channel=IC,
   )
-  y = imcflow_qconv2d(
-      y,
-      relay.var(f"weight_{idx}", shape=(OC, IC, KH, KW), dtype="int8"),
-      ConfigData((N, IC, H, W), (OC, IC, KH, KW), padding=pad,
-                 stride=stride).get_as_const_tensor(),
-      in_channels=IC,
-      channels=OC,
-      kernel_size=(KH, KW),
-      padding=(pad, pad),
-      strides=(stride, stride),
-      out_dtype="int16",
-  )
+
+  def _one_conv(data, oc, tag):
+    out = imcflow_qconv2d(
+        data,
+        relay.var(f"weight_{idx}{tag}", shape=(oc, IC, KH, KW), dtype="int8"),
+        ConfigData((N, IC, H, W), (oc, IC, KH, KW), padding=pad,
+                   stride=stride).get_as_const_tensor(),
+        in_channels=IC,
+        channels=oc,
+        kernel_size=(KH, KW),
+        padding=(pad, pad),
+        strides=(stride, stride),
+        out_dtype="int16",
+    )
+    out = imcflow_batch_norm(
+        out,
+        relay.var(f"fused_scale_{idx}{tag}", shape=(oc,), dtype="int16"),
+        relay.var(f"fused_bias_{idx}{tag}", shape=(oc,), dtype="int16"),
+    )
+    if relu:
+      # ReLU is applied in the int16 domain (same op the resnet8 post-process
+      # uses); the imcflow relay->imce lowering supports nn.relu.
+      out = relay.nn.relu(out)
+    return out
+
+  chunks = _oc_chunks(IC, OC, KH, KW)
+  if len(chunks) == 1:
+    y = _one_conv(y, OC, "")
+  else:
+    branches = [_one_conv(y, oc, f"_c{k}") for k, oc in enumerate(chunks)]
+    y = relay.concatenate(branches, axis=1)
+
   OH = get_height(H, KH, pad, stride)
   OW = get_width(W, KW, pad, stride)
-  y = imcflow_batch_norm(
-      y,
-      relay.var(f"fused_scale_{idx}", shape=(OC,), dtype="int16"),
-      relay.var(f"fused_bias_{idx}", shape=(OC,), dtype="int16"),
-  )
-  if relu:
-    # ReLU is applied in the int16 domain (same op the resnet8 post-process
-    # uses); the imcflow relay->imce lowering supports nn.relu.
-    y = relay.nn.relu(y)
   return y, OC, OH, OW
 
 
