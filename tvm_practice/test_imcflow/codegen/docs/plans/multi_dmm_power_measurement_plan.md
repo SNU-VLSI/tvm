@@ -38,7 +38,7 @@ Add `IMCFLOW_POWER_DMM_NAMES`, a comma-separated, ordered list of logical
 names from the bridge JSON.
 
 ```bash
-export IMCFLOW_POWER_DMM_NAMES=DMM_GPIB1,DMM_GPIB2,DMM_GPIB4
+export IMCFLOW_POWER_DMM_NAMES=VDD,DDA,DDC
 ```
 
 Compatibility rules:
@@ -104,9 +104,9 @@ from the existing region/model/tile suffix plus a filesystem-safe logical DMM
 name, for example:
 
 ```
-<prefix>_model_DMM_GPIB1.txt
-<prefix>_model_DMM_GPIB2.txt
-<prefix>_model_DMM_GPIB4.txt
+<prefix>_model_VDD.txt
+<prefix>_model_DDA.txt
+<prefix>_model_DDC.txt
 ```
 
 Sanitize any character outside `[A-Za-z0-9_.-]` and reject a collision after
@@ -156,7 +156,7 @@ Update `docs/power_v2_quickstart.md` with:
 
 export DMM_BRIDGE_HOST=<meas-2 board-facing IP>
 export DMM_BRIDGE_PORT=9911
-export IMCFLOW_POWER_DMM_NAMES=DMM_GPIB1,DMM_GPIB2,DMM_GPIB4
+export IMCFLOW_POWER_DMM_NAMES=VDD,DDA,DDC
 ```
 
 Document that the DMM list is compile-time input: changing it requires

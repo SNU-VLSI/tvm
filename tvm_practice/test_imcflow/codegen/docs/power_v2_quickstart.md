@@ -128,12 +128,14 @@ TVM 소유 JSON을 meas-2의 `/tmp`로 복사한 뒤, `imcflow` conda 환경의 
 
 export DMM_BRIDGE_HOST=<meas-2-board-facing-ip>
 export DMM_BRIDGE_PORT=9911
-export IMCFLOW_POWER_DMM_NAMES=DMM_GPIB1,DMM_GPIB2,DMM_GPIB4
+export IMCFLOW_POWER_DMM_NAMES=VDD,DDA,DDC
 ```
 
 이 목록은 compile-time 설정이다. 변경하면 TVM compile과 host binary build를 다시
 실행해야 한다. run 결과에는 DMM별 raw `.txt`, tag sidecar, `plots/` PNG와
-`power_metadata.json`이 저장된다.
+`power_metadata.json`이 저장된다. `POWER`의 logical name이 결과 파일명과 power
+figure 제목에 사용되며, 위 config는 GPIB primary address 1/2/4를 각각
+`VDD`/`DDA`/`DDC`로 표시한다.
 
 ## 5. 설정
 
