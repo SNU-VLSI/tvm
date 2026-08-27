@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "chip_clock_hz": 99990000,
+  "chip_clock_source": "B2 /sys/kernel/debug/clk/clk_summary pl0_ref readback on 2026-08-27",
+  "dmm_config": "dmm_gpib124.json",
+  "missing_peak_policy": "zero_energy",
+  "all_chip_power": true,
+  "rails": {
+    "VDD": {
+      "voltage_v": null,
+      "include_in_total": true,
+      "rtl_anchor": "run_state"
+    },
+    "DDA": {
+      "voltage_v": null,
+      "include_in_total": true,
+      "rtl_anchor": "any_imcu_input_handshake"
+    },
+    "DDC": {
+      "voltage_v": null,
+      "include_in_total": true,
+      "rtl_anchor": "run_state"
+    }
+  },
+  "peak_detector": {
+    "median_window": 5,
+    "baseline_window": 201,
+    "baseline_samples": 1000,
+    "mad_multiplier": 8.0,
+    "hysteresis_low_ratio": 0.5,
+    "minimum_width_samples": 1,
+    "merge_gap_samples": 40,
+    "absolute_min_rise_a": 0.00025,
+    "threshold_variation_fraction": 0.2,
+    "alignment_tolerance_samples": 200
+  }
+}

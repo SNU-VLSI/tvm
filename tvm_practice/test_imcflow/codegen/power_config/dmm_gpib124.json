@@ -5,9 +5,9 @@
     "dmm_gpib4": { "VISA_ADDR": "GPIB1::4::INSTR" }
   },
   "POWER": {
-    "DMM_GPIB1": { "DEVICE": "dmm_gpib1" },
-    "DMM_GPIB2": { "DEVICE": "dmm_gpib2" },
-    "DMM_GPIB4": { "DEVICE": "dmm_gpib4" }
+    "VDD": { "DEVICE": "dmm_gpib1", "VOLTAGE_V": 1.0 },
+    "DDA": { "DEVICE": "dmm_gpib2", "VOLTAGE_V": 1.1 },
+    "DDC": { "DEVICE": "dmm_gpib4", "VOLTAGE_V": 1.2 }
   },
   "PRESET": {}
 }

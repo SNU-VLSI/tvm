@@ -413,9 +413,63 @@ def load_transformed_model(eval_dir, pkl_name="transformed_model.pkl"):
   return save_data["mod"], param_dict
 
 
+def count_conv_macs(model_mod):
+  """Count one MAC per conv/depthwise-conv output dot product."""
+  if model_mod is None:
+    return None, None
+  typed_mod = tvm.relay.transform.InferType()(model_mod)
+  total = 0
+  operator_count = 0
+  supported = {
+      "nn.conv2d", "qnn.conv2d", "nn.imcflow_qconv", "nn.imcflow_qdwconv",
+  }
+
+  def static_product(shape, label):
+    result = 1
+    for dim in shape:
+      try:
+        value = int(dim)
+      except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"cannot count conv MACs with dynamic {label} shape") from exc
+      if value <= 0:
+        raise RuntimeError(f"cannot count conv MACs with non-positive {label} dimension")
+      result *= value
+    return result
+
+  def visit(expr):
+    nonlocal total, operator_count
+    if not isinstance(expr, tvm.relay.Call):
+      return
+    op_name = getattr(expr.op, "name", None)
+    if op_name not in supported:
+      return
+    output_elements = static_product(expr.checked_type.shape, f"{op_name} output")
+    data_shape = expr.args[0].checked_type.shape
+    data_layout = str(getattr(expr.attrs, "data_layout", "NCHW"))
+    if "C" not in data_layout:
+      raise RuntimeError(f"cannot find channel axis in {op_name} layout {data_layout}")
+    input_channels = int(data_shape[data_layout.index("C")])
+    groups = int(getattr(expr.attrs, "groups", 1))
+    kernel_size = getattr(expr.attrs, "kernel_size", None)
+    if kernel_size is None:
+      weight_shape = expr.args[1].checked_type.shape
+      kernel_elements = static_product(weight_shape[2:], f"{op_name} kernel")
+    else:
+      kernel_elements = static_product(kernel_size, f"{op_name} kernel")
+    if groups <= 0 or input_channels % groups:
+      raise RuntimeError(f"invalid {op_name} groups={groups}, input_channels={input_channels}")
+    total += output_elements * (input_channels // groups) * kernel_elements
+    operator_count += 1
+
+  tvm.relay.analysis.post_order_visit(typed_mod["main"], visit)
+  if operator_count == 0:
+    raise RuntimeError("cannot count model MACs: no conv/depthwise-conv operators found")
+  return total, operator_count
+
+
 def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
                         options: 'PipelineOptions' = None, checkpoint_path: str = None,
-                        checkpoint_alias: str = None):
+                        checkpoint_alias: str = None, model_mod=None):
   """Save build metadata including compilation configuration.
 
   Args:
@@ -433,6 +487,31 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
     "build_timestamp": datetime.now().isoformat(),
   }
 
+  def repo_state(path):
+    try:
+      revision = subprocess.run(
+          ["git", "-C", path, "rev-parse", "HEAD"], check=True,
+          capture_output=True, text=True).stdout.strip()
+      dirty = bool(subprocess.run(
+          ["git", "-C", path, "status", "--porcelain"], check=True,
+          capture_output=True, text=True).stdout.strip())
+      return revision, dirty
+    except (OSError, subprocess.SubprocessError):
+      return None, None
+
+  tvm_root = subprocess.run(
+      ["git", "rev-parse", "--show-toplevel"], check=True,
+      capture_output=True, text=True).stdout.strip()
+  imcflow_root = os.getenv("IMCFLOW_DIR", "/root/project/imcflow")
+  for prefix, repo_path in (
+      ("tvm", tvm_root),
+      ("measurement_utils", os.path.join(tvm_root, "3rdparty", "measurement_utils")),
+      ("imcflow", imcflow_root),
+  ):
+    revision, dirty = repo_state(repo_path)
+    metadata[f"{prefix}_revision"] = revision
+    metadata[f"{prefix}_dirty"] = dirty
+
   if test_name is not None:
     metadata["model_name"] = test_name
 
@@ -441,6 +520,12 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
 
   if checkpoint_alias is not None:
     metadata["checkpoint_alias"] = checkpoint_alias
+
+  conv_mac_count, conv_operator_count = count_conv_macs(model_mod)
+  metadata["conv_mac_count"] = conv_mac_count
+  metadata["conv_operator_count"] = conv_operator_count
+  metadata["conv_mac_definition"] = (
+      "one MAC per conv/depthwise-conv output dot product; dense excluded")
 
   # Save board and vmode from environment / runtime
   metadata["board"] = os.getenv("BOARD", None)
@@ -459,6 +544,20 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
     metadata["retry_disable"] = options.retry_disable
     metadata["max_retry_count"] = options.max_retry_count
     metadata["with_patch"] = options.with_patch
+    metadata["dataset"] = options.dataset
+    metadata["sample_index"] = options.sample
+
+  bugfix_raw = os.getenv("IMCFLOW_BUGFIX")
+  if bugfix_raw is None:
+    if "bugfixoff" in os.path.basename(eval_dir).lower():
+      metadata["imcflow_bugfix"] = False
+    elif "bugfixon" in os.path.basename(eval_dir).lower():
+      metadata["imcflow_bugfix"] = True
+    else:
+      metadata["imcflow_bugfix"] = None
+  else:
+    metadata["imcflow_bugfix"] = bugfix_raw.strip().lower() in (
+        "1", "true", "yes", "on")
 
   # Save the command line that invoked main.py
   metadata["command_line"] = " ".join(sys.argv)
@@ -494,6 +593,52 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
     "server_output_prefix": os.getenv(
         "IMCFLOW_POWER_SERVER_OUTPUT_PREFIX", "/tmp/imcflow_power").strip(),
   }
+
+  # Persist the exact graph-order/tile-count contract consumed by the RTL
+  # timing extractor.  The fingerprint deliberately covers compile-relevant
+  # identity fields as well as the region layout.  Board is deliberately not
+  # fingerprinted: RTL FSDB timing is shared by B1/B2 for identical codegen.
+  import hashlib
+  import re
+
+  def function_order(item):
+    name = item[0]
+    match = re.search(r"_main_(\d+)$", name)
+    return (0, int(match.group(1)), name) if match else (1, 0, name)
+
+  manifest_regions = []
+  for region_index, (function_name, function_info) in enumerate(
+      sorted(DevConfig().ImcflowFuncMap.items(), key=function_order), 1):
+    manifest_regions.append({
+      "region_index": region_index,
+      "function": function_name,
+      "tile_count": int(function_info.tiling_factor),
+    })
+  if not manifest_regions:
+    raise RuntimeError("cannot write tile manifest: ImcflowFuncMap is empty")
+
+  fingerprint_payload = {
+    "schema_version": 2,
+    "model": metadata.get("model_name"),
+    "vmode": metadata.get("vmode"),
+    "checkpoint_alias": metadata.get("checkpoint_alias"),
+    "dataset": metadata.get("dataset"),
+    "sample_index": metadata.get("sample_index"),
+    "random_seed": metadata.get("random_seed"),
+    "imcflow_bugfix": metadata.get("imcflow_bugfix"),
+    "conv_mac_count": metadata.get("conv_mac_count"),
+    "regions": manifest_regions,
+  }
+  canonical = json.dumps(
+      fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
+  codegen_fingerprint = hashlib.sha256(canonical).hexdigest()
+  metadata["codegen_fingerprint"] = codegen_fingerprint
+  tile_manifest = dict(fingerprint_payload)
+  tile_manifest["codegen_fingerprint"] = codegen_fingerprint
+  tile_manifest_path = os.path.join(eval_dir, "tile_manifest.json")
+  with open(tile_manifest_path, "w") as f:
+    json.dump(tile_manifest, f, indent=2, sort_keys=True)
+    f.write("\n")
 
   metadata_path = os.path.join(eval_dir, "build_metadata.json")
   with open(metadata_path, "w") as f:
@@ -1092,7 +1237,7 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
             pass
         save_build_metadata(eval_dir, use_patched=False, test_name=test_name,
                             options=options, checkpoint_path=ckpt_path,
-                            checkpoint_alias=ckpt_alias)
+                            checkpoint_alias=ckpt_alias, model_mod=orig_mod)
 
       # If stopping at transform, return after frontend transformation
       if options.stop_at == PipelineStage.TRANSFORM:
@@ -1170,7 +1315,8 @@ def run_test(test_name, eval_dir, mod, param_dict, options: PipelineOptions, inp
         except AttributeError:
           pass
       save_build_metadata(eval_dir, use_patched=True, test_name=test_name,
-                          options=options, checkpoint_path=ckpt_path)
+                          options=options, checkpoint_path=ckpt_path,
+                          model_mod=orig_mod)
 
   # Run CPU validation if requested (before simulation so --stop-at validate works)
   cpu_outputs = None
