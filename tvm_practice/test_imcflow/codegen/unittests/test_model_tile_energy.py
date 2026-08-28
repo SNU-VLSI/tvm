@@ -194,11 +194,11 @@ def test_voltages_can_come_from_dmm_config(tmp_path):
   }
 
 
-def test_mac_counting_environment_defaults_to_one_and_accepts_two(monkeypatch):
+def test_mac_counting_environment_defaults_to_two_and_accepts_one(monkeypatch):
   monkeypatch.delenv("IMCFLOW_MAC_COUNTING", raising=False)
-  assert energy.mac_counting_from_environment() == 1
-  monkeypatch.setenv("IMCFLOW_MAC_COUNTING", "2")
   assert energy.mac_counting_from_environment() == 2
+  monkeypatch.setenv("IMCFLOW_MAC_COUNTING", "1")
+  assert energy.mac_counting_from_environment() == 1
   monkeypatch.setenv("IMCFLOW_MAC_COUNTING", "3")
   with pytest.raises(energy.AnalysisInputError, match="must be 1 or 2"):
     energy.mac_counting_from_environment()

@@ -325,7 +325,7 @@ def resolve_rail_voltages(config_path: Path, config: dict[str, Any]) -> dict[str
 
 
 def mac_counting_from_environment() -> int:
-    raw = os.getenv("IMCFLOW_MAC_COUNTING", "1").strip()
+    raw = os.getenv("IMCFLOW_MAC_COUNTING", "2").strip()
     if raw not in ("1", "2"):
         raise AnalysisInputError("IMCFLOW_MAC_COUNTING must be 1 or 2")
     return int(raw)
@@ -945,7 +945,7 @@ def analyze(
         "conv_mac_count": mac_count,
         "operation_count": operations,
         "mac_counting": mac_counting,
-        "mac_counting_source": "IMCFLOW_MAC_COUNTING (default 1)",
+        "mac_counting_source": "IMCFLOW_MAC_COUNTING (default 2)",
     }
     document = {
         "schema_version": 1,

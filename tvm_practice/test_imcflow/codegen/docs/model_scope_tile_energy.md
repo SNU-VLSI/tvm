@@ -241,19 +241,18 @@ python3 scripts/analyze_model_tile_energy.py "$POWER_RUN" \
 
 ## 8. Energy 및 TOPS/W 계산
 
-MAC 1회를 1 OP로 계산하려면 다음과 같이 실행한다.
+기본값은 MAC 1회를 multiply와 accumulate의 2 OP로 계산한다.
 
 ```bash
-IMCFLOW_MAC_COUNTING=1 \
 python3 scripts/analyze_model_tile_energy.py "$POWER_RUN" \
   --rtl-timing "$RTL_TIMING" \
   --analysis-config "$ENERGY_CONFIG"
 ```
 
-MAC 1회를 multiply와 accumulate의 2 OP로 보고 싶으면 값만 2로 바꾼다.
+MAC 1회를 1 OP로 계산하려면 환경변수를 명시한다.
 
 ```bash
-IMCFLOW_MAC_COUNTING=2 \
+IMCFLOW_MAC_COUNTING=1 \
 python3 scripts/analyze_model_tile_energy.py "$POWER_RUN" \
   --rtl-timing "$RTL_TIMING" \
   --analysis-config "$ENERGY_CONFIG"

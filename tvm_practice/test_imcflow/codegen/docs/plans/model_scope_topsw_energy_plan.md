@@ -90,7 +90,7 @@ timing을 모두 생성하며 region 4 DDA anchor는 정상적으로 `null`이�
 - FSDB board는 검증/fingerprint에서 제외하여 동일 codegen의 B1/B2 공용 사용을 허용함
 - `dmm_gpib124.json`에 VDD/DDA/DDC 전압 1.0/1.1/1.2 V를 기록함
 - 원본 Relay의 conv/depthwise-conv MAC을 자동 계산하고 dense를 제외함
-- `IMCFLOW_MAC_COUNTING=1|2`, 기본 1로 OP 환산함
+- `IMCFLOW_MAC_COUNTING=1|2`, 기본 2로 OP 환산함
 - 세 rail 합계를 total-chip energy로 명명함
 - rail peak 또는 DDA RTL handshake가 없으면 `missing_peak_zero`로 0 J 처리함
 - 실제 ResNet8 FSDB에서 6개 tile, 5개 IMCU handshake, region 4 null을 검증함
@@ -229,7 +229,7 @@ JSON에 저장한다. Verdi의 `fsdbdebug/fsdbextract/fsdbreport`가 PATH에 있
 | B2 실제 IMCFLOW clock Hz | RTL cycle을 chip 실행 시간으로 변환 | `pl0_ref=99,990,000 Hz` readback 확인 |
 | VDD/DDA/DDC 실제 voltage V | current를 energy로 변환 | 1.0/1.1/1.2 V를 DMM config에 기록 |
 | ResNet operation count | TOPS/W 분자 | conv/depthwise MAC 12,500,992 자동 계산 |
-| MAC을 1 또는 2 ops로 세는 규칙 | 결과 해석 일관성 | `IMCFLOW_MAC_COUNTING`, 기본 1 |
+| MAC을 1 또는 2 ops로 세는 규칙 | 결과 해석 일관성 | `IMCFLOW_MAC_COUNTING`, 기본 2 |
 | 세 rail이 chip power 전체인지 여부 | total chip energy 명칭 결정 | 사용자 확인: 세 rail 합계를 total chip으로 사용 |
 
 RTL timing은 동일 model, sample 0, checkpoint/codegen fingerprint, BUGFIX mode와
@@ -669,7 +669,7 @@ Plot에는 전체 MODEL raw 위에 다음을 표시한다.
 ## 6. TOPS/W 연결
 
 컴파일 때 원본 Relay의 conv/depthwise-conv MAC 수를 metadata에 저장하며 dense는
-제외한다. `IMCFLOW_MAC_COUNTING=1|2`로 MAC당 OP 수를 정하고 기본값은 1이다.
+제외한다. `IMCFLOW_MAC_COUNTING=1|2`로 MAC당 OP 수를 정하고 기본값은 2이다.
 
 ```text
 TOPS/W = total_operations / total_energy_j / 1e12
