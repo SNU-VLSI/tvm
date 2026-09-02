@@ -1,0 +1,70 @@
+{
+  "DEVICE": {
+    "ps0": {
+      "VISA_ADDR": "GPIB0::3::INSTR"
+    },
+    "ps1": {
+      "VISA_ADDR": "GPIB0::4::INSTR"
+    }
+  },
+  "POWER": {
+    "DDA": {
+      "DEVICE": "ps0",
+      "CH": 1
+    },
+    "DDC": {
+      "DEVICE": "ps0",
+      "CH": 2
+    },
+    "DDF": {
+      "DEVICE": "ps0",
+      "CH": 3
+    },
+    "DVDD": {
+      "DEVICE": "ps1",
+      "CH": 1
+    },
+    "VDD": {
+      "DEVICE": "ps1",
+      "CH": 2
+    },
+    "DDL": {
+      "DEVICE": "ps1",
+      "CH": 3
+    }
+  },
+  "PRESET": {
+    "V1": {
+      "DDA": {
+        "VOL": 1.150,
+        "CUR_LIMIT": 10.0,
+        "VOL_LIMIT": 6.6
+      },
+      "DDC": {
+        "VOL": 1.145,
+        "CUR_LIMIT": 2.0,
+        "VOL_LIMIT": 27.5
+      },
+      "DDF": {
+        "VOL": 0.570,
+        "CUR_LIMIT": 2.0,
+        "VOL_LIMIT": 27.5
+      },
+      "DVDD": {
+        "VOL": 1.8,
+        "CUR_LIMIT": 10.0,
+        "VOL_LIMIT": 6.6
+      },
+      "VDD": {
+        "VOL": 1.0,
+        "CUR_LIMIT": 2.0,
+        "VOL_LIMIT": 27.5
+      },
+      "DDL": {
+        "VOL": 0.022,
+        "CUR_LIMIT": 2.0,
+        "VOL_LIMIT": 27.5
+      }
+    }
+  }
+}
