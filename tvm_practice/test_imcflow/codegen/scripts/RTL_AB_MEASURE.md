@@ -17,6 +17,18 @@ Both resnet8 variants (and the DS-CNN baseline) use the same enlarged-memory
 simv (`IMCFLOW_BIG_IMEM=1`, runner dir `rtl_runner_bigimem`) so only the
 codegen levers differ.
 
+**IMPORTANT — what "bugfixoff" means here:** `IMCFLOW_BUGFIX=off` selects the
+CODEGEN sync mode (extra P0-P4 NoC sync) and the `.bugfixoff` eval_dir tag.
+The prebuilt simv in `rtl_runner_bigimem` is compiled WITH the full BUGFIX_*
+define set + BIG_IMEM (see build/compile.log), i.e. it is the BUGFIX-ON
+(chip/tapeout HW model) RTL. All numbers in the table above were measured on
+that BUGFIX-ON+BIG_IMEM simv — both sides of each A/B, so the comparison is
+internally consistent on the chip HW model. The runner cannot verify the simv
+mode in this directory (no build manifest); it prints a "reusing pre-built
+simv ... Ensure it matches" warning and proceeds. On a fresh machine,
+`make compile` in `rtl_runner_bigimem` reproduces the same define set (the
+Makefile's DEFINE already includes the BUGFIX macros and BIG_IMEM).
+
 Measure busy cycles (`imcflow_state_o=1` regions in the .fsdb) after a PASS:
 
 ```bash
