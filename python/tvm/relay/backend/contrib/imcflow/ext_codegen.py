@@ -548,10 +548,16 @@ static inline int wait_imcflow_interrupt(int fd, volatile uint32_t* npu_pointer)
     perror("read interrupt failed");
     return wait_for_idle(npu_pointer);
   }
-  return 0;
+
+  // INODE emits INTRT before HALT, while the top-level controller changes from
+  // RUN to IDLE only after every INODE is idle.  Therefore a delivered UIO
+  // interrupt is a wake-up hint, not proof that output memory is safe to read.
+  // Always close that race before the generated host code starts its first
+  // output MMIO load.
+  return wait_for_idle(npu_pointer);
 }
 
-static inline void generate_ack(uint32_t* int_ack_gen)
+static inline void generate_ack(volatile uint32_t* int_ack_gen)
 {
   int_ack_gen[0] = 0b1;
 }
@@ -812,7 +818,7 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   }
 
   size_t npu_len = (size_t) IMCFLOW_LEN;
-  uint32_t *npu_pointer = (uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);
+  volatile uint32_t *npu_pointer = (volatile uint32_t *) mmap(NULL, npu_len, PROT_WRITE | PROT_READ, MAP_SHARED, npu_fd, 0);
   if (npu_pointer == MAP_FAILED) {
     perror("npu_pointer mmap error");
     close(npu_fd);
@@ -821,10 +827,10 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   }
 
   size_t int_ack_gen_len = (size_t)INT_ACK_GEN_LEN;
-  uint32_t *int_ack_gen_pointer = (uint32_t*) mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);
+  volatile uint32_t *int_ack_gen_pointer = (volatile uint32_t*) mmap(NULL, int_ack_gen_len, PROT_WRITE | PROT_READ, MAP_SHARED, int_ack_gen_fd, 0);
   if (int_ack_gen_pointer == MAP_FAILED) {
     perror("int_ack_gen_pointer mmap error");
-    munmap(npu_pointer, npu_len);
+    munmap((void*)npu_pointer, npu_len);
     close(npu_fd);
     close(int_ack_gen_fd);
     exit(1);
@@ -833,9 +839,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   int reset_gen_fd = open("/dev/mem", O_RDWR | O_SYNC);
   if (reset_gen_fd < 0) {
     perror("Cannot open /dev/mem for reset generator");
-    munmap(npu_pointer, npu_len);
+    munmap((void*)npu_pointer, npu_len);
     close(npu_fd);
-    munmap(int_ack_gen_pointer, int_ack_gen_len);
+    munmap((void*)int_ack_gen_pointer, int_ack_gen_len);
     close(int_ack_gen_fd);
     exit(1);
   }
@@ -845,9 +851,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   void* reset_gen_map_base = mmap(NULL, reset_gen_map_size, PROT_READ | PROT_WRITE, MAP_SHARED, reset_gen_fd, reset_gen_page_offset);
   if (reset_gen_map_base == MAP_FAILED) {
     perror("reset_gen mmap error");
-    munmap(npu_pointer, npu_len);
+    munmap((void*)npu_pointer, npu_len);
     close(npu_fd);
-    munmap(int_ack_gen_pointer, int_ack_gen_len);
+    munmap((void*)int_ack_gen_pointer, int_ack_gen_len);
     close(int_ack_gen_fd);
     close(reset_gen_fd);
     exit(1);
@@ -856,9 +862,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
   """)
     elif self.os == "baremetal":
       return (f"""
-    uint32_t* npu_pointer = (uint32_t*)IMCFLOW_ADDR;
-    uint32_t* int_ack_gen_pointer = (uint32_t*)INT_ACK_GEN_ADDR;
-    uint32_t* reset_gen_pointer = (uint32_t*)RESET_GEN_ADDR;
+    volatile uint32_t* npu_pointer = (volatile uint32_t*)IMCFLOW_ADDR;
+    volatile uint32_t* int_ack_gen_pointer = (volatile uint32_t*)INT_ACK_GEN_ADDR;
+    volatile uint32_t* reset_gen_pointer = (volatile uint32_t*)RESET_GEN_ADDR;
 """)
     else:
       raise ValueError("Unsupported OS type for device pointer setup!")
@@ -897,9 +903,9 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     if self.os == "linux":
       return ("""
   // Cleanup device pointer
-  munmap(npu_pointer, npu_len);
+  munmap((void*)npu_pointer, npu_len);
   close(npu_fd);
-  munmap(int_ack_gen_pointer, int_ack_gen_len);
+  munmap((void*)int_ack_gen_pointer, int_ack_gen_len);
   close(int_ack_gen_fd);
   munmap(reset_gen_map_base, reset_gen_map_size);
   close(reset_gen_fd);
@@ -998,6 +1004,14 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
   def generateFromNpuTransferCode(self, blocks, tile_idx=None):
     """Generate code to transfer data from NPU memory."""
+    output_barrier = _env_flag("OUTPUT_BARRIER", False)
+    output_barrier_interval = (
+        _env_int("OUTPUT_BARRIER_INTERVAL", 1, minimum=1)
+        if output_barrier else None)
+    output_debug = _env_flag("OUTPUT_DEBUG", False)
+    output_debug_interval = (
+        _env_int("OUTPUT_DEBUG_INTERVAL", 256, minimum=1)
+        if output_debug else None)
     code = CodeWriter()
     code += "// Transfer data from NPU memory\n"
     for block in blocks:
@@ -1014,11 +1028,86 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
       # Get loop parameters
       loop_start, loop_end = self._get_transfer_loop_params(block, tile_idx)
+      word_count = loop_end - loop_start
+      dst_word_offset = loop_start // 4
+      tile_label = tile_idx if tile_idx is not None else -1
+      debug_condition = None
+      if output_debug:
+        debug_condition = (
+            f"(i == 0) || ((i % {output_debug_interval}) == 0) || "
+            f"(i == {word_count - 1})")
 
       # Generate loop code
-      code += f"for(int i=0; i<{loop_end-loop_start}; i++){{\n"
-      code += f"  ((uint32_t*)out{idx})[i + {loop_start//4}] = npu_pointer[({base_address_name} / 4) + i];\n"
+      code += f"for(int i=0; i<{word_count}; i++){{\n"
+      if output_debug:
+        code += f"  if ({debug_condition}) {{\n"
+        code += (
+            f'    fprintf(stderr, "[OUTPUT_XFER] func={self.func_name} '
+            f'tile={tile_label} out={idx} phase=before-read '
+            f'local_word=%d/{word_count} dst_word=%d '
+            f'mmio_byte_offset=0x%08x mmio_ptr=%p\\n", '
+            f'i, i + {dst_word_offset}, '
+            f'(unsigned)({base_address_name} + i * 4), '
+            f'(void*)&npu_pointer[({base_address_name} / 4) + i]);\n')
+        code += "    fflush(stderr);\n"
+        code += "  }\n"
+        code += (
+            f"  uint32_t _imcflow_output_word = "
+            f"npu_pointer[({base_address_name} / 4) + i];\n")
+        code += f"  if ({debug_condition}) {{\n"
+        code += (
+            f'    fprintf(stderr, "[OUTPUT_XFER] func={self.func_name} '
+            f'tile={tile_label} out={idx} phase=after-read '
+            f'local_word=%d/{word_count} dst_word=%d value=0x%08x\\n", '
+            f'i, i + {dst_word_offset}, (unsigned)_imcflow_output_word);\n')
+        code += "    fflush(stderr);\n"
+        code += "  }\n"
+        code += (
+            f"  ((uint32_t*)out{idx})[i + {dst_word_offset}] = "
+            f"_imcflow_output_word;\n")
+      else:
+        code += f"  ((uint32_t*)out{idx})[i + {dst_word_offset}] = npu_pointer[({base_address_name} / 4) + i];\n"
+      if output_barrier:
+        if output_barrier_interval == 1:
+          code += "  __sync_synchronize();\n"
+          if output_debug:
+            code += f"  if ({debug_condition}) {{\n"
+            code += (
+                f'    fprintf(stderr, "[OUTPUT_XFER] func={self.func_name} '
+                f'tile={tile_label} out={idx} phase=after-barrier '
+                f'local_word=%d/{word_count} dst_word=%d\\n", '
+                f'i, i + {dst_word_offset});\n')
+            code += "    fflush(stderr);\n"
+            code += "  }\n"
+        else:
+          code += f"  if (((i + 1) % {output_barrier_interval}) == 0) {{\n"
+          code += "    __sync_synchronize();\n"
+          if output_debug:
+            code += f"    if ({debug_condition}) {{\n"
+            code += (
+                f'      fprintf(stderr, "[OUTPUT_XFER] func={self.func_name} '
+                f'tile={tile_label} out={idx} phase=after-barrier '
+                f'local_word=%d/{word_count} dst_word=%d\\n", '
+                f'i, i + {dst_word_offset});\n')
+            code += "      fflush(stderr);\n"
+            code += "    }\n"
+          code += "  }\n"
       code += f"}}\n"
+      if (output_barrier
+          and word_count % output_barrier_interval != 0):
+        # Drain the final partial interval before moving to the next block.
+        code += "__sync_synchronize();\n"
+        if output_debug:
+          code += (
+              f'fprintf(stderr, "[OUTPUT_XFER] func={self.func_name} '
+              f'tile={tile_label} out={idx} phase=after-tail-barrier '
+              f'words={word_count}\\n");\n')
+          code += "fflush(stderr);\n"
+      if output_debug:
+        code += (
+            f'fprintf(stderr, "[OUTPUT_XFER] func={self.func_name} '
+            f'tile={tile_label} out={idx} phase=complete words={word_count}\\n");\n')
+        code += "fflush(stderr);\n"
     return code
 
   def generateBaseAddrMacros(self):
