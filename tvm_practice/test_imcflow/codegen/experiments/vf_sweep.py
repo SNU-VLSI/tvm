@@ -25,7 +25,10 @@ from ps_ctrl.rpc import RemotePowerSupplyManager
 
 PARENT = 1499.85
 # divisor grid from 100MHz upward; extend as needed
-DIV_GRID = [15, 14, 13, 12, 11, 10, 9, 8]          # 100,107,115,125,136,150,167,188
+# low-f probe grid: start LOW (large div) and push up; for low-VDD f_max<100MHz
+# HIGH->LOW: start at the highest plausible f and step DOWN; first pass
+# is f_max (charge anchor seeded there, no residual-gate on the seed).
+DIV_GRID = [12, 13, 14, 15, 17, 19, 21, 24, 27, 30, 34, 38, 43, 50, 60]  # 125..25MHz
 BASE_LEN, BASE_F = 149.0, 99.99
 DT = 21e-6
 def q_ref(mhz): return 44.14 + 5126.3/mhz            # DDA charge model (uC), 3-pt fit @VDD1.0
@@ -80,15 +83,20 @@ def main():
             mgr.set_voltage("VDD", vdd); mgr.set_voltage("DDA", ANV1); mgr.set_voltage("DDC", ANV1)
             time.sleep(3)
             # phase 1: push freq up
-            fmax = None; p_fmax = None; anchor_nC = None
+            # HIGH->LOW scan: the FIRST frequency that passes is f_max. Gate is
+            # pulse-length + a self-consistency charge check vs an on-the-fly
+            # reference (per-conversion charge must be plausibly full, not a
+            # collapsed fraction). No prior anchor needed: a collapse shows len
+            # far off AND per-conversion charge a small fraction of the ~5.9nC/conv
+            # full value seen across all healthy runs.
+            fmax = None; p_fmax = None
+            FULL_NC = 2.0  # nC/conv: healthy 3.7-5.9, collapse ~0.6; 2.0 separates cleanly
             for div in DIV_GRID:
                 mhz = PARENT / div
                 setf(mhz); time.sleep(2)
-                p = run_once() or (run_once() if div == DIV_GRID[0] else None)  # transient retry only at first
-                if anchor_nC is None and p and len_ok(p, mhz):
-                    anchor_nC = per_conv_nC(p)   # first good point at this VDD = anchor
-                ok = bool(p) and len_ok(p, mhz) and (anchor_nC is None or charge_ok(p, anchor_nC))
-                if ok and p: anchor_nC = per_conv_nC(p)   # advance anchor (track slow drift)
+                p = run_once() or run_once()  # one transient retry every step (freq switch)
+                l = len_ok(p, mhz)
+                ok = bool(p) and l and (per_conv_nC(p) >= FULL_NC)
                 P = (sum(p[r]["run_mA"] for r in ("vdd","dda","ddc")) if p else 0)  # placeholder
                 if p:
                     Pw = (p["vdd"]["run_mA"]*vdd + p["dda"]["run_mA"]*ANV1 + p["ddc"]["run_mA"]*ANV1)/1000
@@ -102,12 +110,11 @@ def main():
                     w.writerow([vdd,"fmax",f"{mhz:.1f}",ANV1,0,"","","","","","","","run-fail"]); f.flush()
                 if ok:
                     fmax, p_fmax = mhz, p
-                    log(f"  {mhz:.1f}MHz OK (len={p['vdd']['len']})")
-                else:
-                    log(f"  {mhz:.1f}MHz FAIL -> f_max={fmax}")
-                    if not board_alive(): log("BOARD DEAD"); return
-                    setf(100)  # back to safe clock before next
+                    log(f"  {mhz:.1f}MHz OK -> f_max (len={p['vdd']['len']})")
                     break
+                else:
+                    log(f"  {mhz:.1f}MHz fail, stepping down")
+                    if p is None and not board_alive(): log("BOARD DEAD"); return
             if fmax is None:
                 log(f"  no working freq at VDD={vdd}?!"); continue
             log(f"  === f_max(VDD={vdd}) = {fmax:.1f}MHz ===")
@@ -127,6 +134,7 @@ def main():
                 Pw = (p["vdd"]["run_mA"]*vdd + (p["dda"]["run_mA"]+p["ddc"]["run_mA"])*an)/1000
                 tops = 2.85*fmax/99.99
                 best = (an, Pw, tops); an_anchor = per_conv_nC(p)
+                log(f"    analog {an}: P={Pw*1000:.1f}mW TOPS/W={tops/Pw:.1f}")
                 w.writerow([vdd,"analog",f"{fmax:.1f}",an,p["vdd"]["len"],
                             f"{p['vdd']['run_mA']:.2f}",f"{p['dda']['run_mA']:.2f}",
                             f"{p['ddc']['run_mA']:.2f}",f"{dda_charge(p)*1e3:.2f}",

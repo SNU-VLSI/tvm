@@ -1,0 +1,2 @@
+vdd,phase,mhz,dda_ddc,pulse_len,run_vdd_mA,run_dda_mA,run_ddc_mA,dda_uC,P_mW,TOPS,TOPSW,status
+1.0,fmax,125.0,1.15,121,85.00,37.11,82.80,91.34,222.9,3.56,16.0,ok
