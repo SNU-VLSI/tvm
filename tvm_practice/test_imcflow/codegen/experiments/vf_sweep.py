@@ -33,7 +33,11 @@ PARENT = 1499.85
 FULL_GRID = [12, 13, 14, 15, 17, 19, 21, 24, 27, 30, 34, 38, 43, 50, 60]  # 125..25MHz
 def grid_for_vdd(vdd):
     # pick a starting MHz ceiling, then take all grid points <= it
-    ceil_mhz = min(125.0, max(25.0, 125.0 - (1.00 - vdd) * 240.0))  # -12MHz/0.05V
+    if vdd >= 0.85:
+        ceil_mhz = 125.0 - (1.00 - vdd) * 300.0        # -15MHz/0.05V (fit 1.0/0.9/0.85)
+    else:
+        ceil_mhz = 80.0 - (0.85 - vdd) * 600.0         # steeper below 0.85 (0.80->50 empirical)
+    ceil_mhz = min(125.0, max(25.0, ceil_mhz))
     return [d for d in FULL_GRID if PARENT / d <= ceil_mhz * 1.03]
 BASE_LEN, BASE_F = 149.0, 99.99
 DT = 21e-6
@@ -69,6 +73,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vdds", default="1.00,0.80", help="comma list, swept")
     ap.add_argument("--analog-floor", type=float, default=0.60)
+    ap.add_argument("--analog-start", type=float, default=1.15,
+                    help="analog headroom while finding f_max (lower it for low VDD to avoid VDD-analog-gap wedge)")
     ap.add_argument("--dry", action="store_true", help="f_max only, skip analog descent")
     args = ap.parse_args()
     vdds = [float(x) for x in args.vdds.split(",")]
@@ -82,7 +88,7 @@ def main():
 
     mgr = RemotePowerSupplyManager("147.46.117.49", 1331,
         "/home/jihoonpark/measurement_utils/example/configs/ps_B2_config.json")
-    ANV1 = 1.15  # analog V1 headroom while finding f_max
+    ANV1 = args.analog_start  # analog headroom while finding f_max (VDD-gap safe)
     try:
         for vdd in vdds:
             log(f"===== VDD={vdd} =====")
