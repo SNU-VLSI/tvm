@@ -417,15 +417,12 @@ class KernelCodeGenerator:
     code.nextIndent()
     code += f'fprintf(stderr, "[RETRY] Timeout at {location_label}, attempt %d/%d\\n", _retry_count+1, MAX_RETRY_COUNT);\n'
     if self.os == "linux":
-      # Drain + ack any pending interrupt BEFORE tearing down / re-arming. On the
-      # timeout path the success-path acks (generate_ack + INTR_DONE) were skipped,
-      # so a genuinely-fired-but-late edge would otherwise leave the UIO count and
-      # the IP interrupt asserted; the next attempt's enable_imcflow_interrupt
-      # would then stack on stale pending state and desync across kernels. Clear
-      # the IP-level interrupt (int_ack_gen + INTR_DONE reg) while the mmaps are
-      # still valid, i.e. before generateDevicePointerCleanup() munmaps them.
+      # Best-effort deassertion before teardown.  Do not immediately write
+      # INTR_DONE=1 here: the external ACK pulse has not been observed yet, so a
+      # re-arm write could reach the controller while INTR_DONE is still 1 and be
+      # ignored.  The next retry resets the device and starts from a known state.
       code += "generate_ack(int_ack_gen_pointer);\n"
-      code += "npu_pointer[INTR_DONE_REG_IDX] = 1;\n"
+      code += "__sync_synchronize();\n"
     if power_session_active:
       code += "dmm_close();\n"
     code += self.generateDevicePointerCleanup()
@@ -513,16 +510,6 @@ static inline int wait_imcflow_interrupt(int fd, volatile uint32_t* npu_pointer)
   fd_set readfds;
   struct timeval timeout;
 
-  // Defense against a lost/already-latched interrupt edge: the STATE register is
-  // the ground truth for completion, the UIO interrupt is only a wake hint. If
-  // the op already reached IDLE (edge fired before we armed/waited, or was never
-  // delivered), return immediately instead of blocking on an edge that will
-  // never come. This is the primary fix for the ~sample-46 chip wedge: a single
-  // missed UIO edge previously hung forever with no status cross-check.
-  if (npu_pointer[STATE_REG_IDX] == SET_IDLE_CODE) {
-    return 0;
-  }
-
   FD_ZERO(&readfds);
   FD_SET(fd, &readfds);
 
@@ -531,35 +518,90 @@ static inline int wait_imcflow_interrupt(int fd, volatile uint32_t* npu_pointer)
 
   int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
   if (ret == 0) {
-    // Interrupt did not arrive within 1s. Do NOT declare failure yet — the edge
-    // may have been missed while the compute actually finished. Fall back to
-    // polling the STATE register (bounded, MAX_POLL_COUNT) so a lost edge cannot
-    // wedge the run. Only if the array is genuinely not IDLE do we return -1.
-    fprintf(stderr, "WARN: Interrupt timeout (1s) - falling back to STATE-register poll\\n");
-    return wait_for_idle(npu_pointer);
+    fprintf(stderr,
+            "[INTERRUPT ERROR] Timeout waiting for UIO interrupt (1s): "
+            "STATE=0x%x INTR_DONE=0x%x\\n",
+            npu_pointer[STATE_REG_IDX], npu_pointer[INTR_DONE_REG_IDX]);
+    return -1;
   } else if (ret < 0) {
     perror("select failed");
-    // select error is not proof the op failed; cross-check the STATE register.
-    return wait_for_idle(npu_pointer);
+    return -1;
   }
 
   ssize_t nb = read(fd, &info, sizeof(info));
   if (nb != (ssize_t)sizeof(info)) {
     perror("read interrupt failed");
-    return wait_for_idle(npu_pointer);
+    return -1;
   }
 
-  // INODE emits INTRT before HALT, while the top-level controller changes from
-  // RUN to IDLE only after every INODE is idle.  Therefore a delivered UIO
-  // interrupt is a wake-up hint, not proof that output memory is safe to read.
-  // Always close that race before the generated host code starts its first
-  // output MMIO load.
-  return wait_for_idle(npu_pointer);
+  fprintf(stderr, "[INTERRUPT] UIO event count=%u received\\n", info);
+  return 0;
 }
 
 static inline void generate_ack(volatile uint32_t* int_ack_gen)
 {
   int_ack_gen[0] = 0b1;
+}
+
+static inline int wait_for_intr_done_value(volatile uint32_t* npu_pointer,
+                                           uint32_t expected,
+                                           const char* phase)
+{
+  uint32_t value = 0;
+  for (uint32_t poll_count = 0; poll_count < MAX_POLL_COUNT; poll_count++) {
+    value = npu_pointer[INTR_DONE_REG_IDX];
+    if (value == expected) {
+      fprintf(stderr,
+              "[INTERRUPT] %s confirmed: INTR_DONE=0x%x (polled %u times)\\n",
+              phase, value, poll_count);
+      return 0;
+    }
+  }
+
+  fprintf(stderr,
+          "[INTERRUPT ERROR] %s timeout after %u polls "
+          "(INTR_DONE=0x%x, expected=0x%x)\\n",
+          phase, MAX_POLL_COUNT, value, expected);
+  return -1;
+}
+
+static inline int acknowledge_and_rearm_imcflow_interrupt(
+    volatile uint32_t* npu_pointer,
+    volatile uint32_t* int_ack_gen)
+{
+  // Establish that this interrupt was raised while the controller was armed.
+  // Seeing 0 here means the event/ACK bookkeeping was already out of phase, so
+  // do not emit a pulse that could acknowledge a different pending interrupt.
+  if (wait_for_intr_done_value(npu_pointer, 1, "pre-ACK armed state") != 0) {
+    return -1;
+  }
+
+  // The external ACK pulse must reach the chip before INTR_DONE is re-armed.
+  // Otherwise the write of 1 can be ignored while the register is still 1,
+  // followed by the delayed ACK clearing it to 0 and suppressing later IRQs.
+  generate_ack(int_ack_gen);
+  __sync_synchronize();
+
+  if (wait_for_intr_done_value(npu_pointer, 0, "external ACK") != 0) {
+    return -1;
+  }
+
+  npu_pointer[INTR_DONE_REG_IDX] = 1;
+  __sync_synchronize();
+  return wait_for_intr_done_value(npu_pointer, 1, "interrupt re-arm");
+}
+
+static inline int prepare_imcflow_interrupt(volatile uint32_t* npu_pointer)
+{
+  // A previous ACK may have reached the chip after teardown and left interrupt
+  // forwarding disabled.  Repair that known-safe idle condition before a new
+  // PROGRAM/RUN request, then confirm the write by reading the chip register.
+  if (npu_pointer[INTR_DONE_REG_IDX] == 0) {
+    fprintf(stderr, "[INTERRUPT] Re-arming INTR_DONE during IDLE preflight\\n");
+    npu_pointer[INTR_DONE_REG_IDX] = 1;
+    __sync_synchronize();
+  }
+  return wait_for_intr_done_value(npu_pointer, 1, "preflight interrupt arm");
 }
 """)
 
@@ -871,31 +913,69 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
 
   def generatePolicyUpdateCode(self):
     """Generate policy update code."""
-    out = [
-      "// Set the inode pc to 0 and run.",
-      "for(int i=0; i<INODE_NUM; i++) {",
-      "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
-      "}",
-      "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
-      " npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
-      "int _wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);" if self.os == "linux" else ("int _wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "int _wait_rc = 0;"),
-      "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
-      "npu_pointer[INTR_DONE_REG_IDX] = 1;",
-    ]
+    out = ["// Confirm IDLE before programming PC registers or entering PROGRAM.",
+           "int _wait_rc = wait_for_idle(npu_pointer);",
+           "if (_wait_rc == 0) {",
+           "  // Set the inode pc to 0 and run.",
+           "  for(int i=0; i<INODE_NUM; i++) {",
+           "    npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_EXTERN_ENUM_VAL << 30 + 0);",
+           "  }"]
+    if self.os == "linux":
+      out.extend([
+        "  _wait_rc = prepare_imcflow_interrupt(npu_pointer);",
+        "}",
+        "if (_wait_rc == 0) {",
+        "  enable_imcflow_interrupt(npu_fd);",
+        "  npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
+        "  _wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);",
+        "}",
+        "if (_wait_rc == 0) {",
+        "  _wait_rc = acknowledge_and_rearm_imcflow_interrupt(npu_pointer, int_ack_gen_pointer);",
+        "}",
+        "if (_wait_rc == 0) {",
+        "  _wait_rc = wait_for_idle(npu_pointer);",
+        "}",
+      ])
+    else:
+      out.extend([
+        "  npu_pointer[STATE_REG_IDX] = SET_PROGRAM_CODE;",
+        "  _wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "  _wait_rc = 0;",
+        "  npu_pointer[INTR_DONE_REG_IDX] = 1;",
+        "}",
+      ])
     return "\n".join(out) + "\n"
 
   def generateInvokeCode(self):
     """Generate NPU invoke code."""
-    out = [
-      "for(int i=0; i<INODE_NUM; i++) {",
-      "  npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
-      "}",
-      "enable_imcflow_interrupt(npu_fd);" if self.os == "linux" else "",
-      "npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
-      "_wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);" if self.os == "linux" else ("_wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "_wait_rc = 0;"),
-      "generate_ack(int_ack_gen_pointer);" if self.os == "linux" else "",
-        "npu_pointer[INTR_DONE_REG_IDX] = 1;"
-    ]
+    out = ["// Confirm IDLE before programming PC registers or entering RUN.",
+           "_wait_rc = wait_for_idle(npu_pointer);",
+           "if (_wait_rc == 0) {",
+           "  for(int i=0; i<INODE_NUM; i++) {",
+           "    npu_pointer[(PC_REG_IDX + i)] = (INODE_PC_START_P1_ENUM_VAL << 30 + 0);",
+           "  }"]
+    if self.os == "linux":
+      out.extend([
+        "  _wait_rc = prepare_imcflow_interrupt(npu_pointer);",
+        "}",
+        "if (_wait_rc == 0) {",
+        "  enable_imcflow_interrupt(npu_fd);",
+        "  npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
+        "  _wait_rc = wait_imcflow_interrupt(npu_fd, npu_pointer);",
+        "}",
+        "if (_wait_rc == 0) {",
+        "  _wait_rc = acknowledge_and_rearm_imcflow_interrupt(npu_pointer, int_ack_gen_pointer);",
+        "}",
+        "if (_wait_rc == 0) {",
+        "  _wait_rc = wait_for_idle(npu_pointer);",
+        "}",
+      ])
+    else:
+      out.extend([
+        "  npu_pointer[STATE_REG_IDX] = SET_RUN_CODE;",
+        "  _wait_rc = wait_for_idle(npu_pointer);" if USE_POLLING else "  _wait_rc = 0;",
+        "  npu_pointer[INTR_DONE_REG_IDX] = 1;",
+        "}",
+      ])
     return "\n".join(out) + "\n"
 
   def generateDevicePointerCleanup(self):
@@ -1205,11 +1285,10 @@ static int wait_for_idle(volatile uint32_t* npu_pointer) {
     code += self.generateRetryMacros()
     code += self.generateExternLink()
     code += makeConstArrayDecl(self.func, self.func_name, self.target_func)
-    # Emit polling utilities (wait_for_idle) BEFORE interrupt utilities:
-    # wait_imcflow_interrupt now calls wait_for_idle as its STATE-register
-    # fallback, so the polling helper must be defined first. Emit it
-    # unconditionally (not gated on USE_POLLING) since the linux/chip interrupt
-    # path always needs it as the lost-edge safety net.
+    # Emit polling utilities before interrupt utilities.  The Linux/chip path
+    # uses wait_for_idle both as a preflight guard and after the interrupt ACK
+    # handshake, so it is required even when execution completion is signalled
+    # through UIO.
     code += self.generatePollingUtilities()
     code += self.generateInterruptUtilities()
 
