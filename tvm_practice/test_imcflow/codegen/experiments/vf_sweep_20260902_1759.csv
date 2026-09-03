@@ -1,0 +1,4 @@
+vdd,phase,mhz,dda_ddc,pulse_len,run_vdd_mA,run_dda_mA,run_ddc_mA,dda_uC,P_mW,TOPS,TOPSW,status
+1.0,fmax,100.0,1.15,149,70.68,31.14,70.87,95.33,188.0,2.85,15.2,ok
+1.0,fmax,107.1,1.15,139,74.46,32.30,74.44,92.16,197.2,3.05,15.5,ok
+1.0,fmax,115.4,1.15,130,78.32,33.18,78.40,88.49,206.6,3.29,15.9,gate-fail
