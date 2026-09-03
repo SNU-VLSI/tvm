@@ -32,7 +32,7 @@ import tvm
 from tvm import relay
 from tvm.relay import op
 from tvm.contrib.imcflow import ImcflowDeviceConfig, TensorEdge, TensorID, NodeID
-from tvm.relay.op.contrib.imcflow import CustomIDToNode
+from tvm.relay.op.contrib.imcflow import CustomIDToNode, pack_bn_minmax_mode
 from tvm.relay.backend.contrib.imcflow.transform_utils import *
 
 logger = logging.getLogger(__name__)
@@ -1873,10 +1873,16 @@ class JointPnRILP:
                     prod = gi.nodes[sid].producer
                     if prod is not None:
                         pin_pairs.add(frozenset((sid, prod)))
-                for cid in gi.concat_nodes:
-                    lp = gi.nodes[cid].last_producer
-                    if lp is not None:
-                        pin_pairs.add(frozenset((cid, lp)))
+                # Under IMCFLOW_PACK_BN_MINMAX the concat is NOT pinned to its
+                # last_producer (P4 dropped, P4b anti-affinity added), so do NOT
+                # exclude the concat<->last_producer pair from P5 -- it must remain
+                # forbidden. Lever OFF -> keep the original exclusion (intentional
+                # co-location) so placement/codegen stay byte-identical.
+                if not pack_bn_minmax_mode():
+                    for cid in gi.concat_nodes:
+                        lp = gi.nodes[cid].last_producer
+                        if lp is not None:
+                            pin_pairs.add(frozenset((cid, lp)))
                 data_pairs = set()
                 for comm in gi.commodities:
                     s, d = comm.source_node_id, comm.dest_node_id
@@ -1994,15 +2000,218 @@ class JointPnRILP:
                         f"P3_split_{hash(split_id) % 100000}_{v.row}_{v.col}"
                     )
 
-        # P4: Concat same as last producer
+        # P4: Concat same as last producer.
+        #
+        # ----------------------------------------------------------------------
+        # IMCFLOW_PACK_BN_MINMAX (Option A anti-affinity): a STANDALONE concat
+        # created by the BN/minmax concat-push (folding a conv's OC-split slices'
+        # post-ops, then re-merging the disjoint channel ranges) MUST NOT be
+        # co-located with any of its producer OC-slices. The default P4 pins the
+        # concat to its last_producer slice; under pack mode that puts a mid-graph
+        # dwconv slice (the producer) AND the downstream concat on ONE core, which
+        # then emits the local-dwconv loop and the concat loop SEQUENTIALLY (no
+        # per-pixel interleave). Meanwhile the sibling slice on a remote core feeds
+        # the concat directly and races ahead, back-pressuring the shared upstream
+        # producer that the co-located slice still needs -> a pixel-1 three-way
+        # blocking-rendezvous deadlock under BUGFIX-off (fsim-confirmed: the concat
+        # cell never reaches its concat loop; it wedges at its own dwconv input
+        # STANDBY). Placing the concat on a NON-producer core turns the region into
+        # a forward DAG (shared_upstream -> {sliceA, sliceB} -> concat -> pw), which
+        # a blocking rendezvous drains without a cycle.
+        #
+        # So under pack mode we (1) DROP the P4 pin for standalone concats and
+        # (2) add P4b anti-affinity forbidding the concat from sharing a core with
+        # ANY producer slice. Lever OFF -> pack_bn_minmax_mode() False -> the pin is
+        # applied exactly as before -> byte-identical placement / codegen.
+        _pack = pack_bn_minmax_mode()
         for concat_id in gi.concat_nodes:
             concat_node = gi.nodes[concat_id]
+            if _pack:
+                # standalone concat: let it float (no last_producer pin)
+                continue
             if concat_node.last_producer and concat_node.last_producer in self.p:
                 for v in self.imce_nodes:
                     self.prob += (
                         self.p[concat_id][v] == self.p[concat_node.last_producer][v],
                         f"P4_concat_{hash(concat_id) % 100000}_{v.row}_{v.col}"
                     )
+
+        # P4b (IMCFLOW_PACK_BN_MINMAX only): standalone concat <-> producer-slice
+        # anti-affinity. For every data edge (producer -> concat) forbid the two
+        # from landing on the same IMCE. Derived from commodities exactly like P5
+        # (dest == concat, congestion group 'data'), so it captures ALL producer
+        # slices of the concat, not just last_producer. Runs unconditionally (not
+        # gated on the launch-aware relax branch) because the 16-cell/16-IMCE ideal
+        # mapping does not trip need_relax, yet still needs the constraint.
+        if _pack and gi.concat_nodes:
+            placed = set(self.p.keys())
+            concat_set = set(gi.concat_nodes)
+            n_p4b = 0
+            # BOTH directions: producer->concat AND concat->consumer must be
+            # off-core. Producer co-location caused the pixel-1 sequential-emission
+            # deadlock (the original wedge). Consumer co-location is ALSO illegal:
+            # the consumer LOAD_LBs the concat output, but a same-core (src==dst)
+            # data edge is skipped by construct_noc_paths -> empty policy_info ->
+            # LoadLBBlock.node_info_str IndexError crash (the exact P5 rationale).
+            # So the standalone concat must land on a core distinct from every node
+            # it exchanges data with -> ALL its edges become real NoC transfers and
+            # the all-external vector-copy path applies. (16 mesh cores vs a concat
+            # + 2 producer slices + 1 consumer = 4 distinct cores needed per concat:
+            # feasible for the ideal mapping; if the solver returns Infeasible the
+            # dense 37-node/16-core packing cannot honor it -> stop-report for B.)
+            _pairs = set()
+            for comm in gi.commodities:
+                s, d = comm.source_node_id, comm.dest_node_id
+                if (s in placed and d in placed and s != d
+                        and comm.get_congestion_group() == 'data'
+                        and (d in concat_set or s in concat_set)):
+                    _pairs.add((s, d))
+            for (s, d) in _pairs:
+                for v in self.imce_nodes:
+                    if v not in self.p.get(s, {}) or v not in self.p.get(d, {}):
+                        continue
+                    self.prob += (
+                        self.p[s][v] + self.p[d][v] <= 1,
+                        f"P4b_concat_antiaff_{hash((s, d)) % 100000}_{v.row}_{v.col}"
+                    )
+                    n_p4b += 1
+            debug_print(f"[JointPnRILP] P4b PACK concat<->neighbor anti-affinity: "
+                        f"{len(_pairs)} producer/consumer edges forced off-core "
+                        f"({n_p4b} constraints)")
+
+            # P4c (IMCFLOW_PACK_BN_MINMAX only): a standalone concat must NOT
+            # co-host a producer-slice of a DIFFERENT concat. RTL-proven root of the
+            # launch2 wedge: the OC-split concat-push makes the region a linear
+            # split->slices->concat->pw chain; PnR packed a LATE-block concat (e.g.
+            # concat73, block C) onto the same core as an EARLY-block dwconv slice
+            # (slice52, block A -> concat53). The core serializes its two node
+            # bodies, but they are PIPELINE-COUPLED across the whole region: the
+            # early slice's per-pixel output is needed by an even-earlier block,
+            # while the late concat's RECV window needs its producers (further
+            # downstream) done. NEITHER intra-cell emission order breaks it
+            # (concat-first blocks the slice immediately; slice-first still wedges
+            # because the cell must eventually open the late concat whose producers
+            # aren't ready) -> a cyclic wait (fsim-confirmed: imce_0_1 pc30
+            # STANDBY(11,2) -> imce_2_1 concat73 RECV -> ... -> imce_0_1). A codegen
+            # reorder is a dead end; the only fix is placement: keep a concat off
+            # any core that hosts a slice feeding a DIFFERENT concat. Feasible here
+            # (few block-concats; if a larger region makes it Infeasible the solver
+            # says so -> stop-report for region splitting). Lever OFF -> no
+            # standalone concats -> inert -> byte-identical placement.
+            #
+            # Producer-slices per concat: the sources of data edges INTO that concat.
+            slice_to_concats = {}   # slice node id -> set(concat ids it feeds)
+            for comm in gi.commodities:
+                s, d = comm.source_node_id, comm.dest_node_id
+                if (d in concat_set and s in placed and s not in concat_set
+                        and comm.get_congestion_group() == 'data'):
+                    slice_to_concats.setdefault(s, set()).add(d)
+            n_p4c = 0
+            _cpairs = set()
+            for s, cfeeds in slice_to_concats.items():
+                for c in concat_set:
+                    if c not in placed or c == s:
+                        continue
+                    # forbid slice s (feeding concat(s) in cfeeds) from co-hosting a
+                    # DIFFERENT concat c (c not among the concats s feeds).
+                    if c in cfeeds:
+                        continue
+                    _cpairs.add((min(s, c), max(s, c)) if isinstance(s, int) and isinstance(c, int) else (s, c))
+            for (a, b) in _cpairs:
+                for v in self.imce_nodes:
+                    if v not in self.p.get(a, {}) or v not in self.p.get(b, {}):
+                        continue
+                    self.prob += (
+                        self.p[a][v] + self.p[b][v] <= 1,
+                        f"P4c_concat_xslice_{hash((a, b)) % 100000}_{v.row}_{v.col}"
+                    )
+                    n_p4c += 1
+            debug_print(f"[JointPnRILP] P4c PACK concat<->foreign-slice anti-affinity: "
+                        f"{len(_cpairs)} (concat, other-concat-slice) pairs forced "
+                        f"off-core ({n_p4c} constraints)")
+
+            # P4d (IMCFLOW_PACK_BN_MINMAX only): GENERALIZE P4b/P4c to the full
+            # cross-block-co-host cycle class. RTL showed that after P4b/P4c removed
+            # the concat<->slice cases, the solver still packed a standalone concat
+            # onto a core hosting a DIFFERENT-block node that is NOT a slice (a
+            # split or a pwconv of another block) -- e.g. imce_2_2 = {split56[B],
+            # concat83[D]}, imce_2_1 = {concat53[A], pwconv84[D]}. Same deadlock
+            # class: the cell serializes an EARLY-block node (split56[B]'s per-pixel
+            # SEND, needed upstream) against a LATE-block concat (concat83[D], whose
+            # RECV needs downstream block data), and the two are pipeline-coupled
+            # across the region -> cyclic wait (fsim: imce_2_2 stalls in split56[B]
+            # SEND while imce_2_1's pwconv84[D] LOAD_LBs concat83[D] which never
+            # runs). The invariant: a standalone concat must NOT co-host ANY node
+            # outside its OWN pipeline block. A concat's block = itself + its
+            # producer slices + those slices' producer (the split) + the split's
+            # producer (minmax) + the concat's consumer (pwconv), i.e. a bounded
+            # neighborhood in the data graph. Everything else is a different
+            # pipeline stage -> back-pressure-coupled -> forbidden co-host. This
+            # SUBSUMES P4b (producers/consumer are IN the block -> allowed to
+            # co-host, but P4b already forbids them for the NoC-edge reasons; both
+            # constraints coexist) and P4c (foreign slices are out-of-block ->
+            # forbidden). Feasibility is solver-checked; Infeasible -> stop-report
+            # for region splitting. Lever OFF -> no standalone concats -> inert.
+            # Build forward/backward DATA adjacency for the block-neighborhood BFS.
+            fwd = {}
+            bwd = {}
+            for comm in gi.commodities:
+                s, d = comm.source_node_id, comm.dest_node_id
+                if comm.get_congestion_group() != 'data':
+                    continue
+                fwd.setdefault(s, set()).add(d)
+                bwd.setdefault(d, set()).add(s)
+            def _concat_block(cid):
+                # A concat's own block = {concat, its producer slices, its pwconv
+                # consumer} -- but the FORK SIDE (the block's split + minmax) is
+                # EXCLUDED so those become out-of-block -> forbidden co-host.
+                #
+                # WHY exclude the fork side: co-hosting the concat (fan-in JOIN) with
+                # its own split (fan-out FORK) whose middle compute (dwconv slices) is
+                # on OTHER cells serializes the split's whole SEND phase ahead of the
+                # concat's RECV phase -> the remote slices can't drain into the
+                # not-yet-open concat -> FIFO fills -> split SEND backpressures ->
+                # fork-join self-coupling DEADLOCK (RTL-confirmed: imce_0_1
+                # dwconv_minmaxquant_loop/split fully precedes call_created_loop/
+                # concat). In a SINGLE dense region this exclusion is INFEASIBLE
+                # (measured 1088 constraints -> Infeasible), which is exactly why the
+                # region cost-model fix now splits DS-CNN into 2 regions: with ~2
+                # blocks/region the mesh has room to place each concat off its own
+                # split, so the exclusion becomes FEASIBLE and the fork-join deadlock
+                # is broken. (Slices are also forbidden by P4b/P4c; pwconv by P4b.)
+                blk = {cid}
+                # producer slices (1 hop back) stay in-block; do NOT walk further
+                # back to the split (2 hops) or minmax (3 hops) -- those are the fork
+                # side and must be forbidden co-hosts.
+                blk |= set(bwd.get(cid, set()))
+                blk |= fwd.get(cid, set())   # forward pwconv consumer (local handoff)
+                return blk
+            n_p4d = 0
+            _dpairs = set()
+            for c in concat_set:
+                if c not in placed:
+                    continue
+                own = _concat_block(c)
+                for n in placed:
+                    if n == c or n in own or n in concat_set:
+                        # skip self, own-block nodes, and other concats (P4b/P4c
+                        # already handle concat<->concat-adjacent; a concat is never
+                        # in another concat's own block here).
+                        continue
+                    key = (min(c, n), max(c, n)) if isinstance(c, int) and isinstance(n, int) else (c, n)
+                    _dpairs.add(key)
+            for (a, b) in _dpairs:
+                for v in self.imce_nodes:
+                    if v not in self.p.get(a, {}) or v not in self.p.get(b, {}):
+                        continue
+                    self.prob += (
+                        self.p[a][v] + self.p[b][v] <= 1,
+                        f"P4d_concat_xblock_{hash((a, b)) % 100000}_{v.row}_{v.col}"
+                    )
+                    n_p4d += 1
+            debug_print(f"[JointPnRILP] P4d PACK concat<->cross-block anti-affinity: "
+                        f"{len(_dpairs)} (concat, out-of-block-node) pairs forced "
+                        f"off-core ({n_p4d} constraints)")
 
     def _add_linking_constraints(self):
         """Add source/destination linking constraints L1-L5"""

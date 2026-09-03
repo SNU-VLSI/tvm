@@ -12,6 +12,7 @@ main tree for the gem5 input-resolution gotcha).
 | `run_resnet8_resid_on_rtl.sh` | PACK_BN_MINMAX + RESIDUAL_IN_REGION (+INODE_BUFFER, OC=64) + REGION_MERGE=2 | 2 regions, **95,744 cyc = 957.4 us** |
 | `run_resnet8_resid_off_rtl.sh` | all off | 4 regions, **132,682 cyc = 1,326.8 us** |
 | `run_dscnn_baseline_rtl.sh` | all off | 2 regions (24 IMCE), **32,370 cyc = 323.7 us** |
+| `run_dscnn_packed_rtl.sh` | PACK_BN_MINMAX (ideal mapping: standalone bn/mm 7→0, 24→20 cells) | 2 regions, **37,076 cyc = 370.8 us** (+14.5% — OR-concat merge hop cost; mapping-density lever, not a latency lever for DS-CNN) |
 
 Both resnet8 variants (and the DS-CNN baseline) use the same enlarged-memory
 simv (`IMCFLOW_BIG_IMEM=1`, runner dir `rtl_runner_bigimem`) so only the
@@ -28,6 +29,9 @@ mode in this directory (no build manifest); it prints a "reusing pre-built
 simv ... Ensure it matches" warning and proceeds. On a fresh machine,
 `make compile` in `rtl_runner_bigimem` reproduces the same define set (the
 Makefile's DEFINE already includes the BUGFIX macros and BIG_IMEM).
+
+2026-09-03 recheck: the resnet8 A/B was re-run end-to-end on the same simv —
+ON 95,759 cyc / OFF 133,386 cyc (both within 0.5% of the table; -28.2%).
 
 Measure busy cycles (`imcflow_state_o=1` regions in the .fsdb) after a PASS:
 

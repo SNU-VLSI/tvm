@@ -47,6 +47,31 @@ PACK_CONST_SYNC_FLAG = 253
 # collides. Lever OFF -> the window is not emitted -> byte-identical.
 PACK_BN_DATA_SYNC_FLAG = 252
 
+# IMCFLOW_PACK_BN_MINMAX: per-window READY-token band for the packed-postop const
+# rendezvous IMCE->inode "invite" pulse. The imce raises this on its OWN node-flag
+# and the inode STANDBYs it before releasing the go-pulse. It REPLACES the shared
+# literal 1 when an imce is paced by MULTIPLE pack-const windows/pacers:
+# fsim-confirmed wedge (DS-CNN 1-region pack) -- imce_1_2 raised the SAME flag=1
+# for 6 pack-const windows split across TWO pacers (4x inode_1_0 go=202 +
+# 2x inode_0_0 go=203); the level-triggered flag-1 collapsed 1->0->1 and one
+# pacer's pulse satisfied the other pacer's STANDBY (crosstalk) -> off-by-one lost
+# wakeup: inode_0_0's 6th STANDBY(imce_1_2,1) arrived 60ns after the imce's last
+# flag-1 fell, permanent EXPECTED=1/ACTUAL=0. A DISTINCT ready value per
+# (pacer_inode, const-window) landing on that imce makes each invite unambiguous
+# (no cross-window/cross-pacer collapse), mirroring the paced_multicast /
+# SAFE_TOKEN monotonic-token pattern. The value lives on the IMCE flag register
+# (independent of the inode go-flag band 200..248), so it only needs to be
+# distinct AMONG the pack-const windows sampling one imce's flag. Band [230..240)
+# is chosen BELOW the paced-multicast tokens (241..248) and the 249 pair-UUID
+# cap / 250 WAVE_DONE / 252/253 / 254/255 barriers, and above the go-band's
+# realistic use (200..~210); a codegen assert caps it under 241. Both the imce
+# RecvConstBlock and the inode SendBlock derive the token from the SAME const
+# EDGE, so they agree by construction (no independent counters). A cell paced by
+# <=1 pack-const window keeps the literal 1 -> byte-identical. Lever OFF -> no
+# pack-const window emitted -> byte-identical.
+PACK_CONST_READY_BASE = 230
+PACK_CONST_READY_CAP = 241  # exclusive upper bound (below paced-mc 241)
+
 # C1b (C) wave-launch realization: dedicated IMCE-flag value for the per-wave
 # completion rendezvous. A core reused across launch waves SETFLAGs this as the
 # last act of its wave-(k-1) program (after its final SEND, before STOP); the
@@ -848,23 +873,51 @@ class SendRecvPairManager:
         cached = getattr(self, "_pack_const_flag_cache", None)
         if cached is not None:
             return cached
-        # Count inode data-input senders per receiver hw node across all pairs.
+        # Count inode data-input senders per receiver hw node across all pairs,
+        # AND record which inodes issue any flag-1 data-input rendezvous SEND and
+        # which issue any pack-const go-pulse.
         recv_inode_senders: Dict[int, Set[int]] = {}
+        data_input_inodes: Set[int] = set()
+        packconst_inodes: Set[int] = set()
         for pair in self.pairs.values():
             if not pair.sender_node.is_inode():
                 continue
             for edge in pair.edges:
-                if not self.is_inode_data_input_recv(edge):
-                    continue
-                rnode = self._get_hw_node(edge.dst_id)
-                if isinstance(rnode, tuple):
-                    rnode = rnode[0]
-                if rnode is None or not rnode.is_imce():
-                    continue
-                recv_inode_senders.setdefault(rnode.value, set()).add(
-                    pair.sender_node.value)
+                if self.is_inode_data_input_recv(edge):
+                    rnode = self._get_hw_node(edge.dst_id)
+                    if isinstance(rnode, tuple):
+                        rnode = rnode[0]
+                    if rnode is not None and rnode.is_imce():
+                        recv_inode_senders.setdefault(rnode.value, set()).add(
+                            pair.sender_node.value)
+                        data_input_inodes.add(pair.sender_node.value)
+        # pack-const edges are UNPAIRED (excluded from self.pairs), so scan the
+        # raw edge list for them and record their inode senders.
+        for edge in self._all_edges_for_pacing:
+            if self.is_packed_postop_const_edge(edge):
+                snode = self._get_hw_node(edge.src_id)
+                if isinstance(snode, tuple):
+                    snode = snode[0]
+                if snode is not None and snode.is_inode():
+                    packconst_inodes.add(snode.value)
         has_two_inode_add = any(len(s) >= 2 for s in recv_inode_senders.values())
-        flag = PACK_CONST_SYNC_FLAG if has_two_inode_add else 1
+        # region-split lost-wakeup: an inode's node-flag is a SINGLE shared scalar.
+        # If ONE inode both (a) SET_FLAG(1)s its CONFIG-phase pack-const go-pulse
+        # (to a pack-const consumer imce) AND (b) SET_FLAG(1)s its DATA-phase
+        # data-input rendezvous (to a DIFFERENT dwconv-input imce), the two alias
+        # on value 1: the data-input consumer opens its recv window early (during
+        # compute-enable) and STEALS the config-phase pack-const pulse, then never
+        # re-raises 1, so the inode's data-feed STANDBY(1,1) wedges forever
+        # (fsim-proven: DS-CNN 2-region region1 inode_0_0 -> imce_0_2 pack-const
+        # pulse stolen by imce_0_1 data window). The >=2-inode-add trigger above
+        # does not catch this pack-const-vs-data-input pair. Move the pack-const
+        # go-pulse off value 1 whenever an inode does BOTH -> the data-input flag-1
+        # window can no longer alias it. The consumer RecvConstBlock reads the same
+        # pack_const_sync_flag() so both sides stay in lockstep. Still inside the
+        # pack gate -> lever OFF byte-identical.
+        packconst_vs_datainput = bool(packconst_inodes & data_input_inodes)
+        flag = (PACK_CONST_SYNC_FLAG
+                if (has_two_inode_add or packconst_vs_datainput) else 1)
         self._pack_const_flag_cache = flag
         return flag
 
@@ -954,6 +1007,99 @@ class SendRecvPairManager:
             f"pack_const_go_flag {flag} >= 249 reserved band; inode {inode_hw} "
             f"paces {len(consumers)} (imce,wave) consumers -- exceeds [200,248].")
         return flag
+
+    def _pack_const_windows_on_imce(self, imce_value: int):
+        """Canonical ORDERED list of pack-const const-edge keys landing on the imce
+        hw node `imce_value`. Key = (src_gid, dst_gid, tensor_type) -- fully derived
+        from the edge, so BOTH the imce RecvConstBlock and the inode SendBlock build
+        the identical order from the same edge set (lockstep by construction; no
+        per-side counter). Cached (edge set fixed post-construction)."""
+        self._build_pack_const_windows_cache()
+        return self._pack_const_windows_cache.get(imce_value, [])
+
+    def _pack_const_pacer_inodes_on_imce(self, imce_value: int):
+        """Set of DISTINCT pacer-inode values feeding pack-const consts to this imce.
+        A cell paced by >=2 inodes is the crosstalk case (one inode's flag pulse can
+        satisfy the other's STANDBY on the shared level flag 1) -- the DS-CNN
+        multi-pacer wedge. A single-pacer multi-window cell (e.g. resnet8 imce_2_2,
+        4 windows all from inode_2_0) runs its windows back-to-back on one inode and
+        does NOT hit the loose-timing crosstalk (RTL-verified passing), so it keeps
+        the literal flag 1 -> byte-identical."""
+        self._build_pack_const_windows_cache()
+        return self._pack_const_pacers_cache.get(imce_value, set())
+
+    def _build_pack_const_windows_cache(self):
+        if getattr(self, "_pack_const_windows_cache", None) is not None:
+            return
+        cache = {}
+        pacers = {}
+        for e in self._iter_all_edges():
+            eps = self.packed_postop_const_endpoints(e)
+            if eps is None:
+                continue
+            inode_hw, imce_hw = eps
+            key = (
+                getattr(e.src_id, "graph_node_id", None),
+                getattr(e.dst_id, "graph_node_id", None),
+                getattr(e.dst_id, "tensor_type", None),
+            )
+            cache.setdefault(imce_hw.value, [])
+            if key not in cache[imce_hw.value]:
+                cache[imce_hw.value].append(key)
+            pacers.setdefault(imce_hw.value, set()).add(inode_hw.value)
+        # Deterministic canonical order (repr-sorted; gid may be int or tuple).
+        for k in cache:
+            cache[k] = sorted(cache[k], key=lambda t: repr(t))
+        self._pack_const_windows_cache = cache
+        self._pack_const_pacers_cache = pacers
+
+    def _pack_const_edge_pacer(self, edge):
+        """The pacer inode hw value for a pack-const edge (its packed_postop_const
+        endpoints inode), or None. Used to key the READY token per PACER."""
+        eps = self.packed_postop_const_endpoints(edge)
+        return eps[0].value if eps is not None else None
+
+    def pack_const_ready_token(self, imce_hw, edge) -> int:
+        """IMCE->inode "invite" (READY) node-flag value for a packed-postop const
+        window, DISTINCT per PACER-INODE feeding this imce (NOT per window).
+
+        WHY per-pacer, not per-window: a per-WINDOW token (fix1) removed the
+        cross-pacer crosstalk but ORDER-COUPLED the inode to the imce's per-window
+        arrival -- the inode's STANDBY(imce, <exact window token>) blocks until the
+        imce reaches THAT window, and any inode SEND queued after that STANDBY (e.g.
+        the next imce's config) freezes if the imce is delayed -> new deadlock
+        (fsim: inode_1_0 STANDBY(1,233)=imce_0_1 max invite blocks its imce_1_1
+        config SEND -> imce_1_1 pc=0 RECV_CFG starves -> whole row 1 wedges).
+
+        Per-PACER restores flag-1's key leniency WITHIN one pacer (all of pacer P's
+        windows raise the SAME token Tp, so P's STANDBY(imce,Tp) passes as soon as
+        the imce reaches ANY of P's windows -- no exact-window coupling), while
+        keeping DIFFERENT pacers on DIFFERENT tokens (Tp != Tq) so pacer P's invite
+        pulse can never satisfy pacer Q's STANDBY (the crosstalk fix1 targeted).
+        Within one pacer the token repeats across its back-to-back windows -- the
+        exact benign pattern the single-pacer resnet8 cells (imce_2_2, 4 windows /
+        1 inode) run and RTL-pass.
+
+        NARROW GATE (byte-id preserving): fires ONLY when this imce is paced by >=2
+        DISTINCT inodes (the crosstalk case). Single-pacer (incl. multi-window)
+        keeps the literal 1 -> byte-identical (resnet8 unaffected). Both the imce
+        RecvConstBlock SETFLAG and the inode SendBlock STANDBY call THIS with the
+        SAME edge -> derive the identical value by construction. OFF never calls it.
+        """
+        pacer_set = self._pack_const_pacer_inodes_on_imce(imce_hw.value)
+        if len(pacer_set) < 2:
+            return 1
+        pacer = self._pack_const_edge_pacer(edge)
+        if pacer is None:
+            return 1
+        # Distinct token per pacer (sorted for determinism + imce/inode agreement).
+        idx = sorted(pacer_set).index(pacer)
+        token = PACK_CONST_READY_BASE + idx
+        assert token < PACK_CONST_READY_CAP, (
+            f"pack_const_ready_token {token} >= {PACK_CONST_READY_CAP} reserved; "
+            f"imce {imce_hw} paced by {len(pacer_set)} inodes -- exceeds "
+            f"[{PACK_CONST_READY_BASE},{PACK_CONST_READY_CAP}).")
+        return token
 
     def _iter_all_edges(self):
         """Yield every TensorEdge seen during construction (paired + const).

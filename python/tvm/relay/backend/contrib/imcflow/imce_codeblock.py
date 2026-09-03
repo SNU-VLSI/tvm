@@ -601,9 +601,15 @@ class RecvConstBlock(ImceCodeBlock):
           # inode -- v14 cross-wave alias fix). Non-merged -> wave 0 -> unchanged.
           pc_flag = pm.pack_const_go_flag(pace_eps[0], pace_eps[1],
                                           pm._edge_dst_wave(self.in_edge))
+          # per-window READY token (invite) -- DISTINCT per const edge on this imce
+          # so multiple windows / multiple pacers can't collapse the shared level
+          # flag 1 (fsim off-by-one lost wakeup). Derived from THIS edge -> matches
+          # the inode SendBlock's STANDBY token by construction. <=1 window -> 1.
+          ready_flag = pm.pack_const_ready_token(pace_eps[1], self.in_edge)
         else:
           pc_flag = 1
-        code += "__builtin_IMCE_SETFLAG(1);"
+          ready_flag = 1
+        code += f"__builtin_IMCE_SETFLAG({ready_flag});"
         code += f"__builtin_IMCE_STANDBY({pace_inode.value}, {pc_flag});"
         code += "__builtin_IMCE_SETFLAG(0);"
       if self.type == RecvConstBlock.ConstType.MIN:
@@ -1248,9 +1254,26 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     #TODO: maybe we need to clear qreg before
     src_masks = [min(15, channels - i - 1) for i in range(0, channels, 16)]
 
+    # qreg_start_idx = the 16-CHANNEL LANE-SLOT (within every 4-bitplane qreg
+    # entry) this slice's block i writes: qreg[gi][16*qreg_start_idx + i]
+    # (ISA.md OP_MM_QUANT). A slice at output-split index o_split_idx occupies a
+    # DISJOINT band of the merged output's channels, so its base lane-slot is
+    # o_split_idx * (this slice's own block count = channels//16), and block i
+    # lands at base + i. The old `i + 4*o_split_idx` HARDCODED 4 slots/slice
+    # (correct ONLY for 64ch slices); for a 32ch OC-split slice (channels//16=2)
+    # it put slice1 at out-of-range slots 4,5 and, with o_split_idx=0, both slices
+    # collided in lanes 0,1 -> the standalone-concat OR-merge overlaid ch0-31 and
+    # ch32-63 in the SAME lanes -> scramble + truncation (RTL numeric bug, bit-
+    # exact traced: golden == [slice0@slots0,1 | slice1@slots2,3]). Using
+    # (channels//16) makes slice1(32ch) land at slots 2,3 = the correct high
+    # lane-half; the concat then merges DISJOINT lanes -> the golden 64ch layout.
+    # Byte-identical for every prior case: o_split_idx==0 -> +0; 64ch slice ->
+    # (64//16)=4 == the old literal 4. Only the 32ch-slice + o_split_idx>0 path
+    # (exactly the DS-CNN concat-push bug) changes.
+    slice_blocks = max(1, channels // 16)
     for i, src_mask in enumerate(src_masks):
       var_i = self._make_unique_input_var_for_post_op(data_edge, i)
-      qreg_start_idx = i + 4 * self.o_split_idx
+      qreg_start_idx = i + slice_blocks * self.o_split_idx
       code += f"__builtin_IMCE_MM_QUANT({var_i}, 0, {src_mask}, {qreg_start_idx});"
 
     # NOTE: currently, it is not possible to have consequtive 4*(MM_QUANT -> QREG)s.
@@ -1303,7 +1326,42 @@ class ConcatBlock(ImceCallCodeBlock):
     """
     last_arg = self.call.call.args[0].fields[-1]
     assert isinstance(last_arg, relay.Call), "Last argument must be a relay.Call"
-    if last_arg.op.name == "qnn.imcflow_min_max_quantize":
+    # The concat's terminal op decides OR_CONCAT (merging bitplane/quantized
+    # streams) vs plain CONCAT. With IMCFLOW_PACK_BN_MINMAX the OC-split conv
+    # slices feed the concat as a packed conv-with-postop *composite* (a
+    # relay.Function whose body ends in min_max_quant), not a raw
+    # min_max_quant Call. Unwrap the composite to its terminal op -- a packed
+    # slice ending in min_max_quant is semantically identical to a raw
+    # min_max_quant feeder, so it must select OR_CONCAT too.
+    terminal_op_name = None
+    if isinstance(last_arg.op, relay.Function):
+      body = last_arg.op.body
+      if isinstance(body, relay.Call) and hasattr(body.op, "name"):
+        terminal_op_name = body.op.name
+    elif hasattr(last_arg.op, "name"):
+      terminal_op_name = last_arg.op.name
+    # OR_CONCAT (or_concat=1) merges BITPLANE streams via IMCE_OR. A min_max_quant
+    # feeder emits its OC slice as 4 BITPLANES (GET_QREG 0-3, num_out_blocks=4
+    # FIXED), where MM_QUANT's qreg_start_idx = i + 4*o_split_idx deposits each
+    # slice's 16-ch groups into DISJOINT 16-bit sub-fields of the SAME 4 qreg
+    # (bitplane) entries (slice0 -> sub-fields[0:32], slice1 -> [32:64]). So the
+    # two slices are DISJOINT-CHANNEL BITPLANE streams: the correct channel-axis
+    # merge is a per-bitplane IMCE_OR (bit-union of disjoint sub-fields) -> 4
+    # output bitplanes each carrying the full 64ch, which is exactly what the
+    # downstream pw conv LOAD_LBs (4 bitplanes, channel innermost). RTL-verified
+    # (extended_regfile.sv qreg[4]=4 bitplanes; ISA.md input ordering
+    # bitplane-innermost) and matches the bit-exact resnet8-packresid template.
+    #
+    # This holds whether the producers are co-located (in-composite: one INTERNAL
+    # input + external peers) OR both REMOTE (STANDALONE concat: all inputs RECV'd
+    # over NoC). The EARLIER or_concat=0 "plain channel-axis copy" for the
+    # standalone case was WRONG: it treated the 4 GET_QREG BITPLANES as 4
+    # CHANNEL-blocks, so num_blocks = ceil(64/16)//2 = 2 copied only bitplanes 0,1
+    # of each slice and DROPPED bitplanes 2,3 -> the 4-bit input was truncated to
+    # its low 2 bits -> a systematic per-channel negative shift (RTL numeric bug).
+    # So: select OR_CONCAT for ANY min_max-terminal feeder, standalone included;
+    # the OR branch below is generalized to the all-external (0-internal) case.
+    if terminal_op_name == "qnn.imcflow_min_max_quantize":
       self.or_concat = 1
     else:
       self.or_concat = 0
@@ -1355,35 +1413,83 @@ class ConcatBlock(ImceCallCodeBlock):
     for arg in self.call.call.args[0].fields:
       if isinstance(arg, relay.Var):
         arg = self.call.conv_pending_info["param_to_arg"][arg]
-        if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op): # normal call
-          pass
-        elif isinstance(arg, relay.Call) and isinstance(arg.op, relay.Function): # composite call
-          arg = arg.op.body
-        else:
-          raise RuntimeError("unexpected arg type in concat")
+      # A STANDALONE concat (IMCFLOW_PACK_BN_MINMAX concat-push) has its tuple
+      # fields as DIRECT composite Calls (relay.Function op) -- an OC-split conv
+      # slice fused with its BN/minmax post-ops -- rather than Vars resolved via
+      # conv_pending_info. Both cases must unwrap the composite to its terminal
+      # body op before the getNodeID match: the in-edge's src_id.graph_node_id is
+      # the INNER node id of that terminal op, so matching against the OUTER
+      # composite id (getNodeID(composite_call)) never succeeds -> in_edges_sorted
+      # stays empty -> no `var_o = var_i` copies -> the concat SENDs unassigned
+      # output vars and drops the RECV'd producer data (the pw conv corrupts).
+      # Unwrapping here matches BOTH producer slices so the vector-copy body emits.
+      if isinstance(arg, relay.Call) and isinstance(arg.op, tvm.ir.Op): # normal call
+        pass
+      elif isinstance(arg, relay.Call) and isinstance(arg.op, relay.Function): # composite call
+        arg = arg.op.body
+      else:
+        raise RuntimeError("unexpected arg type in concat")
       for e in self.in_edges:
         if getInnerNodeID(e.src_id.graph_node_id) == getNodeID(arg):
           in_edges_sorted.append(e)
           break
 
-    assert self.call.curr_composite_id is not None, "standalone concat will be handled at handler"
-    if not self.or_concat: # input is vector form
+    # OR_CONCAT (bitplane merge) has TWO shapes:
+    #  - IN-COMPOSITE (curr_composite_id set): the concat rides on a producer's
+    #    cell -> exactly ONE INTERNAL input (var_i, computed on-cell) plus external
+    #    RECV peers. The concat is NOT wrapped in a RecvSendWrapper, so its body
+    #    OWNS the external RECV.
+    #  - STANDALONE (IMCFLOW_PACK_BN_MINMAX concat-push, curr_composite_id None):
+    #    ALL inputs arrive over NoC and the ConcatHandler wraps this block in a
+    #    RecvSendWrapper that ALREADY RECVs every edge (num_blocks per-edge into
+    #    UniqueVar((edge,i))). The body must therefore NOT re-RECV (that would
+    #    double-drain the fifos) and just OR the wrapper-RECV'd bitplanes.
+    # Both shapes produce 4 OUTPUT BITPLANES via per-bitplane IMCE_OR of the
+    # disjoint-channel slices (RTL-verified: the pw consumer LOAD_LBs 4 bitplanes,
+    # channel innermost; matches the bit-exact resnet8-packresid in-composite
+    # template). The EARLIER standalone or_concat=0 plain-copy dropped bitplanes
+    # 2,3 (4-bit input truncated to low 2 bits) -> systematic negative shift.
+    if not self.or_concat: # input is vector form (channel-block CONCAT)
       for in_edge in in_edges_sorted:
         for b in range(self.num_blocks):
           var_i = self._make_unique_input_var_for_post_op(in_edge, b)
           var_o = UniqueVar((self, b + self.num_blocks * in_edges_sorted.index(in_edge)))
           code += f"{var_o} = {var_i};"
-    else: # input is bitplane form
+    else: # input is bitplane form -> per-bitplane OR merge, 4 outputs
       external_in_edges = [e for e in self.in_edges if e in DevConfig().TensorEdgetoInfo]
-      internal_in_edge = (set(self.in_edges) - set(external_in_edges)).pop()
-      assert len(internal_in_edge) == 0, "no internal edge is expected in OR concat"
-      for i in range(num_bitplanes):
-        var_o = UniqueVar((self, i))
-        for ext_edge in external_in_edges:
-          var_e = UniqueVar((ext_edge, i))
-          fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
-          code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
-          code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
+      internal_in_edges = [e for e in self.in_edges if e not in external_in_edges]
+      if self.call.curr_composite_id is not None:
+        # IN-COMPOSITE: 1 internal producer (var_i) + external peers; body RECVs
+        # the externals itself (byte-identical to the prior in-composite path).
+        assert len(internal_in_edges) == 1, \
+            "in-composite OR_CONCAT needs exactly one internal input"
+        internal_edge = internal_in_edges[0]
+        for i in range(num_bitplanes):
+          var_i = self._make_unique_input_var_for_post_op(internal_edge, i)
+          var_o = UniqueVar((self, i))
+          for ext_edge in external_in_edges:
+            var_e = UniqueVar((ext_edge, i))
+            fifo_id = DevConfig().get_tensor_edge_info(ext_edge).fifo_id
+            code += f"{var_e} = __builtin_IMCE_RECV({fifo_id});"
+            code += f"{var_o} = __builtin_IMCE_OR({var_i}, {var_e}, {src_mask});"
+      else:
+        # STANDALONE: all inputs external and ALREADY RECV'd by the wrapper into
+        # UniqueVar((edge,i)); OR them per bitplane. NO re-RECV. Deterministic edge
+        # order = in_edges_sorted (by the concat's tuple-arg order = split_idx /
+        # channel range), so the OR combines disjoint channel ranges consistently.
+        assert len(internal_in_edges) == 0, \
+            "standalone OR_CONCAT expects all-external inputs"
+        assert len(in_edges_sorted) >= 2, \
+            "standalone OR_CONCAT expects >=2 external slices"
+        for i in range(num_bitplanes):
+          var_o = UniqueVar((self, i))
+          var_acc = UniqueVar((in_edges_sorted[0], i))
+          for k in range(1, len(in_edges_sorted)):
+            var_next = UniqueVar((in_edges_sorted[k], i))
+            # fold: acc = OR(acc, next); last fold writes var_o
+            dst = var_o if k == len(in_edges_sorted) - 1 else var_acc
+            code += f"{dst} = __builtin_IMCE_OR({var_acc}, {var_next}, {src_mask});"
+            var_acc = dst
 
     return code.render()
 
@@ -4131,7 +4237,76 @@ class RecvSendWrapper(ImceCodeBlock):
       # Each input edge has num_blocks blocks
       num_blocks = actual_send_block.num_blocks
       num_out_blocks = actual_send_block.num_out_blocks
-      count = in_total_bytes // (32 * num_blocks)
+      # STANDALONE OR_CONCAT (bitplane merge, IMCFLOW_PACK_BN_MINMAX): the wrapper
+      # RECV loop iterates range(num_blocks) PER EDGE, so it must be given the
+      # PER-EDGE bitplane count (4), NOT ConcatBlock.num_blocks which returns
+      # 4*len(in_edges)=8 for or_concat (that 8 is the in-composite BODY's total
+      # loop count). Passing 8 to the per-edge wrapper RECV -> 8*n_edges=16 RECVs
+      # for 8 real bitplane words -> 2x over-RECV fifo deadlock. Override locally to
+      # num_blocks=4 (per-edge bitplanes), num_out_blocks=4 (the 4 OR'd output
+      # bitplanes the wrapper SENDs), count = output H*W. The property is left
+      # unchanged (the in-composite body relies on 4*len(in_edges)). The pw
+      # consumer LOAD_LBs 4 bitplanes -> SEND=4 keeps send/recv consistency.
+      if actual_send_block.or_concat == 1 \
+          and getattr(actual_send_block.call, "curr_composite_id", None) is None:
+        out_vtype = get_type(call_ctx.module, call_ctx.call)  # virtual (N,C,H,W)
+        _, _oc, _oh, _ow = [int(d) for d in out_vtype.shape]
+        count = _oh * _ow
+        # These LOCAL vars are what create_loop passes to RecvSendWrapper(...) at
+        # the tail (inner = RecvSendWrapper(self.body, num_blocks, num_out_blocks,
+        # ...)). ConcatBlock.num_blocks is a property (4*len(in_edges)); we do NOT
+        # touch it (the in-composite body needs it) -- only the wrapper's per-edge
+        # RECV cadence (num_blocks) and SEND count (num_out_blocks) are overridden.
+        num_blocks = 4            # per-edge bitplanes (wrapper RECV cadence)
+        num_out_blocks = 4        # OR'd output bitplanes (wrapper SEND)
+      # A STANDALONE channel-axis concat cell (or_concat=0, IMCFLOW_PACK_BN_MINMAX
+      # concat-push) must iterate ONCE per output spatial position, emitting all
+      # num_out_blocks channel-blocks per position -- exactly like its downstream
+      # consumer. The generic `in_total_bytes // (32*num_blocks)` counts the
+      # concatenated input as if it were a single serial stream, which for N input
+      # slices over-counts the loop by N (240 vs the consumer's 120 for 2x32ch ->
+      # 64ch) -> SEND count 2x the consumer's RECV -> fifo mismatch / RTL deadlock.
+      # Derive the loop trip count from the OUTPUT spatial extent (H*W) so
+      # count*num_out_blocks == consumer recv. Guarded to the standalone case; the
+      # in-composite concat keeps curr_composite_id set and never reaches here as a
+      # standalone-wrapped block.
+      if actual_send_block.or_concat == 0 \
+          and getattr(actual_send_block.call, "curr_composite_id", None) is None:
+        out_vtype = get_type(call_ctx.module, call_ctx.call)  # virtual (N,C,H,W)
+        _, _oc, _oh, _ow = [int(d) for d in out_vtype.shape]
+        count = _oh * _ow
+        # GRANULARITY burst-pad (mirrors the BatchNormBlock branch below): each
+        # producer slice (a MinmaxQuant tail) SENDs GRANULARITY(=4) blocks/pixel
+        # (real + dummy-0 pad) under BUGFIX-off. This concat RECVs one such stream
+        # PER input edge, so its per-edge RECV block count must equal the padded
+        # producer count (4), not the real channel-block count (ceil(32/16)=2) --
+        # otherwise a per-edge fifo mismatch -> RTL deadlock. Pad the per-edge RECV
+        # cadence up to GRANULARITY so each edge's RECV loop drains 4 blocks (2 real
+        # + 2 dummy) matching the producer.
+        #
+        # ★ SEND real_blocks: the concat's OUTPUT is the MERGED channel range of ALL
+        # slices (2 slices x 2 real blocks = 4 = num_out_blocks for 64ch), so EVERY
+        # output block is REAL and must be SENT. The vector-copy body already emits
+        # var_o for all num_out_blocks (var379=var371.. var382=var376). Setting
+        # real_blocks = num_out_blocks makes RecvSendWrapper's SEND loop send all 4
+        # (no dummy tail) -> both slices reach the consumer. (The earlier code set
+        # real_blocks = real_per_edge = 2, which was correct only for the OLD
+        # co-located concat that carried ONE slice's worth of output; under Option A
+        # the concat is all-external and carries the full merge, so capping the SEND
+        # at 2 DROPPED the second slice -- var381/var382 were computed but padded to
+        # 0.) RECV cadence (num_blocks=GRANULARITY) is unchanged; only the SEND
+        # real-block count changes. SEND count per pixel stays num_out_blocks=4 so
+        # send/recv consistency and the consumer RECV cadence are unchanged.
+        GRANULARITY = 4
+        real_per_edge = actual_send_block.num_blocks  # ceil(OC/16)//n_edges = 2 (32ch)
+        if bugfix_off_mode() and real_per_edge < GRANULARITY \
+            and (GRANULARITY % real_per_edge == 0):
+          num_blocks = GRANULARITY
+          # all merged output blocks are real -> SEND them all (no dummy pad)
+          actual_send_block.real_blocks = num_out_blocks
+          actual_send_block._num_blocks = num_blocks
+      else:
+        count = in_total_bytes // (32 * num_blocks)
     elif isinstance(actual_send_block, BatchNormBlock):
       # For standalone BatchNorm, use num_blocks from the block which is
       # calculated based on scale/bias edge size

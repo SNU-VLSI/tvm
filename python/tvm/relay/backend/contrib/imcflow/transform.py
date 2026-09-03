@@ -1060,6 +1060,29 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
     #- we never include batch_norm as conv2d post op. BN is channel-wise operation, so it can be applied after concat.
     #  This simplifies parameter management and allows BN + min_max_quant to be fused into a single composite.
     post_op_candidates = [op.get("nn.bias_add"), op.get("nn.relu")]
+
+    # IMCE-packing lever (IMCFLOW_PACK_BN_MINMAX): concat-push BN/minmax into the
+    # per-OC-slice conv path so an OC-split conv emits
+    #   split -> (conv_slice -> bn_slice -> minmax) x N -> concat
+    # instead of  split -> conv_slice x N -> concat -> bn -> minmax.
+    # BN is per-channel affine and minmax has scalar (channel-independent) clip
+    # constants, so both commute with the OC-split/concat and can be applied on
+    # each slice BEFORE the concat. Once pushed, each slice is a LINEAR
+    # conv -> [bn] -> minmax chain (no concat terminal), so merge_composite_ops
+    # folds it into a qdwconv2d-with-postop composite (same-IMCE post_ops) --
+    # eliminating the standalone preop-minmax cell for OC-split (dwconv) layers.
+    # For a NON-split conv (e.g. 64ch 1x1 pw) split_and_optimize_conv2d leaves the
+    # collected post_ops linearly attached (ShouldDelete is only set on the
+    # OC-split path), so this addition is a no-op there. GATED: this list is only
+    # extended when packing is ON; OFF -> [bias_add, relu] exactly -> the split
+    # path never collects bn/minmax -> byte-identical to stock (also unchanged for
+    # ResNet8, whose BN sits after concat and is picked up by the standalone
+    # bn-minmax composite as before when packing is off).
+    if imcflow.pack_bn_minmax_mode():
+      post_op_candidates = post_op_candidates + [
+        op.get("imcflow.fused_batch_norm"),
+        op.get("qnn.imcflow_min_max_quantize"),
+      ]
     class Worker:
       def __init__(self, OldParamDict):
         self.OldParamDict = OldParamDict
@@ -1434,6 +1457,39 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
                           SplitParam = relay.Constant(tvm.nd.array(nd_array))
                         NewParams.append(SplitParam)
                       post_nodes[oc_id] = imcflow_batch_norm(post_nodes[oc_id], *NewParams)
+                    elif PostNode.op == op.get("qnn.imcflow_min_max_quantize"):
+                      # minmax clip constants (min, max) are SCALARS -- channel-
+                      # independent -- so they replay unchanged on every OC slice;
+                      # only the `channel` attr shrinks to the slice width. Args 1,2
+                      # are the min/max Constants (no per-channel slicing needed).
+                      # DISTINCT Constant per slice: reusing the SAME Constant object
+                      # for both OC slices makes them share ONE graph const inner-id,
+                      # which PnR (const_to_inode) can map to only ONE inode -- but the
+                      # two slices are placed on DIFFERENT mesh rows, so that single
+                      # shared inode is remote for one slice, forcing it MULTI-PACER
+                      # (its per-cell fused_scale/bias come from its own row inode,
+                      # the shared min/max from another) -> the pack-const cross-pacer
+                      # crosstalk / order-coupling RTL wedge. Materialize a FRESH
+                      # Constant (identical value) per slice so each min/max gets its
+                      # own inner-id and PnR co-locates it on that slice's row inode
+                      # -> every packed cell is single-pacer -> the RTL-proven flag-1
+                      # path. Values are byte-identical (same numpy data).
+                      _mn = PostNode.args[1]
+                      _mx = PostNode.args[2]
+                      if isinstance(_mn, relay.Constant):
+                        _mn = relay.const(_mn.data.numpy().copy(), dtype=str(_mn.data.dtype))
+                      if isinstance(_mx, relay.Constant):
+                        _mx = relay.const(_mx.data.numpy().copy(), dtype=str(_mx.data.dtype))
+                      post_nodes[oc_id] = imcflow_min_max_quantize(
+                        post_nodes[oc_id],
+                        _mn,
+                        _mx,
+                        axis=int(PostNode.attrs.axis),
+                        out_dtype=str(PostNode.attrs.out_dtype),
+                        param_dtype=str(PostNode.attrs.param_dtype),
+                        channel=oc_size,
+                        replicate_factor=int(PostNode.attrs.replicate_factor),
+                      )
 
                 concat_node = relay.op.concatenate([post_nodes[oc_id] for oc_id in range(oc_split_num)], axis=1)
             else:
@@ -3763,7 +3819,38 @@ class AnnotGenerator:
             composite_func = call.op
             conv_call = _find_conv_in_composite(composite_func)
             if conv_call is not None:
-              return _get_conv_cost(conv_call)
+              cost = _get_conv_cost(conv_call)
+              # IMCFLOW_PACK_BN_MINMAX region-cost correction: a packed depthwise
+              # conv-with-postop whose OC exceeds the depthwise atom (32) is later
+              # OC-SPLIT by split_conv_to_atomic + concat-push, which MATERIALIZES
+              # extra placeable PnR cells the base conv cost misses: one SPLIT (fans
+              # the input to the OC slices) + one standalone CONCAT (re-merges the
+              # slice outputs). The base cost counts only the OC slices
+              # (ceil(OC/32)); it omits split+concat, so the packed DS-CNN's
+              # cumulative region cost lands JUST under IMCE_NUM (measured 15/16) and
+              # the partitioner collapses the whole model into ONE region -> the
+              # fork-join (split[X]+concat[X]) is forced onto one cell -> RTL
+              # deadlock (unfixable in 1 region: PnR anti-affinity to separate them
+              # is Infeasible on 16 cores). Adding the split+concat cells to the cost
+              # makes the cumulative cross IMCE_NUM at a block boundary so the
+              # partitioner naturally emits 2 regions with every fork-join
+              # region-resident. Scoped to depthwise + OC-split + pack mode:
+              # resnet8 (no depthwise, no OC-split-to-concat) never triggers it ->
+              # its partitioning is byte-identical. Lever OFF -> inert.
+              try:
+                from tvm.relay.op.contrib.imcflow import pack_bn_minmax_mode as _pkm
+                if _pkm() and conv_call.op.name == "nn.imcflow_qdwconv":
+                  w = conv_call.args[1]
+                  wsh = ([int(d) for d in w.checked_type.shape]
+                         if getattr(w, "checked_type", None) is not None
+                         else (list(w.data.shape) if isinstance(w, relay.Constant) else None))
+                  if wsh is not None:
+                    OC = wsh[0]  # depthwise weight (IC,1,KH,KW); OC==IC==wsh[0]
+                    if OC > 32:  # OC-split -> materializes 1 split + 1 concat
+                      cost = cost + 2
+              except Exception as _e:
+                debug_print(f"[getCost] pack OC-split cost correction skipped: {_e}")
+              return cost
             else:
               # Composite without conv
               return 1

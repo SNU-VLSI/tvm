@@ -927,8 +927,14 @@ class SendBlock(InodeCodeBlock):
         # the SAME distinct flag per wave (v14 cross-wave alias fix). Non-merged ->
         # wave 0 -> byte-identical.
         pc_flag = pm.pack_const_go_flag(inode_hw, imce_hw, pm._edge_dst_wave(e))
+        # per-window READY token (invite) -- MUST match the imce RecvConstBlock's
+        # SETFLAG for THIS const edge. Both derive it from the SAME edge `e`, so
+        # they agree by construction (lockstep). DISTINCT per (const-window) on the
+        # imce breaks the shared-flag-1 lost-wakeup where two pacers' windows to one
+        # imce collapsed the level flag. <=1 window on the imce -> 1 (byte-id).
+        ready_flag = pm.pack_const_ready_token(imce_hw, e)
         return (
-          f"__builtin_INODE_STANDBY({imce_hw.value}, 1); // pack-const sync with {imce_hw.name}\n"
+          f"__builtin_INODE_STANDBY({imce_hw.value}, {ready_flag}); // pack-const sync with {imce_hw.name}\n"
           f"__builtin_INODE_SET_FLAG({pc_flag});\n"
           f"__builtin_INODE_STANDBY({imce_hw.value}, 0);\n"
           f"__builtin_INODE_SET_FLAG(0);\n"

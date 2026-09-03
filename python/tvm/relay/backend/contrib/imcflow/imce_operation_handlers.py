@@ -551,6 +551,32 @@ class MinMaxQuantizeHandler(OperationHandler):
     else:
       return False, None, None
 
+  def _o_split_idx_from_concat(self, call: 'BuilderContext'):
+    """Position of this min_max's OC-split composite in its downstream concat's
+    tuple (0,1,...), or None if it does not feed a concat. Used to recover the
+    lane-slot base for concat-push slices where last_tuple_idx is unavailable."""
+    try:
+      out_edges = call.get_output_edges()
+      if len(out_edges) != 1:
+        return None
+      dst_gid = out_edges[0].dst_id.graph_node_id
+      dst_node = CustomIDToNode().get(getInnerNodeID(dst_gid))
+      if not (isinstance(dst_node, relay.Call)
+              and hasattr(dst_node.op, "name")
+              and dst_node.op.name == "concatenate"):
+        return None
+      # concat tuple fields are the slice composites in channel order; match this
+      # min_max's composite (curr_composite_id) to its field index.
+      comp_id = call.curr_composite_id
+      fields = dst_node.args[0].fields if isinstance(dst_node.args[0], relay.Tuple) \
+          else [dst_node.args[0]]
+      for idx, f in enumerate(fields):
+        if isinstance(f, relay.Call) and getNodeID(f) == comp_id:
+          return idx
+      return None
+    except Exception:
+      return None
+
   def handle(self, call: 'BuilderContext') -> None:
     print(f"[IMCE CODE BUILDER] handle MinMaxQuantize: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
     hid = call.get_hid()
@@ -573,8 +599,25 @@ class MinMaxQuantizeHandler(OperationHandler):
 
     is_non_multicast_split, channels, num_splits = self.consumer_is_non_multicast_split(call)
 
-    # set o_split_idx to 0 when last_tuple_idx is None
-    block = MinmaxQuantBlock(call, call.last_tuple_idx or 0, "min_max_quantize")
+    # o_split_idx = this slice's position in its downstream concat (0,1,...). It
+    # sets the qreg LANE-SLOT base so disjoint OC slices land in disjoint 16-ch
+    # lanes of the merged bitplanes. The visit_tuple `last_tuple_idx` mechanism
+    # does NOT propagate into an IMCFLOW_PACK_BN_MINMAX concat-push slice (the
+    # min_max sits INSIDE an OC-split conv-with-postop composite, visited via a
+    # path where last_tuple_idx is None -> o_split_idx=0 for BOTH slices -> both
+    # write lanes[0:32] -> the standalone-concat OR merges them into the SAME
+    # lanes -> scramble). Derive the index directly from the graph: this min_max's
+    # composite (curr_composite_id) feeds a `concatenate`; o_split_idx = the
+    # composite's position in that concat's tuple. Pack-gated + only when
+    # last_tuple_idx is missing -> lever-OFF and the working last_tuple_idx paths
+    # (resnet8 in-composite split-concat) are byte-identical.
+    o_split_idx = call.last_tuple_idx or 0
+    if pack_bn_minmax_mode() and call.last_tuple_idx is None \
+        and getattr(call, "curr_composite_id", None) is not None:
+      derived = self._o_split_idx_from_concat(call)
+      if derived is not None:
+        o_split_idx = derived
+    block = MinmaxQuantBlock(call, o_split_idx, "min_max_quantize")
     # Priority: vec_op_stack > post_op_stack > standalone
     if self.builder.vec_op_stack is not None:
       self.builder.vec_op_stack.append(block)
