@@ -26,9 +26,15 @@ from ps_ctrl.rpc import RemotePowerSupplyManager
 PARENT = 1499.85
 # divisor grid from 100MHz upward; extend as needed
 # low-f probe grid: start LOW (large div) and push up; for low-VDD f_max<100MHz
-# HIGH->LOW: start at the highest plausible f and step DOWN; first pass
-# is f_max (charge anchor seeded there, no residual-gate on the seed).
-DIV_GRID = [12, 13, 14, 15, 17, 19, 21, 24, 27, 30, 34, 38, 43, 50, 60]  # 125..25MHz
+# HIGH->LOW scan; first pass = f_max. Start the grid at a VDD-appropriate
+# CEILING so a low VDD does not get hit with a hopeless high freq (which
+# wedges the SoC instead of just failing the gate). Ceiling from prior data:
+# 1.0->125, 0.95->115, 0.90->100, then ~ -12MHz per -0.05V, floored at 25MHz.
+FULL_GRID = [12, 13, 14, 15, 17, 19, 21, 24, 27, 30, 34, 38, 43, 50, 60]  # 125..25MHz
+def grid_for_vdd(vdd):
+    # pick a starting MHz ceiling, then take all grid points <= it
+    ceil_mhz = min(125.0, max(25.0, 125.0 - (1.00 - vdd) * 240.0))  # -12MHz/0.05V
+    return [d for d in FULL_GRID if PARENT / d <= ceil_mhz * 1.03]
 BASE_LEN, BASE_F = 149.0, 99.99
 DT = 21e-6
 def q_ref(mhz): return 44.14 + 5126.3/mhz            # DDA charge model (uC), 3-pt fit @VDD1.0
@@ -91,7 +97,7 @@ def main():
             # full value seen across all healthy runs.
             fmax = None; p_fmax = None
             FULL_NC = 2.0  # nC/conv: healthy 3.7-5.9, collapse ~0.6; 2.0 separates cleanly
-            for div in DIV_GRID:
+            for div in grid_for_vdd(vdd):
                 mhz = PARENT / div
                 setf(mhz); time.sleep(2)
                 p = run_once() or run_once()  # one transient retry every step (freq switch)
