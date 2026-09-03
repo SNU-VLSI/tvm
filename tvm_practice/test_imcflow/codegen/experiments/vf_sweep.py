@@ -144,9 +144,20 @@ def main():
                 log(f"  BEST @VDD={vdd}: f={fmax:.1f} analog={an} P={Pw*1000:.1f}mW TOPS/W={tops/Pw:.1f}")
             setf(100); mgr.set_voltage("DDA", ANV1); mgr.set_voltage("DDC", ANV1); time.sleep(1)
     finally:
-        setf(100); mgr.apply_preset("V1")
-        log(f"CSV: {out} (V1 + 100MHz restored)")
-        f.close()
+        # PS restore FIRST and independently: a wedged board makes setf() (ssh)
+        # hang/timeout, which previously skipped the voltage restore and left the
+        # rails at a low sweep value. Voltage safety must not depend on the board.
+        try:
+            mgr.apply_preset("V1"); log("PS -> V1")
+        except Exception as e:
+            log(f"PS restore FAILED: {e}")
+        try:
+            setf(100); log("clock -> 100MHz")
+        except Exception as e:
+            log(f"clock restore skipped (board likely wedged): {e}")
+        try: f.close()
+        except Exception: pass
+        log(f"CSV: {out}")
 
 
 if __name__ == "__main__":
