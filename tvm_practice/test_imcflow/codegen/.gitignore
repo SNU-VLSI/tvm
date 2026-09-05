@@ -38,3 +38,4 @@ eval_results/
 
 scan_gen/B1_scan_reg_files/
 scan_gen/B2_scan_reg_files/
+_run*.sh
