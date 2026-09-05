@@ -11,7 +11,45 @@ from tvm import relay
 from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
-from .utils import get_param_info_from_relay_func, _rand_tensor
+from .utils import get_param_info_from_relay_func
+
+
+def _make_synthetic_param(name, dtype, shape, rng):
+    """Create deterministic, numerically valid parameters for RTL smoke tests.
+
+    This model does not yet have a checkpoint loader.  Generic random tensor
+    generation is unsafe here because batch-normalization variances can become
+    negative and independently generated quantization bounds can be reversed.
+    Keep the synthetic model well-defined until trained DAE checkpoint mapping
+    is added.
+    """
+    if name == "bn_gamma1":
+        return np.ones(shape, dtype=dtype)
+    if name in ("bn_beta1", "bn_moving_mean1"):
+        return np.zeros(shape, dtype=dtype)
+    if name == "bn_moving_var1":
+        return np.ones(shape, dtype=dtype)
+
+    if name == "scale_f1":
+        return np.full(shape, 64.0, dtype=dtype)
+    if name == "post_f_inv":
+        return np.full(shape, 1.0 / 64.0, dtype=dtype)
+
+    if name.startswith("quant_min"):
+        return np.full(shape, -512, dtype=dtype)
+    if name.startswith("quant_max"):
+        return np.full(shape, 511, dtype=dtype)
+    if name.startswith("fused_scale"):
+        return np.ones(shape, dtype=dtype)
+    if name.startswith("fused_bias"):
+        return np.zeros(shape, dtype=dtype)
+
+    if name in ("weight1", "dense_weight_final"):
+        return rng.uniform(-0.125, 0.125, size=shape).astype(dtype)
+    if name.startswith("weight"):
+        return rng.integers(-2, 3, size=shape, dtype=np.dtype(dtype))
+
+    raise ValueError(f"No synthetic DAE initializer for parameter {name!r}")
 
 def get_height(H, KH, padding, stride):
     pad_h = padding
@@ -188,18 +226,26 @@ def getModel_(input_shape):
     return out, var_info
 
 
-def getModel(small_debug=False):
+def getModel(small_debug=False, seed=1234):
     """
-    Create a test model for IMCFlow deep autoencoder
+    Create a synthetic test model for IMCFlow deep autoencoder.
+
+    Args:
+      small_debug: Reserved for API compatibility.  Both modes currently use
+        the original 640-feature input shape.
+      seed: Local parameter seed.  The same seed produces identical weights
+        without mutating NumPy's process-global random state.
     """
     if small_debug:
       input_shape = (1, 640)  # batch_size=1, inputDim=640
     else:
       input_shape = (1, 640)  # batch_size=1, inputDim=640
     out, var_dict = getModel_(input_shape)
+    rng = np.random.default_rng(seed)
     params_dict={}
     for name in sorted(var_dict.keys()):
       info = var_dict[name]
-      params_dict[name] = _rand_tensor(info["dtype"], info["shape"])
+      params_dict[name] = _make_synthetic_param(
+          name, info["dtype"], info["shape"], rng)
     
     return out, params_dict

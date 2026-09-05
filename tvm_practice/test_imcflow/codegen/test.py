@@ -219,7 +219,9 @@ MODEL_REGISTRY = {
 
     # Other models
     # "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
-    # "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
+    # Synthetic 640-feature DAE used for compiler/runner bring-up.  It has no
+    # trained-checkpoint loader yet; parameters are deterministic smoke data.
+    "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
 
     # ------------------------------------------------------------------------------------------
     # DS CNN
