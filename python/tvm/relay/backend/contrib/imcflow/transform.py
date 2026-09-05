@@ -1479,7 +1479,12 @@ def split_conv_to_atomic(mod, OldParamDict, effective_oc=64):
         return NewFunc
 
     worker = Worker(OldParamDict)
-    for global_var, func in mod.functions.items():
+    # IRModule's function map does not guarantee iteration order.  Since the
+    # shared counter below becomes the persisted orig_conv_id, visit functions
+    # in a stable order so identical graphs produce identical psum maps.
+    for global_var, func in sorted(
+        mod.functions.items(), key=lambda item: item[0].name_hint
+    ):
       # if isinstance(func, relay.Function) and "Compiler" in func.attrs and re.match(r"imcflow.*", func.attrs["Compiler"]):
       if isinstance(func, relay.Function) and "global_symbol" in func.attrs and "imcflow" in func.attrs["global_symbol"]:
         mod[global_var] = worker.transform_function(func, mod)
