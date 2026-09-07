@@ -1,0 +1,2 @@
+volt,mhz,pulse_len,exp_len,perconv_nC,verdict
+0.96,125.0,0,119,,FAIL

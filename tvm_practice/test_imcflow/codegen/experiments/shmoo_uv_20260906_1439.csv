@@ -1,0 +1,4 @@
+volt,mhz,pulse_len,exp_len,perconv_nC,verdict
+0.85,93.7,0,159,,FAIL
+0.85,100.0,11,149,0.14,FAIL
+0.85,107.1,0,139,,WEDGE
