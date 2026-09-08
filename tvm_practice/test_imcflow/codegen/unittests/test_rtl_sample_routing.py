@@ -15,6 +15,23 @@ def test_rtl_sample_path_and_legacy_path(tmp_path):
     assert runner.get_output_path(str(tmp_path)) == str(tmp_path / "test_outputs/rtl_runner/output.npy")
 
 
+def test_rtl_relative_output_uses_current_worktree():
+    codegen = Path(__file__).resolve().parents[1]
+    assert module.RTLRunner().get_output_path("eval_dir/dae", 7) == str(
+        codegen / "eval_dir/dae/test_outputs/rtl_runner/sample_7/output.npy"
+    )
+
+
+def test_rtl_passes_current_worktree_to_shared_runner(tmp_path, monkeypatch):
+    commands = []
+    monkeypatch.setenv("IMCFLOW_TVM_CODEGEN_DIR", "/stale/worktree")
+    monkeypatch.setattr(module.PortAllocator, "get_port_for_test", lambda _: 10042)
+    monkeypatch.setattr(module.PortAllocator, "release_port", lambda _: None)
+    monkeypatch.setattr(module.RTLRunner, "_stream_command_output", lambda self, **kwargs: commands.append(kwargs))
+    module.RTLRunner().run("execute_graph", "no", "test", str(tmp_path))
+    assert commands[0]["env"]["IMCFLOW_TVM_CODEGEN_DIR"] == str(Path(__file__).resolve().parents[1])
+
+
 @pytest.mark.parametrize("sample", [None, 0, 7])
 def test_rtl_passes_sample_to_run_script_without_noise(tmp_path, monkeypatch, sample):
     runner = module.RTLRunner()

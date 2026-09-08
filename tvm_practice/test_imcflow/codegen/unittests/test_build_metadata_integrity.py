@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -20,7 +21,13 @@ def test_compile_metadata_records_target_and_artifact_content(tmp_path, monkeypa
     source = Path(__file__).resolve().parents[1] / "test.py"
     tree = ast.parse(source.read_text())
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "save_build_metadata")
-    scope = dict(os=os, sys=sys)
+    scope = dict(
+        os=os, sys=sys, subprocess=subprocess,
+        count_conv_macs=lambda mod: (128, 1),
+        DevConfig=lambda: SimpleNamespace(ImcflowFuncMap={
+            "tvmgen_default_imcflow_main_0": SimpleNamespace(tiling_factor=1),
+        }),
+    )
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
     monkeypatch.setenv("IMCFLOW_HOST_OS", "linux")
     monkeypatch.setenv("IMCFLOW_HOST_ISA", "arm")
@@ -32,11 +39,16 @@ def test_compile_metadata_records_target_and_artifact_content(tmp_path, monkeypa
     for path in (checkpoint, disabled, mlf):
         path.write_bytes(path.name.encode())
     options = SimpleNamespace(use_v2=True, column_disable_config=str(disabled), num_disable_columns=32,
-                              random_seed=42, single_qconv=False, retry_disable=True, max_retry_count=0, with_patch=False)
+                              random_seed=42, single_qconv=False, retry_disable=True, max_retry_count=0,
+                              with_patch=False, dataset=None, sample=None)
     scope["save_build_metadata"](str(tmp_path), False, "dae_toycar_full_pretrained", options, str(checkpoint))
     metadata = json.loads((tmp_path / "build_metadata.json").read_text())
     assert (metadata["host_os"], metadata["host_isa"], metadata["acc_mask"]) == ("linux", "arm", 1)
     assert metadata["vmode"] == "HALF"
+    assert metadata["conv_mac_count"] == 128
+    manifest = json.loads((tmp_path / "tile_manifest.json").read_text())
+    assert manifest["codegen_fingerprint"] == metadata["codegen_fingerprint"]
+    assert manifest["regions"][0]["tile_count"] == 1
     for name, path in (("checkpoint", checkpoint), ("column_disable_config", disabled), ("mlf", mlf)):
         assert metadata[name + "_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
 

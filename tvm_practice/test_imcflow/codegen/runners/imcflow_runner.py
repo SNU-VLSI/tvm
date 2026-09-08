@@ -413,7 +413,7 @@ class PyRunner(ImcFlowRunner):
         # With runner_name support, outputs are saved to:
         # {codegen_dir}/{test_name}/test_outputs/{runner_name}/output.npy
         # test_name is already "eval_dir/xxx_evl" format
-        codegen_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
+        codegen_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         parts = [codegen_dir, test_name, "test_outputs", self.name]
         if sample_idx is not None:
             parts.append(f"sample_{int(sample_idx)}")
@@ -537,7 +537,9 @@ class RTLRunner(ImcFlowRunner):
                 command=sim_command,
                 cwd=self.directory_path,
                 log_path=os.path.join(runner_log_dir, self.main_log_filename),
-                timeout=self.timeout
+                timeout=self.timeout,
+                env=dict(os.environ, IMCFLOW_TVM_CODEGEN_DIR=os.path.dirname(
+                    os.path.dirname(os.path.abspath(__file__)))),
             )
             print(f"Simulation completed")
             print(f"   Logs saved to: {runner_log_dir}/")
@@ -623,7 +625,7 @@ class RTLRunner(ImcFlowRunner):
         # With runner_name support, outputs are saved to:
         # {codegen_dir}/{test_name}/test_outputs/{runner_name}/output.npy
         # test_name is already "eval_dir/xxx_evl" format
-        codegen_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
+        codegen_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         output_dir = os.path.join(codegen_dir, test_name, "test_outputs", self.name)
         if sample_idx is not None:
             output_dir = os.path.join(output_dir, f"sample_{int(sample_idx)}")
