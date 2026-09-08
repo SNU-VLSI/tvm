@@ -1,251 +1,236 @@
 """
- @file   deep_autoencoder_imcflow.py
- @brief  Deep autoencoder model for IMCFlow hardware target
- @author Converted from original deep_autoencoder.py
- Copyright (C) 2020 Hitachi, Ltd. All right reserved.
+Deep autoencoder for IMCFlow: FP front/head and eight 1x1 IMC Dense blocks.
+
+Copyright (C) 2020 Hitachi, Ltd. All right reserved.
 """
+import json
+import os
+from pathlib import Path
 
 import numpy as np
 import tvm
 from tvm import relay
-from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize, imcflow_nu_quantize
+from tvm.relay.qnn.op.qnn import imcflow_min_max_quantize
 from tvm.relay.op.nn import imcflow_batch_norm, imcflow_qconv2d
 from tvm.relay.backend.contrib.imcflow.acim_util import ConfigData
 from .utils import get_param_info_from_relay_func
 
 
+DAE_BLOCKS = ("enc2", "enc3", "enc4", "bottleneck", "dec1", "dec2", "dec3", "dec4")
+DAE_BLOCK_CHANNELS = ((128, 128), (128, 128), (128, 128), (128, 8),
+                      (8, 128), (128, 128), (128, 128), (128, 128))
+DAE_LAYER_IDX_TO_RELAY_WEIGHT_NAME = {i: f"weight{i + 2}" for i in range(8)}
+_last_checkpoint_path = None
+_last_checkpoint_alias = None
+
+
+def get_last_checkpoint_path():
+    return _last_checkpoint_path
+
+
+def get_last_checkpoint_alias():
+    return _last_checkpoint_alias
+
+
+class EarlyStopException(Exception):
+    def __init__(self, y):
+        self.y = y
+        super().__init__()
+
+
+class RelayOpCounter:
+    """Zero-based assignment index, matching the existing subset builders."""
+    def __init__(self, until_relay):
+        if until_relay is not None and (not isinstance(until_relay, int) or until_relay < 0):
+            raise ValueError("until_relay must be a non-negative integer")
+        self.count = 0
+        self.until_relay = until_relay
+
+    def check(self, y):
+        index = self.count
+        self.count += 1
+        if self.until_relay == index:
+            raise EarlyStopException(y)
+        return y
+
+
+def getModel_(input_shape, until_relay=None):
+    """Build [N,640] -> [N,640], optionally stopping at a Relay assignment."""
+    if len(input_shape) != 2 or input_shape[1] != 640 or input_shape[0] < 1:
+        raise ValueError("DAE expects input shape (N, 640), N >= 1")
+    n, input_dim = input_shape
+    x = relay.var("model_input", shape=input_shape, dtype="float32")
+    c = RelayOpCounter(until_relay)
+    try:
+        y = c.check(relay.nn.dense(
+            x, relay.var("weight1", shape=(128, input_dim), dtype="float32")))
+        y = c.check(relay.nn.batch_norm(
+            y,
+            relay.var("bn_gamma1", shape=(128,), dtype="float32"),
+            relay.var("bn_beta1", shape=(128,), dtype="float32"),
+            relay.var("bn_moving_mean1", shape=(128,), dtype="float32"),
+            relay.var("bn_moving_var1", shape=(128,), dtype="float32"),
+            epsilon=1e-5)[0])
+        # Signed front: deploy has no ReLU here; clamp before truncating.
+        y = c.check(y * relay.var("scale_f1", shape=(1,), dtype="float32"))
+        y = c.check(relay.clip(y, -32768, 32767))
+        y = c.check(relay.cast(y, "int16"))
+        y = c.check(relay.reshape(y, (n, 128, 1, 1)))
+
+        for i, (ic, oc) in enumerate(DAE_BLOCK_CHANNELS, start=1):
+            y = c.check(imcflow_min_max_quantize(
+                y, relay.var(f"quant_min{i}", shape=(), dtype="int16"),
+                relay.var(f"quant_max{i}", shape=(), dtype="int16"),
+                axis=1, out_dtype="uint8", channel=ic))
+            y = c.check(imcflow_qconv2d(
+                y, relay.var(f"weight{i + 1}", shape=(oc, ic, 1, 1), dtype="int8"),
+                ConfigData((n, ic, 1, 1), (oc, ic, 1, 1),
+                           padding=0, stride=1).get_as_const_tensor(),
+                in_channels=ic, channels=oc, kernel_size=(1, 1), out_dtype="int16"))
+            y = c.check(imcflow_batch_norm(
+                y, relay.var(f"fused_scale{i}", shape=(oc,), dtype="int16"),
+                relay.var(f"fused_bias{i}", shape=(oc,), dtype="int16")))
+
+        y = c.check(relay.cast(y, "float32") *
+                    relay.var("post_f_inv", shape=(1,), dtype="float32"))
+        y = c.check(relay.reshape(y, (n, 128)))
+        y = c.check(relay.nn.relu(y))
+        y = c.check(relay.nn.dense(
+            y, relay.var("dense_weight_final", shape=(input_dim, 128), dtype="float32")))
+        y = c.check(relay.nn.bias_add(
+            y, relay.var("dense_bias_final", shape=(input_dim,), dtype="float32"), axis=1))
+    except EarlyStopException as stop:
+        y = stop.y
+    return tvm.IRModule.from_expr(y), get_param_info_from_relay_func(y)
+
+
 def _make_synthetic_param(name, dtype, shape, rng):
-    """Create deterministic, numerically valid parameters for RTL smoke tests.
-
-    This model does not yet have a checkpoint loader.  Generic random tensor
-    generation is unsafe here because batch-normalization variances can become
-    negative and independently generated quantization bounds can be reversed.
-    Keep the synthetic model well-defined until trained DAE checkpoint mapping
-    is added.
-    """
-    if name == "bn_gamma1":
+    """Deterministic, finite synthetic parameters, without changing global RNG."""
+    if name in ("bn_gamma1", "bn_moving_var1"):
         return np.ones(shape, dtype=dtype)
-    if name in ("bn_beta1", "bn_moving_mean1"):
+    if name in ("bn_beta1", "bn_moving_mean1", "dense_bias_final"):
         return np.zeros(shape, dtype=dtype)
-    if name == "bn_moving_var1":
-        return np.ones(shape, dtype=dtype)
-
-    if name == "scale_f1":
-        return np.full(shape, 64.0, dtype=dtype)
-    if name == "post_f_inv":
-        return np.full(shape, 1.0 / 64.0, dtype=dtype)
-
-    if name.startswith("quant_min"):
-        return np.full(shape, -512, dtype=dtype)
-    if name.startswith("quant_max"):
-        return np.full(shape, 511, dtype=dtype)
-    if name.startswith("fused_scale"):
-        return np.ones(shape, dtype=dtype)
-    if name.startswith("fused_bias"):
-        return np.zeros(shape, dtype=dtype)
-
+    constants = {"scale_f1": 64.0, "post_f_inv": 1.0 / 64.0}
+    if name in constants:
+        return np.full(shape, constants[name], dtype=dtype)
+    for prefix, value in (("quant_min", -512), ("quant_max", 511),
+                          ("fused_scale", 1), ("fused_bias", 0)):
+        if name.startswith(prefix):
+            return np.full(shape, value, dtype=dtype)
     if name in ("weight1", "dense_weight_final"):
         return rng.uniform(-0.125, 0.125, size=shape).astype(dtype)
     if name.startswith("weight"):
         return rng.integers(-2, 3, size=shape, dtype=np.dtype(dtype))
-
-    raise ValueError(f"No synthetic DAE initializer for parameter {name!r}")
-
-def get_height(H, KH, padding, stride):
-    pad_h = padding
-    out_h = (H + 2 * pad_h - KH) // stride + 1
-    return out_h
+    raise ValueError(f"No synthetic DAE initializer for {name!r}")
 
 
-def get_width(W, KW, padding, stride):
-    pad_w = padding
-    out_w = (W + 2 * pad_w - KW) // stride + 1
-    return out_w
-
-
-def getModel_(input_shape):
-    """
-    Define the IMCFlow version of deep autoencoder
-    First dense layer uses CPU (float32), middle layers use IMCFlow ops as 1x1 conv,
-    last dense layer uses CPU (float32)
-    Structure: 128*128*128*128*8*128*128*128*128
-    
-    Dense layers are represented as 1x1 convolutions by reshaping input to (N, C, 1, 1)
-    """
-    input = relay.var("model_input", shape=input_shape, dtype="float32")
-    N, inputDim = input_shape
-    
-    # First Dense layer (CPU) - keep as float32
-    y = relay.nn.dense(input, relay.var("weight1", shape=(128, inputDim), dtype="float32"))
-    y = relay.nn.batch_norm(y,
-                           relay.var("bn_gamma1", shape=(128,), dtype="float32"),
-                           relay.var("bn_beta1", shape=(128,), dtype="float32"),
-                           relay.var("bn_moving_mean1", shape=(128,), dtype="float32"),
-                           relay.var("bn_moving_var1", shape=(128,), dtype="float32"))[0]
-    y = relay.nn.relu(y)
-    
-    # Convert to int16 for IMCFlow processing
-    y = y * relay.var("scale_f1", shape=(1,), dtype="float32")
-    y = relay.cast(y, dtype="int16")
-    
-    # Reshape to (N, 128, 1, 1) for 1x1 conv representation
-    y = relay.reshape(y, newshape=(N, 128, 1, 1))
-    IC, H, W = 128, 1, 1
-    
-    # Second Dense layer (IMCFlow) - as 1x1 conv
-    y = imcflow_min_max_quantize(y, relay.var("quant_min1", shape=(), dtype="int16"),
-                                  relay.var("quant_max1", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=128)
-    y = imcflow_qconv2d(
-        y,
-        relay.var("weight2", shape=(128, 128, 1, 1), dtype="int8"),
-        ConfigData((N, IC, H, W), (128, 128, 1, 1), padding=0, stride=1).get_as_const_tensor(),
-        in_channels=128,
-        channels=128,
-        kernel_size=(1, 1),
-        out_dtype="int16"
-    )
-    IC = 128
-    y = imcflow_batch_norm(y, relay.var("fused_scale1", shape=(128,), dtype="int16"),
-                           relay.var("fused_bias1", shape=(128,), dtype="int16"))
-    
-    # Third Dense layer (IMCFlow) - as 1x1 conv
-    y = imcflow_min_max_quantize(y, relay.var("quant_min2", shape=(), dtype="int16"),
-                                  relay.var("quant_max2", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=128)
-    y = imcflow_qconv2d(
-        y,
-        relay.var("weight3", shape=(128, 128, 1, 1), dtype="int8"),
-        ConfigData((N, IC, H, W), (128, 128, 1, 1), padding=0, stride=1).get_as_const_tensor(),
-        in_channels=128,
-        channels=128,
-        kernel_size=(1, 1),
-        out_dtype="int16"
-    )
-    IC = 128
-    y = imcflow_batch_norm(y, relay.var("fused_scale2", shape=(128,), dtype="int16"),
-                           relay.var("fused_bias2", shape=(128,), dtype="int16"))
-    
-    # Fourth Dense layer (IMCFlow) - as 1x1 conv
-    y = imcflow_min_max_quantize(y, relay.var("quant_min3", shape=(), dtype="int16"),
-                                  relay.var("quant_max3", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=128)
-    y = imcflow_qconv2d(
-        y,
-        relay.var("weight4", shape=(128, 128, 1, 1), dtype="int8"),
-        ConfigData((N, IC, H, W), (128, 128, 1, 1), padding=0, stride=1).get_as_const_tensor(),
-        in_channels=128,
-        channels=128,
-        kernel_size=(1, 1),
-        out_dtype="int16"
-    )
-    IC = 128
-    y = imcflow_batch_norm(y, relay.var("fused_scale3", shape=(128,), dtype="int16"),
-                           relay.var("fused_bias3", shape=(128,), dtype="int16"))
-    
-    # Fifth Dense layer (IMCFlow) - bottleneck to 8 features as 1x1 conv
-    y = imcflow_min_max_quantize(y, relay.var("quant_min4", shape=(), dtype="int16"),
-                                  relay.var("quant_max4", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=128)
-    y = imcflow_qconv2d(
-        y,
-        relay.var("weight5", shape=(8, 128, 1, 1), dtype="int8"),
-        ConfigData((N, IC, H, W), (8, 128, 1, 1), padding=0, stride=1).get_as_const_tensor(),
-        in_channels=128,
-        channels=8,
-        kernel_size=(1, 1),
-        out_dtype="int16"
-    )
-    IC = 8
-    y = imcflow_batch_norm(y, relay.var("fused_scale4", shape=(8,), dtype="int16"),
-                           relay.var("fused_bias4", shape=(8,), dtype="int16"))
-    
-    # Sixth Dense layer (IMCFlow) - expand from 8 to 128 as 1x1 conv
-    y = imcflow_min_max_quantize(y, relay.var("quant_min5", shape=(), dtype="int16"),
-                                  relay.var("quant_max5", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=8)
-    y = imcflow_qconv2d(
-        y,
-        relay.var("weight6", shape=(128, 8, 1, 1), dtype="int8"),
-        ConfigData((N, IC, H, W), (128, 8, 1, 1), padding=0, stride=1).get_as_const_tensor(),
-        in_channels=8,
-        channels=128,
-        kernel_size=(1, 1),
-        out_dtype="int16"
-    )
-    IC = 128
-    y = imcflow_batch_norm(y, relay.var("fused_scale5", shape=(128,), dtype="int16"),
-                           relay.var("fused_bias5", shape=(128,), dtype="int16"))
-    
-    # Seventh Dense layer (IMCFlow) - as 1x1 conv
-    y = imcflow_min_max_quantize(y, relay.var("quant_min6", shape=(), dtype="int16"),
-                                  relay.var("quant_max6", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=128)
-    y = imcflow_qconv2d(
-        y,
-        relay.var("weight7", shape=(128, 128, 1, 1), dtype="int8"),
-        ConfigData((N, IC, H, W), (128, 128, 1, 1), padding=0, stride=1).get_as_const_tensor(),
-        in_channels=128,
-        channels=128,
-        kernel_size=(1, 1),
-        out_dtype="int16"
-    )
-    IC = 128
-    y = imcflow_batch_norm(y, relay.var("fused_scale6", shape=(128,), dtype="int16"),
-                           relay.var("fused_bias6", shape=(128,), dtype="int16"))
-    
-    # Eighth Dense layer (IMCFlow) - as 1x1 conv
-    y = imcflow_min_max_quantize(y, relay.var("quant_min7", shape=(), dtype="int16"),
-                                  relay.var("quant_max7", shape=(), dtype="int16"),
-                                  axis=1, out_dtype="uint8", channel=128)
-    y = imcflow_qconv2d(
-        y,
-        relay.var("weight8", shape=(128, 128, 1, 1), dtype="int8"),
-        ConfigData((N, IC, H, W), (128, 128, 1, 1), padding=0, stride=1).get_as_const_tensor(),
-        in_channels=128,
-        channels=128,
-        kernel_size=(1, 1),
-        out_dtype="int16"
-    )
-    IC = 128
-    y = imcflow_batch_norm(y, relay.var("fused_scale7", shape=(128,), dtype="int16"),
-                           relay.var("fused_bias7", shape=(128,), dtype="int16"))
-    
-    # Convert back to float32 for final layer (CPU)
-    y = relay.cast(y, dtype="float32") * relay.var("post_f_inv", shape=(1,), dtype="float32")
-    
-    # Reshape back to (N, 128) for final dense layer
-    y = relay.reshape(y, newshape=(N, 128))
-    
-    # Final Dense layer (CPU) - output reconstruction
-    y = relay.nn.dense(y, relay.var("dense_weight_final", shape=(inputDim, 128), dtype="float32"))
-
-    var_info = get_param_info_from_relay_func(y)
-    out = tvm.IRModule.from_expr(y)
-
-    return out, var_info
-
-
-def getModel(small_debug=False, seed=1234):
-    """
-    Create a synthetic test model for IMCFlow deep autoencoder.
-
-    Args:
-      small_debug: Reserved for API compatibility.  Both modes currently use
-        the original 640-feature input shape.
-      seed: Local parameter seed.  The same seed produces identical weights
-        without mutating NumPy's process-global random state.
-    """
-    if small_debug:
-      input_shape = (1, 640)  # batch_size=1, inputDim=640
-    else:
-      input_shape = (1, 640)  # batch_size=1, inputDim=640
-    out, var_dict = getModel_(input_shape)
+def getModel(small_debug=False, seed=1234, until_relay=None):
+    """Synthetic eight-block smoke model; small_debug retains API compatibility."""
+    out, var_dict = getModel_((1, 640), until_relay=until_relay)
     rng = np.random.default_rng(seed)
-    params_dict={}
-    for name in sorted(var_dict.keys()):
-      info = var_dict[name]
-      params_dict[name] = _make_synthetic_param(
-          name, info["dtype"], info["shape"], rng)
-    
-    return out, params_dict
+    return out, {name: _make_synthetic_param(name, info["dtype"], info["shape"], rng)
+                 for name, info in sorted(var_dict.items())}
+
+
+def _checkpoint_path():
+    direct = os.environ.get("CKPT_PATH", "").strip()
+    alias = os.environ.get("CKPT", "").strip() or None
+    if direct:
+        path = Path(direct).expanduser().resolve()
+    else:
+        board = os.environ.get("BOARD", "B1").upper()
+        cim = Path(os.environ.get("CIM_DIR", "/root/project/CIM"))
+        registry = cim / "checkpoints" / f"{board.lower()}_half_ad.json"
+        with registry.open() as stream:
+            reg = json.load(stream)
+        alias = alias or reg.get("default")
+        if alias not in reg["entries"]:
+            raise ValueError(f"Unknown DAE CKPT={alias!r}; available: {list(reg['entries'])}")
+        path = (cim / reg["_base"] / reg["entries"][alias] / "checkpoint.pth.tar").resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"DAE deploy checkpoint does not exist: {path}")
+    return str(path), alias
+
+
+def _validate_factors(factors):
+    values = {}
+    for i in range(1, 9):
+        for prefix in ("x_f", "bn_f"):
+            key = f"{prefix}_{i}"
+            value = factors[key]
+            if hasattr(value, "detach"):
+                value = value.detach().cpu().numpy()
+            scalar = np.asarray(value)
+            if scalar.shape != () or not np.isfinite(scalar) or scalar <= 0:
+                raise ValueError(f"{key} must be a positive finite scalar")
+            values[key] = float(scalar)
+    for i in range(1, 8):
+        if values[f"bn_f_{i}"] != values[f"x_f_{i + 1}"]:
+            raise ValueError(f"DAE factor tie violated: bn_f_{i} != x_f_{i + 1}")
+    return values
+
+
+def getModel_from_pretrained_weight(until_relay=None):
+    """Load a deploy export (not a raw training checkpoint), preserving int values."""
+    import torch
+
+    global _last_checkpoint_path, _last_checkpoint_alias
+    _last_checkpoint_path = _last_checkpoint_alias = None
+    path, alias = _checkpoint_path()
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    state = checkpoint["state_dict"]
+    factors = _validate_factors(checkpoint["adjust_factors"])
+    out, var_info = getModel_((1, 640), until_relay=until_relay)
+    mappings = {
+        "weight1": "_fh.linear1.weight",
+        "bn_gamma1": "_fh.bn1.weight",
+        "bn_beta1": "_fh.bn1.bias",
+        "bn_moving_mean1": "_fh.bn1.running_mean",
+        "bn_moving_var1": "_fh.bn1.running_var",
+        "dense_weight_final": "_fh.out.weight",
+        "dense_bias_final": "_fh.out.bias",
+    }
+    for i in range(1, 9):
+        prefix = f"blocks.{i - 1}.block_int16"
+        mappings.update({
+            f"weight{i + 1}": f"{prefix}.linear.weight",
+            f"quant_min{i}": f"{prefix}.act.min",
+            f"quant_max{i}": f"{prefix}.act.max",
+            f"fused_scale{i}": f"{prefix}.bn.scale",
+            f"fused_bias{i}": f"{prefix}.bn.bias",
+        })
+    params = {}
+    for name, info in var_info.items():
+        dtype, shape = info["dtype"], tuple(info["shape"])
+        if name == "scale_f1":
+            value = np.asarray([factors["x_f_1"]])
+        elif name == "post_f_inv":
+            value = np.asarray([1.0 / factors["bn_f_8"]])
+        else:
+            value = state[mappings[name]]
+            if hasattr(value, "detach"):
+                value = value.detach().cpu().numpy()
+            value = np.asarray(value)
+            if shape == () and value.size == 1:
+                value = value.reshape(())
+        if value.shape != shape or not np.all(np.isfinite(value)):
+            raise ValueError(f"Invalid {name}: expected finite shape {shape}, got {value.shape}")
+        target = np.dtype(dtype)
+        if np.issubdtype(target, np.integer):
+            low, high = (np.iinfo(target).min, np.iinfo(target).max)
+            if name.startswith("weight"):
+                low, high = -8, 7
+            if np.any(value != np.trunc(value)) or np.any(value < low) or np.any(value > high):
+                raise ValueError(f"{name} is not representable in [{low}, {high}]")
+        with np.errstate(over="ignore"):
+            converted = value.astype(target)
+        if not np.all(np.isfinite(converted)):
+            raise ValueError(f"{name} overflows {dtype}")
+        params[name] = converted
+    for i in range(1, 9):
+        if f"quant_max{i}" in params and params[f"quant_min{i}"] >= params[f"quant_max{i}"]:
+            raise ValueError(f"Invalid quantization bounds for {DAE_BLOCKS[i - 1]}")
+    if "bn_moving_var1" in params and np.any(params["bn_moving_var1"] < 0):
+        raise ValueError("Negative front BN running variance")
+    _last_checkpoint_path, _last_checkpoint_alias = path, alias
+    return out, params
