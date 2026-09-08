@@ -72,6 +72,16 @@ CONV_PARAMS = {
 }
 
 MODEL_PROFILE_DEFAULTS = {
+    'ad_dae': {
+        'npz_path': os.path.join(CODEGEN, 'eval_dir/dae_toycar_full_pretrained_evl.linux/psum_imcu_column_map.npz'),
+        'pysim_dir': os.path.join(CODEGEN, 'eval_dir/dae_toycar_full_pretrained_evl.baremetal/test_outputs/py_runner'),
+        'ckpt_path': os.path.join(CIM_DIR, 'runs/dae_integration/initial/checkpoint.pth.tar'),
+        # enc2, enc3, enc4, bottleneck, dec1 (IC=8), dec2, dec3, dec4.
+        'conv_params': {
+            f'weight{i + 2}': (1, 1, 0, f'blocks.{i}.block_int16.linear.weight')
+            for i in range(8)
+        },
+    },
     'resnet8': {
         'npz_path': NPZ_PATH,
         'pysim_dir': PYSIM_DIR,
@@ -121,6 +131,10 @@ def resolve_model_profile(profile=None):
         or 'resnet8'
     ).strip()
     aliases = {
+        'dae': 'ad_dae',
+        'anomaly': 'ad_dae',
+        'anomaly_detection': 'ad_dae',
+        'dae_toycar_full_pretrained': 'ad_dae',
         'resnet': 'resnet8',
         'resnet8_cifar10': 'resnet8',
         'kws': 'kws_dscnn',

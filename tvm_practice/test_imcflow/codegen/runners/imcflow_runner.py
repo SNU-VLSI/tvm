@@ -468,10 +468,8 @@ class RTLRunner(ImcFlowRunner):
         interface parity with PyRunner but ignored — the RTL path forwards
         MMIO to VCS, not to the Python IMCU model.
 
-        ``sample_idx`` is accepted for interface parity; the RTL runner's
-        bespoke run.sh path doesn't currently route a per-sample suffix to the
-        host binary, so it is also ignored here (RTL flow assumes a single
-        sample per invocation).
+        ``sample_idx`` selects the same per-sample input/output layout as
+        PyRunner, through run.sh and the gem5 RTL configuration.
         """
         if noise_csv:
             print(f"[RTLRunner] Ignoring --noise-csv={noise_csv} (RTL path "
@@ -492,8 +490,8 @@ class RTLRunner(ImcFlowRunner):
             print(f"[RTLRunner] Ignoring --noise-seed={noise_seed} (RTL path "
                   f"does not exercise the Python IMCU noise model)")
         if sample_idx is not None:
-            print(f"[RTLRunner] Ignoring sample_idx={sample_idx} (RTL path "
-                  f"does not thread per-sample dump dirs)")
+            if not isinstance(sample_idx, int) or sample_idx < 0:
+                raise ValueError("RTL sample_idx must be a nonnegative integer")
         # Allocate unique port for this test
         self._allocated_port = PortAllocator.get_port_for_test(test_name)
         print(f"Allocated socket port {self._allocated_port} for test '{test_name}'")
@@ -502,7 +500,7 @@ class RTLRunner(ImcFlowRunner):
             print(f"\n--- Running {self.display_name} ---")
 
             # Create runner-specific output directory
-            output_dir = self.get_output_path(test_name=eval_dir)
+            output_dir = self.get_output_path(test_name=eval_dir, sample_idx=sample_idx)
             os.makedirs(os.path.dirname(output_dir), exist_ok=True)
 
             # Create runner-specific log directory in test's logs folder
@@ -524,6 +522,8 @@ class RTLRunner(ImcFlowRunner):
                 binary_name, gdb_mode, test_name, abs_runner_log_dir, imc_size,
                 str(self._allocated_port)
             ]
+            if sample_idx is not None:
+                sim_command.extend(["--sample-idx", str(sample_idx)])
 
             self._stream_command_output(
                 command=sim_command,
@@ -585,8 +585,7 @@ class RTLRunner(ImcFlowRunner):
 
         Args:
             test_name: Name of the test
-            sample_idx: kept for signature parity with PyRunner; ignored (the
-                RTL path does not thread per-sample dump dirs).
+            sample_idx: optional dataset row, stored under sample_<N>.
 
         Returns:
             Absolute path to output.npy in rtl_runner test_outputs
@@ -595,9 +594,10 @@ class RTLRunner(ImcFlowRunner):
         # {codegen_dir}/{test_name}/test_outputs/{runner_name}/output.npy
         # test_name is already "eval_dir/xxx_evl" format
         codegen_dir = "/root/project/tvm/tvm_practice/test_imcflow/codegen"
-        return os.path.abspath(
-            os.path.join(codegen_dir, test_name, "test_outputs", self.name, "output.npy")
-        )
+        output_dir = os.path.join(codegen_dir, test_name, "test_outputs", self.name)
+        if sample_idx is not None:
+            output_dir = os.path.join(output_dir, f"sample_{int(sample_idx)}")
+        return os.path.abspath(os.path.join(output_dir, "output.npy"))
 
 
 # =============================================================================
