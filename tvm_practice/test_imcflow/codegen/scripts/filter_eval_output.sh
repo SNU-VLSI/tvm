@@ -42,6 +42,12 @@ BEGIN {
 
     # --- Progress bar ---
     if ($0 ~ /^Progress:/) {
+        if ($0 ~ /Metric: window_mse/) {
+            printf "\r%s", $0
+            fflush()
+            last_progress = "yes"
+            next
+        }
         match($0, /Progress: ([0-9]+)\/([0-9]+).*Failed: ([0-9]+).*Accuracy: ([0-9.]+)%/, m)
         if (RSTART > 0) {
             current = m[1] + 0

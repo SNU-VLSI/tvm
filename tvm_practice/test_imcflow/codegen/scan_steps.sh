@@ -149,7 +149,12 @@ scan_transfer_reg_files() {
         return 0
     fi
     echo "Step $STEP_NUM: Transferring scan_reg_files to remote server..."
-    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/$NPZ_FILE_PATH"
+    if [[ "${IMCFLOW_DAE_SAFE_TRANSFER:-0}" == 1 ]]; then
+        python3 "$SCRIPT_DIR_SCAN_STEPS/scripts/transfer_dae_artifacts.py" \
+            --scan-reg-dir "$SCRIPT_DIR_SCAN_STEPS/scan_gen/$NPZ_FILE_PATH"
+    else
+        echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/$NPZ_FILE_PATH"
+    fi
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer $NPZ_FILE_PATH"
         exit 1
@@ -166,7 +171,12 @@ scan_transfer_executable() {
         return 0
     fi
     echo "Step $STEP_NUM: Transferring program_scan_reg to remote server..."
-    echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/scan_executable_make"
+    if [[ "${IMCFLOW_DAE_SAFE_TRANSFER:-0}" == 1 ]]; then
+        python3 "$SCRIPT_DIR_SCAN_STEPS/scripts/transfer_dae_artifacts.py" \
+            --scan-program-dir "$SCRIPT_DIR_SCAN_STEPS/scan_gen/scan_executable_make"
+    else
+        echo "y" | ./transfer_evl.sh --host "$REMOTE_HOST" --path "scan_gen/scan_executable_make"
+    fi
     if [ $? -ne 0 ]; then
         echo "Error: Failed to transfer scan_executable_make"
         exit 1
@@ -184,7 +194,7 @@ scan_program_registers() {
     fi
     echo "Step $STEP_NUM: Executing scan program on remote chip (timeout: 0.5s)..."
     echo ""
-    scan_ssh "source ~/.bashrc && source /home/root/.venv/bin/activate && \
+    scan_ssh "source ~/.bashrc && \
                 cd $REMOTE_BASE_PATH/scan_gen/scan_executable_make/build && timeout -s INT 0.5s ./program_scan_reg \
                 $REMOTE_BASE_PATH/scan_gen/$NPZ_FILE_PATH; \
                 cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1 && \

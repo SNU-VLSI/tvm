@@ -51,6 +51,9 @@ Examples:
   # Run with v2 driver (random IMCE assignment, single-phase)
   python main.py --model one_conv_big --driver-v2
 
+  # Run the synthetic deep autoencoder through CPU validation and RTL simulation
+  IMCFLOW_RUNNER=rtl python main.py --model deep_autoencoder_imcflow --driver-v2
+
   # Run with v2 driver + column disable
   python main.py --model resnet8_subset06_pretrained_orig --driver-v2 \\
       --column-disable-config column_disable_config.json --random-seed 42

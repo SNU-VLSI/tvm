@@ -113,7 +113,7 @@ chip_lock_acquire() {
         done
         if _chip_lock_is_stale; then
             echo -e "${_YELLOW}  (no chip process detected - may be stale)${_NC}"
-            echo -e "${_YELLOW}  To remove: ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST 'rm $CHIP_LOCKFILE'${_NC}"
+            echo -e "${_YELLOW}  Inspect the recorded owner and archive the stale lock before retrying.${_NC}"
         fi
         echo -e "${_RED}=========================================${_NC}"
         echo ""
@@ -145,11 +145,13 @@ LOCKEOF"
 }
 
 chip_lock_release() {
-    _chip_lock_ssh "rm -f $CHIP_LOCKFILE" 2>/dev/null
-    if [[ $? -eq 255 ]]; then
+    # Preserve the lock record in tmpfs; no destructive shell cleanup is needed.
+    local release_id="$(date +%s%N).$$"
+    _chip_lock_ssh "if [ -e '$CHIP_LOCKFILE' ]; then mv '$CHIP_LOCKFILE' '$CHIP_LOCKFILE.released.$release_id'; fi" 2>/dev/null
+    if [[ $? -ne 0 ]]; then
         echo -e "${_YELLOW}[CHIP LOCK] Warning: could not release lock (chip unreachable).${_NC}"
         echo -e "${_YELLOW}  Lock file ${CHIP_LOCKFILE} may remain on remote.${_NC}"
-        echo -e "${_YELLOW}  Remove manually when chip is back: ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST 'rm $CHIP_LOCKFILE'${_NC}"
+        echo -e "${_YELLOW}  Inspect and archive the lock manually when the chip is back.${_NC}"
     else
         echo -e "${_GREEN}[CHIP LOCK] Released${_NC}"
     fi

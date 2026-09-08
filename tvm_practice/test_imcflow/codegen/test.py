@@ -63,6 +63,8 @@ def _checkpoint_module_for_test(test_name):
   get_last_checkpoint_path()/get_last_checkpoint_alias() set during weight load.
   """
   name = test_name or ""
+  if name.startswith("dae_"):
+    return deep_autoencoder_imcflow
   if name.startswith("ds_cnn"):
     return ds_cnn_subset_models
   if name.startswith("resnet8"):
@@ -221,7 +223,10 @@ MODEL_REGISTRY = {
 
     # Other models
     # "mobilenet_imcflow": (lambda: mobilenet_imcflow.getModel(False), "random"),
-    # "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
+    # Synthetic 640-feature DAE used for compiler/runner bring-up.  It has no
+    # trained-checkpoint loader yet; parameters are deterministic smoke data.
+    "deep_autoencoder_imcflow": (lambda: deep_autoencoder_imcflow.getModel(False), "random"),
+    "dae_toycar_full_pretrained": (lambda: deep_autoencoder_imcflow.getModel_from_pretrained_weight(), "random"),
 
     # ------------------------------------------------------------------------------------------
     # DS CNN
@@ -529,9 +534,12 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
 
   # Save board and vmode from environment / runtime
   metadata["board"] = os.getenv("BOARD", None)
+  metadata["host_os"] = os.getenv("IMCFLOW_HOST_OS", "baremetal").lower()
+  metadata["host_isa"] = os.getenv("IMCFLOW_HOST_ISA", "x86").lower()
   try:
-    from tvm.relay.backend.contrib.imcflow.acim_util import get_default_vmode
+    from tvm.relay.backend.contrib.imcflow.acim_util import get_default_vmode, get_default_acc_mask
     metadata["vmode"] = str(get_default_vmode().name)
+    metadata["acc_mask"] = int(get_default_acc_mask().value)
   except Exception:
     metadata["vmode"] = os.getenv("VMODE", None)
 
@@ -540,6 +548,7 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
     metadata["column_disable_config"] = options.column_disable_config
     metadata["num_disable_columns"] = options.num_disable_columns
     metadata["random_seed"] = options.random_seed
+    metadata["fixed_imce_core"] = getattr(options, "fixed_imce_core", None)
     metadata["single_qconv"] = options.single_qconv
     metadata["retry_disable"] = options.retry_disable
     metadata["max_retry_count"] = options.max_retry_count
@@ -639,6 +648,21 @@ def save_build_metadata(eval_dir, use_patched: bool, test_name: str = None,
   with open(tile_manifest_path, "w") as f:
     json.dump(tile_manifest, f, indent=2, sort_keys=True)
     f.write("\n")
+  # Bind the recorded paths to the artifacts that produced this build. A path
+  # alone cannot identify a checkpoint when a later loop iteration replaces it.
+  import hashlib
+  artifact_paths = {
+    "checkpoint": checkpoint_path,
+    "mlf": os.path.join(eval_dir, "lib_graph_system-lib.tar"),
+    "column_disable_config": options.column_disable_config if options else None,
+  }
+  for name, path in artifact_paths.items():
+    if path and os.path.isfile(path):
+      digest = hashlib.sha256()
+      with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+          digest.update(chunk)
+      metadata[name + "_sha256"] = digest.hexdigest()
 
   metadata_path = os.path.join(eval_dir, "build_metadata.json")
   with open(metadata_path, "w") as f:
@@ -696,6 +720,16 @@ def setup_dir(test_name, suffix=""):
         shutil.rmtree(runner_path)
 
   dir_name = f"{test_name}{suffix}"
+  dae_prefixes = ("deep_autoencoder_imcflow_evl.", "dae_toycar_full_pretrained_evl.")
+  if os.path.basename(dir_name).startswith(dae_prefixes) and os.path.lexists(dir_name):
+    # Keep prior simulator traces and board artifacts recoverable across DAE
+    # recompiles. Simulation-only reuse never calls setup_dir.
+    import uuid
+    archive = dir_name + ".previous." + uuid.uuid4().hex
+    if os.path.lexists(archive):
+      raise FileExistsError(archive)
+    os.rename(dir_name, archive)
+    print(f"  Preserved previous DAE build: {archive}")
   if not os.path.exists(dir_name):
     os.makedirs(dir_name)
   else:
