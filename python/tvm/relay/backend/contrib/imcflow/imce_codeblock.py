@@ -767,6 +767,32 @@ class ReLUBlock(VecBlock):
     return "MAXI"
 
 
+def classify_minmax_quantize_outputs(out_edges, func_name):
+  """Distinguish channel-group DW splitting from ordinary tensor multicast.
+
+  Multiple ordinary consumers receive the same complete source tensor. Split
+  consumers instead need their channel-group metadata and are only supported
+  as a single output. FIFO/policy agreement remains checked by the wrapper.
+  """
+  if not out_edges:
+    raise ValueError("Min/max quantize requires at least one output edge")
+  consumers = [CustomIDToNode()[getInnerNodeID(edge.dst_id.graph_node_id)]
+                for edge in out_edges]
+  is_split = [isinstance(node, relay.Call) and node.op == relay.op.get("split")
+              for node in consumers]
+  if len(out_edges) > 1:
+    if any(edge.src_id != out_edges[0].src_id for edge in out_edges):
+      raise ValueError("Min/max quantize multicast requires the same source tensor")
+    if any(is_split):
+      raise ValueError("Min/max quantize does not support multiple outputs with split consumers")
+    return False, None, None
+  if is_split[0]:
+    # Missing split metadata must fail, never silently use ordinary multicast.
+    split_info = DevConfig().SplitInfo[func_name][getNodeID(consumers[0])]
+    return not split_info["is_multi_cast"], split_info["channels"], split_info["num_splits"]
+  return False, None, None
+
+
 class MinmaxQuantBlock(ImceCallCodeBlock):
   """
   MinmaxQuantBlock for min/max quantization operations.
@@ -790,18 +816,7 @@ class MinmaxQuantBlock(ImceCallCodeBlock):
     return 4  # FIXED in MinmaxQuantBlock
 
   def consumer_is_non_multicast_split(self):
-    assert len(self.out_edges) == 1, "Only one output edge is expected"
-    out_edge = self.out_edges[0]
-    dst_gid = out_edge.dst_id.graph_node_id
-    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
-    if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
-      split_info = DevConfig().SplitInfo[self.call.func_name][getNodeID(dst_node)]
-      is_multicast = split_info["is_multi_cast"]
-      channels = split_info["channels"]
-      num_splits = split_info["num_splits"]
-      return (not is_multicast), channels, num_splits
-    else:
-      return False, None, None
+    return classify_minmax_quantize_outputs(self.out_edges, self.call.func_name)
   
   def get_split_consumer_edge_info(self):
     assert len(self.out_edges) == 1, "Only one output edge is expected"

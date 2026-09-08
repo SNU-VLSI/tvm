@@ -528,19 +528,7 @@ class MinMaxQuantizeHandler(OperationHandler):
     return call.op == op.get("qnn.imcflow_min_max_quantize")
 
   def consumer_is_non_multicast_split(self, call:'BuilderContext') -> tuple[bool, int, int]:
-    out_edges = call.get_output_edges()
-    assert len(out_edges) == 1, "Only one output edge is expected"
-    out_edge = out_edges[0]
-    dst_gid = out_edge.dst_id.graph_node_id
-    dst_node = CustomIDToNode()[getInnerNodeID(dst_gid)]
-    if isinstance(dst_node, relay.Call) and dst_node.op.name == "split":
-      split_info = DevConfig().SplitInfo[call.func_name][getNodeID(dst_node)]
-      is_multicast = split_info["is_multi_cast"]
-      channels = split_info["channels"]
-      num_splits = split_info["num_splits"]
-      return (not is_multicast), channels, num_splits
-    else:
-      return False, None, None
+    return classify_minmax_quantize_outputs(call.get_output_edges(), call.func_name)
 
   def handle(self, call: 'BuilderContext') -> None:
     print(f"[IMCE CODE BUILDER] handle MinMaxQuantize: {getNodeID(call.call)} {getNodeDebugID(call.call)}")
