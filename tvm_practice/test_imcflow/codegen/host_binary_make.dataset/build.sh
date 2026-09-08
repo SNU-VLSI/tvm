@@ -90,7 +90,11 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 # Clean previous build
-rm -rf *
+if [ -n "$(ls -A .)" ]; then
+    PREVIOUS_BUILD_DIR=$(mktemp -d ../build.previous.XXXXXX) || exit 1
+    find . -mindepth 1 -maxdepth 1 -exec mv -- {} "$PREVIOUS_BUILD_DIR/" \; || exit 1
+    echo "Previous build preserved in $PREVIOUS_BUILD_DIR"
+fi
 
 # Configure
 CMAKE_ARGS=(

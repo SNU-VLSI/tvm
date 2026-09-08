@@ -89,6 +89,7 @@ static inline int node_is_imcflow(const char* name) {
 
 // Dataset loader
 #include "npy_dataset_loader.h"
+#include "dae_dataset_metrics.h"
 
 // Result file handle (global for use by helper functions)
 static FILE* g_result_file = NULL;
@@ -299,6 +300,7 @@ int main(int argc, char** argv) {
   const char* images_path = argv[3];
   const char* labels_path = argv[4];
   const char* result_path = argc > 6 ? argv[6] : DEFAULT_RESULT_PATH;
+  const int dae_mode = dae_dataset_mode();
 
   // Timing instrumentation toggle
   {
@@ -330,11 +332,20 @@ int main(int argc, char** argv) {
   // Open result file
   g_result_file = fopen(result_path, "w");
   if (!g_result_file) {
+    if (dae_mode) {
+      fprintf(stderr, "DAE requires a writable result file: %s\n", result_path);
+      return 2;
+    }
     fprintf(stderr, "Warning: Could not open result file '%s', results will only go to stdout\n", result_path);
   } else {
     fprintf(stderr, "Results will be saved to: %s\n", result_path);
   }
 
+  if (dae_mode && dae_write_run_header(g_result_file) != 0) {
+    fprintf(stderr, "DAE requires a writable result and a fresh 32-hex IMCFLOW_DAE_RUN_ID\n");
+    if (g_result_file) fclose(g_result_file);
+    return 2;
+  }
   fprintf(stderr, "\n");
   fprintf(stderr, "========================================\n");
   fprintf(stderr, "  TVM Dataset Evaluation\n");
@@ -591,6 +602,8 @@ int main(int argc, char** argv) {
   }
 
   int correct = 0;
+  int dae_evaluated = 0;
+  double dae_mse_sum = 0;
   int failed_count = 0;
   int failed_indices[MAX_INDICES];
 
@@ -607,6 +620,10 @@ int main(int argc, char** argv) {
     void* sample_data = get_sample(&images, sample_idx);
     if (!sample_data) {
       fprintf(stderr, "Failed to get sample %zu\n", sample_idx);
+      if (dae_mode) {
+        if (failed_count < MAX_INDICES) failed_indices[failed_count] = (int)sample_idx;
+        failed_count++;
+      }
       continue;
     }
     memcpy(input_tensor.data, sample_data, images.sample_size);
@@ -642,7 +659,12 @@ int main(int argc, char** argv) {
       if (g_result_file) {
         fprintf(g_result_file, "\n[Sample %zu] FAILED (timeout)\n", sample_idx);
       }
-      failed_indices[failed_count++] = (int)sample_idx;
+      if (failed_count < MAX_INDICES) failed_indices[failed_count] = (int)sample_idx;
+      failed_count++;
+      if (dae_mode) {
+        dae_progress(iter + 1, num_samples, dae_evaluated, failed_count);
+        continue;
+      }
       // Print progress after skip so progress bar stays updated
       int evaluated = (int)(iter + 1) - failed_count;
       double accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
@@ -656,6 +678,10 @@ int main(int argc, char** argv) {
     rc = TVMGraphExecutor_GetOutput(exec, 0, &output_tensor);
     if (rc != 0) {
       fprintf(stderr, "GetOutput failed for sample %zu: %d\n", sample_idx, rc);
+      if (dae_mode) {
+        if (failed_count < MAX_INDICES) failed_indices[failed_count] = (int)sample_idx;
+        failed_count++;
+      }
       continue;
     }
 
@@ -673,6 +699,21 @@ int main(int argc, char** argv) {
       fflush(stderr);
       g_sum_total_ns += total_ns; g_sum_hw_ns += g_ns_hw; g_sum_cpu_ns += g_ns_cpu;
       g_sum_setin_ns += setin_ns; g_sum_overhead_ns += overhead_ns; g_timed_samples++;
+    }
+
+    if (dae_mode) {
+      double mse = 0;
+      if (dae_record_sample(g_result_file, sample_idx, get_label(&labels, sample_idx),
+                            &images, sample_data, &output_tensor, &mse) != 0) {
+        fprintf(stderr, "[SKIP] Sample %zu FAILED (invalid DAE output/result write)\n", sample_idx);
+        if (failed_count < MAX_INDICES) failed_indices[failed_count] = (int)sample_idx;
+        failed_count++;
+      } else {
+        dae_evaluated++;
+        dae_mse_sum += mse;
+      }
+      dae_progress(iter + 1, num_samples, dae_evaluated, failed_count);
+      continue;
     }
 
     // Get prediction (argmax)
@@ -706,7 +747,7 @@ int main(int argc, char** argv) {
   // ============================================================================
   // Final Results
   // ============================================================================
-  int evaluated = (int)num_samples - failed_count;
+  int evaluated = dae_mode ? dae_evaluated : (int)num_samples - failed_count;
   double final_accuracy = evaluated > 0 ? 100.0 * correct / evaluated : 0.0;
 
   FILE* outs[] = { stdout, g_result_file };
@@ -720,11 +761,16 @@ int main(int argc, char** argv) {
     fprintf(f, "Total Samples: %zu\n", num_samples);
     fprintf(f, "Evaluated:     %d\n", evaluated);
     fprintf(f, "Failed:        %d\n", failed_count);
-    fprintf(f, "Correct:       %d\n", correct);
-    fprintf(f, "Accuracy:      %.2f%% (%d/%d)\n", final_accuracy, correct, evaluated);
+    if (dae_mode) {
+      fprintf(f, "Metric:        window_mse (file AUC is aggregated on master)\n");
+      if (evaluated) fprintf(f, "Mean MSE:      %.17g\n", dae_mse_sum / evaluated);
+    } else {
+      fprintf(f, "Correct:       %d\n", correct);
+      fprintf(f, "Accuracy:      %.2f%% (%d/%d)\n", final_accuracy, correct, evaluated);
+    }
     if (failed_count > 0) {
       fprintf(f, "Failed indices:");
-      for (int i = 0; i < failed_count; i++) {
+      for (int i = 0; i < failed_count && i < MAX_INDICES; i++) {
         fprintf(f, " %d", failed_indices[i]);
       }
       fprintf(f, "\n");
@@ -778,5 +824,5 @@ int main(int argc, char** argv) {
   TVMGraphExecutor_Release(&exec);
 
   fprintf(stderr, "Cleanup completed\n");
-  return 0;
+  return dae_mode && failed_count ? 3 : 0;
 }

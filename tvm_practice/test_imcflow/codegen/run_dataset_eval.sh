@@ -239,6 +239,27 @@ fi
 # sample_map.json there records staged->original rows. Set NO_STAGE=1 to keep the
 # old whole-dataset behavior (e.g. to evaluate the full set on-chip).
 STAGED_DIR="$DATASET_DIR/$DATASET_NAME/_staged"
+DAE_ENV=""
+DAE_RUN_ID="${DAE_RUN_ID:-}"
+DAE_RUN_FAILED=0
+DAE_DATASET=0
+case "$DATASET_NAME" in
+    toyadmos|toyadmos_feedback|toyadmos_eval) DAE_DATASET=1 ;;
+esac
+if [[ "$DAE_DATASET" == 1 ]]; then
+    export IMCFLOW_DAE_SAFE_TRANSFER=1
+    DAE_RUN_ID="${DAE_RUN_ID:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}" || exit 1
+    if [[ ! "$DAE_RUN_ID" =~ ^[0-9a-f]{32}$ ]]; then
+        echo "Error: DAE_RUN_ID must contain 32 lowercase hexadecimal digits" >&2
+        exit 1
+    fi
+    DAE_SAVE_RECONSTRUCTION="${DAE_SAVE_RECONSTRUCTION:-$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["mode"] == "verification"))' "$DATASET_DIR/$DATASET_NAME/metadata.json")}" || exit 1
+    if [[ "$DAE_SAVE_RECONSTRUCTION" != 0 && "$DAE_SAVE_RECONSTRUCTION" != 1 ]]; then
+        echo "Error: DAE_SAVE_RECONSTRUCTION must be 0 or 1" >&2
+        exit 1
+    fi
+    DAE_ENV="IMCFLOW_DATASET_TASK=anomaly_detection IMCFLOW_DAE_RUN_ID=$DAE_RUN_ID IMCFLOW_DAE_SAVE_RECONSTRUCTION=$DAE_SAVE_RECONSTRUCTION "
+fi
 if [[ "${NO_STAGE:-0}" != "1" ]]; then
     if [[ -n "$SAMPLE_INDICES" ]]; then
         STAGE_SEL=(--indices "$SAMPLE_INDICES")
@@ -302,6 +323,20 @@ trap 'chip_lock_release' EXIT
 if [[ "$SKIP_STEP2" == true ]]; then
     echo "Step 2: Skipped."
     echo ""
+elif [[ "$DAE_DATASET" == 1 ]]; then
+    DAE_TRANSFER_SOURCE="$STAGED_DIR"
+    DAE_TRANSFER_TARGET="dataset/$DATASET_NAME/_staged"
+    if [[ "${NO_STAGE:-0}" == 1 ]]; then
+        DAE_TRANSFER_SOURCE="$DATASET_DIR/$DATASET_NAME"
+        DAE_TRANSFER_TARGET="dataset/$DATASET_NAME"
+    fi
+    echo "Step 2: Verifying/transferring immutable DAE runtime and inputs..."
+    REMOTE_HOST="$REMOTE_HOST" REMOTE_PORT="$REMOTE_PORT" REMOTE_USER="$REMOTE_USER" \
+    REMOTE_BASE_PATH="$REMOTE_BASE_PATH" REMOTE_AUTH_METHOD="$REMOTE_AUTH_METHOD" \
+    REMOTE_PASSWORD="${REMOTE_PASSWORD:-}" \
+    python3 scripts/transfer_dae_artifacts.py --binary-dir "$BINARY_DIR" \
+        --executable "$DATASET_EXEC_NAME" --dataset-dir "$DAE_TRANSFER_SOURCE" \
+        --dataset-target "$DAE_TRANSFER_TARGET" || exit 1
 else
     echo "Step 2: Transferring $BINARY_DIR to remote server..."
     echo ""
@@ -346,7 +381,11 @@ else
     # of create/unlink churn on the SD ext4 was corrupting its directory htree
     # ("Bad message"). tmpfs absorbs it with zero SD wear; fetched + freed below.
     # Overridable via CHIP_DEBUG_DUMP_DIR / CHIP_HEARTBEAT_PATH.
-    CHIP_DEBUG_DUMP_DIR="${CHIP_DEBUG_DUMP_DIR:-/var/volatile/debug_nodes}"
+    if [[ "$DAE_DATASET" == 1 ]]; then
+        CHIP_DEBUG_DUMP_DIR="${CHIP_DEBUG_DUMP_DIR:-/var/volatile/dae_debug}/$DAE_RUN_ID"
+    else
+        CHIP_DEBUG_DUMP_DIR="${CHIP_DEBUG_DUMP_DIR:-/var/volatile/debug_nodes}"
+    fi
     CHIP_HEARTBEAT_PATH="${CHIP_HEARTBEAT_PATH:-/var/volatile/imcflow_chip_heartbeat.txt}"
     # Pin the eval binary to a single, otherwise-idle CPU core (taskset). The ZynqMP
     # A53 has 4 cores; CPU0 carries the eth0/mmc/i2c IRQ handlers. When the eval was
@@ -364,14 +403,14 @@ else
     if [ -n "${IMCFLOW_TIMING:-}" ]; then
         TIMING_ENV="IMCFLOW_TIMING=$IMCFLOW_TIMING "
     fi
-    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
+    REMOTE_CMD="cd $REMOTE_BASE_PATH && ${DAE_ENV}${TIMING_ENV}IMCFLOW_DEBUG_DUMP_DIR=$CHIP_DEBUG_DUMP_DIR IMCFLOW_HEARTBEAT_PATH=$CHIP_HEARTBEAT_PATH taskset -c $CHIP_EVAL_CPU $BINARY_DIR/build/$DATASET_EXEC_NAME \
 $GRAPH_PATH \
 $PARAMS_PATH \
 $IMAGES_PATH \
 $LABELS_PATH \
 $SAMPLES_ARG \
-$REMOTE_RESULT_PATH; \
-cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1"
+$REMOTE_RESULT_PATH; dataset_status=\$?; \
+cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > /dev/null 2>&1; exit \$dataset_status"
     echo "[CMD] $(scan_ssh_display) \"$REMOTE_CMD\""
 
     if [[ "$QUIET_MODE" == true ]]; then
@@ -396,7 +435,12 @@ cd /home/root/imcflow/xilinx/petalinux-csrc && make clear_time && make warmup > 
         echo "=========================================="
         echo "Dataset evaluation failed!"
         echo "=========================================="
-        exit 1
+        if [[ "$DAE_DATASET" == 1 ]]; then
+            DAE_RUN_FAILED=1
+            echo "Fetching partial DAE results for missing-window recovery."
+        else
+            exit 1
+        fi
     fi
 fi
 
@@ -417,7 +461,22 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
 
     # Clean only sample_* from target directory, preserving run_* from repeat_dataset_eval.
     mkdir -p "$LOCAL_DEBUG_DIR"
-    if [[ "${PRESERVE_DEBUG_DUMPS:-0}" == "1" ]]; then
+    if [[ "$DAE_DATASET" == 1 ]]; then
+        # Preserve retries in separate local directories; never merge stale nodes.
+        python3 - "$LOCAL_DEBUG_DIR" <<'PY'
+from pathlib import Path
+import sys
+import tempfile
+root = Path(sys.argv[1])
+paths = list(root.glob('sample_*'))
+if paths:
+    archive = Path(tempfile.mkdtemp(prefix='previous.', dir=str(root)))
+    for path in paths:
+        path.rename(archive / path.name)
+    print('Archived previous DAE sample dumps:', archive)
+PY
+        if [[ $? -ne 0 ]]; then exit 1; fi
+    elif [[ "${PRESERVE_DEBUG_DUMPS:-0}" == "1" ]]; then
         echo "Preserving existing local sample_* in $LOCAL_DEBUG_DIR/ ..."
     elif compgen -G "$LOCAL_DEBUG_DIR/sample_*" > /dev/null; then
         echo "Removing stale sample_* in $LOCAL_DEBUG_DIR/ ..."
@@ -435,11 +494,16 @@ if [[ "${DEBUG_EXE}" == "1" ]] && [[ "$SKIP_STEP6" != true ]]; then
         # them accumulates across runs and can exhaust chip memory. PRESERVE_DEBUG_DUMPS
         # only governs the LOCAL copy (already fetched above); it must NOT keep the
         # tmpfs copy alive.
-        echo "Freeing remote tmpfs debug_nodes..."
-        scan_ssh "rm -rf $REMOTE_DEBUG_DIR"
-        echo "✅ Remote tmpfs debug_nodes freed"
+        if [[ "$DAE_DATASET" == 1 ]]; then
+            echo "DAE dumps retained in $REMOTE_DEBUG_DIR; next planned board reboot clears tmpfs."
+        else
+            echo "Freeing remote tmpfs debug_nodes..."
+            scan_ssh "rm -rf $REMOTE_DEBUG_DIR"
+            echo "✅ Remote tmpfs debug_nodes freed"
+        fi
     else
         echo "⚠️  Failed to fetch debug_nodes (remote may not have any)"
+        if [[ "$DAE_DATASET" == 1 ]]; then DAE_RUN_FAILED=1; fi
     fi
     echo ""
 fi
@@ -497,6 +561,14 @@ for k, v in m.items():
             mv "${LOCAL_RESULT_FILE}.tmp" "$LOCAL_RESULT_FILE"
         fi
 
+        if [[ "$DAE_DATASET" == 1 ]]; then
+            DAE_METADATA_ARGS=(--result "$LOCAL_RESULT_FILE" --dataset "$DATASET_DIR/$DATASET_NAME"
+                --build-metadata "$METADATA_FILE" --run-id "$DAE_RUN_ID" --target "$REMOTE_HOST:$REMOTE_PORT")
+            if [[ "${NO_STAGE:-0}" != 1 ]]; then
+                DAE_METADATA_ARGS+=(--staged "$STAGED_DIR")
+            fi
+            python3 "$SCRIPT_DIR/scripts/save_dae_run_metadata.py" "${DAE_METADATA_ARGS[@]}" || exit 1
+        fi
         echo ""
         echo "=========================================="
         echo "Result file saved to: $LOCAL_RESULT_FILE"
@@ -511,4 +583,9 @@ for k, v in m.items():
         echo "Warning: Failed to fetch result file from remote"
         echo "=========================================="
     fi
+fi
+
+# Preserve nonzero inference status even after successfully fetching partial data.
+if [[ "$DAE_RUN_FAILED" == 1 ]]; then
+    exit 1
 fi
