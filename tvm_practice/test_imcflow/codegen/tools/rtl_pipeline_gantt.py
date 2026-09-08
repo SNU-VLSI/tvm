@@ -131,6 +131,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('eval_dir'); ap.add_argument('-o', '--out', required=True)
     ap.add_argument('--regions', default='')
+    ap.add_argument('--render', choices=['dominant', 'presence'], default='presence',
+                    help="bin coloring: 'dominant' = largest-share class per bin "
+                         "(thin mm/add bursts vanish); 'presence' = priority "
+                         "compute>noc>wait, so any compute in a bin shows (default)")
     a = ap.parse_args()
     ld = _resolve_log_dir(Path(a.eval_dir))
     ev = core_events(ld)
@@ -167,7 +171,14 @@ def main():
                         acc[g][min(i0, NB)+1:min(i1, NB)] += binw
             names = list(GCOL)
             stack = np.stack([acc[g] for g in names])
-            dom = np.where(stack.sum(0) > 0, stack.argmax(0), -1)
+            if a.render == 'presence':
+                # priority compute > noc > wait: a bin shows compute if ANY
+                # compute cycles landed in it (keeps 2-6cyc mm/add bursts visible)
+                dom = np.full(NB + 1, -1)
+                for gi in reversed(range(len(names))):   # wait, noc, compute
+                    dom = np.where(stack[gi] > 0, gi, dom)
+            else:
+                dom = np.where(stack.sum(0) > 0, stack.argmax(0), -1)
             # runs of equal dominant class -> one broken_barh batch per class
             spans = {g: [] for g in names}
             j = 0
