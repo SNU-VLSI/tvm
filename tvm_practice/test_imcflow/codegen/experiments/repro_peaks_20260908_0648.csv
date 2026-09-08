@@ -1,0 +1,7 @@
+point,input,vdd,an,mhz,run,vdd_mA,dda_mA,ddc_mA,pulse_len,exp_len,P_mW,TOPS_per_W
+peak_tops,rand4,1.0,1.02,125.0,1,,,,12,119,,LEN-FAIL
+peak_tops,rand4,1.0,1.02,125.0,2,,,,13,119,,LEN-FAIL
+peak_tops,rand4,1.0,1.02,125.0,3,,,,12,119,,LEN-FAIL
+peak_eff,rand4,0.81,0.66,50.0,1,37.83,3.30,24.58,295,298,49.0,29.1
+peak_eff,rand4,0.81,0.66,50.0,2,37.83,3.29,24.58,295,298,49.0,29.1
+peak_eff,rand4,0.81,0.66,50.0,3,37.91,3.29,24.57,294,298,49.1,29.0

@@ -1,0 +1,5 @@
+point,input,vdd,an,mhz,run,vdd_mA,dda_mA,ddc_mA,pulse_len,exp_len,P_mW,TOPS_per_W
+tops_an115,rand4,1.0,1.15,125.0,1,,,,14,119,,LEN-FAIL
+tops_an115,rand4,1.0,1.15,125.0,2,,,,14,119,,LEN-FAIL
+tops_115mhz,rand4,1.0,1.02,115.4,1,93.50,22.05,70.58,133,129,188.0,17.5
+tops_115mhz,rand4,1.0,1.02,115.4,2,93.59,21.82,70.53,133,129,187.8,17.5
