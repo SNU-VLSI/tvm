@@ -36,7 +36,7 @@ import torch
 import torch.nn.functional as F
 
 CODEGEN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CIM_DIR = '/root/project/CIM'
+CIM_DIR = os.environ.get('CIM_DIR', '/root/project/CIM')
 sys.path.insert(0, CIM_DIR)
 sys.path.insert(0, os.path.join(CODEGEN, 'scripts'))
 
@@ -446,6 +446,8 @@ def main():
     parser.add_argument('--samples', default='0-199')
     parser.add_argument('--output', default='aggregated_noise_table.npz')
     parser.add_argument('--checkpoint', default=None)
+    parser.add_argument('--noise-model-config', default=None,
+                        help='Common versioned noise_model config (opt-in)')
     parser.add_argument('--n-ref-bins', type=int, default=200,
                         help='Number of clean_ref bins')
     parser.add_argument('--ref-range', type=float, nargs=2, default=None,
@@ -480,6 +482,17 @@ def main():
                         help='Path to psum_imcu_column_map.npz '
                              '(default: selected model profile)')
     args = parser.parse_args()
+    contract = None
+    if args.noise_model_config:
+        from exact_noise_contract import load_contract
+        contract = load_contract(args.noise_model_config)
+        if contract['noise_model']['distribution_mode'] == 'exact_psum':
+            forbidden = ('--n-ref-bins', '--ref-range', '--n-noise-bins', '--noise-range',
+                         '--smoothing', '--min-count', '--csv-min-count', '--csv-output')
+            if any(arg.split('=')[0] in forbidden for arg in sys.argv[1:]):
+                raise ValueError('Exact mode uses the common contract and compact artifact; no histogram/CSV overrides')
+            if args.acc_mask != 1:
+                raise ValueError('Exact DAE chip-dump contract requires ACC_MASK=1')
     model_profile = resolve_model_profile(args.model_profile)
     conv_params = get_conv_params(model_profile)
 
@@ -528,6 +541,29 @@ def main():
         )
 
     print(f"  Atomics: {len(atomics)}, pseudo_chs: {n_pseudo}")
+
+    if contract and contract['noise_model']['distribution_mode'] == 'exact_psum':
+        from exact_noise_contract import ExactTable, file_digest
+        provenance = dict(acc_mask=args.acc_mask, checkpoint_sha256=file_digest(ckpt_path),
+                          map_sha256=file_digest(npz_path), layout_sha256=file_digest(layout_json),
+                          dump_dirs=dump_dirs, samples=list(sample_range))
+        exact = ExactTable(contract, int(n_pseudo), provenance)
+        pairs = 0
+        for dump_dir in dump_dirs:
+            for s_idx in sample_range:
+                sample_dir = os.path.join(dump_dir, f'sample_{s_idx}')
+                for atomic in atomics:
+                    clean, observed, _, _, _ = load_matching_qconv_observation(
+                        sample_dir, atomic, weights, conv_params, args.acc_mask, args.device)
+                    if observed is None:
+                        raise ValueError(f'Exact table missing dump pair: {sample_dir} {atomic["func"]}')
+                    exact.add_batch(atomic['pseudo_chs'], clean, signed_int16(observed - clean),
+                                    layer=atomic['orig_conv'])
+                    pairs += 1
+        output_path = args.output if os.path.isabs(args.output) else os.path.join(dump_dirs[0], args.output)
+        exact.save(output_path)
+        print(f'Exact table saved: {output_path}; atomic/sample pairs={pairs}; sparse rows={len(exact.rows)}')
+        return
 
     # Auto-determine ranges from a subset
     if args.ref_range is None or args.noise_range is None:
