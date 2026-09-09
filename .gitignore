@@ -284,3 +284,4 @@ gallery/how_to/work_with_microtvm/micro_tvmc.py
 .gdb_history
 **/ci/.ci_env
 .codegraph/
+_remind_me.sh
